@@ -1,0 +1,2 @@
+# Skill manifests hash LF-canonical Python source on every platform.
+skills/**/skill.py text eol=lf

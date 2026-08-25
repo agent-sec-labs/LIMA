@@ -21,6 +21,18 @@ FORBIDDEN_IMPORTS = {
 }
 
 
+def _canonical_skill_source(source: bytes) -> bytes:
+    """Canonicalize text line endings before integrity verification.
+
+    Git may materialize a tracked Python file with CRLF on Windows and LF on
+    Linux. The Python semantics are identical, so manifests and signatures use
+    LF as their platform-independent representation. Other byte changes remain
+    covered by SHA-256/HMAC.
+    """
+
+    return source.replace(b"\r\n", b"\n")
+
+
 @dataclass
 class SkillInfo:
     name: str
@@ -152,7 +164,9 @@ class SkillRegistry:
         if not os.path.isdir(self.skills_dir):
             os.makedirs(self.skills_dir, exist_ok=True)
             return self.list()
-        for entry in os.scandir(self.skills_dir):
+        with os.scandir(self.skills_dir) as iterator:
+            entries = list(iterator)
+        for entry in entries:
             if not entry.is_dir():
                 continue
             manifest_path = os.path.join(entry.path, "skill.json")
@@ -184,7 +198,7 @@ class SkillRegistry:
         if manifest["permissions"]:
             raise ValueError("review skills currently receive no host permissions")
         with open(module_path, "rb") as handle:
-            source = handle.read()
+            source = _canonical_skill_source(handle.read())
         digest = hashlib.sha256(source).hexdigest()
         if not hmac.compare_digest(digest, str(manifest["sha256"])):
             raise ValueError("skill checksum mismatch: %s" % manifest["name"])

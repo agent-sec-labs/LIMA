@@ -12,6 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from lima.console import configure_utf8_stdio
 from lima.report import to_markdown
 from lima.repository_scanner import RepositoryScanner
 from lima.workspace import RepositoryWorkspace
@@ -57,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
     args = build_parser().parse_args(argv)
     workspace = RepositoryWorkspace(
         args.repository,

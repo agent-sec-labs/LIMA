@@ -444,6 +444,7 @@ class RealProjectOracleRunner:
             completed = subprocess.run(
                 [sys.executable, self.script, "--kind", kind, "--repository", str(root)],
                 cwd=tempfile.gettempdir(), env=env, text=True, capture_output=True,
+                encoding="utf-8", errors="replace",
                 timeout=self.timeout_seconds, check=False,
             )
             payload = json.loads(completed.stdout) if completed.stdout.strip() else {}

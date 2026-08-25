@@ -12,6 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from lima.console import configure_utf8_stdio
 from lima.repair_evaluation import RepairConstraintEvaluator, load_repair_dataset
 
 
@@ -57,6 +58,7 @@ def markdown(result: dict) -> str:
 
 
 def main(argv=None) -> int:
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Evaluate constrained security repairs.")
     parser.add_argument(
         "--dataset", default=os.path.join(ROOT, "evaluation_data", "security_repair_cases.json")

@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lima.config import Settings
+from lima.console import configure_utf8_stdio
 from lima.real_world_evaluation import (
     LLMSecurityTriageClient,
     RealProjectOracleRunner,
@@ -120,6 +121,7 @@ def _llm_client() -> LLMSecurityTriageClient:
 
 
 def main(argv=None) -> int:
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Run pinned real-world security evaluation.")
     parser.add_argument(
         "--dataset", default=str(ROOT / "evaluation_data" / "real_world_security_cases.json")

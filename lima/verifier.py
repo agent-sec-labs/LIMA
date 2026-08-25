@@ -171,6 +171,7 @@ class RepairVerifier:
             try:
                 result = subprocess.run(
                     command, cwd=root, env=env, text=True, capture_output=True,
+                    encoding="utf-8", errors="replace",
                     timeout=self.timeout_seconds, check=False,
                 )
                 passed = result.returncode == 0

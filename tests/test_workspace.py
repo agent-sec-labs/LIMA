@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -7,6 +8,15 @@ from pathlib import Path
 
 from lima.repository_scanner import RepositoryScanner
 from lima.workspace import RepositoryWorkspace
+
+
+def _cp1252_environment():
+    """Reproduce the legacy standard streams used by Windows CI runners."""
+
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "0"
+    environment["PYTHONIOENCODING"] = "cp1252"
+    return environment
 
 
 class RepositoryWorkspaceTests(unittest.TestCase):
@@ -35,6 +45,8 @@ class RepositoryWorkspaceTests(unittest.TestCase):
                 [sys.executable, str(script), str(repository), "--format", "json"],
                 cwd=project_root,
                 capture_output=True,
+                encoding="utf-8",
+                env=_cp1252_environment(),
                 text=True,
                 timeout=30,
                 check=False,
@@ -63,6 +75,8 @@ class RepositoryWorkspaceTests(unittest.TestCase):
                     ],
                     cwd=project_root,
                     capture_output=True,
+                    encoding="utf-8",
+                    env=_cp1252_environment(),
                     text=True,
                     timeout=30,
                     check=False,

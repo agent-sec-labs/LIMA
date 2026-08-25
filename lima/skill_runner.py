@@ -9,6 +9,11 @@ def main() -> None:
     module_path = os.path.abspath(sys.argv[1])
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, package_root)
+
+    # ``python -I`` intentionally ignores PYTHONIOENCODING. Configure the
+    # JSON protocol explicitly so Chinese findings survive Windows code pages.
+    from lima.console import configure_utf8_stdio
+    configure_utf8_stdio()
     payload = json.load(sys.stdin)
 
     if os.name != "nt":

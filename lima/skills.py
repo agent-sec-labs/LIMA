@@ -80,6 +80,7 @@ class SandboxedSkillReviewer(Reviewer):
                 result = subprocess.run(
                     command,
                     input=json.dumps(payload), text=True, capture_output=True,
+                    encoding="utf-8", errors="replace",
                     cwd=workdir, env=env, timeout=self.timeout_seconds, check=False,
                 )
             except subprocess.TimeoutExpired as exc:

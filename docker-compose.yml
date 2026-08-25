@@ -1,0 +1,87 @@
+name: lima
+
+services:
+  postgres:
+    image: public.ecr.aws/docker/library/postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    environment:
+      # Preserve the existing database role/name while the product namespace changes.
+      # This avoids destructive data migration for current installations.
+      POSTGRES_DB: evoagent
+      POSTGRES_USER: evoagent
+      POSTGRES_PASSWORD: ${LIMA_POSTGRES_PASSWORD:?Run scripts/bootstrap_docker_env.ps1 first}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evoagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: public.ecr.aws/docker/library/redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  lima:
+    image: lima:local
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - ${LIMA_REPOSITORY_IMPORT_PATH:-./repositories}:/repositories:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${LIMA_HTTP_PORT:-18080}:8080"
+    environment:
+      LIMA_HOST: 0.0.0.0
+      LIMA_DATABASE_URL: postgresql://evoagent:${LIMA_POSTGRES_PASSWORD}@postgres:5432/evoagent
+      LIMA_REDIS_URL: redis://redis:6379/0
+      LIMA_ASYNC_WORKERS: 4
+      LIMA_SKILLS_DIR: /app/skills
+      LIMA_PUBLIC_BASE_URL: http://127.0.0.1:${LIMA_HTTP_PORT:-18080}
+      LIMA_REPOSITORY_IMPORT_ROOT: /repositories
+      LIMA_REPOSITORY_SCAN_SAST_MODE: ${LIMA_REPOSITORY_SCAN_SAST_MODE:-required}
+      LIMA_AUTH_REQUIRED: "true"
+      LIMA_AUTH_SECRET: ${LIMA_AUTH_SECRET:?Set LIMA_AUTH_SECRET to a random value of at least 32 bytes}
+      LIMA_BOOTSTRAP_ADMIN_USERNAME: ${LIMA_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      LIMA_BOOTSTRAP_ADMIN_PASSWORD: ${LIMA_BOOTSTRAP_ADMIN_PASSWORD:?Set a unique bootstrap administrator password of at least 10 characters}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  # Explicit legacy volume names keep all existing tasks, accounts and queue state.
+  # New containers and images use the LIMA brand; only storage identity is retained.
+  postgres_data:
+    name: security-agent_postgres_data
+    external: true
+  redis_data:
+    name: security-agent_redis_data
+    external: true

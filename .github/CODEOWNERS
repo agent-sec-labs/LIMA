@@ -1,0 +1,11 @@
+# Initial owner. Replace or extend with organization teams as the project grows.
+* @AttentionYourCode
+
+# Security-critical surfaces always require an owner review.
+/lima/auth.py @AttentionYourCode
+/lima/repository_import.py @AttentionYourCode
+/lima/security_repair.py @AttentionYourCode
+/lima/verifier.py @AttentionYourCode
+/.github/workflows/ @AttentionYourCode
+/Dockerfile @AttentionYourCode
+/docker-compose.yml @AttentionYourCode

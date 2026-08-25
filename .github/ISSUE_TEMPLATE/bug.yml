@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible defect that is not a confidential vulnerability
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not disclose vulnerabilities, credentials, or private repository data here. Follow SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: LIMA version or commit
+      placeholder: v1.6.0 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Docker Desktop on Windows
+        - Docker on Linux
+        - Native Windows Python
+        - Native Linux/macOS Python
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include commands and sanitized inputs. Remove tokens and private code.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed secrets, personal data, and private repository content.
+          required: true
+        - label: This is not a confidential security vulnerability.
+          required: true

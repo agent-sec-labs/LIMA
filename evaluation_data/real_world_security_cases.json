@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "name": "lima-real-world-pilot-v1",
+  "description": "Public, fixed-SHA vulnerable/fixed repository pairs for end-to-end security evaluation.",
+  "cases": [
+    {
+      "id": "aiohttp-cve-2024-23334",
+      "cve": "CVE-2024-23334",
+      "ghsa": "GHSA-5h86-8mv2-jq9f",
+      "cwe": "CWE-22",
+      "repository": "aio-libs/aiohttp",
+      "vulnerable_commit": "33ccdfb0a12690af5bb49bda2319ec0907fa7827",
+      "fixed_commit": "1c335944d6a8b1298baf179b7c0b3069f10c514b",
+      "vulnerable_archive_sha256": "174bf9f403d6ef20515a66cb694eee94d095acdda3e750c1a8b7d10300083f9f",
+      "fixed_archive_sha256": "c34a49fab874306b8fa500cc410b1910eea85bfdf93dca39f78ad605854f8a2a",
+      "ground_truth_paths": [
+        "aiohttp/web_urldispatcher.py"
+      ],
+      "ground_truth_symbols": [
+        "StaticResource.url_for",
+        "StaticResource._handle"
+      ],
+      "expected_repair_policy": "abstain",
+      "oracle": {
+        "kind": "documented-upstream-test",
+        "tests": [
+          "tests/test_web_urldispatcher.py::test_follow_symlink_directory_traversal",
+          "tests/test_web_urldispatcher.py::test_follow_symlink_directory_traversal_after_normalization"
+        ],
+        "automated": false,
+        "reason": "The upstream test needs an aiohttp source build and its complete test dependency profile."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-5h86-8mv2-jq9f",
+        "https://github.com/aio-libs/aiohttp/commit/1c335944d6a8b1298baf179b7c0b3069f10c514b"
+      ]
+    },
+    {
+      "id": "django-cve-2020-7471",
+      "cve": "CVE-2020-7471",
+      "ghsa": "GHSA-6c7v-2f49-8h26",
+      "cwe": "CWE-89",
+      "repository": "django/django",
+      "vulnerable_commit": "6b178a3e930f72069f3cda2e6a09d1b320fc09ec",
+      "fixed_commit": "eb31d845323618d688ad429479c6dda973056136",
+      "vulnerable_archive_sha256": "50cc35312dce5923a9b4a85aee526fbea545194f44151def26a503a4e19f1564",
+      "fixed_archive_sha256": "9a4a7b0030fab31996b165cdba21432b58ed7e45e73721a6f6562bf9bb51ed9c",
+      "ground_truth_paths": [
+        "django/contrib/postgres/aggregates/general.py",
+        "django/contrib/postgres/aggregates/mixins.py"
+      ],
+      "ground_truth_symbols": [
+        "StringAgg.__init__",
+        "OrderableAggMixin.__init__"
+      ],
+      "expected_repair_policy": "abstain",
+      "oracle": {
+        "kind": "documented-upstream-test",
+        "tests": [
+          "tests/postgres_tests/test_aggregates.py::TestGeneralAggregate::test_string_agg_delimiter_escaping"
+        ],
+        "automated": false,
+        "reason": "The upstream regression test requires a version-compatible Django matrix and PostgreSQL test database."
+      },
+      "sources": [
+        "https://www.openwall.com/lists/oss-security/2020/02/03/1",
+        "https://github.com/django/django/commit/eb31d845323618d688ad429479c6dda973056136"
+      ]
+    },
+    {
+      "id": "gitpython-cve-2026-42215",
+      "cve": "CVE-2026-42215",
+      "ghsa": "GHSA-rpm5-65cw-6hj4",
+      "cwe": "CWE-78",
+      "repository": "gitpython-developers/GitPython",
+      "vulnerable_commit": "da545232d0401fb9fb7660f9ff67991996674dda",
+      "fixed_commit": "0f68db0710f9125762fca5dbc2328593537ae923",
+      "vulnerable_archive_sha256": "890143ff7def068476a1ba11e8f919dac7db657b2fdc480a847f19611eecab75",
+      "fixed_archive_sha256": "a67596d9bc0e996da086866a8704a3544e911b5e9d9407ee5c51db856b84b106",
+      "ground_truth_paths": [
+        "git/cmd.py"
+      ],
+      "ground_truth_symbols": [
+        "Git.check_unsafe_options"
+      ],
+      "expected_repair_policy": "abstain",
+      "oracle": {
+        "kind": "gitpython-unsafe-option-guard",
+        "automated": true,
+        "upstream_test": "test/test_git.py::TestGit::test_check_unsafe_options_normalizes_kwargs"
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-rpm5-65cw-6hj4",
+        "https://github.com/gitpython-developers/GitPython/commit/0f68db0710f9125762fca5dbc2328593537ae923"
+      ]
+    }
+  ]
+}

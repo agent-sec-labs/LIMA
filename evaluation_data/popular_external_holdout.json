@@ -1,0 +1,208 @@
+{
+  "schema_version": 2,
+  "name": "lima-popular-python-external-holdout-v1",
+  "evaluation_role": "external-holdout",
+  "created_at": "2026-08-24",
+  "frozen_analyzer_version": "1.4.0",
+  "frozen_analyzer_sha256": "e9000d218084bc0738d9ecef8ec7a8e4c145931042a8ac9cb6f458eec555869b",
+  "selection_policy": {
+    "minimum_stars": 1000,
+    "minimum_watchers": 100,
+    "threshold_operator": "or",
+    "case_count_range": [5, 10],
+    "repository_disjoint": true,
+    "represented_cwes": ["CWE-22", "CWE-78", "CWE-89"],
+    "excluded_repositories": [
+      "aio-libs/aiohttp",
+      "django/django",
+      "gitpython-developers/GitPython"
+    ],
+    "selection_notes": "Five public Python security fixes from unique popular repositories. Popularity is used only for repository selection, never as analyzer input."
+  },
+  "resource_exclusions": [
+    {
+      "repository": "MobSF/Mobile-Security-Framework-MobSF",
+      "cve": "CVE-2026-33545",
+      "cwe": "CWE-89",
+      "stars": 21630,
+      "watchers": 590,
+      "reason": "Pinned source archive exceeds the evaluator's fail-closed 100 MiB download limit."
+    }
+  ],
+  "cases": [
+    {
+      "id": "pip-cve-2026-1703",
+      "cve": "CVE-2026-1703",
+      "ghsa": "GHSA-6vgw-5pg2-w6jp",
+      "cwe": "CWE-22",
+      "repository": "pypa/pip",
+      "vulnerable_commit": "a52069365063ea813fe3a3f8bac90397c9426d35",
+      "fixed_commit": "2f4d4a836ed00076001376fbb0ce6dc4f22cdae2",
+      "vulnerable_archive_sha256": "d55bccdda3628defe436c45da868d85a13125d60b34b16822e2fae4b527d2c48",
+      "fixed_archive_sha256": "6ca585d3d68c2c016c382291a39d23bc53e9fc5b17ec405add8a66f56fb32b5c",
+      "ground_truth_paths": [
+        "src/pip/_internal/utils/unpacking.py"
+      ],
+      "ground_truth_symbols": [
+        "is_within_directory"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "external-holdout",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-24",
+        "stars": 10270,
+        "watchers": 315,
+        "source": "https://github.com/pypa/pip"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The pilot scores pinned source pairs without installing or executing third-party package code."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-6vgw-5pg2-w6jp",
+        "https://github.com/pypa/pip/commit/8e227a9",
+        "https://github.com/pypa/pip/releases/tag/26.0"
+      ]
+    },
+    {
+      "id": "rembg-cve-2026-40086",
+      "cve": "CVE-2026-40086",
+      "ghsa": "GHSA-3wqj-33cg-xc48",
+      "cwe": "CWE-22",
+      "repository": "danielgatis/rembg",
+      "vulnerable_commit": "02ca21f4cae4cefc6caf5657ed41970d05f19109",
+      "fixed_commit": "7b8de60ef9fc225af1768d81aa09da29db22a355",
+      "vulnerable_archive_sha256": "37f6d6f42cff8252350677496aeb1ac08d478068395a841da2b6a77e704563f2",
+      "fixed_archive_sha256": "3633df8a231716d5c649eef50d78c58d17799283375cbb54c1289b1919e60e2d",
+      "ground_truth_paths": [
+        "rembg/sessions/ben_custom.py",
+        "rembg/sessions/dis_custom.py",
+        "rembg/sessions/u2net_custom.py"
+      ],
+      "ground_truth_symbols": [
+        "BenCustomSession.download_models",
+        "DisCustomSession.download_models",
+        "U2netCustomSession.download_models"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "external-holdout",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-24",
+        "stars": 24401,
+        "watchers": 168,
+        "source": "https://github.com/danielgatis/rembg"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The ONNX runtime dependency is not installed in the isolated evaluator."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-3wqj-33cg-xc48",
+        "https://github.com/danielgatis/rembg/security/advisories/GHSA-3wqj-33cg-xc48",
+        "https://github.com/danielgatis/rembg/releases/tag/v2.0.75"
+      ]
+    },
+    {
+      "id": "yt-dlp-ghsa-69qj-pvh9-c5wg",
+      "cve": "",
+      "ghsa": "GHSA-69qj-pvh9-c5wg",
+      "cwe": "CWE-78",
+      "repository": "yt-dlp/yt-dlp",
+      "vulnerable_commit": "7fd74d10097833ebce0cb162e0ccf7825de9b768",
+      "fixed_commit": "7f7bdc974dc61d941d1a0d51c4e21a0fdb7b2d06",
+      "vulnerable_archive_sha256": "10fe77a91df36489818958bfbed135434fc0f797a0c84585711ec1b03de1f1a6",
+      "fixed_archive_sha256": "c7e555746bde05dfe9a46a702cc5da5be506f6b576f0fa3c6d4ab872f5a16a9e",
+      "ground_truth_paths": [
+        "yt_dlp/postprocessor/exec.py"
+      ],
+      "ground_truth_symbols": [
+        "ExecPP.parse_cmd"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "external-holdout",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-24",
+        "stars": 186566,
+        "watchers": 919,
+        "source": "https://github.com/yt-dlp/yt-dlp"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "Executing a real shell-injection proof is intentionally outside the safe evaluation boundary."
+      },
+      "sources": [
+        "https://github.com/yt-dlp/yt-dlp/security/advisories/GHSA-69qj-pvh9-c5wg",
+        "https://github.com/yt-dlp/yt-dlp/commit/5faffa999fd33b373d47773e8ee639d072accec2",
+        "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.06.09"
+      ]
+    },
+    {
+      "id": "praisonai-cve-2026-40088",
+      "cve": "CVE-2026-40088",
+      "ghsa": "GHSA-2763-cj5r-c79m",
+      "cwe": "CWE-78",
+      "repository": "MervinPraison/PraisonAI",
+      "vulnerable_commit": "0d40fa93aadae4187651e0d48655bf5a530ed8e2",
+      "fixed_commit": "42807f1740acfaa647abadaf17b21fe68cd76e6d",
+      "vulnerable_archive_sha256": "97e1880aa5ebe2b48c72a45ac48750ae2f6c84c2274977fad9f135938260d7c7",
+      "fixed_archive_sha256": "312a170288a78d61a117adefc3a47a284796cfc496bb3ff83d3fd3b6b4f33f41",
+      "ground_truth_paths": [
+        "src/praisonai/praisonai/code/tools/execute_command.py"
+      ],
+      "ground_truth_symbols": [
+        "execute_command"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "external-holdout",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-24",
+        "stars": 8950,
+        "watchers": 72,
+        "source": "https://github.com/MervinPraison/PraisonAI"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "Executing untrusted workflow shell commands is intentionally outside the safe evaluation boundary."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-2763-cj5r-c79m",
+        "https://github.com/MervinPraison/PraisonAI/releases/tag/v4.5.121",
+        "https://github.com/MervinPraison/PraisonAI/compare/v4.5.120...v4.5.121"
+      ]
+    },
+    {
+      "id": "calibre-web-cve-2022-30765",
+      "cve": "CVE-2022-30765",
+      "ghsa": "",
+      "cwe": "CWE-89",
+      "repository": "janeczku/calibre-web",
+      "vulnerable_commit": "c53817859a0e46820a0a92bbd0697805f7e65445",
+      "fixed_commit": "fee76741a02899d2dfdc2ce29cfc27901a06383c",
+      "vulnerable_archive_sha256": "3bd588407c78fe52005d52874e95857e31eb5197f69000bae67e42b74ff56e4a",
+      "fixed_archive_sha256": "73109bd15371a99cc49f023cbb3a0d49d05dfa339c2f625fbcf529e289219436",
+      "ground_truth_paths": [
+        "cps/admin.py"
+      ],
+      "ground_truth_symbols": [
+        "list_users"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "external-holdout",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-24",
+        "stars": 18044,
+        "watchers": 172,
+        "source": "https://github.com/janeczku/calibre-web"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The full Calibre-Web application stack is not installed in the isolated evaluator."
+      },
+      "sources": [
+        "https://github.com/janeczku/calibre-web/blob/master/SECURITY.md",
+        "https://github.com/janeczku/calibre-web/releases/tag/0.6.18",
+        "https://github.com/advisories?query=CVE-2022-30765"
+      ]
+    }
+  ]
+}

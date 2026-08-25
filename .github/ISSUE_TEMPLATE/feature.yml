@@ -1,0 +1,47 @@
+name: Feature proposal
+description: Propose an engineering or research improvement for LIMA
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user, workflow, or measurable security gap.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Explain the smallest useful change and its expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and evaluation
+      description: State the baseline, test cases, metrics, or references that would validate it.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and operational risks
+      description: Cover new permissions, network/API use, untrusted code execution, false positives, and cost.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Primary scope
+      options:
+        - Audit and vulnerability detection
+        - Verified repair and Oracle
+        - Agent/runtime architecture
+        - Evaluation and datasets
+        - Frontend and product experience
+        - Documentation or developer experience
+    validations:
+      required: true

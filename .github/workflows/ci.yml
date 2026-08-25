@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: >-
+          python scripts/run_repair_evaluation.py --format json
+          --output output/repair-evaluation.json --min-constraint-accuracy 1.0
+
+  container-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target test --tag lima:test .
+      - run: docker run --rm --read-only --tmpfs /tmp:rw,size=256m lima:test
+
+  security-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: >-
+          python scripts/scan_repository.py . --sast required --format json
+          --exclude-dir tests --exclude-dir evaluation_data
+          --output output/ci-security-audit.json --fail-on high --verified-only

@@ -1,0 +1,11 @@
+砺码 · LIMA
+Copyright 2026 LIMA Contributors
+
+LIMA is provided primarily for security research, learning, and portfolio
+demonstration. It is distributed under the Apache License, Version 2.0,
+without warranties or guarantees of vulnerability detection, repair safety,
+fitness for production use, or regulatory compliance.
+
+Third-party software, container images, public vulnerability records, and
+upstream source excerpts remain subject to their respective licenses and
+notices. See THIRD_PARTY_NOTICES.md and evaluation_data/README.md.

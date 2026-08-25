@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "name": "lima-cwe-repair-constraints-v1",
+  "cases": [
+    {
+      "id": "cwe78-subprocess-concat",
+      "cwe": "CWE-78",
+      "source": "import subprocess\nvalue = input()\nsubprocess.run('echo ' + value, shell=True)\n",
+      "finding": {"path": "app.py", "line": 3, "rule_id": "SEC-SUBPROCESS-SHELL"},
+      "expected": {"decision": "repair", "strategy": "argv-no-shell"}
+    },
+    {
+      "id": "cwe78-subprocess-fstring",
+      "cwe": "CWE-78",
+      "source": "import subprocess\nname = input()\nsubprocess.check_output(f'getent hosts {name}', shell=True)\n",
+      "finding": {"path": "dns.py", "line": 3, "rule_id": "FLOW-COMMAND"},
+      "expected": {"decision": "repair", "strategy": "argv-no-shell"}
+    },
+    {
+      "id": "cwe78-os-system-expression",
+      "cwe": "CWE-78",
+      "source": "import os\nvalue = input()\nos.system('printf %s ' + value)\n",
+      "finding": {"path": "legacy.py", "line": 3, "rule_id": "SEC-OS-SYSTEM"},
+      "expected": {"decision": "repair", "strategy": "argv-no-shell"}
+    },
+    {
+      "id": "cwe78-dynamic-executable",
+      "cwe": "CWE-78",
+      "source": "import subprocess\ncommand = input()\nsubprocess.run(command + ' --safe', shell=True)\n",
+      "finding": {"path": "app.py", "line": 3, "rule_id": "SEC-SUBPROCESS-SHELL"},
+      "expected": {"decision": "abstain", "reason": "dynamic-executable"}
+    },
+    {
+      "id": "cwe78-shell-pipeline",
+      "cwe": "CWE-78",
+      "source": "import subprocess\nvalue = input()\nsubprocess.run('echo ' + value + ' | tee out', shell=True)\n",
+      "finding": {"path": "app.py", "line": 3, "rule_id": "SEC-SUBPROCESS-SHELL"},
+      "expected": {"decision": "abstain", "reason": "shell-syntax-required"}
+    },
+    {
+      "id": "cwe78-used-os-system-status",
+      "cwe": "CWE-78",
+      "source": "import os\nvalue = input()\nstatus = os.system('echo ' + value)\n",
+      "finding": {"path": "legacy.py", "line": 3, "rule_id": "SEC-OS-SYSTEM"},
+      "expected": {"decision": "abstain", "reason": "os-system-result-is-used"}
+    },
+    {
+      "id": "cwe89-sqlite-concat-value",
+      "cwe": "CWE-89",
+      "source": "import sqlite3\nuser_id = input()\ncursor.execute('SELECT name FROM users WHERE id = ' + user_id)\n",
+      "finding": {"path": "db.py", "line": 3, "rule_id": "SEC-SQL-CONCAT"},
+      "expected": {"decision": "repair", "strategy": "parameterized-sql"}
+    },
+    {
+      "id": "cwe89-sqlite-fstring-value",
+      "cwe": "CWE-89",
+      "source": "import sqlite3\nlimit = input()\ndb_cursor.execute(f'SELECT name FROM users LIMIT {limit}')\n",
+      "finding": {"path": "db.py", "line": 3, "rule_id": "FLOW-SQL"},
+      "expected": {"decision": "repair", "strategy": "parameterized-sql"}
+    },
+    {
+      "id": "cwe89-psycopg-format",
+      "cwe": "CWE-89",
+      "source": "import psycopg\nemail = input()\nconnection.execute('DELETE FROM users WHERE email = ' + email)\n",
+      "finding": {"path": "db.py", "line": 3, "rule_id": "FLOW-SQL"},
+      "expected": {"decision": "repair", "strategy": "parameterized-sql"}
+    },
+    {
+      "id": "cwe89-dynamic-table",
+      "cwe": "CWE-89",
+      "source": "import sqlite3\ntable = input()\ncursor.execute('SELECT * FROM ' + table + ' WHERE id = 1')\n",
+      "finding": {"path": "db.py", "line": 3, "rule_id": "SEC-SQL-CONCAT"},
+      "expected": {"decision": "abstain", "reason": "dynamic-sql-structure"}
+    },
+    {
+      "id": "cwe89-unknown-driver",
+      "cwe": "CWE-89",
+      "source": "user_id = input()\ncursor.execute('SELECT * FROM users WHERE id = ' + user_id)\n",
+      "finding": {"path": "db.py", "line": 2, "rule_id": "FLOW-SQL"},
+      "expected": {"decision": "abstain", "reason": "unknown-sql-paramstyle"}
+    },
+    {
+      "id": "cwe89-quoted-concatenation",
+      "cwe": "CWE-89",
+      "source": "import sqlite3\nname = input()\ncursor.execute(\"SELECT * FROM users WHERE name = '\" + name + \"'\")\n",
+      "finding": {"path": "db.py", "line": 3, "rule_id": "SEC-SQL-CONCAT"},
+      "expected": {"decision": "abstain", "reason": "dynamic-sql-structure"}
+    },
+    {
+      "id": "cwe22-static-path-root",
+      "cwe": "CWE-22",
+      "source": "from pathlib import Path\nUPLOAD_ROOT = Path('/srv/uploads')\nname = input()\nopen(UPLOAD_ROOT / name)\n",
+      "finding": {"path": "files.py", "line": 4, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "repair", "strategy": "confined-path"}
+    },
+    {
+      "id": "cwe22-os-path-join-literal-root",
+      "cwe": "CWE-22",
+      "source": "import os\nname = input()\nopen(os.path.join('/srv/uploads', name))\n",
+      "finding": {"path": "files.py", "line": 3, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "repair", "strategy": "confined-path"}
+    },
+    {
+      "id": "cwe22-audited-config-root",
+      "cwe": "CWE-22",
+      "source": "# lima: trusted-path-root=config.UPLOAD_ROOT\nname = input()\nopen(config.UPLOAD_ROOT / name)\n",
+      "finding": {"path": "files.py", "line": 3, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "repair", "strategy": "confined-path"}
+    },
+    {
+      "id": "cwe22-parameter-named-root",
+      "cwe": "CWE-22",
+      "source": "def read(upload_root, name):\n    return open(upload_root / name)\n",
+      "finding": {"path": "files.py", "line": 2, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
+    },
+    {
+      "id": "cwe22-bare-path",
+      "cwe": "CWE-22",
+      "source": "name = input()\nopen(name)\n",
+      "finding": {"path": "files.py", "line": 2, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "unsupported-path-shape"}
+    },
+    {
+      "id": "cwe22-dynamic-root",
+      "cwe": "CWE-22",
+      "source": "value = input()\nopen(value / 'file.txt')\n",
+      "finding": {"path": "files.py", "line": 2, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
+    }
+  ]
+}

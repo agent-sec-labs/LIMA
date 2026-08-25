@@ -3,4 +3,4 @@ redis>=5,<7
 PyJWT[crypto]>=2.8,<3
 opentelemetry-sdk>=1.24,<2
 opentelemetry-exporter-otlp-proto-http>=1.24,<2
-bandit>=1.7,<2
+bandit>=1.9.4,<2

@@ -38,11 +38,13 @@ function Import-LegacyLimaEnvironment([string]$Path) {
     }
 }
 
-function Ensure-LimaDataVolumes {
-    foreach ($volumeName in @(
+function Ensure-LimaDataVolumes(
+    [string[]]$VolumeNames = @(
         'security-agent_postgres_data',
         'security-agent_redis_data'
-    )) {
+    )
+) {
+    foreach ($volumeName in $VolumeNames) {
         docker volume create $volumeName | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "Unable to create or reuse the LIMA compatibility volume '$volumeName'."

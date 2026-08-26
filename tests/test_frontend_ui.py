@@ -28,7 +28,7 @@ def _check_task_oriented_navigation_and_first_run_guidance() -> None:
     assert "砺码 · LIMA" in html
     assert "SecurityAgent" not in html
     assert "EvoAgent" not in html
-    for label in ("开始", "发起审计", "审计结果", "系统能力", "模型设置"):
+    for label in ("开始", "发起审计", "审计结果", "外部评测", "系统能力", "模型设置"):
         assert label in html
     assert 'id="demo-login"' in html
     assert 'id="overview-demo"' in html
@@ -47,6 +47,14 @@ def _check_report_surface_is_human_readable_not_a_raw_payload_dump() -> None:
     assert "function renderTaskReport" in script
     assert "finding-table" in script
     assert "severity-bars" in script
+    assert "function reportAdjudication" in script
+    assert "function decisionForFinding" in script
+    assert "function renderSemanticTriageStatus" in script
+    assert "disposition-banner" in script
+    assert "semantic-evidence" in script
+    assert "模型不可用或输出不符合契约" in script
+    assert "需要复核" in script
+    assert "确定性缓解证据与模型 clean 结论一致" in script
     assert "formatJson" not in script
     assert "JSON.stringify(task" not in script
 
@@ -61,6 +69,34 @@ def _check_frontend_includes_feedback_guards_and_destructive_confirmation() -> N
     assert "await confirmAction" in script
     assert "spinner-large" in script
     assert 'role="alert"' in html
+
+
+def _check_experiment_center_is_guided_readable_and_fail_closed() -> None:
+    html = _read("index.html")
+    script = _read("app.js")
+    api = (ROOT / "lima" / "api.py").read_text(encoding="utf-8")
+
+    assert 'id="view-experiments"' in html
+    assert 'id="experiment-wizard"' in html
+    assert html.count('data-experiment-step="') == 3
+    assert 'id="load-experiment-sample"' in html
+    assert 'id="experiment-list"' in html
+    assert 'id="experiment-detail"' in html
+    assert 'data-tooltip="刷新实验记录"' in html
+    assert "function loadExperiments" in script
+    assert "function renderExperimentDetail" in script
+    assert "function setExperimentPolling" in script
+    assert "function actOnExperiment" in script
+    assert "experimentSampleVisible && id === DEMO_EXPERIMENT.id" in script
+    assert "renderExperimentDetail(DEMO_EXPERIMENT)" in script
+    assert "experimentRefreshInFlight" in script
+    assert "风险不变量召回率" in script
+    assert "目标人工复核率" in script
+    assert "setExperimentPolling(false)" in script
+    assert "allow_ambiguous_retry: ambiguous" in script
+    assert "await confirmAction" in script
+    assert "JSON.stringify(record" not in script
+    assert 'path == "/v1/experiments/catalog"' in api
 
 
 def _check_model_helper_never_persists_or_posts_the_user_api_key() -> None:
@@ -125,6 +161,9 @@ class FrontendUiTests(unittest.TestCase):
 
     def test_feedback_guards_and_destructive_confirmation(self) -> None:
         _check_frontend_includes_feedback_guards_and_destructive_confirmation()
+
+    def test_experiment_center_is_guided_readable_and_fail_closed(self) -> None:
+        _check_experiment_center_is_guided_readable_and_fail_closed()
 
     def test_model_helper_never_persists_or_posts_the_user_api_key(self) -> None:
         _check_model_helper_never_persists_or_posts_the_user_api_key()

@@ -1,42 +1,111 @@
-name: ci
+name: lima-ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: lima-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
 
 jobs:
+  quality-contracts:
+    name: quality-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile Python sources
+        run: python -m compileall -q lima scripts tests
+      - name: Check browser JavaScript syntax
+        run: node --check web/app.js
+      - name: Verify CI, frontend, and experiment contracts
+        run: >-
+          python -m unittest -v tests.test_ci_contract
+          tests.test_frontend_ui tests.test_experiments
+
   unit-tests:
+    name: unit-${{ matrix.os }}-py${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run complete unit and integration suite
+        run: >-
+          python scripts/run_ci_tests.py
+          --output output/ci/unit-${{ runner.os }}-py${{ matrix.python-version }}.log
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unit-${{ runner.os }}-py${{ matrix.python-version }}
+          path: output/ci/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  repair-constraints:
+    name: repair-constraints
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
-      - run: >-
+      - name: Enforce safe repair constraints
+        run: >-
           python scripts/run_repair_evaluation.py --format json
           --output output/repair-evaluation.json --min-constraint-accuracy 1.0
+      - name: Upload repair evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: repair-constraint-report
+          path: output/repair-evaluation.json
+          if-no-files-found: error
+          retention-days: 30
 
   container-tests:
+    name: container-read-only
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - run: docker build --target test --tag lima:test .
@@ -46,17 +115,49 @@ jobs:
       - run: docker run --rm --read-only --tmpfs /tmp:rw,size=256m lima:test
 
   security-baseline:
+    name: security-baseline
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.11'
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: >-
+      - name: Fail on verified high-severity regressions
+        run: >-
           python scripts/scan_repository.py . --sast required --format json
           --exclude-dir tests --exclude-dir evaluation_data
           --output output/ci-security-audit.json --fail-on high --verified-only
+      - name: Upload security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-baseline-report
+          path: output/ci-security-audit.json
+          if-no-files-found: error
+          retention-days: 30
+
+  merge-gate:
+    name: merge-gate
+    if: always()
+    needs:
+      - quality-contracts
+      - unit-tests
+      - repair-constraints
+      - container-tests
+      - security-baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every engineering gate
+        shell: bash
+        run: |
+          test "${{ needs.quality-contracts.result }}" = "success"
+          test "${{ needs.unit-tests.result }}" = "success"
+          test "${{ needs.repair-constraints.result }}" = "success"
+          test "${{ needs.container-tests.result }}" = "success"
+          test "${{ needs.security-baseline.result }}" = "success"

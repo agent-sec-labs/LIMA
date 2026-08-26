@@ -6,6 +6,7 @@ import difflib
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from .adjudication import adjudicate_findings
 from .diff_parser import parse_unified_diff
 from .models import Finding, ReviewReport, Severity
 from .python_analyzer import PythonAstSecurityAnalyzer
@@ -253,5 +254,6 @@ class RepositoryScanner:
                 "sast": sast_summary,
                 "skipped": dict(sorted(inventory.skipped.items())),
             },
+            adjudication=adjudicate_findings(findings),
         )
         return RepositoryScanResult(report=report, inventory=inventory)

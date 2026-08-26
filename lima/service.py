@@ -28,7 +28,17 @@ from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 from .repository_import import RepositoryImportPolicy
 from .repository_scanner import RepositoryScanner
+from .repository_triage import (
+    RepositorySemanticTriage,
+    RepositorySemanticTriageError,
+)
+from .experiments import ExperimentRunner, LLM_MODES
 from .repair_preview import RepositoryRepairPreviewer
+from .real_world_evaluation import (
+    LLMSecurityTriageClient,
+    RealWorldSecurityEvaluator,
+    SnapshotStore,
+)
 from .workspace import RepositoryWorkspace
 
 
@@ -37,6 +47,10 @@ class ReviewService:
         self.settings = settings
         settings.validate_evolution()
         self.llm_config = settings.resolved_llm()
+        if settings.repository_scan_llm_mode == "required" and not self.llm_config:
+            raise ValueError(
+                "required repository semantic triage needs an LLM provider"
+            )
         self.store = create_store(settings.database_url, settings.db_path)
         self.context_manager = ContextManager(
             settings.context_max_tokens, settings.context_reserved_tokens
@@ -110,10 +124,36 @@ class ReviewService:
         self.repository_scanner = RepositoryScanner(
             sast_mode=settings.repository_scan_sast_mode
         )
+        self.repository_semantic_triage = self._build_repository_semantic_triage()
+        self.experiment_runner = ExperimentRunner(
+            self.store,
+            settings.experiment_dataset_root,
+            settings.experiment_artifact_root,
+            self._build_experiment_evaluator,
+            llm_available=bool(self.llm_config),
+            llm_identity={
+                "provider": str(self.llm_config.get("provider", "")),
+                "model": str(self.llm_config.get("model", "")),
+            },
+            default_max_llm_calls=settings.experiment_max_llm_calls,
+            default_max_total_tokens=settings.experiment_max_total_tokens,
+        )
         self.queue = TaskQueue(
             self._process_queued, settings.async_workers, settings.redis_url,
             settings.queue_max_attempts, settings.queue_lease_seconds,
             self._on_dead_letter,
+        )
+        self.experiment_queue = TaskQueue(
+            self._process_experiment_queued,
+            settings.experiment_workers,
+            settings.redis_url,
+            1,
+            settings.experiment_queue_lease_seconds,
+            self._on_experiment_dead_letter,
+            stream="lima:experiment:stream",
+            dead_letter_stream="lima:experiment:dlq",
+            group="lima-experiment-workers",
+            thread_prefix="lima-experiment-worker",
         )
 
     def _build_llm_reviewer(self, prompt: str = "") -> OpenAICompatibleReviewer:
@@ -128,6 +168,124 @@ class ReviewService:
             provider=str(self.llm_config["provider"]),
             extra_headers=dict(self.llm_config.get("headers") or {}),
         )
+
+    def _build_repository_semantic_triage(self):
+        mode = self.settings.repository_scan_llm_mode
+        if mode == "off":
+            return None
+        if not self.llm_config:
+            if mode == "required":
+                raise ValueError(
+                    "required repository semantic triage needs an LLM provider"
+                )
+            return None
+        client = LLMSecurityTriageClient(
+            base_url=str(self.llm_config["base_url"]),
+            api_key=str(self.llm_config["api_key"]),
+            model=str(self.llm_config["model"]),
+            provider=str(self.llm_config["provider"]),
+            extra_headers=dict(self.llm_config.get("headers") or {}),
+            timeout_seconds=self.settings.repository_scan_llm_timeout_seconds,
+            max_context_chars=self.settings.repository_scan_llm_max_context_chars,
+            max_completion_tokens=(
+                self.settings.repository_scan_llm_max_completion_tokens
+            ),
+        )
+        return RepositorySemanticTriage(
+            client,
+            mode=mode,
+            max_candidates=self.settings.repository_scan_llm_max_candidates,
+        )
+
+    def _build_experiment_evaluator(self, mode: str) -> RealWorldSecurityEvaluator:
+        llm_client = None
+        if mode in LLM_MODES:
+            if not self.llm_config:
+                raise ValueError("LLM experiment mode requires a configured provider")
+            llm_client = LLMSecurityTriageClient(
+                base_url=str(self.llm_config["base_url"]),
+                api_key=str(self.llm_config["api_key"]),
+                model=str(self.llm_config["model"]),
+                provider=str(self.llm_config["provider"]),
+                extra_headers=dict(self.llm_config.get("headers") or {}),
+                timeout_seconds=self.settings.repository_scan_llm_timeout_seconds,
+                max_context_chars=self.settings.repository_scan_llm_max_context_chars,
+                max_completion_tokens=(
+                    self.settings.repository_scan_llm_max_completion_tokens
+                ),
+            )
+        return RealWorldSecurityEvaluator(
+            SnapshotStore(self.settings.experiment_cache_root),
+            scanner=RepositoryScanner(sast_mode="off", dataflow_enabled=False),
+            llm_client=llm_client,
+        )
+
+    def create_experiment(
+        self, dataset: str, mode: str, tenant_id: str,
+        *, max_llm_calls: Optional[int] = None,
+        max_total_tokens: Optional[int] = None,
+    ) -> dict:
+        record = self.experiment_runner.create(
+            dataset, mode, tenant_id,
+            max_llm_calls=max_llm_calls,
+            max_total_tokens=max_total_tokens,
+        )
+        self.experiment_queue.submit({
+            "run_id": record["id"], "tenant_id": tenant_id,
+            "allow_ambiguous_retry": False,
+        }, message_id=record["id"])
+        return {
+            "run_id": record["id"], "state": record["state"],
+            "mode": record["mode"], "queue": self.experiment_queue.backend,
+        }
+
+    def get_experiment(self, run_id: str, tenant_id: str) -> Optional[dict]:
+        return self.store.get_experiment(run_id, tenant_id)
+
+    def list_experiments(self, tenant_id: str, limit: int = 50) -> list:
+        return self.store.list_experiments(limit, tenant_id)
+
+    def experiment_catalog(self) -> list:
+        return self.experiment_runner.catalog()
+
+    def cancel_experiment(self, run_id: str, tenant_id: str) -> bool:
+        return self.experiment_runner.cancel(run_id, tenant_id)
+
+    def resume_experiment(
+        self, run_id: str, tenant_id: str,
+        *, allow_ambiguous_retry: bool = False,
+    ) -> dict:
+        record = self.experiment_runner.prepare_resume(
+            run_id, tenant_id,
+            allow_ambiguous_retry=allow_ambiguous_retry,
+        )
+        if record["state"] == "QUEUED":
+            self.experiment_queue.submit({
+                "run_id": run_id, "tenant_id": tenant_id,
+                "allow_ambiguous_retry": allow_ambiguous_retry,
+            }, message_id="%s:%s" % (run_id, uuid.uuid4().hex[:8]))
+        return {"run_id": run_id, "state": record["state"], "resumed": True}
+
+    def _process_experiment_queued(self, payload: Dict[str, Any]) -> None:
+        self.experiment_runner.run(
+            str(payload["run_id"]),
+            allow_ambiguous_retry=bool(payload.get("allow_ambiguous_retry")),
+        )
+
+    def _on_experiment_dead_letter(
+        self, payload: Dict[str, Any], error: str,
+    ) -> None:
+        run_id = str(payload.get("run_id", ""))
+        record = self.store.get_experiment(run_id) if run_id else None
+        if record:
+            self.store.update_experiment(
+                run_id, "FAILED", record.get("progress") or {},
+                error="experiment queue failure: %s" % error[:1500],
+            )
+
+    def close(self) -> None:
+        self.queue.close()
+        self.experiment_queue.close()
 
     def _build_coordinator(self, reviewers: list) -> MultiAgentCoordinator:
         return MultiAgentCoordinator(
@@ -373,6 +531,20 @@ class ReviewService:
                 "repository-tests", "human-draft-pr-approval",
             ],
             "repair_tests_configured": bool(self.settings.repair_test_command),
+            "semantic_triage_mode": self.settings.repository_scan_llm_mode,
+            "semantic_triage_enabled": self.repository_semantic_triage is not None,
+            "semantic_triage_provider": (
+                str(self.llm_config.get("provider", "")) if self.llm_config else ""
+            ),
+            "semantic_triage_max_candidates": (
+                self.settings.repository_scan_llm_max_candidates
+            ),
+            "semantic_triage_max_context_chars": (
+                self.settings.repository_scan_llm_max_context_chars
+            ),
+            "semantic_triage_max_completion_tokens": (
+                self.settings.repository_scan_llm_max_completion_tokens
+            ),
             "max_files": self.settings.repository_scan_max_files,
             "max_file_bytes": self.settings.repository_scan_max_file_bytes,
             "max_total_bytes": self.settings.repository_scan_max_total_bytes,
@@ -390,6 +562,7 @@ class ReviewService:
             "task_type": "repository_scan",
             "repository_key": key,
             "sast_mode": self.settings.repository_scan_sast_mode,
+            "semantic_triage_mode": self.settings.repository_scan_llm_mode,
         }, tenant_id)
         self.queue.submit({
             "task_id": task_id,
@@ -444,6 +617,54 @@ class ReviewService:
             "snapshot_sha256": result.inventory.fingerprint(),
             "snapshot_files": len(result.inventory.files),
         }
+        if self.repository_semantic_triage is not None:
+            try:
+                with metrics.timer("repository_semantic_triage_duration"):
+                    triage = self.repository_semantic_triage.run(
+                        root,
+                        result.report.adjudication,
+                        result.report.findings,
+                    )
+            except RepositorySemanticTriageError as exc:
+                metrics.inc("repository_semantic_triage_failed_total")
+                raise PermanentTaskError(str(exc)) from exc
+            if triage.findings:
+                result.report.findings.extend(triage.findings)
+                severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+                result.report.findings.sort(key=lambda item: (
+                    -severity_rank.get(item.severity.value, 0),
+                    item.path, item.line, item.rule_id,
+                ))
+                highest = max(
+                    (severity_rank.get(item.severity.value, 0)
+                     for item in result.report.findings),
+                    default=0,
+                )
+                result.report.risk = (
+                    "critical" if highest == 4 else
+                    "high" if highest == 3 else
+                    "medium" if highest == 2 else "low"
+                )
+                result.report.summary += (
+                    " Hybrid semantic triage added %d evidence-backed finding%s."
+                    % (len(triage.findings), "" if len(triage.findings) == 1 else "s")
+                )
+            result.report.adjudication = triage.adjudication
+            result.report.collaboration["semantic_triage"] = triage.diagnostics
+            if triage.diagnostics.get("status") == "completed":
+                metrics.inc("repository_semantic_triage_completed_total")
+            else:
+                metrics.inc("repository_semantic_triage_degraded_total")
+        else:
+            result.report.collaboration["semantic_triage"] = {
+                "mode": self.settings.repository_scan_llm_mode,
+                "status": (
+                    "disabled"
+                    if self.settings.repository_scan_llm_mode == "off"
+                    else "llm-not-configured"
+                ),
+                "secret_persisted": False,
+            }
         self.store.succeed(
             task_id, result.report,
             TraceEvent(

@@ -25,6 +25,11 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual("SUCCESS", task["state"])
         self.assertEqual(["PLANNING", "EXECUTING", "REVIEWING", "SUCCESS"], [x["state"] for x in task["trace"]])
         self.assertEqual("high", report.risk)
+        self.assertEqual("needs_review", report.adjudication["overall_disposition"])
+        self.assertEqual(
+            "unverified-finding-requires-human-review",
+            report.adjudication["decisions"][0]["reason"],
+        )
 
     def test_invalid_diff_is_recorded_as_failure(self):
         task_id = "bad-task"
@@ -36,4 +41,3 @@ class HarnessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

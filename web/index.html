@@ -8,7 +8,7 @@
   <meta name="description" content="从仓库审计到证据验证与安全修复，用清晰步骤获得可执行的代码安全结论。">
   <meta name="application-name" content="砺码 · LIMA">
   <link rel="icon" type="image/svg+xml" href="/assets/lima-mark.svg?v=20260825.1">
-  <link rel="stylesheet" href="/assets/app.css?v=20260825.1">
+  <link rel="stylesheet" href="/assets/app.css?v=20260826.1">
   <link rel="stylesheet" href="/assets/login.css?v=20260825.1">
 </head>
 <body>
@@ -47,6 +47,7 @@
         <button class="nav-item active" data-view="overview"><svg><use href="#i-home"/></svg><span>开始</span></button>
         <button class="nav-item" data-view="scan"><svg><use href="#i-scan"/></svg><span>发起审计</span></button>
         <button class="nav-item" data-view="tasks"><svg><use href="#i-report"/></svg><span>审计结果</span></button>
+        <button class="nav-item" data-view="experiments"><svg><use href="#i-flask"/></svg><span>外部评测</span></button>
         <button class="nav-item" data-view="skills"><svg><use href="#i-grid"/></svg><span>系统能力</span></button>
         <button class="nav-item" data-view="settings"><svg><use href="#i-settings"/></svg><span>模型设置</span></button>
         <button class="nav-item nav-item-secondary" data-view="evolution"><svg><use href="#i-flask"/></svg><span>高级实验</span></button>
@@ -271,6 +272,64 @@
         </div>
       </section>
 
+      <section class="view" id="view-experiments" aria-labelledby="page-title">
+        <div class="section-heading">
+          <div><span class="eyebrow">REPOSITORY-DISJOINT EVALUATION</span><h2>外部评测实验中心</h2><p>创建后台实验后可以关闭浏览器。LIMA 会逐个保存案例、预算与最终报告，稍后回来继续查看。</p></div>
+        </div>
+
+        <div class="notice notice-blue"><svg><use href="#i-info"/></svg><p><b>实验不会在 GitHub PR CI 中调用真实模型。</b><span>只有管理员在这里显式创建 LLM 评测才会产生远程请求和费用；代码、数据或分析器漂移会拒绝旧实验继续运行。</span></p></div>
+
+        <div class="experiment-grid">
+          <article class="wizard panel experiment-wizard" id="experiment-wizard">
+            <div class="panel-head"><div><span class="eyebrow">NEW RUN</span><h3>创建一次可恢复实验</h3></div><span class="pill pill-blue">后台运行</span></div>
+            <ol class="stepper experiment-stepper" aria-label="实验创建步骤">
+              <li class="active" data-experiment-indicator="1"><span>1</span><p><b>选择数据</b><small>数据集与模式</small></p></li>
+              <li data-experiment-indicator="2"><span>2</span><p><b>限制预算</b><small>调用与 Token</small></p></li>
+              <li data-experiment-indicator="3"><span>3</span><p><b>确认运行</b><small>冻结实验身份</small></p></li>
+            </ol>
+            <div class="experiment-wizard-body">
+              <section class="experiment-step active" data-experiment-step="1">
+                <div class="step-heading"><span>步骤 1 / 3</span><h3>选择一个已审核的数据集</h3><p>这里只展示可运行的安全摘要，不暴露 holdout 的案例标签。</p></div>
+                <label class="field"><span class="field-title">评测数据集</span><select id="experiment-dataset"><option value="">正在读取数据集…</option></select><small id="experiment-dataset-help">数据集会在创建时冻结文件和案例 SHA-256。</small></label>
+                <label class="field"><span class="field-title">运行模式</span><select id="experiment-mode"><option value="retrieval">检索基线（推荐，不调用模型）</option><option value="deterministic">确定性扫描</option><option value="llm-retrieval">检索 + 真实 LLM</option></select><small>建议先跑检索基线；候选证据正确后再消耗模型预算。</small></label>
+                <div class="sample-callout"><span><svg><use href="#i-sparkle"/></svg></span><p><b>第一次使用？</b><small>加载内置示例，只在浏览器演示进度和报告，不会创建任务或调用远程服务。</small></p><button class="button button-ghost" type="button" id="load-experiment-sample">一键加载示例</button></div>
+                <p class="inline-error" id="experiment-step-one-error" role="alert"></p>
+                <div class="wizard-actions"><span></span><button class="button button-primary" type="button" data-experiment-next>下一步：限制预算 <svg><use href="#i-arrow"/></svg></button></div>
+              </section>
+
+              <section class="experiment-step" data-experiment-step="2">
+                <div class="step-heading"><span>步骤 2 / 3</span><h3>给远程调用设置硬上限</h3><p>预算是实验冻结身份的一部分，耗尽后不能临时追加。</p></div>
+                <div class="field-row">
+                  <label class="field"><span class="field-title">最多 LLM 调用</span><input id="experiment-max-calls" type="number" min="0" max="200" value="20"><small>每个漏洞/修复对通常预留 2 次调用。</small></label>
+                  <label class="field"><span class="field-title">最多总 Token</span><input id="experiment-max-tokens" type="number" min="1" max="10000000" value="100000"><small>达到上限后在下一个案例前安全停止。</small></label>
+                </div>
+                <div class="notice notice-amber"><svg><use href="#i-key"/></svg><p><b>模型请求中断不会自动重试。</b><span>无法确认是否计费的请求会进入“需要处理”，必须由管理员再次确认。</span></p></div>
+                <p class="inline-error" id="experiment-step-two-error" role="alert"></p>
+                <div class="wizard-actions"><button class="button button-ghost" type="button" data-experiment-back>返回</button><button class="button button-primary" type="button" data-experiment-next>下一步：检查并运行 <svg><use href="#i-arrow"/></svg></button></div>
+              </section>
+
+              <section class="experiment-step" data-experiment-step="3">
+                <div class="step-heading"><span>步骤 3 / 3</span><h3>确认冻结内容</h3><p>提交后会立即进入独立实验队列，无需保持页面打开。</p></div>
+                <div class="review-summary" id="experiment-review-summary"></div>
+                <div class="wizard-actions"><button class="button button-ghost" type="button" data-experiment-back>返回修改</button><button class="button button-primary" type="button" id="run-experiment">创建并后台运行 <svg><use href="#i-flask"/></svg></button></div>
+              </section>
+            </div>
+          </article>
+
+          <article class="panel experiment-history-panel">
+            <div class="panel-head"><div><span class="eyebrow">RUN HISTORY</span><h3>实验记录</h3></div><button class="icon-button" id="refresh-experiments" type="button" aria-label="刷新实验记录" data-tooltip="刷新实验记录"><svg><use href="#i-refresh"/></svg></button></div>
+            <div id="experiment-list" class="experiment-list" aria-live="polite"><div class="list-skeleton"></div><div class="list-skeleton"></div></div>
+          </article>
+        </div>
+
+        <article class="panel experiment-detail-panel">
+          <div class="panel-head"><div><span class="eyebrow">RUN DETAIL</span><h3>运行详情与可读结果</h3></div><span class="pill pill-neutral" id="experiment-live-status">等待选择</span></div>
+          <div id="experiment-detail" aria-live="polite">
+            <div class="empty-state"><div><div class="empty-illustration"><svg><use href="#i-flask"/></svg></div><h4>还没有选择实验</h4><p>从右上方记录中选择一次运行，查看案例进度、预算消耗和最终指标。</p></div></div>
+          </div>
+        </article>
+      </section>
+
       <section class="view" id="view-skills" aria-labelledby="page-title">
         <div class="section-heading heading-with-action">
           <div><span class="eyebrow">CAPABILITIES</span><h2>系统能力</h2><p>用人类可读的方式了解当前启用的分析器、模型和安全边界。</p></div>
@@ -379,6 +438,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
-  <script src="/assets/app.js?v=20260825.1"></script>
+  <script src="/assets/app.js?v=20260826.1"></script>
 </body>
 </html>

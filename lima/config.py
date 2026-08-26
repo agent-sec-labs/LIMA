@@ -147,11 +147,23 @@ class Settings:
     alert_smtp_host: str = ""
     alert_email_to: str = ""
     continuous_eval_seconds: int = 0
+    experiment_workers: int = 1
+    experiment_queue_lease_seconds: int = 3600
+    experiment_dataset_root: str = "evaluation_data"
+    experiment_artifact_root: str = "output/experiments"
+    experiment_cache_root: str = "output/experiment-cache"
+    experiment_max_llm_calls: int = 20
+    experiment_max_total_tokens: int = 100_000
     repository_import_root: str = ""
     repository_scan_sast_mode: str = "required"
     repository_scan_max_files: int = 5000
     repository_scan_max_file_bytes: int = 512 * 1024
     repository_scan_max_total_bytes: int = 20 * 1024 * 1024
+    repository_scan_llm_mode: str = "off"
+    repository_scan_llm_timeout_seconds: int = 60
+    repository_scan_llm_max_candidates: int = 6
+    repository_scan_llm_max_context_chars: int = 36_000
+    repository_scan_llm_max_completion_tokens: int = 3_000
 
     def resolved_llm(self) -> Dict[str, object]:
         """Resolve a named provider to the existing OpenAI-compatible transport."""
@@ -258,10 +270,18 @@ class Settings:
             raise ValueError(
                 "LIMA_REPOSITORY_SCAN_SAST_MODE must be auto, off or required"
             )
+        if self.repository_scan_llm_mode not in {"off", "auto", "required"}:
+            raise ValueError(
+                "LIMA_REPOSITORY_SCAN_LLM_MODE must be off, auto or required"
+            )
         if min(
             self.repository_scan_max_files,
             self.repository_scan_max_file_bytes,
             self.repository_scan_max_total_bytes,
+            self.repository_scan_llm_timeout_seconds,
+            self.repository_scan_llm_max_candidates,
+            self.repository_scan_llm_max_context_chars,
+            self.repository_scan_llm_max_completion_tokens,
         ) < 1:
             raise ValueError("repository scan limits must be positive")
 
@@ -341,6 +361,25 @@ class Settings:
             continuous_eval_seconds=_non_negative_int(
                 "LIMA_CONTINUOUS_EVAL_SECONDS", 0
             ),
+            experiment_workers=_int("LIMA_EXPERIMENT_WORKERS", 1),
+            experiment_queue_lease_seconds=_int(
+                "LIMA_EXPERIMENT_QUEUE_LEASE_SECONDS", 3600
+            ),
+            experiment_dataset_root=os.getenv(
+                "LIMA_EXPERIMENT_DATASET_ROOT", "evaluation_data"
+            ),
+            experiment_artifact_root=os.getenv(
+                "LIMA_EXPERIMENT_ARTIFACT_ROOT", "output/experiments"
+            ),
+            experiment_cache_root=os.getenv(
+                "LIMA_EXPERIMENT_CACHE_ROOT", "output/experiment-cache"
+            ),
+            experiment_max_llm_calls=_int(
+                "LIMA_EXPERIMENT_MAX_LLM_CALLS", 20
+            ),
+            experiment_max_total_tokens=_int(
+                "LIMA_EXPERIMENT_MAX_TOTAL_TOKENS", 100_000
+            ),
             repository_import_root=os.getenv("LIMA_REPOSITORY_IMPORT_ROOT", ""),
             repository_scan_sast_mode=os.getenv(
                 "LIMA_REPOSITORY_SCAN_SAST_MODE", "required"
@@ -353,5 +392,20 @@ class Settings:
             ),
             repository_scan_max_total_bytes=_int(
                 "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES", 20 * 1024 * 1024
+            ),
+            repository_scan_llm_mode=os.getenv(
+                "LIMA_REPOSITORY_SCAN_LLM_MODE", "off"
+            ).strip().lower(),
+            repository_scan_llm_timeout_seconds=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS", 60
+            ),
+            repository_scan_llm_max_candidates=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_MAX_CANDIDATES", 6
+            ),
+            repository_scan_llm_max_context_chars=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_MAX_CONTEXT_CHARS", 36_000
+            ),
+            repository_scan_llm_max_completion_tokens=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS", 3_000
             ),
         )

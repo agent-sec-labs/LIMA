@@ -1,6 +1,31 @@
 from typing import Any, Dict
 
 
+DISPOSITION_LABELS = {
+    "alert": "Actionable alert",
+    "needs_review": "Human review required",
+    "clear": "Cleared by agreeing evidence",
+}
+
+
+def _finding_decision(item: Dict[str, Any], adjudication: Dict[str, Any]) -> Dict[str, Any]:
+    decisions = adjudication.get("decisions") or []
+    fingerprint = item.get("fingerprint")
+    if fingerprint:
+        matched = next(
+            (value for value in decisions if value.get("fingerprint") == fingerprint),
+            None,
+        )
+        if matched:
+            return matched
+    return next((
+        value for value in decisions
+        if value.get("path") == item.get("path")
+        and value.get("line") == item.get("line")
+        and value.get("rule_id") == item.get("rule_id")
+    ), {})
+
+
 def to_markdown(report: Dict[str, Any]) -> str:
     if report.get("pull_request") is None:
         title = "# LIMA Repository Audit"
@@ -69,14 +94,60 @@ def to_markdown(report: Dict[str, Any]) -> str:
             ),
             "",
         ])
+    semantic = collaboration.get("semantic_triage") or {}
+    if semantic:
+        retrieval = semantic.get("retrieval") or {}
+        usage = semantic.get("usage") or {}
+        lines.extend([
+            "## Production semantic triage",
+            "",
+            "- Mode: `%s`; status: **%s**" % (
+                semantic.get("mode", "off"), semantic.get("status", "disabled"),
+            ),
+            "- Provider/model: `%s` / `%s`" % (
+                semantic.get("provider", "local"), semantic.get("model", "none"),
+            ),
+            "- Evidence candidates: `%s`; context characters: `%s`" % (
+                retrieval.get("evidence_candidates", 0),
+                semantic.get("context_chars", 0),
+            ),
+            "- Tokens: `%s`; model latency: `%s ms`; secret persisted: `%s`" % (
+                usage.get("total_tokens", 0), semantic.get("latency_ms", 0),
+                semantic.get("secret_persisted", False),
+            ),
+            "",
+        ])
+    adjudication = report.get("adjudication") or {}
+    if adjudication:
+        counts = adjudication.get("counts") or {}
+        overall = str(adjudication.get("overall_disposition", "needs_review"))
+        lines.extend([
+            "## Evidence disposition",
+            "",
+            "- Overall: **%s**" % DISPOSITION_LABELS.get(overall, overall),
+            "- Actionable alerts: `%s`; human review: `%s`; cleared: `%s`" % (
+                counts.get("alert", 0), counts.get("needs_review", 0),
+                counts.get("clear", 0),
+            ),
+            "- Policy: `%s`; automatic clear allowed: `%s`" % (
+                adjudication.get("policy", "unknown"),
+                bool(adjudication.get("auto_clear", False)),
+            ),
+            "",
+        ])
     findings = report.get("findings", [])
     if not findings:
-        lines.append("✅ No actionable issue detected in the added lines.")
+        lines.append(
+            "No actionable finding reached the current evidence threshold. "
+            "This is not proof that the reviewed code is secure."
+        )
         return "\n".join(lines) + "\n"
     lines.extend(["## Findings", ""])
     icons = {"critical": "🚨", "high": "🔴", "medium": "🟠", "low": "🟡"}
     for index, item in enumerate(findings, 1):
         severity = item.get("severity", "medium")
+        decision = _finding_decision(item, adjudication)
+        disposition = str(decision.get("disposition", "needs_review"))
         lines.extend(
             [
                 "### %d. %s %s" % (index, icons.get(severity, "•"), item.get("title", "Finding")),
@@ -87,6 +158,11 @@ def to_markdown(report: Dict[str, Any]) -> str:
                     item.get("verification_state", "candidate")),
                 "",
                 item.get("explanation", ""),
+                "",
+                "**Disposition:** %s — `%s`" % (
+                    DISPOSITION_LABELS.get(disposition, disposition),
+                    decision.get("reason", "missing-disposition-evidence"),
+                ),
                 "",
                 "**Evidence**",
                 "",

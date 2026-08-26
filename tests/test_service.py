@@ -32,6 +32,20 @@ class ServiceTests(unittest.TestCase):
             result["report"]["collaboration"]["protocol"],
         )
         self.assertGreater(result["report"]["collaboration"]["messages"], 0)
+        self.assertEqual(
+            "agreement-required-for-auto-clear-v1",
+            result["report"]["adjudication"]["policy"],
+        )
+        self.assertEqual(
+            "alert", result["report"]["adjudication"]["overall_disposition"]
+        )
+        self.assertEqual(
+            "multi-agent-verification-approved-risk",
+            result["report"]["adjudication"]["decisions"][0]["reason"],
+        )
+        self.assertEqual(
+            result["report"]["adjudication"], task["report"]["adjudication"]
+        )
         self.assertIn(
             "arbitration_decision", {item["kind"] for item in task["collaboration"]}
         )
@@ -40,6 +54,15 @@ class ServiceTests(unittest.TestCase):
         service = ReviewService(self.settings)
         with self.assertRaises(ValueError):
             service.create_review("org/repo", "x" * 10001)
+
+    def test_required_repository_semantic_triage_needs_a_model(self):
+        settings = Settings(**{
+            **self.settings.__dict__,
+            "repository_scan_llm_mode": "required",
+        })
+
+        with self.assertRaisesRegex(ValueError, "needs an LLM provider"):
+            ReviewService(settings)
 
     def test_completed_review_feedback_is_persisted_and_listed_per_task(self):
         diff = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+eval(data)\n"

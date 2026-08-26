@@ -18,6 +18,20 @@ class CxxFindingModelTests(unittest.TestCase):
         self.assertIsNone(finding.automatic_repair)
         self.assertEqual("", finding.evidence_records[0].language)
 
+    def test_fallback_evidence_preserves_finding_metadata(self):
+        finding = Finding(
+            rule_id="CXX-OOB-WRITE", severity=Severity.HIGH, title="overflow",
+            explanation="unsafe write", path="src/buffer.cpp", line=12,
+            evidence="buffer[index] = value", fix="bound the index",
+            test="exercise the boundary", language="c++", symbol="write_buffer",
+            analysis_mode="build-backed",
+        )
+
+        evidence = finding.evidence_records[0]
+        self.assertEqual("c++", evidence.language)
+        self.assertEqual("write_buffer", evidence.symbol)
+        self.assertEqual("build-backed", evidence.analysis_mode)
+
     def test_explicitly_disabled_finding_is_rejected_before_rule_matching(self):
         eligibility = SafeFixer.repair_eligibility({
             "rule_id": "SEC-SQL-CONCAT", "cwe": "CWE-89",

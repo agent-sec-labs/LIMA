@@ -90,6 +90,9 @@ class Finding:
                 rule_id=self.rule_id,
                 cwe=self.cwe,
                 confidence=self.confidence,
+                language=self.language,
+                symbol=self.symbol,
+                analysis_mode=self.analysis_mode,
             ))
 
     def to_dict(self) -> Dict[str, Any]:

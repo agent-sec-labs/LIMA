@@ -26,5 +26,6 @@ repositories/*
 *.log
 .vscode/
 .idea/
+.worktrees/
 .DS_Store
 Thumbs.db

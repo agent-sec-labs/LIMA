@@ -40,6 +40,9 @@ jobs:
         with:
           persist-credentials: false
       - run: docker build --target test --tag lima:test .
+      - name: Test Docker volume initialization
+        shell: pwsh
+        run: ./tests/test_lima_data_volumes.ps1 -Image lima:test
       - run: docker run --rm --read-only --tmpfs /tmp:rw,size=256m lima:test
 
   security-baseline:

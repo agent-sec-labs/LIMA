@@ -101,6 +101,7 @@ class ReviewReport:
     files_reviewed: List[str] = field(default_factory=list)
     reviewer: str = "local-rules"
     collaboration: Dict[str, Any] = field(default_factory=dict)
+    adjudication: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -112,6 +113,7 @@ class ReviewReport:
             "files_reviewed": self.files_reviewed,
             "reviewer": self.reviewer,
             "collaboration": self.collaboration,
+            "adjudication": self.adjudication,
         }
 
 

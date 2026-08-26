@@ -2,6 +2,7 @@
 import threading
 from typing import Any, Dict, Optional, TypedDict
 
+from .adjudication import adjudicate_findings
 from .diff_parser import ParsedDiff, parse_unified_diff
 from .models import ChangedLine, Finding, ReviewReport, Severity, TaskState, TraceEvent
 from .reviewer import Reviewer
@@ -155,6 +156,12 @@ class ReviewHarness:
             summary=self._summary(findings, len(parsed.files), risk), risk=risk,
             findings=findings, files_reviewed=parsed.files, reviewer=self.reviewer.name,
             collaboration=collaboration,
+            adjudication=adjudicate_findings(
+                findings,
+                multi_agent_verified=(
+                    self.reviewer.name == "multi-agent-collaboration"
+                ),
+            ),
         )
         return {"report": report.to_dict()}
 
@@ -204,13 +211,25 @@ class ReviewHarness:
 
     @classmethod
     def _report_from_dict(cls, value: Dict[str, Any]) -> ReviewReport:
+        findings = [
+            cls._finding_from_dict(item) for item in value.get("findings", [])
+        ]
+        adjudication = dict(value.get("adjudication") or {})
+        if not adjudication:
+            adjudication = adjudicate_findings(
+                findings,
+                multi_agent_verified=(
+                    value.get("reviewer") == "multi-agent-collaboration"
+                ),
+            )
         return ReviewReport(
             repository=value["repository"], pull_request=value.get("pull_request"),
             summary=value["summary"], risk=value["risk"],
-            findings=[cls._finding_from_dict(item) for item in value.get("findings", [])],
+            findings=findings,
             files_reviewed=list(value.get("files_reviewed", [])),
             reviewer=value.get("reviewer", "unknown"),
             collaboration=dict(value.get("collaboration", {})),
+            adjudication=adjudication,
         )
 
     @staticmethod

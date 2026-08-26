@@ -77,6 +77,17 @@ class PostgresTaskStore:
                 task_id TEXT NOT NULL REFERENCES tasks(id), node TEXT NOT NULL, status TEXT NOT NULL,
                 attempt INTEGER NOT NULL DEFAULT 1, state_json JSONB NOT NULL, error TEXT,
                 updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(task_id,node))""",
+            """CREATE TABLE IF NOT EXISTS experiment_runs (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+                state TEXT NOT NULL, mode TEXT NOT NULL, dataset_path TEXT NOT NULL,
+                manifest_json JSONB NOT NULL, progress_json JSONB NOT NULL,
+                result_json JSONB, error TEXT, cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS experiment_cases (
+                run_id TEXT NOT NULL REFERENCES experiment_runs(id), case_id TEXT NOT NULL,
+                stage TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+                result_json JSONB, error TEXT, updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(run_id,case_id))""",
             """CREATE TABLE IF NOT EXISTS task_payloads (
                 task_id TEXT PRIMARY KEY REFERENCES tasks(id), diff TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL)""",
@@ -640,6 +651,145 @@ class PostgresTaskStore:
         with self._connect() as conn:
             row = conn.execute("SELECT diff FROM task_payloads WHERE task_id=%s", (task_id,)).fetchone()
         return row["diff"] if row else None
+
+    @staticmethod
+    def _experiment_value(row: Dict[str, Any]) -> Dict[str, Any]:
+        value = dict(row)
+        value["manifest"] = value.pop("manifest_json")
+        value["progress"] = value.pop("progress_json")
+        value["result"] = value.pop("result_json")
+        value["cancel_requested"] = bool(value["cancel_requested"])
+        for key in ("created_at", "updated_at"):
+            value[key] = value[key].isoformat()
+        return value
+
+    def create_experiment(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        now = record.get("created_at") or utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO experiment_runs(id,tenant_id,state,mode,dataset_path,"
+                "manifest_json,progress_json,result_json,error,cancel_requested,"
+                "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,"
+                "NULL,NULL,FALSE,%s,%s)",
+                (
+                    record["id"], record.get("tenant_id", "default"),
+                    record["state"], record["mode"], record["dataset_path"],
+                    json.dumps(record["manifest"], ensure_ascii=False),
+                    json.dumps(record.get("progress") or {}, ensure_ascii=False),
+                    now, now,
+                ),
+            )
+        return self.get_experiment(record["id"]) or {}
+
+    def get_experiment(
+        self, run_id: str, tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM experiment_runs WHERE id=%s"
+        params: list[Any] = [run_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=%s"
+            params.append(tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        if not row:
+            return None
+        value = self._experiment_value(row)
+        value["cases"] = self.list_experiment_cases(run_id)
+        return value
+
+    def list_experiments(
+        self, limit: int = 50, tenant_id: Optional[str] = None,
+    ) -> list:
+        query = "SELECT * FROM experiment_runs"
+        params: list[Any] = []
+        if tenant_id is not None:
+            query += " WHERE tenant_id=%s"
+            params.append(tenant_id)
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(max(1, min(limit, 200)))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        values = []
+        for row in rows:
+            value = self._experiment_value(row)
+            value["result_available"] = value.pop("result") is not None
+            values.append(value)
+        return values
+
+    def update_experiment(
+        self, run_id: str, state: str, progress: Dict[str, Any],
+        *, error: str = "", result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        rendered_result = (
+            json.dumps(result, ensure_ascii=False) if result is not None else None
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE experiment_runs SET state=%s,progress_json=%s::jsonb,"
+                "result_json=COALESCE(%s::jsonb,result_json),error=%s,updated_at=%s "
+                "WHERE id=%s",
+                (
+                    state, json.dumps(progress, ensure_ascii=False), rendered_result,
+                    error[:2000] or None, utc_now(), run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("experiment not found")
+
+    def save_experiment_case(
+        self, run_id: str, case_id: str, stage: str, status: str,
+        *, attempt: int = 1, result: Optional[Dict[str, Any]] = None,
+        error: str = "",
+    ) -> None:
+        rendered = json.dumps(result, ensure_ascii=False) if result is not None else None
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO experiment_cases(run_id,case_id,stage,status,attempt,"
+                "result_json,error,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s) "
+                "ON CONFLICT(run_id,case_id) DO UPDATE SET stage=EXCLUDED.stage,"
+                "status=EXCLUDED.status,attempt=EXCLUDED.attempt,"
+                "result_json=COALESCE(EXCLUDED.result_json,experiment_cases.result_json),"
+                "error=EXCLUDED.error,updated_at=EXCLUDED.updated_at",
+                (
+                    run_id, case_id, stage, status, attempt, rendered,
+                    error[:2000] or None, utc_now(),
+                ),
+            )
+
+    def list_experiment_cases(self, run_id: str) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM experiment_cases WHERE run_id=%s ORDER BY case_id",
+                (run_id,),
+            ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            value["result"] = value.pop("result_json")
+            value["updated_at"] = value["updated_at"].isoformat()
+            values.append(value)
+        return values
+
+    def request_experiment_cancel(
+        self, run_id: str, tenant_id: Optional[str] = None,
+    ) -> bool:
+        query = "UPDATE experiment_runs SET cancel_requested=TRUE,updated_at=%s WHERE id=%s"
+        params: list[Any] = [utc_now(), run_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=%s"
+            params.append(tenant_id)
+        with self._connect() as conn:
+            cursor = conn.execute(query, params)
+            return cursor.rowcount == 1
+
+    def reset_experiment_cancel(self, run_id: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE experiment_runs SET cancel_requested=FALSE,updated_at=%s WHERE id=%s",
+                (utc_now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("experiment not found")
 
     def save_checkpoint(
         self, task_id: str, node: str, state: Dict[str, Any], status: str = "completed",

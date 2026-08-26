@@ -6,6 +6,12 @@
 /lima/repository_import.py @AttentionYourCode
 /lima/security_repair.py @AttentionYourCode
 /lima/verifier.py @AttentionYourCode
+/lima/experiments.py @AttentionYourCode
+/lima/real_world_evaluation.py @AttentionYourCode
+/lima/task_queue.py @AttentionYourCode
+/lima/store.py @AttentionYourCode
+/lima/postgres_store.py @AttentionYourCode
 /.github/workflows/ @AttentionYourCode
 /Dockerfile @AttentionYourCode
 /docker-compose.yml @AttentionYourCode
+/evaluation_data/ @AttentionYourCode

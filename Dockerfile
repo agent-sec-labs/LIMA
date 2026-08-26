@@ -11,7 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/lima
 
 RUN groupadd --gid "${APP_GID}" lima \
-    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home lima
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home lima \
+    && install -d -o "${APP_UID}" -g "${APP_GID}" /experiments /experiment-cache
 
 WORKDIR /app
 COPY requirements.txt ./
@@ -29,8 +30,10 @@ COPY --chown=lima:lima evaluation_data ./evaluation_data
 
 FROM base AS test
 COPY --chown=lima:lima tests ./tests
-COPY --chown=lima:lima Dockerfile pyproject.toml docker-compose.yml .env.example LIMA_ROADMAP.md ./
+COPY --chown=lima:lima Dockerfile pyproject.toml docker-compose.yml .env.example LIMA_ROADMAP.md CONTRIBUTING.md ./
+COPY --chown=lima:lima .github ./.github
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
+COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
 USER lima:lima
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
 

@@ -24,6 +24,9 @@ REPAIR_PREVIEW = re.compile(r"^/v1/tasks/([0-9a-f-]+)/repair-preview$")
 FEEDBACK = re.compile(r"^/v1/tasks/([0-9a-f-]+)/feedback$")
 CANCEL = re.compile(r"^/v1/tasks/([0-9a-f-]+)/cancel$")
 RESUME = re.compile(r"^/v1/tasks/([0-9a-f-]+)/resume$")
+EXPERIMENT = re.compile(r"^/v1/experiments/([0-9a-f-]+)$")
+EXPERIMENT_CANCEL = re.compile(r"^/v1/experiments/([0-9a-f-]+)/cancel$")
+EXPERIMENT_RESUME = re.compile(r"^/v1/experiments/([0-9a-f-]+)/resume$")
 ROLLBACK = re.compile(r"^/v1/skills/([A-Za-z0-9_-]+)/versions/(\d+)/activate$")
 SKILL_ARTIFACT_VERSIONS = re.compile(r"^/v1/skill-evolution/([a-z0-9_-]+)/versions$")
 SKILL_ARTIFACT_ACTIVATE = re.compile(
@@ -136,6 +139,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                                   "reviewer": self.service.reviewer.name,
                                   "runtime": self.service.harness.name,
                                   "queue": self.service.queue.backend,
+                                  "experiment_queue": self.service.experiment_queue.backend,
                                   "llm_provider": self.service.llm_config.get("provider", "local"),
                                   "llm_model": self.service.llm_config.get("model", "")})
             return
@@ -144,6 +148,36 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if path == "/metrics":
             self._send_text(200, metrics.prometheus(), "text/plain; version=0.0.4; charset=utf-8")
+            return
+        if path == "/v1/experiments/catalog":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {
+                "datasets": self.service.experiment_catalog(),
+                "llm_available": bool(self.service.llm_config),
+            })
+            return
+        if path == "/v1/experiments":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {"experiments": self.service.list_experiments(
+                principal.tenant_id, int(query.get("limit", [50])[0])
+            )})
+            return
+        experiment_match = EXPERIMENT.match(path)
+        if experiment_match:
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            record = self.service.get_experiment(
+                experiment_match.group(1), principal.tenant_id
+            )
+            if not record:
+                self._send_json(404, {"error": "experiment not found"})
+                return
+            self._send_json(200, record)
             return
         if path == "/api/dashboard":
             self._send_json(200, {"stats": self.service.store.dashboard_stats(principal.tenant_id),
@@ -324,6 +358,63 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json(401, {"error": str(exc)})
                     return
                 self._send_json(200, result)
+                return
+            if path == "/v1/experiments":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                max_calls = payload.get("max_llm_calls")
+                max_tokens = payload.get("max_total_tokens")
+                if max_calls is not None and not isinstance(max_calls, int):
+                    raise ValueError("max_llm_calls must be an integer")
+                if max_tokens is not None and not isinstance(max_tokens, int):
+                    raise ValueError("max_total_tokens must be an integer")
+                result = self.service.create_experiment(
+                    str(payload.get("dataset", "")),
+                    str(payload.get("mode", "retrieval")),
+                    principal.tenant_id,
+                    max_llm_calls=max_calls,
+                    max_total_tokens=max_tokens,
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "experiment.create", result["run_id"],
+                    {"mode": result["mode"], "dataset": str(payload.get("dataset", ""))},
+                )
+                self._send_json(202, result)
+                return
+            match = EXPERIMENT_CANCEL.match(path)
+            if match:
+                principal = self._principal("manage")
+                self._read_json(body)
+                cancelled = self.service.cancel_experiment(
+                    match.group(1), principal.tenant_id
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "experiment.cancel", match.group(1),
+                    {"cancel_requested": cancelled},
+                )
+                self._send_json(202 if cancelled else 404, {
+                    "cancel_requested": cancelled
+                })
+                return
+            match = EXPERIMENT_RESUME.match(path)
+            if match:
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                allow_ambiguous = payload.get("allow_ambiguous_retry", False)
+                if not isinstance(allow_ambiguous, bool):
+                    raise ValueError("allow_ambiguous_retry must be a boolean")
+                result = self.service.resume_experiment(
+                    match.group(1), principal.tenant_id,
+                    allow_ambiguous_retry=allow_ambiguous,
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "experiment.resume", match.group(1),
+                    {"allow_ambiguous_retry": allow_ambiguous},
+                )
+                self._send_json(202, result)
                 return
             if path == "/v1/reviews":
                 principal = self._principal("review")
@@ -585,5 +676,5 @@ def run() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        service.queue.close()
+        service.close()
         server.server_close()

@@ -1,0 +1,220 @@
+{
+  "schema_version": 2,
+  "name": "lima-popular-python-calibration-v2",
+  "evaluation_role": "calibration",
+  "created_at": "2026-08-26",
+  "baseline_analyzer_version": "1.6.0",
+  "baseline_analyzer_sha256": "bf81ba2cf0719bd62b7b9b2bf3b621571a6a38fe5b6e79374c3cdc2e36f1e5f1",
+  "calibration_analyzer_version": "1.7.0-dev",
+  "calibration_analyzer_sha256": "fe7c4b6257db1efd0c839c7c3dc6ffc11d06e82556e89b1e26ac1fa4a5765264",
+  "source_holdout_manifest_sha256": "3a45b1138a5863ea4db6bb13b804f7eef4c3122fbcd5bc6bf176a0828ae181f4",
+  "selection_policy": {
+    "minimum_stars": 1000,
+    "minimum_watchers": 100,
+    "threshold_operator": "or",
+    "case_count_range": [5, 10],
+    "repository_disjoint": true,
+    "represented_cwes": ["CWE-22", "CWE-78", "CWE-89"],
+    "excluded_repositories": [
+      "aio-libs/aiohttp",
+      "django/django",
+      "gitpython-developers/GitPython",
+      "pypa/pip",
+      "danielgatis/rembg",
+      "yt-dlp/yt-dlp",
+      "MervinPraison/PraisonAI",
+      "janeczku/calibre-web",
+      "MobSF/Mobile-Security-Framework-MobSF"
+    ],
+    "selection_notes": "These five cases were the frozen v1.6 external holdout. After both baseline runs completed, their case-level failures informed v1.7 retrieval changes, so they are now calibration only and cannot support new external-generalization claims."
+  },
+  "resource_exclusions": [
+    {
+      "repository": "mlflow/mlflow",
+      "cve": "CVE-2025-15031",
+      "ghsa": "GHSA-fhff-qmm8-h2fp",
+      "cwe": "CWE-22",
+      "stars": 27682,
+      "watchers": 320,
+      "vulnerable_archive_bytes": 168974687,
+      "fixed_archive_bytes": 168975641,
+      "reason": "Both pinned source archives exceed the evaluator's fail-closed 100 MiB download limit."
+    }
+  ],
+  "cases": [
+    {
+      "id": "gradio-cve-2024-51751",
+      "cve": "CVE-2024-51751",
+      "ghsa": "GHSA-rhm9-gp5p-5248",
+      "cwe": "CWE-22",
+      "repository": "gradio-app/gradio",
+      "vulnerable_commit": "7d77024cb8f9cfd39a6468de9534e58dcfa69f49",
+      "fixed_commit": "dcfa7ad3e819002c0213a592ad726ccfd9e2bf0c",
+      "vulnerable_archive_sha256": "0812f0856d74c129c5b7ff6e768d4bce31eb71e273f12626519d4b78e176ac9b",
+      "fixed_archive_sha256": "41f66bf65d850f667cfea0bd7fee1e10eb1e7fcd70807846f89e411ce7ffb046",
+      "ground_truth_paths": [
+        "gradio/blocks.py",
+        "gradio/data_classes.py"
+      ],
+      "ground_truth_symbols": [
+        "Blocks.preprocess_data",
+        "FileData"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "calibration",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-26",
+        "stars": 43421,
+        "watchers": 196,
+        "source": "https://github.com/gradio-app/gradio"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The isolated evaluator does not install or launch the full Gradio application stack."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-rhm9-gp5p-5248",
+        "https://github.com/gradio-app/gradio/security/advisories/GHSA-rhm9-gp5p-5248",
+        "https://github.com/gradio-app/gradio/commit/dcfa7ad3e819002c0213a592ad726ccfd9e2bf0c"
+      ]
+    },
+    {
+      "id": "comfyui-cve-2026-56671",
+      "cve": "CVE-2026-56671",
+      "ghsa": "GHSA-pj59-g5vv-74q4",
+      "cwe": "CWE-22",
+      "repository": "Comfy-Org/ComfyUI",
+      "vulnerable_commit": "35c1470935044be5610a81d46e57922a8a598c6c",
+      "fixed_commit": "96e0e3585b41e1417442eaa14ec57f7b4ffcb5e0",
+      "vulnerable_archive_sha256": "291acb60b4e0f3060ef8c6d4aac68d4d2fd195c8130a55ed41449ffd677296e8",
+      "fixed_archive_sha256": "1a7c1258d9836c885c46a8c8eaf65d38c58a934837603952cc4e28a8491ddc7a",
+      "ground_truth_paths": [
+        "app/model_manager.py"
+      ],
+      "ground_truth_symbols": [
+        "ModelFileManager.add_routes"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "calibration",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-26",
+        "stars": 130021,
+        "watchers": 785,
+        "source": "https://github.com/Comfy-Org/ComfyUI"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The evaluator does not launch ComfyUI or request arbitrary host files from its preview endpoint."
+      },
+      "sources": [
+        "https://github.com/Comfy-Org/ComfyUI/security/advisories/GHSA-pj59-g5vv-74q4",
+        "https://github.com/Comfy-Org/ComfyUI/commit/96e0e3585b41e1417442eaa14ec57f7b4ffcb5e0",
+        "https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.28.0"
+      ]
+    },
+    {
+      "id": "pillow-cve-2026-55798",
+      "cve": "CVE-2026-55798",
+      "ghsa": "GHSA-4x4j-2g7c-83w6",
+      "cwe": "CWE-78",
+      "repository": "python-pillow/Pillow",
+      "vulnerable_commit": "87e788339e8746e7ceb8e901df9b0c7fda55e975",
+      "fixed_commit": "8404ea5fe5df40fc34aa1e51403dd6fce0778b8a",
+      "vulnerable_archive_sha256": "9608b5b18764d69a5b959b9eb42139afd14a0c0595d92c4e453a60847aa194de",
+      "fixed_archive_sha256": "a268ec48d6f9db5370597fa50e14304030bc822db4ed0a564e68c93718e9136f",
+      "ground_truth_paths": [
+        "src/PIL/ImageShow.py"
+      ],
+      "ground_truth_symbols": [
+        "WindowsViewer"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "calibration",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-26",
+        "stars": 13775,
+        "watchers": 219,
+        "source": "https://github.com/python-pillow/Pillow"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The vulnerable behavior is Windows shell execution and is not invoked by the read-only evaluator."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-4x4j-2g7c-83w6",
+        "https://github.com/python-pillow/Pillow/commit/8404ea5fe5df40fc34aa1e51403dd6fce0778b8a",
+        "https://github.com/python-pillow/Pillow/blob/main/docs/releasenotes/12.3.0.rst"
+      ]
+    },
+    {
+      "id": "airflow-cve-2025-30473",
+      "cve": "CVE-2025-30473",
+      "ghsa": "GHSA-5r62-mjf5-xwhj",
+      "cwe": "CWE-89",
+      "repository": "apache/airflow",
+      "vulnerable_commit": "a0220e0fd56bee7892fac2cbd3ac833f9b236e79",
+      "fixed_commit": "e6c0793b27313a6eae918a90661e5f68231f7687",
+      "vulnerable_archive_sha256": "3bb02535e60334fd1f1d6c1e58fca592f793fcf1026e638b9c9360b94f6433e4",
+      "fixed_archive_sha256": "f98b8f37642ce01df5c69d8c79c158f7275c5012c0e51b61efe479354b5f1c29",
+      "ground_truth_paths": [
+        "providers/common/sql/src/airflow/providers/common/sql/operators/sql.py"
+      ],
+      "ground_truth_symbols": [
+        "SQLColumnCheckOperator.__init__",
+        "SQLTableCheckOperator.__init__"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "calibration",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-26",
+        "stars": 46608,
+        "watchers": 779,
+        "source": "https://github.com/apache/airflow"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The full Airflow provider and database stack is outside the isolated evaluator."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-5r62-mjf5-xwhj",
+        "https://github.com/apache/airflow/pull/48098",
+        "https://github.com/apache/airflow/commit/e6c0793b27313a6eae918a90661e5f68231f7687",
+        "https://lists.apache.org/thread/53klkv790cylqcop0350w7nfq1y6h0t2"
+      ]
+    },
+    {
+      "id": "langchain-cve-2023-34540",
+      "cve": "CVE-2023-34540",
+      "ghsa": "GHSA-x32c-59v5-h7fg",
+      "cwe": "CWE-78",
+      "repository": "langchain-ai/langchain",
+      "vulnerable_commit": "61938a02a1e76fa6c6e8203c98a9344a179c810d",
+      "fixed_commit": "a2f191a32229256dd41deadf97786fe41ce04cbb",
+      "vulnerable_archive_sha256": "683e00fd4a2c1e5c2c830db0626f264f05a0182b4dda0c5745b69e3fbeb9c60f",
+      "fixed_archive_sha256": "02dd49029dfb6ee6937c593c4b27b7401886079d465715df8629276e810e8157",
+      "ground_truth_paths": [
+        "langchain/utilities/jira.py"
+      ],
+      "ground_truth_symbols": [
+        "JiraAPIWrapper.other"
+      ],
+      "expected_repair_policy": "abstain",
+      "split": "calibration",
+      "popularity_snapshot": {
+        "captured_at": "2026-08-26",
+        "stars": 145008,
+        "watchers": 908,
+        "source": "https://github.com/langchain-ai/langchain"
+      },
+      "oracle": {
+        "automated": false,
+        "reason": "The evaluator never executes attacker-controlled Jira wrapper input or third-party integrations."
+      },
+      "sources": [
+        "https://github.com/advisories/GHSA-x32c-59v5-h7fg",
+        "https://github.com/langchain-ai/langchain/commit/a2f191a32229256dd41deadf97786fe41ce04cbb",
+        "https://github.com/langchain-ai/langchain/releases/tag/v0.0.225"
+      ]
+    }
+  ]
+}

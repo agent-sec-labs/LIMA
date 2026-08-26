@@ -1,11 +1,14 @@
 import os
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
+from lima.adjudication import finalize_adjudication
 from lima.config import Settings
 from lima.repository_import import RepositoryImportPolicy
+from lima.repository_triage import RepositoryTriageOutcome
 from lima.service import ReviewService
 
 
@@ -58,16 +61,34 @@ class RepositoryImportPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "disabled"):
             RepositoryImportPolicy().resolve("team/repo")
 
-    def test_symlink_escape_is_rejected_when_supported(self):
+    def test_directory_link_escape_is_rejected(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
             link = Path(root, "linked")
-            try:
+            if os.name == "nt":
+                created = subprocess.run(
+                    ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), outside],
+                    text=True,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+                self.assertEqual(
+                    0, created.returncode,
+                    "Windows junction creation failed: %s" % created.stderr,
+                )
+            else:
                 os.symlink(outside, link, target_is_directory=True)
-            except (OSError, NotImplementedError):
-                self.skipTest("directory symlinks are unavailable on this host")
-
-            with self.assertRaisesRegex(ValueError, "escapes"):
-                RepositoryImportPolicy(root).resolve("linked")
+            try:
+                with self.assertRaisesRegex(ValueError, "escapes"):
+                    RepositoryImportPolicy(root).resolve("linked")
+            finally:
+                if link.is_symlink():
+                    link.unlink()
+                else:
+                    # Windows directory junctions are reparse-point directories,
+                    # not pathlib symlinks, and must be removed as directories.
+                    link.rmdir()
 
 
 class RepositoryScanServiceTests(unittest.TestCase):
@@ -117,6 +138,18 @@ class RepositoryScanServiceTests(unittest.TestCase):
                 self.assertEqual(
                     "dataflow-verified",
                     task["report"]["findings"][0]["verification_state"],
+                )
+                self.assertEqual(
+                    "alert", task["report"]["adjudication"]["overall_disposition"]
+                )
+                self.assertEqual(
+                    "source-to-sink-risk-evidence",
+                    task["report"]["adjudication"]["decisions"][0]["reason"],
+                )
+                self.assertFalse(task["report"]["adjudication"]["auto_clear"])
+                self.assertEqual(
+                    "disabled",
+                    task["report"]["collaboration"]["semantic_triage"]["status"],
                 )
                 self.assertEqual(
                     1, task["report"]["collaboration"]["interprocedural_call_edges"]
@@ -192,11 +225,74 @@ class RepositoryScanServiceTests(unittest.TestCase):
             self.assertFalse(capabilities["repair_preview_writes_repository"])
             self.assertTrue(capabilities["repair_preview_snapshot_pinned"])
             self.assertFalse(capabilities["repair_tests_configured"])
+            self.assertEqual("off", capabilities["semantic_triage_mode"])
+            self.assertFalse(capabilities["semantic_triage_enabled"])
             with self.assertRaisesRegex(ValueError, "disabled"):
                 service.enqueue_repository_scan("team/project")
         finally:
             service.queue.close()
             os.unlink(db_path)
+
+    def test_semantic_triage_outcome_is_persisted_without_secret(self):
+        class SemanticTriageStub:
+            @staticmethod
+            def run(_root, _baseline, _findings):
+                return RepositoryTriageOutcome(
+                    adjudication=finalize_adjudication([{
+                        "path": "app.py",
+                        "symbol": "safe_join",
+                        "disposition": "clear",
+                        "reason": "mitigation-invariant-and-llm-agree",
+                        "invariant_statuses": ["mitigation"],
+                        "llm_is_vulnerable": False,
+                    }]),
+                    diagnostics={
+                        "mode": "auto",
+                        "status": "completed",
+                        "provider": "test-provider",
+                        "usage": {"total_tokens": 120},
+                        "secret_persisted": False,
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = Path(root, "team", "safe-project")
+            repository.mkdir(parents=True)
+            repository.joinpath("app.py").write_text(
+                "def safe_join(root, value):\n"
+                "    candidate = (root / value).resolve()\n"
+                "    candidate.relative_to(root.resolve())\n"
+                "    return candidate\n",
+                encoding="utf-8",
+            )
+            settings = Settings(**{
+                **settings_for(str(Path(root, "state.db")), root).__dict__,
+                "repository_scan_llm_mode": "auto",
+            })
+            service = ReviewService(settings)
+            service.repository_semantic_triage = SemanticTriageStub()
+            try:
+                created = service.enqueue_repository_scan(
+                    "team/safe-project", "tenant-a"
+                )
+                task = self._wait_for_task(
+                    service, created["task_id"], "tenant-a"
+                )
+
+                self.assertEqual("SUCCESS", task["state"])
+                self.assertEqual(
+                    "clear", task["report"]["adjudication"]["overall_disposition"]
+                )
+                self.assertTrue(task["report"]["adjudication"]["auto_clear"])
+                semantic = task["report"]["collaboration"]["semantic_triage"]
+                self.assertEqual("completed", semantic["status"])
+                self.assertFalse(semantic["secret_persisted"])
+                self.assertNotIn("api_key", str(task).lower())
+                self.assertEqual(
+                    "auto", task["input"]["semantic_triage_mode"]
+                )
+            finally:
+                service.queue.close()
 
 
 if __name__ == "__main__":

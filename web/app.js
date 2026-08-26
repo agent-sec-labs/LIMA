@@ -5,6 +5,7 @@ const titles = {
   overview: "开始",
   scan: "发起审计",
   tasks: "审计结果",
+  experiments: "外部评测",
   skills: "系统能力",
   settings: "模型设置",
   evolution: "高级实验",
@@ -18,6 +19,13 @@ const stateLabels = {
   SUCCESS: "已完成",
   FAILED: "失败",
   CANCELLED: "已取消",
+  PENDING: "等待执行",
+  FETCHING: "获取固定快照",
+  EVALUATING: "正在评测",
+  LLM_IN_FLIGHT: "模型请求中",
+  COMPLETED: "已完成",
+  COMPLETED_WITH_WARNINGS: "完成但有警告",
+  AMBIGUOUS: "调用状态不明确",
 };
 
 const severityLabels = {
@@ -34,6 +42,24 @@ const feedbackLabels = {
   missed_issue: "漏报",
   bad_fix: "坏修复",
   accepted: "已接受",
+};
+
+const experimentStateLabels = {
+  QUEUED: "等待执行",
+  RUNNING: "正在运行",
+  AGGREGATING: "正在汇总",
+  SUCCEEDED: "已完成",
+  SUCCEEDED_WITH_WARNINGS: "完成但有警告",
+  FAILED: "运行失败",
+  NEEDS_ATTENTION: "需要管理员处理",
+  BUDGET_EXHAUSTED: "预算已耗尽",
+  CANCELLED: "已取消",
+};
+
+const experimentModeLabels = {
+  deterministic: "确定性扫描",
+  retrieval: "检索基线",
+  "llm-retrieval": "检索 + 真实 LLM",
 };
 
 const providerDefaults = {
@@ -127,6 +153,64 @@ const DEMO_TASK = {
       cross_file_call_edges: 5,
       unresolved_dataflow_calls: 2,
       dynamic_import_sites: 0,
+      semantic_triage: {
+        mode: "auto",
+        status: "completed",
+        provider: "demo-provider",
+        model: "security-triage-demo",
+        usage: { total_tokens: 864 },
+        latency_ms: 1260,
+        retrieval: { evidence_candidates: 3 },
+        secret_persisted: false,
+      },
+    },
+    adjudication: {
+      policy: "agreement-required-for-auto-clear-v1",
+      overall_disposition: "alert",
+      overall_reason: "one-or-more-actionable-alerts",
+      auto_clear: false,
+      counts: { alert: 3, needs_review: 0, clear: 0 },
+      decisions: [
+        { path: "app/tasks.py", line: 42, start_line: 38, symbol: "run_task", rule_id: "PY-CMD-001", disposition: "alert", reason: "risk-invariant-and-llm-agree", decision_source: "semantic-llm", llm_root_cause: "请求参数跨越信任边界后进入 shell=True 调用。" },
+        { path: "app/files.py", line: 27, rule_id: "PY-PATH-003", disposition: "alert", reason: "deterministic-syntax-risk-evidence" },
+        { path: "app/search.py", line: 61, rule_id: "PY-SQL-002", disposition: "alert", reason: "deterministic-syntax-risk-evidence" },
+      ],
+    },
+  },
+};
+
+const DEMO_EXPERIMENT = {
+  id: "00000000-0000-4000-8000-000000000001",
+  state: "SUCCEEDED",
+  mode: "llm-retrieval",
+  dataset_path: "demo/repository-disjoint.json",
+  created_at: "2026-08-26T10:00:00+08:00",
+  updated_at: "2026-08-26T10:08:00+08:00",
+  manifest: {
+    dataset_name: "热门仓库外部评测示例",
+    evaluation_role: "demo",
+    analyzer_sha256: "bf81ba2cf0719bd62b7b9b2bf3b621571a6a38fe5b6e79374c3cdc2e36f1e5f1",
+    budgets: { max_llm_calls: 20, max_total_tokens: 100000 },
+    llm: { provider: "demo-provider", model: "security-review-demo" },
+  },
+  progress: {
+    total_cases: 5, completed_cases: 5, current_case: "",
+    llm_calls: 10, total_tokens: 18420, warnings: 0,
+  },
+  cases: [
+    { case_id: "repository-a", stage: "COMPLETED", status: "COMPLETED", attempt: 1, result: { usage: { total_tokens: 3510 } } },
+    { case_id: "repository-b", stage: "COMPLETED", status: "COMPLETED", attempt: 1, result: { usage: { total_tokens: 3690 } } },
+    { case_id: "repository-c", stage: "COMPLETED", status: "COMPLETED", attempt: 1, result: { usage: { total_tokens: 3740 } } },
+    { case_id: "repository-d", stage: "COMPLETED", status: "COMPLETED", attempt: 1, result: { usage: { total_tokens: 3590 } } },
+    { case_id: "repository-e", stage: "COMPLETED", status: "COMPLETED", attempt: 1, result: { usage: { total_tokens: 3890 } } },
+  ],
+  result: {
+    metrics: {
+      cases: 5,
+      retrieval_target_symbol_recall: 0.8,
+      llm_vulnerable_recall: 0.6,
+      llm_fixed_specificity: 0.8,
+      llm_paired_discrimination_rate: 0.6,
     },
   },
 };
@@ -140,6 +224,13 @@ let isDemoMode = sessionStorage.getItem("lima_demo") === "1";
 let lastRuntime = {};
 let auditDraft = { mode: "repository", step: 1, sample: false };
 let demoFeedback = [];
+let allExperiments = [];
+let experimentCatalog = [];
+let selectedExperiment = "";
+let experimentPoller = null;
+let experimentSampleVisible = false;
+let experimentRefreshInFlight = false;
+let experimentDraft = { step: 1, sample: false };
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function icon(name) {
@@ -273,6 +364,28 @@ async function mockApi(path, options = {}) {
     };
   }
   if (path === "/api/failures") return { cases: demoFeedback };
+  if (path === "/v1/experiments/catalog") {
+    return {
+      llm_available: true,
+      datasets: [{
+        path: "demo/repository-disjoint.json", name: "热门仓库外部评测示例",
+        evaluation_role: "demo", case_count: 5,
+        modes: ["deterministic", "retrieval", "llm-retrieval"],
+        dataset_file_sha256: "d".repeat(64),
+      }],
+    };
+  }
+  if (path === "/v1/experiments" && options.method === "POST") {
+    return { run_id: DEMO_EXPERIMENT.id, state: "QUEUED", mode: "llm-retrieval", queue: "演示队列" };
+  }
+  if (path === "/v1/experiments") return { experiments: [DEMO_EXPERIMENT] };
+  if (path.endsWith("/cancel") && path.startsWith("/v1/experiments/")) {
+    return { cancel_requested: true };
+  }
+  if (path.endsWith("/resume") && path.startsWith("/v1/experiments/")) {
+    return { run_id: DEMO_EXPERIMENT.id, state: "QUEUED", resumed: true };
+  }
+  if (path.startsWith("/v1/experiments/")) return DEMO_EXPERIMENT;
   if (path.startsWith("/v1/evolution/status")) {
     return { validation_cases: 42, holdout_cases: 18, unresolved_cases: demoFeedback.length, active_version: "1.5.0", ready: true };
   }
@@ -337,10 +450,12 @@ function show(view, updateHash = true) {
   document.title = `${titles[view]} · LIMA`;
   if (updateHash) history.replaceState(null, "", `#${view}`);
   if (view === "tasks") loadTasks();
+  if (view === "experiments") loadExperiments();
   if (view === "scan") loadRepositoryScanCapabilities();
   if (view === "skills") loadSkills();
   if (view === "settings") renderSettingsRuntime(lastRuntime);
   if (view === "evolution") loadFailures();
+  setExperimentPolling(view === "experiments");
   window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" });
 }
 
@@ -692,6 +807,133 @@ function verificationLabel(value) {
   return "候选 · 需复核";
 }
 
+function isVerifiedState(value) {
+  const state = String(value || "candidate").toLowerCase();
+  return state.includes("verified") || state === "corroborated" || state === "confirmed";
+}
+
+const dispositionLabels = {
+  alert: "确认告警",
+  needs_review: "需要复核",
+  clear: "证据通过",
+};
+
+const dispositionReasons = {
+  "multi-agent-verification-approved-risk": "多 Agent 证据复核与仲裁已通过",
+  "deterministic-syntax-risk-evidence": "确定性语法约束确认风险",
+  "independent-evidence-corroborated-risk": "两个独立证据源相互印证",
+  "source-to-sink-risk-evidence": "已确认不可信输入到危险调用的数据流",
+  "confirmed-risk-evidence": "风险证据已经确认",
+  "unverified-finding-requires-human-review": "当前只有候选证据，需要人工结合业务上下文判断",
+  "risk-invariant-and-llm-agree": "风险不变量与模型结论一致",
+  "risk-invariant-conflicts-with-llm": "风险不变量与模型结论冲突，禁止自动放行",
+  "mitigation-invariant-and-llm-agree": "缓解不变量与模型 clean 结论一致",
+  "mitigation-invariant-conflicts-with-llm": "缓解不变量与模型结论冲突",
+  "invalid-or-missing-llm-verdict": "模型结论缺失或不符合输出契约",
+  "llm-alert-without-deterministic-invariant": "模型报告风险，但尚缺少确定性不变量",
+  "llm-clean-without-deterministic-safety-evidence": "模型认为安全，但没有确定性缓解证据",
+  "clear-rejected-without-agreeing-safety-evidence": "放行请求缺少确定性缓解证据与有效模型 clean 结论",
+  "semantic-triage-provider-failure": "远程模型调用失败，系统已禁止自动放行",
+  "no-semantic-candidates-for-safety-proof": "没有足够的语义候选可以形成正向安全证明",
+};
+
+const semanticStatusLabels = {
+  completed: "模型复核完成",
+  "invalid-contract": "输出契约无效",
+  "failed-closed": "调用失败 · 已关闭放行",
+  "no-candidates": "没有可复核候选",
+  disabled: "未启用",
+  "llm-not-configured": "模型未配置",
+};
+
+function renderSemanticTriageStatus(report) {
+  const semantic = report?.collaboration?.semantic_triage;
+  if (!semantic || typeof semantic !== "object") return "";
+  const status = String(semantic.status || "disabled");
+  const healthy = status === "completed";
+  const neutral = status === "disabled" || status === "llm-not-configured";
+  const candidates = Number(semantic.retrieval?.evidence_candidates || 0);
+  const tokens = Number(semantic.usage?.total_tokens || 0);
+  const latency = Number(semantic.latency_ms || 0);
+  const explanation = healthy
+    ? "系统已对有界语义证据包执行一次批量模型复核，并与确定性安全不变量共同仲裁。"
+    : status === "failed-closed" || status === "invalid-contract"
+      ? "模型不可用或输出不符合契约；相关对象已进入人工复核，不会自动标记安全。"
+      : status === "no-candidates"
+        ? "当前检索器没有形成可验证的安全证据包，因此系统不会仅凭零发现给出安全结论。"
+        : "生产语义复核当前未执行，报告仅使用本地 AST、数据流和 SAST 证据。";
+  return `
+    <section class="semantic-status-card" aria-label="生产语义复核状态">
+      <div>
+        <span class="eyebrow">SEMANTIC TRIAGE</span>
+        <h3>${escapeHtml(semanticStatusLabels[status] || status)}</h3>
+        <p>${escapeHtml(explanation)}</p>
+      </div>
+      <span class="pill ${healthy ? "pill-green" : neutral ? "pill-neutral" : "pill-amber"}">${escapeHtml(String(semantic.mode || "off").toUpperCase())}</span>
+      <dl>
+        <div><dt>供应商 / 模型</dt><dd>${escapeHtml([semantic.provider, semantic.model].filter(Boolean).join(" / ") || "本地模式")}</dd></div>
+        <div><dt>证据候选</dt><dd>${candidates || "—"}</dd></div>
+        <div><dt>Token</dt><dd>${tokens || "—"}</dd></div>
+        <div><dt>模型时延</dt><dd>${latency ? `${Math.round(latency)} ms` : "—"}</dd></div>
+      </dl>
+    </section>
+  `;
+}
+
+function reportAdjudication(report, findings) {
+  const raw = report?.adjudication && typeof report.adjudication === "object" ? report.adjudication : {};
+  let decisions = Array.isArray(raw.decisions) ? raw.decisions : [];
+  if (!Object.keys(raw).length) {
+    decisions = findings.map((finding) => ({
+      fingerprint: finding.fingerprint || "",
+      path: finding.path || "",
+      line: finding.line || 0,
+      rule_id: finding.rule_id || "",
+      disposition: isVerifiedState(finding.verification_state) ? "alert" : "needs_review",
+      reason: isVerifiedState(finding.verification_state)
+        ? "confirmed-risk-evidence"
+        : "unverified-finding-requires-human-review",
+    }));
+  }
+  const derivedCounts = decisions.reduce((counts, decision) => {
+    const disposition = ["alert", "needs_review", "clear"].includes(decision.disposition)
+      ? decision.disposition : "needs_review";
+    counts[disposition] += 1;
+    return counts;
+  }, { alert: 0, needs_review: 0, clear: 0 });
+  const counts = {
+    alert: Number(raw.counts?.alert ?? derivedCounts.alert) || 0,
+    needs_review: Number(raw.counts?.needs_review ?? derivedCounts.needs_review) || 0,
+    clear: Number(raw.counts?.clear ?? derivedCounts.clear) || 0,
+  };
+  const explicit = String(raw.overall_disposition || "").toLowerCase();
+  const overall = ["alert", "needs_review", "clear"].includes(explicit)
+    ? explicit
+    : counts.alert ? "alert" : counts.needs_review ? "needs_review" : counts.clear ? "clear" : "needs_review";
+  return {
+    policy: raw.policy || "legacy-fail-closed",
+    overall_disposition: overall,
+    auto_clear: raw.auto_clear === true && overall === "clear",
+    counts,
+    decisions,
+  };
+}
+
+function decisionForFinding(finding, adjudication) {
+  if (finding.fingerprint) {
+    const exact = adjudication.decisions.find((decision) => decision.fingerprint === finding.fingerprint);
+    if (exact) return exact;
+  }
+  return adjudication.decisions.find((decision) => (
+    decision.path === finding.path
+    && Number(decision.line || 0) === Number(finding.line || 0)
+    && decision.rule_id === finding.rule_id
+  )) || {
+    disposition: "needs_review",
+    reason: "unverified-finding-requires-human-review",
+  };
+}
+
 function renderTaskReport(task) {
   const state = normalizeState(task?.state);
   if (!["SUCCESS", "FAILED", "CANCELLED"].includes(state) && !task?.report) {
@@ -710,7 +952,9 @@ function renderTaskReport(task) {
   const findings = Array.isArray(report.findings) ? report.findings : [];
   const counts = severityCounts(findings);
   const risk = reportRisk(report, findings);
-  const verified = findings.filter((finding) => String(finding.verification_state || "").toLowerCase().includes("verified")).length;
+  const adjudication = reportAdjudication(report, findings);
+  const disposition = adjudication.overall_disposition;
+  const verified = findings.filter((finding) => isVerifiedState(finding.verification_state)).length;
   const files = Array.isArray(report.files_reviewed) ? report.files_reviewed.length : Number(report.files_reviewed || report.file_count || 0);
   const highPriority = counts.critical + counts.high;
   const summary = report.summary || (findings.length
@@ -728,6 +972,8 @@ function renderTaskReport(task) {
     const severity = String(finding.severity || "info").toLowerCase();
     const safeSeverity = ["critical", "high", "medium", "low", "info"].includes(severity) ? severity : "info";
     const location = `${finding.path || "未知文件"}:${finding.line || "?"}`;
+    const decision = decisionForFinding(finding, adjudication);
+    const decisionClass = decision.disposition === "alert" ? "pill-red" : decision.disposition === "clear" ? "pill-green" : "pill-amber";
     return `
       <tr>
         <td><span class="pill ${safeSeverity === "critical" || safeSeverity === "high" ? "pill-red" : safeSeverity === "medium" ? "pill-amber" : "pill-green"}">${escapeHtml(severityLabels[safeSeverity] || safeSeverity)}</span></td>
@@ -744,11 +990,34 @@ function renderTaskReport(task) {
           </details>
         </td>
         <td><code>${escapeHtml(location)}</code></td>
+        <td>
+          <span class="pill ${decisionClass}">${escapeHtml(dispositionLabels[decision.disposition] || "需要复核")}</span>
+          <small class="disposition-reason">${escapeHtml(dispositionReasons[decision.reason] || decision.reason || "缺少处置依据")}</small>
+        </td>
         <td><span class="pill pill-neutral">${escapeHtml(verificationLabel(finding.verification_state))}</span></td>
         <td class="confidence">${escapeHtml(confidenceLabel(finding.confidence))}</td>
       </tr>
     `;
   }).join("");
+  const semanticRows = adjudication.decisions
+    .filter((decision) => decision.decision_source === "semantic-llm" && decision.symbol)
+    .map((decision) => {
+      const decisionClass = decision.disposition === "alert" ? "pill-red" : decision.disposition === "clear" ? "pill-green" : "pill-amber";
+      const modelEvidence = decision.disposition === "clear"
+        ? decision.llm_mitigation_evidence
+        : decision.llm_root_cause || decision.llm_sink_evidence;
+      return `
+        <article class="semantic-evidence-item">
+          <div>
+            <span class="pill ${decisionClass}">${escapeHtml(dispositionLabels[decision.disposition] || "需要复核")}</span>
+            <b>${escapeHtml(decision.symbol)}</b>
+            <code>${escapeHtml(`${decision.path || "未知文件"}:${decision.start_line || "?"}`)}</code>
+          </div>
+          <p>${escapeHtml(dispositionReasons[decision.reason] || decision.reason || "缺少处置依据")}</p>
+          <small><strong>模型证据：</strong>${escapeHtml(modelEvidence || "模型没有提供可展示的证据摘要。")}</small>
+        </article>
+      `;
+    }).join("");
   return `
     <div class="report-document">
       <header class="report-header">
@@ -759,6 +1028,23 @@ function renderTaskReport(task) {
         </div>
         <div class="risk-badge risk-${risk}"><strong>${escapeHtml(severityLabels[risk] || risk)}</strong><span>总体风险</span></div>
       </header>
+      <section class="disposition-banner disposition-${disposition}" aria-label="证据处置结论">
+        <div>
+          <span class="eyebrow">EVIDENCE DISPOSITION</span>
+          <h3>${escapeHtml(dispositionLabels[disposition] || "需要复核")}</h3>
+          <p>${disposition === "alert"
+            ? "至少一项风险已有足够证据，请进入修复与安全回归流程。"
+            : disposition === "clear"
+              ? "全部评估对象同时具备确定性缓解证据与一致的模型 clean 结论。"
+              : "证据缺失或相互冲突，系统已禁止自动放行，请安排人工复核。"}</p>
+        </div>
+        <div class="disposition-counts" aria-label="处置数量">
+          <span><b>${adjudication.counts.alert}</b> 告警</span>
+          <span><b>${adjudication.counts.needs_review}</b> 复核</span>
+          <span><b>${adjudication.counts.clear}</b> 通过</span>
+        </div>
+      </section>
+      ${renderSemanticTriageStatus(report)}
       <section class="report-metrics" aria-label="报告摘要">
         <div class="report-metric"><span>问题总数</span><strong>${findings.length}</strong></div>
         <div class="report-metric"><span>严重 / 高危</span><strong>${highPriority}</strong></div>
@@ -769,14 +1055,20 @@ function renderTaskReport(task) {
         <div><h3>严重度分布</h3><p>条形长度按当前报告中的最大类别归一化。</p></div>
         <div class="severity-bars">${bars}</div>
       </section>
+      ${semanticRows ? `
+        <section class="semantic-evidence" aria-label="语义证据处置明细">
+          <div class="finding-section-head"><div><h3>语义证据处置</h3><p>模型结论必须与确定性不变量共同解读；冲突不会自动放行。</p></div><span class="pill pill-blue">${adjudication.policy}</span></div>
+          <div class="semantic-evidence-grid">${semanticRows}</div>
+        </section>
+      ` : ""}
       <div class="finding-section-head">
         <div><h3>问题清单</h3><p>按风险、位置和证据状态快速决定处理顺序。</p></div>
         <span class="pill pill-neutral">${findings.length} 项</span>
       </div>
       ${findingRows
-        ? `<div class="finding-table-wrap"><table class="finding-table"><thead><tr><th>风险</th><th>问题与依据</th><th>位置</th><th>证据状态</th><th>置信度</th></tr></thead><tbody>${findingRows}</tbody></table></div>`
+        ? `<div class="finding-table-wrap"><table class="finding-table"><thead><tr><th>风险</th><th>问题与依据</th><th>位置</th><th>处置结论</th><th>证据状态</th><th>置信度</th></tr></thead><tbody>${findingRows}</tbody></table></div>`
         : emptyState("未发现达到阈值的问题", "这不等于绝对安全。请结合依赖风险、部署配置和业务权限继续复核。", "发起另一项审计", "scan", "check")}
-      <p class="report-footnote">${icon("info")}<span><strong>如何解读：</strong>“数据流已验证”表示系统确认了输入源到危险调用的路径；“候选”仍需要人工结合业务上下文判断。置信度不能替代漏洞可利用性分析。</span></p>
+      <p class="report-footnote">${icon("info")}<span><strong>如何解读：</strong>系统只有在确定性缓解证据与模型 clean 结论一致时才自动放行；冲突或缺失证据统一进入人工复核。“没有发现”不等于“已经证明安全”，置信度也不能替代漏洞可利用性分析。策略：${escapeHtml(adjudication.policy)}。</span></p>
     </div>
   `;
 }
@@ -849,6 +1141,384 @@ async function loadTaskFeedback(taskId) {
     if (selectedTask === taskId) renderTaskFeedback(data.cases || []);
   } catch (error) {
     $("#task-feedback-history").innerHTML = `<p class="feedback-empty">无法读取反馈：${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function experimentStateTone(state) {
+  const normalized = normalizeState(state);
+  if (normalized === "SUCCEEDED") return "pill-green";
+  if (["FAILED", "BUDGET_EXHAUSTED"].includes(normalized)) return "pill-red";
+  if (["NEEDS_ATTENTION", "SUCCEEDED_WITH_WARNINGS", "COMPLETED_WITH_WARNINGS", "AMBIGUOUS"].includes(normalized)) return "pill-amber";
+  if (["RUNNING", "AGGREGATING"].includes(normalized)) return "pill-blue";
+  return "pill-neutral";
+}
+
+function experimentStateLabel(state) {
+  const normalized = normalizeState(state);
+  return experimentStateLabels[normalized] || normalized;
+}
+
+function experimentProgress(record) {
+  const progress = record?.progress || {};
+  const total = Number(progress.total_cases || record?.manifest?.case_ids?.length || 0);
+  const completed = Math.min(total, Number(progress.completed_cases || 0));
+  return {
+    total,
+    completed,
+    percent: total ? Math.round((completed / total) * 100) : 0,
+    calls: Number(progress.llm_calls || 0),
+    tokens: Number(progress.total_tokens || 0),
+    current: progress.current_case || "",
+    warnings: Number(progress.warnings || 0),
+  };
+}
+
+function renderExperimentCatalog() {
+  const select = $("#experiment-dataset");
+  const previous = select.value;
+  if (!experimentCatalog.length) {
+    select.innerHTML = '<option value="">没有可运行的数据集</option>';
+    select.disabled = true;
+    $("#experiment-dataset-help").textContent = "请先把经过审核的 JSON manifest 放入 evaluation_data。";
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = experimentCatalog.map((dataset) => `
+    <option value="${escapeHtml(dataset.path)}">${escapeHtml(dataset.name)} · ${Number(dataset.case_count || 0)} 个案例</option>
+  `).join("");
+  if (experimentCatalog.some((item) => item.path === previous)) select.value = previous;
+  updateExperimentDatasetHelp();
+}
+
+function updateExperimentDatasetHelp() {
+  const dataset = experimentCatalog.find((item) => item.path === $("#experiment-dataset").value);
+  if (!dataset) return;
+  $("#experiment-dataset-help").textContent = `${dataset.case_count} 个固定案例 · 角色 ${dataset.evaluation_role || "development"} · 创建时冻结 SHA-256`;
+  const allowed = new Set(dataset.modes || []);
+  $$("#experiment-mode option").forEach((option) => {
+    option.disabled = !allowed.has(option.value);
+  });
+  const mode = $("#experiment-mode");
+  if (mode.selectedOptions[0]?.disabled) mode.value = allowed.has("retrieval") ? "retrieval" : [...allowed][0] || "";
+}
+
+function setExperimentStep(step) {
+  experimentDraft.step = Math.max(1, Math.min(3, Number(step) || 1));
+  $$('[data-experiment-step]').forEach((element) => {
+    element.classList.toggle("active", Number(element.dataset.experimentStep) === experimentDraft.step);
+  });
+  $$('[data-experiment-indicator]').forEach((element) => {
+    const current = Number(element.dataset.experimentIndicator);
+    element.classList.toggle("active", current === experimentDraft.step);
+    element.classList.toggle("done", current < experimentDraft.step);
+  });
+  if (experimentDraft.step === 3) renderExperimentReview();
+}
+
+function validateExperimentStep(step) {
+  if (step === 1) {
+    const dataset = experimentCatalog.find((item) => item.path === $("#experiment-dataset").value);
+    const mode = $("#experiment-mode").value;
+    const message = !dataset
+      ? "请选择一个可运行的数据集。"
+      : !(dataset.modes || []).includes(mode)
+        ? "当前数据集或运行时不支持这个模式。"
+        : "";
+    $("#experiment-step-one-error").textContent = message;
+    return !message;
+  }
+  const calls = Number($("#experiment-max-calls").value);
+  const tokens = Number($("#experiment-max-tokens").value);
+  const llm = $("#experiment-mode").value === "llm-retrieval";
+  const message = !Number.isInteger(calls) || calls < 0 || calls > 200
+    ? "LLM 调用上限必须是 0–200 的整数。"
+    : llm && calls < 2
+      ? "真实 LLM 模式至少需要为一个漏洞/修复对预留 2 次调用。"
+      : !Number.isInteger(tokens) || tokens < 1 || tokens > 10000000
+        ? "Token 上限必须是 1–10,000,000 的整数。"
+        : "";
+  $("#experiment-step-two-error").textContent = message;
+  return !message;
+}
+
+function renderExperimentReview() {
+  const dataset = experimentCatalog.find((item) => item.path === $("#experiment-dataset").value) || {};
+  const mode = $("#experiment-mode").value;
+  const llm = mode === "llm-retrieval";
+  $("#experiment-review-summary").innerHTML = `
+    <div><span>数据集</span><strong>${escapeHtml(dataset.name || dataset.path || "未选择")}</strong></div>
+    <div><span>案例数量</span><strong>${Number(dataset.case_count || 0)} 个固定案例</strong></div>
+    <div><span>运行模式</span><strong>${escapeHtml(experimentModeLabels[mode] || mode)}</strong></div>
+    <div><span>LLM 调用上限</span><strong>${llm ? Number($("#experiment-max-calls").value).toLocaleString("zh-CN") : "0（不会调用）"}</strong></div>
+    <div><span>Token 上限</span><strong>${llm ? Number($("#experiment-max-tokens").value).toLocaleString("zh-CN") : "不适用"}</strong></div>
+    <div><span>恢复策略</span><strong>逐例保存 · 模糊调用人工确认</strong></div>
+  `;
+}
+
+function renderExperimentList() {
+  const root = $("#experiment-list");
+  if (!allExperiments.length) {
+    root.innerHTML = emptyState("还没有外部评测", "使用左侧三步向导创建第一次后台实验，离开页面也不会中断。", "创建第一次评测", "experiments", "flask");
+    return;
+  }
+  root.innerHTML = allExperiments.map((record) => {
+    const progress = experimentProgress(record);
+    const name = record.manifest?.dataset_name || record.dataset_path || "未命名数据集";
+    return `
+      <button class="experiment-row ${selectedExperiment === record.id ? "selected" : ""}" type="button" data-experiment-id="${escapeHtml(record.id)}">
+        <span class="experiment-row-head"><b>${escapeHtml(name)}</b><span class="pill ${experimentStateTone(record.state)}">${escapeHtml(experimentStateLabel(record.state))}</span></span>
+        <span class="experiment-row-meta">${escapeHtml(experimentModeLabels[record.mode] || record.mode)} · ${formatTime(record.created_at)}</span>
+        <span class="experiment-progress" aria-label="完成 ${progress.percent}%"><i style="width:${progress.percent}%"></i></span>
+        <span class="experiment-row-foot"><span>${progress.completed} / ${progress.total} 案例</span><span>${progress.tokens.toLocaleString("zh-CN")} Token</span></span>
+      </button>
+    `;
+  }).join("");
+}
+
+function experimentMetricLabel(key) {
+  const labels = {
+    cases: "评测案例",
+    vulnerable_detection_recall_at_known_file: "确定性漏洞文件召回率",
+    fixed_pair_specificity_at_known_file: "确定性修复版本特异度",
+    paired_discrimination_rate: "确定性成对区分率",
+    verified_evidence_rate: "已验证证据率",
+    repair_attempt_rate: "修复尝试率",
+    verified_patch_rate: "验证补丁率",
+    abstention_policy_adherence: "拒修策略遵从率",
+    automated_project_oracle_coverage: "自动 Oracle 配置覆盖率",
+    executed_project_oracle_coverage: "项目 Oracle 执行覆盖率",
+    paired_project_oracle_pass_rate: "项目 Oracle 成对通过率",
+    retrieval_vulnerable_path_recall_at_k: "漏洞路径 Recall@K",
+    retrieval_vulnerable_ground_truth_inventory_recall: "真实目标文件清单召回率",
+    retrieval_vulnerable_symbol_recall_at_k: "漏洞符号 Recall@K",
+    retrieval_vulnerable_evidence_packet_symbol_recall: "证据包符号召回率",
+    retrieval_fixed_symbol_recall_at_k: "修复符号 Recall@K",
+    invariant_vulnerable_risk_recall: "风险不变量召回率",
+    invariant_fixed_mitigation_rate: "缓解不变量命中率",
+    llm_api_success_rate: "模型 API 成功率",
+    llm_contract_valid_rate: "模型输出契约有效率",
+    llm_vulnerable_recall_at_evaluation_scope: "模型漏洞召回率",
+    llm_fixed_specificity_at_evaluation_scope: "模型修复版本特异度",
+    llm_paired_discrimination_at_evaluation_scope: "模型成对区分率",
+    hybrid_vulnerable_non_clear_rate_at_evaluation_scope: "漏洞版本未自动放行率",
+    hybrid_fixed_auto_clear_rate_at_evaluation_scope: "修复版本自动清除率",
+    hybrid_paired_safe_discrimination_rate: "混合策略安全成对区分率",
+    hybrid_target_manual_review_rate: "目标人工复核率",
+    retrieval_target_symbol_recall: "目标符号 Recall@K（示例）",
+    llm_vulnerable_recall: "模型漏洞召回率（示例）",
+    llm_fixed_specificity: "修复版本特异度（示例）",
+    llm_paired_discrimination_rate: "模型成对区分率（示例）",
+  };
+  return labels[key] || String(key).replaceAll("_", " ");
+}
+
+function experimentMetricValue(key, value) {
+  if (typeof value !== "number") return String(value ?? "—");
+  if (/(rate|recall|specificity|precision|accuracy|coverage|adherence|discrimination|non_clear|auto_clear)/.test(key)) {
+    return `${(value * 100).toFixed(1)}%`;
+  }
+  return Number.isInteger(value) ? value.toLocaleString("zh-CN") : value.toFixed(3);
+}
+
+function renderExperimentDetail(record) {
+  const root = $("#experiment-detail");
+  const progress = experimentProgress(record);
+  const manifest = record.manifest || {};
+  const metrics = record.result?.metrics || {};
+  const cases = record.cases || [];
+  const state = normalizeState(record.state);
+  const active = ["QUEUED", "RUNNING", "AGGREGATING"].includes(state);
+  const resumable = ["FAILED", "CANCELLED"].includes(state);
+  const ambiguous = state === "NEEDS_ATTENTION";
+  $("#experiment-live-status").className = `pill ${experimentStateTone(state)}`;
+  $("#experiment-live-status").textContent = experimentStateLabel(state);
+  const priorities = {
+    deterministic: [
+      "cases", "vulnerable_detection_recall_at_known_file",
+      "fixed_pair_specificity_at_known_file", "paired_discrimination_rate",
+      "verified_evidence_rate", "verified_patch_rate",
+      "abstention_policy_adherence", "paired_project_oracle_pass_rate",
+    ],
+    retrieval: [
+      "cases", "paired_discrimination_rate",
+      "retrieval_vulnerable_path_recall_at_k",
+      "retrieval_vulnerable_symbol_recall_at_k",
+      "retrieval_vulnerable_evidence_packet_symbol_recall",
+      "retrieval_fixed_symbol_recall_at_k", "invariant_vulnerable_risk_recall",
+      "invariant_fixed_mitigation_rate",
+    ],
+    "llm-retrieval": [
+      "cases", "retrieval_vulnerable_symbol_recall_at_k",
+      "invariant_vulnerable_risk_recall", "invariant_fixed_mitigation_rate",
+      "llm_api_success_rate", "llm_contract_valid_rate",
+      "llm_vulnerable_recall_at_evaluation_scope",
+      "llm_fixed_specificity_at_evaluation_scope",
+      "llm_paired_discrimination_at_evaluation_scope",
+      "hybrid_vulnerable_non_clear_rate_at_evaluation_scope",
+      "hybrid_fixed_auto_clear_rate_at_evaluation_scope",
+      "hybrid_paired_safe_discrimination_rate", "hybrid_target_manual_review_rate",
+      "retrieval_target_symbol_recall", "llm_vulnerable_recall",
+      "llm_fixed_specificity", "llm_paired_discrimination_rate",
+    ],
+  };
+  const priority = priorities[record.mode] || Object.keys(metrics);
+  const metricCards = priority
+    .filter((key) => typeof metrics[key] === "number")
+    .slice(0, 13)
+    .map((key) => [key, metrics[key]])
+    .map(([key, value]) => `<div class="report-metric"><span>${escapeHtml(experimentMetricLabel(key))}</span><strong>${escapeHtml(experimentMetricValue(key, value))}</strong></div>`)
+    .join("");
+  const caseRows = cases.length ? cases.map((item) => {
+    const usage = item.result?.usage || {};
+    return `<tr><td><strong>${escapeHtml(item.case_id)}</strong></td><td>${escapeHtml(experimentStateLabel(item.stage || "PENDING"))}</td><td><span class="pill ${experimentStateTone(item.status === "COMPLETED" ? "SUCCEEDED" : item.status)}">${escapeHtml(experimentStateLabel(item.status === "COMPLETED" ? "SUCCEEDED" : item.status))}</span></td><td>${Number(item.attempt || 1)}</td><td>${Number(usage.total_tokens || 0).toLocaleString("zh-CN")}</td></tr>`;
+  }).join("") : '<tr><td colspan="5">案例尚未开始，队列接管后会逐项显示。</td></tr>';
+  const errorNotice = record.error ? `<div class="notice notice-amber">${icon("alert")}<p><b>需要关注</b><span>${escapeHtml(record.error)}</span></p></div>` : "";
+  const budgetNotice = state === "BUDGET_EXHAUSTED" ? `<div class="notice notice-amber">${icon("info")}<p><b>冻结预算已经耗尽</b><span>为保证实验身份不可篡改，请创建一个预算更高的新实验；不能恢复本次运行。</span></p></div>` : "";
+  root.innerHTML = `
+    <div class="experiment-detail-head">
+      <div><span class="eyebrow">${escapeHtml(manifest.evaluation_role || "EXPERIMENT")}</span><h3>${escapeHtml(manifest.dataset_name || record.dataset_path || "外部评测")}</h3><p>${escapeHtml(experimentModeLabels[record.mode] || record.mode)} · 创建于 ${formatTime(record.created_at)}</p></div>
+      <div class="experiment-actions">
+        ${active ? '<button class="button button-danger" type="button" data-experiment-action="cancel">请求取消</button>' : ""}
+        ${resumable ? '<button class="button button-primary" type="button" data-experiment-action="resume">从断点恢复</button>' : ""}
+        ${ambiguous ? '<button class="button button-danger" type="button" data-experiment-action="retry-ambiguous">确认并重试模糊调用</button>' : ""}
+      </div>
+    </div>
+    <div class="experiment-progress-large"><span><b>${progress.completed} / ${progress.total}</b> 案例完成</span><span>${progress.percent}%</span><div><i style="width:${progress.percent}%"></i></div><small>${progress.current ? `当前案例：${escapeHtml(progress.current)}` : "当前没有执行中的案例"}</small></div>
+    ${errorNotice}${budgetNotice}
+    <section class="report-metrics experiment-metrics" aria-label="实验预算和指标">
+      <div class="report-metric"><span>LLM 调用</span><strong>${progress.calls} / ${Number(manifest.budgets?.max_llm_calls || 0)}</strong></div>
+      <div class="report-metric"><span>Token 消耗</span><strong>${progress.tokens.toLocaleString("zh-CN")} / ${Number(manifest.budgets?.max_total_tokens || 0).toLocaleString("zh-CN")}</strong></div>
+      <div class="report-metric"><span>警告案例</span><strong>${progress.warnings}</strong></div>
+      <div class="report-metric"><span>模型身份</span><strong>${escapeHtml(manifest.llm?.model || "未调用模型")}</strong></div>
+      ${metricCards}
+    </section>
+    <div class="finding-section-head"><div><h3>逐案例执行记录</h3><p>每个案例结束即持久化；完成案例不会在恢复时重复扫描或计费。</p></div><span class="pill pill-neutral">${cases.length} 条记录</span></div>
+    <div class="finding-table-wrap"><table class="finding-table experiment-case-table"><thead><tr><th>案例</th><th>阶段</th><th>状态</th><th>尝试</th><th>Token</th></tr></thead><tbody>${caseRows}</tbody></table></div>
+    <p class="report-footnote">${icon("info")}<span><strong>结果边界：</strong>零告警不等于仓库安全。最终结论必须结合召回率、特异度、人工复核率和冻结 manifest 解读。</span></p>
+  `;
+}
+
+async function openExperiment(id, silent = false) {
+  selectedExperiment = id;
+  renderExperimentList();
+  if (experimentSampleVisible && id === DEMO_EXPERIMENT.id) {
+    renderExperimentDetail(DEMO_EXPERIMENT);
+    return;
+  }
+  if (!silent) {
+    $("#experiment-detail").innerHTML = '<div class="pending-report"><span class="spinner-large"></span><h3>正在读取实验记录</h3><p>加载逐案例状态、预算和指标…</p></div>';
+  }
+  try {
+    const record = await api(`/v1/experiments/${encodeURIComponent(id)}`);
+    if (selectedExperiment !== id) return;
+    renderExperimentDetail(record);
+  } catch (error) {
+    $("#experiment-detail").innerHTML = emptyState("实验详情加载失败", error.message, "刷新实验列表", "experiments", "alert");
+    if (!silent) toast("实验详情加载失败", error.message, "error");
+  }
+}
+
+async function loadExperiments(silent = false) {
+  if (experimentRefreshInFlight) return;
+  experimentRefreshInFlight = true;
+  if (!silent) $("#experiment-list").innerHTML = '<div class="list-skeleton"></div><div class="list-skeleton"></div>';
+  try {
+    const [catalogData, listData] = await Promise.all([
+      api("/v1/experiments/catalog"), api("/v1/experiments"),
+    ]);
+    experimentCatalog = catalogData.datasets || [];
+    const persisted = listData.experiments || [];
+    allExperiments = experimentSampleVisible
+      ? [DEMO_EXPERIMENT, ...persisted.filter((item) => item.id !== DEMO_EXPERIMENT.id)]
+      : persisted;
+    renderExperimentCatalog();
+    renderExperimentList();
+    if (!selectedExperiment && allExperiments.length) selectedExperiment = allExperiments[0].id;
+    if (selectedExperiment) await openExperiment(selectedExperiment, silent);
+  } catch (error) {
+    $("#experiment-list").innerHTML = emptyState("实验中心暂时不可用", error.message, "检查模型设置", "settings", "alert");
+    if (!silent) toast("实验数据加载失败", error.message, "error");
+  } finally {
+    experimentRefreshInFlight = false;
+  }
+}
+
+function setExperimentPolling(active) {
+  if (experimentPoller) window.clearInterval(experimentPoller);
+  experimentPoller = null;
+  if (!active) return;
+  experimentPoller = window.setInterval(() => {
+    if (!document.hidden && location.hash.slice(1) === "experiments") loadExperiments(true);
+  }, 5000);
+}
+
+function loadExperimentSample() {
+  experimentSampleVisible = true;
+  selectedExperiment = DEMO_EXPERIMENT.id;
+  allExperiments = [DEMO_EXPERIMENT, ...allExperiments.filter((item) => item.id !== DEMO_EXPERIMENT.id)];
+  renderExperimentList();
+  renderExperimentDetail(DEMO_EXPERIMENT);
+  $("#experiment-detail").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth", block: "start" });
+  toast("示例实验已加载", "这是浏览器内置示例，不会创建任务或消耗 Token。", "success");
+}
+
+async function createExperiment() {
+  if (!validateExperimentStep(1) || !validateExperimentStep(2)) return;
+  const button = $("#run-experiment");
+  const mode = $("#experiment-mode").value;
+  const body = {
+    dataset: $("#experiment-dataset").value,
+    mode,
+    max_llm_calls: mode === "llm-retrieval" ? Number($("#experiment-max-calls").value) : 0,
+    max_total_tokens: Number($("#experiment-max-tokens").value),
+  };
+  setButtonBusy(button, true, "正在创建…");
+  try {
+    const created = await api("/v1/experiments", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    experimentSampleVisible = false;
+    selectedExperiment = created.run_id;
+    setExperimentStep(1);
+    toast("后台实验已创建", "现在可以关闭浏览器；LIMA 会持续保存中间结果。", "success");
+    await loadExperiments();
+  } catch (error) {
+    toast("实验创建失败", error.message, "error");
+  } finally {
+    setButtonBusy(button, false);
+  }
+}
+
+async function actOnExperiment(action) {
+  if (!selectedExperiment) return;
+  const ambiguous = action === "retry-ambiguous";
+  const cancelling = action === "cancel";
+  const accepted = await confirmAction({
+    title: cancelling ? "确认请求取消实验？" : ambiguous ? "确认承担可能的重复调用？" : "确认从断点恢复？",
+    description: cancelling
+      ? "实验会在当前案例边界停止，已完成的案例和 artifact 会保留。"
+      : ambiguous
+        ? "上一次请求可能已经被供应商计费。继续会重新执行该案例，并按保守策略累计调用次数。"
+        : "已完成案例不会重新扫描；实验会从最近一个完整边界继续。",
+    acceptLabel: cancelling ? "请求取消" : ambiguous ? "确认并重试" : "恢复运行",
+  });
+  if (!accepted) return;
+  try {
+    if (cancelling) {
+      await api(`/v1/experiments/${encodeURIComponent(selectedExperiment)}/cancel`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      toast("取消请求已提交", "Runner 会在下一个案例边界安全停止。", "success");
+    } else {
+      await api(`/v1/experiments/${encodeURIComponent(selectedExperiment)}/resume`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allow_ambiguous_retry: ambiguous }),
+      });
+      toast("实验已重新入队", ambiguous ? "模糊调用重试已明确授权。" : "将从已保存边界继续。", "success");
+    }
+    await loadExperiments();
+  } catch (error) {
+    toast("实验操作失败", error.message, "error");
   }
 }
 
@@ -1066,6 +1736,35 @@ $("#load-audit-sample").addEventListener("click", loadAuditSample);
 $("#audit-diff").addEventListener("input", updateDiffStats);
 $("#run-audit").addEventListener("click", runAudit);
 
+$$('[data-experiment-next]').forEach((button) => button.addEventListener("click", () => {
+  if (validateExperimentStep(experimentDraft.step)) setExperimentStep(experimentDraft.step + 1);
+}));
+$$('[data-experiment-back]').forEach((button) => button.addEventListener("click", () => setExperimentStep(experimentDraft.step - 1)));
+$("#experiment-dataset").addEventListener("change", updateExperimentDatasetHelp);
+$("#experiment-mode").addEventListener("change", () => {
+  $("#experiment-step-one-error").textContent = "";
+});
+$("#load-experiment-sample").addEventListener("click", loadExperimentSample);
+$("#run-experiment").addEventListener("click", createExperiment);
+$("#refresh-experiments").addEventListener("click", async () => {
+  const button = $("#refresh-experiments");
+  button.disabled = true;
+  try {
+    await loadExperiments();
+    toast("实验记录已刷新", "", "success");
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#experiment-list").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-experiment-id]");
+  if (row) openExperiment(row.dataset.experimentId);
+});
+$("#experiment-detail").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-experiment-action]");
+  if (button) actOnExperiment(button.dataset.experimentAction);
+});
+
 $("#task-search").addEventListener("input", renderTaskList);
 $$("[data-task-filter]").forEach((button) => button.addEventListener("click", () => {
   taskFilter = button.dataset.taskFilter;
@@ -1279,6 +1978,7 @@ $("#refresh").addEventListener("click", async () => {
   if (view === "overview") await loadDashboard();
   else if (view === "scan") await loadRepositoryScanCapabilities();
   else if (view === "tasks") await loadTasks();
+  else if (view === "experiments") await loadExperiments();
   else if (view === "skills") await loadSkills();
   else if (view === "settings") await loadDashboard();
   else if (view === "evolution") await loadFailures();
@@ -1312,6 +2012,10 @@ $("#login-form").addEventListener("submit", async (event) => {
     $("#logout").classList.remove("hidden");
     toast("登录成功", "正在加载你的安全工作区。", "success");
     await loadDashboard();
+    if ((location.hash.slice(1) || "overview") === "experiments") {
+      await loadExperiments();
+      setExperimentPolling(true);
+    }
   } catch (error) {
     $("#login-error").textContent = error.message;
   } finally {
@@ -1326,6 +2030,10 @@ $("#logout").addEventListener("click", () => {
   sessionStorage.removeItem("lima_demo");
   selectedTask = null;
   selectedTaskData = null;
+  selectedExperiment = "";
+  experimentSampleVisible = false;
+  allExperiments = [];
+  setExperimentPolling(false);
   $("#login-overlay").classList.remove("hidden");
   $("#logout").classList.add("hidden");
   $("#system-status").textContent = "等待登录";
@@ -1340,6 +2048,7 @@ document.addEventListener("click", (event) => {
 
 updateAuditMode("repository");
 setWizardStep(1);
+setExperimentStep(1);
 updateDiffStats();
 updateProviderDefaults();
 if (isDemoMode || accessToken) $("#logout").classList.remove("hidden");

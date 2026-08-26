@@ -11,7 +11,7 @@ LIMA requires Python 3.11 or newer. On Windows PowerShell:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m pytest -q
+python -m unittest discover -s tests -v
 node --check web\app.js
 ```
 
@@ -23,6 +23,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\lima.ps1 test
 
 Normal tests must not require a real LLM key. Remote-model evaluations are
 opt-in, cost-bearing experiments and must never run on untrusted pull requests.
+CI stores UTF-8 unit-test logs for 14 days and security/repair evidence for 30
+days. The stable `merge-gate` check is the only status name branch protection
+needs to require; it fails closed unless every underlying engineering job passes.
 
 ## Workflow
 
@@ -32,6 +35,11 @@ opt-in, cost-bearing experiments and must never run on untrusted pull requests.
 4. Add or update tests for changed behavior.
 5. Run host tests and the relevant Docker/security checks.
 6. Open a pull request and resolve all review comments and required checks.
+
+Repository administrators should configure `main` to require a pull request,
+one approving review, Code Owner review, resolved conversations, and the
+`merge-gate` status check. Do not require individual matrix names: the stable
+aggregate prevents branch rules from breaking when the compatibility matrix changes.
 
 Direct pushes, force pushes, and branch deletion on `main` are not part of the
 project workflow.

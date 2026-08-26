@@ -17,7 +17,8 @@
 ## Verification
 
 - [ ] Added or updated tests
-- [ ] `python -m pytest -q`
+- [ ] `python -m unittest discover -s tests -v`
+- [ ] `node --check web/app.js` when frontend code changed
 - [ ] Relevant Docker/security checks
 - [ ] No secret, private repository, personal data, or generated report committed
 - [ ] Documentation updated for user-visible behavior
@@ -25,6 +26,11 @@
 ## Evidence
 
 <!-- Include concise test output, metrics, screenshots, or reproduction steps. -->
+
+## Experiment integrity
+
+<!-- For analyzer/evaluation changes: state dataset role, frozen SHA/fingerprint impact,
+whether old holdouts now fail closed, and confirm that no paid remote evaluation ran in CI. -->
 
 ## Review notes
 

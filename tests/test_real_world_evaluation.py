@@ -7,7 +7,9 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import lima.real_world_evaluation as evaluation_module
 from lima.real_world_evaluation import (
+    ANALYZER_COMPONENTS,
     LLMSecurityTriageClient,
     RealWorldSecurityEvaluator,
     SnapshotStore,
@@ -209,6 +211,20 @@ class RealWorldEvaluationTests(unittest.TestCase):
             [item["id"] for item in calibration["cases"]],
         )
         self.assertTrue(all(item["split"] == "calibration" for item in calibration["cases"]))
+
+    def test_analyzer_fingerprint_is_portable_across_lf_and_crlf_checkouts(self):
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root)
+            for name in ANALYZER_COMPONENTS:
+                (package / name).write_bytes(b"first line\nsecond line\n")
+            with patch.object(
+                evaluation_module, "__file__", str(package / "real_world_evaluation.py")
+            ):
+                lf_fingerprint = analyzer_fingerprint()
+                for name in ANALYZER_COMPONENTS:
+                    (package / name).write_bytes(b"first line\r\nsecond line\r\n")
+                crlf_fingerprint = analyzer_fingerprint()
+        self.assertEqual(lf_fingerprint, crlf_fingerprint)
 
     def test_snapshot_store_extracts_pinned_archive_and_uses_cache(self):
         commit = "a" * 40

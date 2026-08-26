@@ -12,9 +12,9 @@ v1.7 在不读取漏洞标签进行运行时检索、不硬编码仓库名/文�
 - 历史清单规范化 SHA-256：`3a45b1138a5863ea4db6bb13b804f7eef4c3122fbcd5bc6bf176a0828ae181f4`
 - v1.6 冻结分析器：`bf81ba2cf0719bd62b7b9b2bf3b621571a6a38fe5b6e79374c3cdc2e36f1e5f1`
 - 校准清单：`evaluation_data/popular_external_calibration_v2.json`
-- 校准清单规范化 SHA-256：`12e939291fde56f48d6b00c8dafb05e7de66a43d563ab3b881d934d29dfa02e2`
+- v1.7.1 校准清单规范化 SHA-256：`e587d44778163f519476b765bedd826611a11ca9e77a7e306b63f6a5d35586f6`
 - 校准案例 SHA-256：`5640777521a02ec3bbf20144e52a6038a31ea40a6c47d2f1c03de4d58cded3e1`
-- v1.7 校准分析器：`fe7c4b6257db1efd0c839c7c3dc6ffc11d06e82556e89b1e26ac1fa4a5765264`
+- v1.7.1 当前校准分析器：`68d9e3b08b1d47b271814b4ef8dae570979a8cd94ff1146458329c7b3204412a`
 - 数据角色：`calibration`
 - 范围：5 个 Python 热门仓库，CWE-22 × 2、CWE-78 × 2、CWE-89 × 1
 
@@ -60,6 +60,7 @@ API 与契约全部成功、目标判断却为零，说明不能先归咎模型�
 9. **文件 provenance 被拆成孤立片段**：将文件模型、入站 cache/validation consumer、marker-aware helper 和下游动态分发的文件读取 sink 建模为一条有类型的跨符号流；证据包为该链预留有界槽位。
 10. **输入与输出 cache 边界混淆**：只有入站 `preprocess/input` 或带上传目录检查的 cache consumer 生成 provenance 风险/缓解不变量；postprocess/streaming 输出流不再被错误转移成入站风险。
 11. **命令字符串等同于执行**：CWE-78 要求显示的 shell/interpreter 调用边；结构化平台 API 覆盖旧 builder 且 builder 不可达时，不再仅凭返回命令字符串报警。
+12. **Windows checkout 改写分析器身份**：分析器组件统一在 LF 规范化后计算指纹，CRLF/LF checkout 现在具有同一身份；新增回归测试直接对两种换行计算并要求相等。
 
 所有规则只依赖源码结构和通用安全语义，没有仓库、路径、CVE 或 ground-truth 特例。
 
@@ -80,7 +81,7 @@ API 与契约全部成功、目标判断却为零，说明不能先归咎模型�
 | 平均检索时延 | 2,928.438 ms | 10 snapshots |
 | P95 检索时延 | 5,987.054 ms | 10 snapshots |
 
-最终持久化 retrieval run 为 `ff0c683d-48e8-4fb2-9474-fcf73c02766d`：`SUCCEEDED`、5/5 案例、0 warning、15/15 artifact 校验和通过、未持久化 secret。校准运行的分析器指纹为 `fe7c4b6257db1efd0c839c7c3dc6ffc11d06e82556e89b1e26ac1fa4a5765264`。确定性检测器仍只命中 1/5 漏洞文件并在 1 个固定版本报警；本轮没有修改扫描规则，因此不能把检索改善包装成端到端检测改善。
+最终持久化 retrieval run 为 `ff0c683d-48e8-4fb2-9474-fcf73c02766d`：`SUCCEEDED`、5/5 案例、0 warning、15/15 artifact 校验和通过、未持久化 secret。该运行绑定修复前的原始字节指纹 `fe7c4b6257db1efd0c839c7c3dc6ffc11d06e82556e89b1e26ac1fa4a5765264`。v1.7.1 只把指纹输入规范化为 LF，不改变扫描、检索、Prompt 或仲裁行为；当前跨平台指纹为 `68d9e3b08b1d47b271814b4ef8dae570979a8cd94ff1146458329c7b3204412a`。确定性检测器仍只命中 1/5 漏洞文件并在 1 个固定版本报警；本轮没有修改扫描规则，因此不能把检索改善包装成端到端检测改善。
 
 ## v1.7 真实模型与混合仲裁验收
 
@@ -111,7 +112,7 @@ Pillow 的 LLM 成对判断正确；混合仲裁仍对固定版本中未执行�
 - Windows：208 tests，全部通过。
 - Docker/Linux：208 tests，全部通过。
 - 运行态：服务重建成功，`/health` 返回 `ok`。
-- 数据身份：案例 SHA-256 `5640777521a02ec3bbf20144e52a6038a31ea40a6c47d2f1c03de4d58cded3e1`，清单规范化 SHA-256 `12e939291fde56f48d6b00c8dafb05e7de66a43d563ab3b881d934d29dfa02e2`，分析器 SHA-256 `fe7c4b6257db1efd0c839c7c3dc6ffc11d06e82556e89b1e26ac1fa4a5765264`。
+- 数据身份：案例 SHA-256 `5640777521a02ec3bbf20144e52a6038a31ea40a6c47d2f1c03de4d58cded3e1`，v1.7.1 清单规范化 SHA-256 `e587d44778163f519476b765bedd826611a11ca9e77a7e306b63f6a5d35586f6`，分析器 SHA-256 `68d9e3b08b1d47b271814b4ef8dae570979a8cd94ff1146458329c7b3204412a`。
 
 ## 后续门禁
 

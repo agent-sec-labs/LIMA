@@ -103,15 +103,20 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_source_bytes(payload: bytes) -> bytes:
+    """Normalize text checkouts so LF and CRLF have one analyzer identity."""
+    return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def analyzer_fingerprint() -> str:
-    """Fingerprint every local component that can affect external-holdout results."""
+    """Fingerprint analyzer source using a checkout-independent text encoding."""
     package_root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for name in ANALYZER_COMPONENTS:
         source = package_root / name
         if not source.is_file():
             raise RuntimeError("analyzer component is missing: %s" % name)
-        payload = source.read_bytes()
+        payload = _canonical_source_bytes(source.read_bytes())
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(len(payload)).encode("ascii"))

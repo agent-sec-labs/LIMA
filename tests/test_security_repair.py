@@ -7,7 +7,9 @@ import zipfile
 from pathlib import Path
 
 from lima.fixer import SafeFixer
+from lima.repair_preview import RepositoryRepairPreviewer
 from lima.verifier import RepairVerifier
+from lima.workspace import RepositoryWorkspace
 
 
 def finding(path, line, rule_id, cwe):
@@ -29,6 +31,36 @@ def repository_archive(files):
 
 
 class SecurityRepairTemplateTests(unittest.TestCase):
+    def test_explicitly_disabled_finding_cannot_create_repair_or_preview(self):
+        source = (
+            "import sqlite3\n"
+            "value = input()\n"
+            "cursor.execute('SELECT * FROM users WHERE id = ' + value)\n"
+        )
+        disabled = {
+            **finding("app.py", 3, "SEC-SQL-CONCAT", "CWE-89"),
+            "automatic_repair": False,
+        }
+
+        result = SafeFixer().apply(source, [disabled], "app.py")
+
+        self.assertEqual([], result["rules"])
+        self.assertEqual(source, result["content"])
+        self.assertEqual("automatic-repair-disabled", result["blocked"][0]["reason"])
+
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "app.py").write_text(source, encoding="utf-8")
+            preview = RepositoryRepairPreviewer().preview(
+                RepositoryWorkspace(root), {"findings": [disabled]}
+            )
+
+        self.assertEqual("no-repair", preview["status"])
+        self.assertEqual([], preview["patches"])
+        self.assertEqual([], preview["repair_manifest"])
+        self.assertEqual(
+            "automatic-repair-disabled", preview["blocked_findings"][0]["reason"]
+        )
+
     def test_cwe78_converts_fixed_command_to_argv_and_disables_shell(self):
         source = (
             "import subprocess\n"

@@ -38,6 +38,9 @@ class EvidenceRecord:
     rule_id: str = ""
     cwe: str = ""
     confidence: float = 0.0
+    language: str = ""
+    symbol: str = ""
+    analysis_mode: str = ""
 
 
 @dataclass
@@ -58,6 +61,10 @@ class Finding:
     fingerprint: str = ""
     verification_state: str = "candidate"
     evidence_records: List[EvidenceRecord] = field(default_factory=list)
+    language: str = ""
+    symbol: str = ""
+    analysis_mode: str = ""
+    automatic_repair: Optional[bool] = None
 
     def __post_init__(self) -> None:
         self.cwe = self.cwe.upper().strip()

@@ -188,6 +188,8 @@ class SafeFixer:
 
     @staticmethod
     def repair_eligibility(finding: dict) -> Dict[str, object]:
+        if finding.get("automatic_repair") is False:
+            return {"eligible": False, "reason": "automatic-repair-disabled"}
         rule_id = str(finding.get("rule_id", ""))
         state = str(finding.get("verification_state", "candidate"))
         if rule_id not in SUPPORTED_AUTOFIX_RULES:

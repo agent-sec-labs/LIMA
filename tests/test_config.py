@@ -57,3 +57,39 @@ class DotenvTests(unittest.TestCase):
             resolved = Settings.from_env().resolved_llm()
             self.assertEqual("deepseek", resolved["provider"])
             self.assertEqual("legacy-real-key", resolved["api_key"])
+
+    def test_cxx_memory_settings_are_parsed_and_validated(self):
+        values = {
+            "LIMA_CXX_MEMORY_MODE": "required",
+            "LIMA_CXX_ANALYZER_URL": "http://cxx-analyzer:8090",
+            "LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS": "41",
+            "LIMA_CXX_MAX_RESPONSE_BYTES": "4096",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            settings = Settings.from_env()
+            settings.validate_evolution()
+
+        self.assertEqual("required", settings.cxx_memory_mode)
+        self.assertEqual("http://cxx-analyzer:8090", settings.cxx_analyzer_url)
+        self.assertEqual(41, settings.cxx_analysis_timeout_seconds)
+        self.assertEqual(4096, settings.cxx_max_response_bytes)
+
+    def test_cxx_memory_mode_rejects_unknown_value(self):
+        with patch.dict(os.environ, {"LIMA_CXX_MEMORY_MODE": "maybe"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "LIMA_CXX_MEMORY_MODE"):
+                Settings.from_env().validate_evolution()
+
+    def test_cxx_analyzer_url_rejects_unsafe_or_invalid_components(self):
+        invalid_urls = (
+            "ftp://cxx-analyzer:8090",
+            "http://user@cxx-analyzer:8090",
+            "http://cxx-analyzer:8090?layer=source",
+            "http://cxx-analyzer:8090#source",
+            "http://cxx-analyzer:not-a-port",
+        )
+        for url in invalid_urls:
+            with self.subTest(url=url), patch.dict(
+                os.environ, {"LIMA_CXX_ANALYZER_URL": url}, clear=True
+            ):
+                with self.assertRaisesRegex(ValueError, "LIMA_CXX_ANALYZER_URL"):
+                    Settings.from_env().validate_evolution()

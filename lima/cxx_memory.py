@@ -19,6 +19,11 @@ ANALYSIS_STATES = {
     "build-backed": "build-verified",
     "sanitizer-confirmed": "confirmed",
 }
+_TOOL_ANALYSIS_BINDINGS = frozenset({
+    ("semgrep", "source-only", "candidate"),
+    ("clang", "build-backed", "build-verified"),
+    ("asan", "sanitizer-confirmed", "confirmed"),
+})
 _TOP_LEVEL_KEYS = {
     "schema_version", "request_id", "status", "snapshot_sha256",
     "tool_runs", "findings", "coverage", "diagnostics",
@@ -83,7 +88,7 @@ def map_asan_error(error_type: str, access: str) -> str | None:
     }
     if error_type in overflow_types:
         return {"WRITE": "CWE-787", "READ": "CWE-125"}.get(access)
-    if error_type == "heap-use-after-free":
+    if error_type == "heap-use-after-free" and access in {"READ", "WRITE"}:
         return "CWE-416"
     if error_type == "attempting double-free" and access == "FREE":
         return "CWE-415"
@@ -109,6 +114,14 @@ class CxxMemoryAnalyzerClient:
         snapshot_sha256: str,
         requested_layers: tuple[str, ...],
     ) -> CxxAnalysisResult:
+        if (
+            type(requested_layers) is not tuple
+            or not requested_layers
+            or any(type(layer) is not str for layer in requested_layers)
+            or len(set(requested_layers)) != len(requested_layers)
+            or any(layer not in REQUESTED_LAYERS for layer in requested_layers)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer requested layers")
         request_id = str(uuid.uuid4())
         body = json.dumps({
             "request_id": request_id,
@@ -199,6 +212,12 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer analysis mode")
         if item["verification_state"] != ANALYSIS_STATES[analysis_mode]:
             raise CxxAnalyzerProtocolError("C/C++ analyzer mode and state mismatch")
+        if (
+            item["tool"],
+            analysis_mode,
+            item["verification_state"],
+        ) not in _TOOL_ANALYSIS_BINDINGS:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer tool evidence mismatch")
         if type(item["line"]) is not int or item["line"] < 1:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer line")
         confidence = item["confidence"]

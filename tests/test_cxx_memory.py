@@ -182,6 +182,62 @@ class CxxMemoryClientTests(unittest.TestCase):
         self.assertEqual("source-only", evidence.analysis_mode)
 
     @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
+    def test_tool_cannot_claim_another_evidence_level(self, _uuid4):
+        invalid_bindings = [
+            ("semgrep", "sanitizer-confirmed", "confirmed"),
+            ("clang", "source-only", "candidate"),
+            ("asan", "build-backed", "build-verified"),
+            ("unknown-tool", "source-only", "candidate"),
+        ]
+
+        for tool, analysis_mode, verification_state in invalid_bindings:
+            with self.subTest(tool=tool, analysis_mode=analysis_mode):
+                payload = valid_response_payload()
+                payload["findings"][0].update({
+                    "tool": tool,
+                    "analysis_mode": analysis_mode,
+                    "verification_state": verification_state,
+                })
+                client = RecordingConversionClient(
+                    "http://cxx-analyzer:8090", timeout_seconds=8,
+                    max_response_bytes=4096,
+                    opener=RecordingOpener(payload),
+                )
+
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    client.analyze(
+                        "team/project", SNAPSHOT_SHA256,
+                        ("source-only", "build-backed"),
+                    )
+
+                self.assertEqual([], client.converted_findings)
+
+    @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
+    def test_invalid_requested_layers_are_rejected_before_network(self, _uuid4):
+        invalid_layers = [
+            ("unknown", ("source-only", "run-command")),
+            ("duplicate", ("source-only", "source-only")),
+            ("empty", ()),
+            ("non-string", ("source-only", 7)),
+        ]
+
+        for name, requested_layers in invalid_layers:
+            with self.subTest(name=name):
+                opener = RecordingOpener(valid_response_payload())
+                client = CxxMemoryAnalyzerClient(
+                    "http://cxx-analyzer:8090", timeout_seconds=8,
+                    max_response_bytes=4096, opener=opener,
+                )
+
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    client.analyze(
+                        "team/project", SNAPSHOT_SHA256,
+                        requested_layers,
+                    )
+
+                self.assertIsNone(opener.request)
+
+    @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
     def test_invalid_response_rejects_the_entire_payload(self, _uuid4):
         invalid_payloads = []
 
@@ -261,6 +317,10 @@ class CxxMemoryClientTests(unittest.TestCase):
 
         self.assertIsNone(map_asan_error("heap-buffer-overflow", "FREE"))
         self.assertIsNone(map_asan_error("unknown-sanitizer-error", "WRITE"))
+
+    def test_uaf_mapping_rejects_unrecognized_access_tokens(self):
+        self.assertIsNone(map_asan_error("heap-use-after-free", "FREE"))
+        self.assertIsNone(map_asan_error("heap-use-after-free", "BOGUS"))
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ from lima.workspace import RepositoryWorkspace
 
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 VERIFIED_STATES = {
-    "syntax-verified", "corroborated", "dataflow-verified", "confirmed"
+    "syntax-verified", "corroborated", "dataflow-verified", "build-verified",
+    "confirmed",
 }
 
 

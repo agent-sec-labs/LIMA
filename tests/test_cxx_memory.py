@@ -105,9 +105,9 @@ class FakeCxxAdapter:
         return self.result
 
 
-def cxx_result(*findings, status="completed"):
+def cxx_result(*findings):
     return CxxAnalysisResult(
-        status=status,
+        status="completed",
         tool_runs=[{"tool": "semgrep", "status": "completed"}],
         findings=list(findings),
         coverage={"source_files": 1},
@@ -313,22 +313,46 @@ class CxxRepositoryScannerTests(unittest.TestCase):
                     RepositoryWorkspace(root), repository_key="team/project"
                 )
 
-    def test_build_failed_is_an_analysis_result_in_all_modes(self):
+    @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
+    def test_build_failed_layer_metadata_is_preserved_in_all_modes(self, _uuid4):
         for mode in ("auto", "required"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
-                source_finding = cxx_finding("semgrep", "source-only")
-                adapter = FakeCxxAdapter(cxx_result(source_finding, status="build_failed"))
+                workspace = RepositoryWorkspace(root)
+                payload = valid_response_payload()
+                payload["snapshot_sha256"] = workspace.inventory().fingerprint()
+                payload["tool_runs"] = [
+                    {"tool": "semgrep", "status": "completed"},
+                    {"tool": "clang", "status": "build_failed"},
+                ]
+                payload["coverage"] = {"source_files": 1, "build_backed_files": 0}
+                payload["diagnostics"] = [{
+                    "layer": "build-backed",
+                    "status": "build_failed",
+                    "message": "CMake configuration failed",
+                }]
+                adapter = CxxMemoryAnalyzerClient(
+                    "http://cxx-analyzer:8090",
+                    timeout_seconds=8,
+                    max_response_bytes=4096,
+                    opener=RecordingOpener(payload),
+                )
 
                 result = self._scanner(adapter, mode=mode).scan(
-                    RepositoryWorkspace(root), repository_key="team/project"
+                    workspace, repository_key="team/project"
                 )
 
+                metadata = result.report.collaboration["cxx_memory"]
                 self.assertEqual(
-                    "build_failed",
-                    result.report.collaboration["cxx_memory"]["status"],
+                    "completed",
+                    metadata["status"],
                 )
+                self.assertEqual(payload["tool_runs"], metadata["tool_runs"])
+                self.assertEqual(payload["coverage"], metadata["coverage"])
+                self.assertEqual(payload["diagnostics"], metadata["diagnostics"])
+                self.assertEqual(1, len(result.report.findings))
+                self.assertEqual("source-only", result.report.findings[0].analysis_mode)
                 self.assertEqual("candidate", result.report.findings[0].verification_state)
 
     def test_protocol_error_is_rejected_in_auto_and_fatal_when_required(self):
@@ -477,6 +501,7 @@ class CxxMemoryClientTests(unittest.TestCase):
 
         changed("unknown top-level field", lambda value: value.update({"extra": True}))
         changed("schema version", lambda value: value.update({"schema_version": 2}))
+        changed("top-level status", lambda value: value.update({"status": "build_failed"}))
         changed("request id", lambda value: value.update({"request_id": "wrong"}))
         changed(
             "snapshot digest",

@@ -1,13 +1,19 @@
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import Mock, patch
 
+from lima.cxx_memory import CxxAnalysisResult
+from lima.models import Finding, Severity
 from lima.repository_scanner import RepositoryScanner
 from lima.workspace import RepositoryWorkspace
+from scripts import scan_repository
 
 
 def _cp1252_environment():
@@ -164,6 +170,62 @@ class RepositoryWorkspaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(2, run("--verified-only").returncode)
+
+    def test_scan_cli_verified_only_includes_build_verified_cxx_finding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+            finding = Finding(
+                rule_id="cxx.double-free",
+                severity=Severity.HIGH,
+                title="Potential double free",
+                explanation="free called twice",
+                path="main.cpp",
+                line=1,
+                evidence="free(p)",
+                fix="",
+                test="Run the configured test",
+                confidence=0.84,
+                cwe="CWE-415",
+                source="clang",
+                evidence_kind="line",
+                verification_state="build-verified",
+                language="c++",
+                symbol="main",
+                analysis_mode="build-backed",
+                automatic_repair=False,
+            )
+            adapter = Mock()
+            adapter.analyze.return_value = CxxAnalysisResult(
+                status="completed",
+                tool_runs=[{"tool": "clang", "status": "completed"}],
+                findings=[finding],
+                coverage={"build_backed_files": 1},
+                diagnostics=[],
+            )
+
+            with (
+                patch.object(
+                    scan_repository,
+                    "CxxMemoryAnalyzerClient",
+                    return_value=adapter,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = scan_repository.main([
+                    str(repository),
+                    "--format", "json",
+                    "--sast", "off",
+                    "--dataflow", "off",
+                    "--cxx-memory", "auto",
+                    "--repository-key", "team/project",
+                    "--verified-only",
+                    "--fail-on", "high",
+                ])
+
+            self.assertEqual(2, exit_code)
 
     def test_inventory_is_bounded_deterministic_and_skips_sensitive_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

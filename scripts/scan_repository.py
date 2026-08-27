@@ -13,10 +13,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from lima.console import configure_utf8_stdio
+from lima.cxx_memory import CxxMemoryAnalyzerClient
 from lima.report import to_markdown
+from lima.repository_import import RepositoryImportPolicy
 from lima.repository_scanner import RepositoryScanner
 from lima.workspace import RepositoryWorkspace
-
 
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 VERIFIED_STATES = {
@@ -37,6 +38,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataflow", choices=("on", "off"), default="on",
         help="Enable or disable local source-to-sink verification for ablation baselines",
+    )
+    parser.add_argument(
+        "--cxx-memory", choices=("auto", "off", "required"), default="off",
+        help="Opt in to the configured C/C++ memory analysis Sidecar",
+    )
+    parser.add_argument(
+        "--repository-key",
+        help="Bounded import-policy repository key required for C/C++ Sidecar analysis",
+    )
+    parser.add_argument(
+        "--cxx-analyzer-url",
+        default=os.getenv("LIMA_CXX_ANALYZER_URL", "http://cxx-analyzer:8090"),
+        help="Internal C/C++ analyzer URL",
+    )
+    parser.add_argument(
+        "--cxx-analysis-timeout-seconds",
+        type=int,
+        default=int(os.getenv("LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS", "300")),
+    )
+    parser.add_argument(
+        "--cxx-max-response-bytes",
+        type=int,
+        default=int(os.getenv("LIMA_CXX_MAX_RESPONSE_BYTES", str(2 * 1024 * 1024))),
     )
     parser.add_argument("--output", help="Write the report to this path instead of stdout")
     parser.add_argument("--max-files", type=int, default=5_000)
@@ -59,7 +83,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    repository_key = ""
+    cxx_memory_adapter = None
+    if args.cxx_memory != "off":
+        if not args.repository_key:
+            parser.error("--repository-key is required when --cxx-memory is auto or required")
+        try:
+            repository_key = RepositoryImportPolicy().normalize_key(args.repository_key)
+        except ValueError as exc:
+            parser.error("invalid --repository-key: %s" % exc)
+        cxx_memory_adapter = CxxMemoryAnalyzerClient(
+            args.cxx_analyzer_url,
+            timeout_seconds=args.cxx_analysis_timeout_seconds,
+            max_response_bytes=args.cxx_max_response_bytes,
+        )
     workspace = RepositoryWorkspace(
         args.repository,
         max_files=args.max_files,
@@ -69,8 +108,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         result = RepositoryScanner(
-            sast_mode=args.sast, dataflow_enabled=args.dataflow == "on"
-        ).scan(workspace)
+            sast_mode=args.sast,
+            dataflow_enabled=args.dataflow == "on",
+            cxx_memory_mode=args.cxx_memory,
+            cxx_memory_adapter=cxx_memory_adapter,
+        ).scan(workspace, repository_key=repository_key)
     except RuntimeError as exc:
         print("scan failed: %s" % exc, file=sys.stderr)
         return 3

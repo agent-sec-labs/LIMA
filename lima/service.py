@@ -6,30 +6,42 @@ from .agents import MultiAgentCoordinator
 from .auth import AuthManager
 from .config import Settings
 from .context_manager import ContextManager
+from .cxx_memory import (
+    REQUESTED_LAYERS,
+    SUPPORTED_CWES,
+    CxxMemoryAnalyzerClient,
+)
+from .diff_parser import parse_unified_diff
 from .evolution import EvolutionEngine
 from .fixer import SafeFixer
 from .github import GitHubAppAuthenticator, GitHubClient
 from .harness import ReviewHarness
-from .metrics import metrics
 from .memory import MemoryManager
+from .metrics import metrics
 from .models import TaskState, TraceEvent
 from .observability import AlertManager, Observability
 from .postgres_store import create_store
+from .repair_preview import RepositoryRepairPreviewer
 from .report import to_markdown
-from .reviewer import (
-    OpenAICompatibleReviewer, ReliabilityRuleReviewer, SecurityRuleReviewer,
-)
-from .diff_parser import parse_unified_diff
-from .skills import SkillRegistry
-from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
-from .store import utc_now
-from .task_queue import PermanentTaskError, TaskQueue
-from .rollout import ReleaseManager
-from .verifier import RepairVerifier
 from .repository_import import RepositoryImportPolicy
 from .repository_scanner import RepositoryScanner
-from .repair_preview import RepositoryRepairPreviewer
-from .workspace import RepositoryWorkspace
+from .reviewer import (
+    OpenAICompatibleReviewer,
+    ReliabilityRuleReviewer,
+    SecurityRuleReviewer,
+)
+from .rollout import ReleaseManager
+from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
+from .skills import SkillRegistry
+from .store import utc_now
+from .task_queue import PermanentTaskError, TaskQueue
+from .verifier import RepairVerifier
+from .workspace import (
+    CXX_BUILD_EXTENSIONS,
+    CXX_SOURCE_EXTENSIONS,
+    DEFAULT_FILENAMES,
+    RepositoryWorkspace,
+)
 
 
 class ReviewService:
@@ -107,8 +119,17 @@ class ReviewService:
         self.repository_import = RepositoryImportPolicy(
             settings.repository_import_root
         )
+        cxx_memory_adapter = None
+        if settings.cxx_memory_mode != "off":
+            cxx_memory_adapter = CxxMemoryAnalyzerClient(
+                settings.cxx_analyzer_url,
+                timeout_seconds=settings.cxx_analysis_timeout_seconds,
+                max_response_bytes=settings.cxx_max_response_bytes,
+            )
         self.repository_scanner = RepositoryScanner(
-            sast_mode=settings.repository_scan_sast_mode
+            sast_mode=settings.repository_scan_sast_mode,
+            cxx_memory_mode=settings.cxx_memory_mode,
+            cxx_memory_adapter=cxx_memory_adapter,
         )
         self.queue = TaskQueue(
             self._process_queued, settings.async_workers, settings.redis_url,
@@ -373,6 +394,18 @@ class ReviewService:
                 "repository-tests", "human-draft-pr-approval",
             ],
             "repair_tests_configured": bool(self.settings.repair_test_command),
+            "cxx_memory": {
+                "mode": self.settings.cxx_memory_mode,
+                "analyzer_configured": bool(self.settings.cxx_analyzer_url),
+                "supported_extensions": sorted(CXX_SOURCE_EXTENSIONS),
+                "build_metadata_extensions": sorted(CXX_BUILD_EXTENSIONS),
+                "build_metadata_filenames": sorted(DEFAULT_FILENAMES),
+                "supported_cwes": sorted(SUPPORTED_CWES),
+                "layers": list(REQUESTED_LAYERS),
+                "build_configuration_status": "sidecar-managed",
+                "test_configuration_status": "sidecar-managed",
+                "automatic_repair": False,
+            },
             "max_files": self.settings.repository_scan_max_files,
             "max_file_bytes": self.settings.repository_scan_max_file_bytes,
             "max_total_bytes": self.settings.repository_scan_max_total_bytes,
@@ -390,6 +423,7 @@ class ReviewService:
             "task_type": "repository_scan",
             "repository_key": key,
             "sast_mode": self.settings.repository_scan_sast_mode,
+            "cxx_memory_mode": self.settings.cxx_memory_mode,
         }, tenant_id)
         self.queue.submit({
             "task_id": task_id,
@@ -435,7 +469,9 @@ class ReviewService:
             "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
             repository=repository_key,
         ), metrics.timer("repository_scan_duration"):
-            result = self.repository_scanner.scan(workspace)
+            result = self.repository_scanner.scan(
+                workspace, repository_key=repository_key
+            )
         result.report.repository = repository_key
         result.report.collaboration["import_policy"] = {
             "repository_key": repository_key,

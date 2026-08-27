@@ -1,16 +1,23 @@
 import copy
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from lima.cxx_memory import (
+    REQUESTED_LAYERS,
+    CxxAnalysisResult,
     CxxAnalyzerProtocolError,
+    CxxAnalyzerUnavailable,
     CxxMemoryAnalyzerClient,
     map_asan_error,
 )
 from lima.fixer import SafeFixer
 from lima.models import Finding, Severity
+from lima.repository_scanner import VERIFICATION_RANK, RepositoryScanner
+from lima.workspace import RepositoryWorkspace
 
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
 SNAPSHOT_SHA256 = "a" * 64
@@ -85,6 +92,46 @@ class RecordingConversionClient(CxxMemoryAnalyzerClient):
         return super()._convert_finding(item)
 
 
+class FakeCxxAdapter:
+    def __init__(self, result=None, error=None):
+        self.calls = []
+        self.result = result
+        self.error = error
+
+    def analyze(self, repository_key, snapshot_sha256, requested_layers):
+        self.calls.append((repository_key, snapshot_sha256, requested_layers))
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def cxx_result(*findings, status="completed"):
+    return CxxAnalysisResult(
+        status=status,
+        tool_runs=[{"tool": "semgrep", "status": "completed"}],
+        findings=list(findings),
+        coverage={"source_files": 1},
+        diagnostics=["bounded diagnostic"],
+    )
+
+
+def cxx_finding(tool, analysis_mode, *, symbol="release"):
+    states = {
+        "source-only": "candidate",
+        "build-backed": "build-verified",
+        "sanitizer-confirmed": "confirmed",
+    }
+    return Finding(
+        rule_id="cxx.double-free", severity=Severity.HIGH,
+        title="Potential double free", explanation="free called twice",
+        path="src/free.c", line=12, evidence="free(p)", fix="",
+        test="Reproduce under AddressSanitizer", confidence=0.72,
+        cwe="CWE-415", source=tool, evidence_kind="line",
+        verification_state=states[analysis_mode], language="c",
+        symbol=symbol, analysis_mode=analysis_mode, automatic_repair=False,
+    )
+
+
 class CxxFindingModelTests(unittest.TestCase):
     def test_new_evidence_fields_have_backward_compatible_defaults(self):
         finding = Finding(
@@ -123,6 +170,188 @@ class CxxFindingModelTests(unittest.TestCase):
             {"eligible": False, "reason": "automatic-repair-disabled"},
             eligibility,
         )
+
+
+class CxxRepositoryScannerTests(unittest.TestCase):
+    @staticmethod
+    def _scanner(adapter, mode="auto"):
+        return RepositoryScanner(
+            sast_mode="off", dataflow_enabled=False,
+            cxx_memory_mode=mode, cxx_memory_adapter=adapter,
+        )
+
+    def test_sidecar_invocation_requires_cxx_source_or_header(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "app.py").write_text("safe = True\n", encoding="utf-8")
+            (root / "CMakeLists.txt").write_text("project(sample)\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(cxx_result())
+
+            result = self._scanner(adapter).scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual([], adapter.calls)
+            self.assertEqual("not-applicable", result.report.collaboration["cxx_memory"]["status"])
+
+    def test_sidecar_receives_repository_key_snapshot_and_requested_layers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(cxx_result())
+
+            result = self._scanner(adapter).scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual([
+                ("team/project", result.inventory.fingerprint(), REQUESTED_LAYERS)
+            ], adapter.calls)
+            self.assertEqual("completed", result.report.collaboration["cxx_memory"]["status"])
+
+    def test_off_mode_never_invokes_sidecar(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(cxx_result())
+
+            result = self._scanner(adapter, mode="off").scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual([], adapter.calls)
+            self.assertEqual("disabled", result.report.collaboration["cxx_memory"]["status"])
+
+    def test_cxx_findings_fuse_by_cwe_path_symbol_and_line(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(cxx_result(
+                cxx_finding("semgrep", "source-only"),
+                cxx_finding("clang", "build-backed"),
+                cxx_finding("asan", "sanitizer-confirmed"),
+            ))
+
+            result = self._scanner(adapter).scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual(1, len(result.report.findings))
+            finding = result.report.findings[0]
+            self.assertEqual("asan+clang+semgrep", finding.source)
+            self.assertEqual(
+                {"asan", "clang", "semgrep"},
+                {item.source for item in finding.evidence_records},
+            )
+            self.assertEqual("sanitizer-confirmed", finding.analysis_mode)
+            self.assertEqual("confirmed", finding.verification_state)
+            self.assertFalse(finding.automatic_repair)
+
+    def test_cxx_findings_with_different_symbols_remain_independent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(cxx_result(
+                cxx_finding("semgrep", "source-only", symbol="release_left"),
+                cxx_finding("clang", "build-backed", symbol="release_right"),
+            ))
+
+            result = self._scanner(adapter).scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual(
+                {"release_left", "release_right"},
+                {item.symbol for item in result.report.findings},
+            )
+
+    def test_build_verified_ranks_with_dataflow_verified(self):
+        self.assertEqual(
+            VERIFICATION_RANK["dataflow-verified"],
+            VERIFICATION_RANK["build-verified"],
+        )
+
+    def test_source_only_fusion_never_promotes_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(cxx_result(
+                cxx_finding("semgrep", "source-only"),
+                cxx_finding("semgrep", "source-only"),
+            ))
+
+            result = self._scanner(adapter).scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual(1, len(result.report.findings))
+            self.assertEqual("source-only", result.report.findings[0].analysis_mode)
+            self.assertEqual("candidate", result.report.findings[0].verification_state)
+
+    def test_auto_unavailable_preserves_other_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            (root / "app.py").write_text("eval(data)\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(error=CxxAnalyzerUnavailable("offline"))
+
+            result = self._scanner(adapter).scan(
+                RepositoryWorkspace(root), repository_key="team/project"
+            )
+
+            self.assertEqual("unavailable", result.report.collaboration["cxx_memory"]["status"])
+            self.assertIn("SEC-EVAL", {item.rule_id for item in result.report.findings})
+
+    def test_required_unavailable_fails_scan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            adapter = FakeCxxAdapter(error=CxxAnalyzerUnavailable("offline"))
+
+            with self.assertRaisesRegex(RuntimeError, "required C/C\\+\\+ memory analyzer"):
+                self._scanner(adapter, mode="required").scan(
+                    RepositoryWorkspace(root), repository_key="team/project"
+                )
+
+    def test_build_failed_is_an_analysis_result_in_all_modes(self):
+        for mode in ("auto", "required"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+                source_finding = cxx_finding("semgrep", "source-only")
+                adapter = FakeCxxAdapter(cxx_result(source_finding, status="build_failed"))
+
+                result = self._scanner(adapter, mode=mode).scan(
+                    RepositoryWorkspace(root), repository_key="team/project"
+                )
+
+                self.assertEqual(
+                    "build_failed",
+                    result.report.collaboration["cxx_memory"]["status"],
+                )
+                self.assertEqual("candidate", result.report.findings[0].verification_state)
+
+    def test_protocol_error_is_rejected_in_auto_and_fatal_when_required(self):
+        for mode in ("auto", "required"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+                adapter = FakeCxxAdapter(error=CxxAnalyzerProtocolError("bad response"))
+
+                if mode == "required":
+                    with self.assertRaisesRegex(RuntimeError, "invalid response"):
+                        self._scanner(adapter, mode=mode).scan(
+                            RepositoryWorkspace(root), repository_key="team/project"
+                        )
+                else:
+                    result = self._scanner(adapter, mode=mode).scan(
+                        RepositoryWorkspace(root), repository_key="team/project"
+                    )
+                    self.assertEqual(
+                        "invalid-response",
+                        result.report.collaboration["cxx_memory"]["status"],
+                    )
+                    self.assertEqual([], result.report.findings)
 
 
 class CxxMemoryClientTests(unittest.TestCase):

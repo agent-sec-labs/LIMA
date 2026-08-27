@@ -20,6 +20,24 @@ def _cp1252_environment():
 
 
 class RepositoryWorkspaceTests(unittest.TestCase):
+    def test_inventory_includes_all_supported_cxx_extensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supported = [
+                "main.c", "main.cc", "main.cpp", "main.cxx", "main.h",
+                "main.hh", "main.hpp", "main.hxx", "toolchain.cmake",
+                "CMakeLists.txt",
+            ]
+            for name in supported:
+                (root / name).write_text("// source\n", encoding="utf-8")
+            for name in ("compiled.obj", "program.exe", "Makefile"):
+                (root / name).write_text("not source\n", encoding="utf-8")
+
+            inventory = RepositoryWorkspace(root).inventory()
+
+            self.assertEqual(sorted(supported), sorted(item.path for item in inventory.files))
+            self.assertEqual(3, inventory.skipped["unsupported-extension"])
+
     def test_import_area_is_not_recursively_scanned(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -55,6 +73,60 @@ class RepositoryWorkspaceTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["findings"][0]["rule_id"], "SEC-EVAL")
+            self.assertEqual("off", payload["collaboration"]["cxx_memory"]["mode"])
+
+    def test_scan_repository_cli_requires_repository_key_for_cxx_analysis(self):
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "scan_repository.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable, str(script), str(repository),
+                    "--cxx-memory", "auto", "--sast", "off",
+                ],
+                cwd=project_root,
+                capture_output=True,
+                encoding="utf-8",
+                env=_cp1252_environment(),
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("--repository-key is required", completed.stderr)
+
+    def test_scan_repository_cli_rejects_unsafe_cxx_repository_key(self):
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "scan_repository.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable, str(script), str(repository),
+                    "--cxx-memory", "auto", "--repository-key", "../escape",
+                    "--sast", "off",
+                ],
+                cwd=project_root,
+                capture_output=True,
+                encoding="utf-8",
+                env=_cp1252_environment(),
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("invalid --repository-key", completed.stderr)
 
     def test_scan_cli_can_gate_only_verified_findings(self):
         project_root = Path(__file__).resolve().parents[1]

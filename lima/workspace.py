@@ -8,14 +8,18 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Iterable, Iterator, Optional
 
-
 DEFAULT_EXTENSIONS = frozenset(
     {
-        ".c", ".cc", ".cpp", ".go", ".h", ".hpp", ".java", ".js", ".json",
-        ".jsx", ".php", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
-        ".yaml", ".yml",
+        ".c", ".cc", ".cmake", ".cpp", ".cxx", ".go", ".h", ".hh", ".hpp",
+        ".hxx", ".java", ".js", ".json", ".jsx", ".php", ".py", ".rb", ".rs",
+        ".sh", ".toml", ".ts", ".tsx", ".yaml", ".yml",
     }
 )
+DEFAULT_FILENAMES = frozenset({"CMakeLists.txt"})
+CXX_SOURCE_EXTENSIONS = frozenset(
+    {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+)
+CXX_BUILD_EXTENSIONS = frozenset({".cmake"})
 DEFAULT_IGNORED_DIRECTORIES = frozenset(
     {
         ".git", ".hg", ".idea", ".mypy_cache", ".pytest_cache", ".ruff_cache",
@@ -172,7 +176,10 @@ class RepositoryWorkspace:
                     self._record_skip(result, "symlink")
                 elif name in DEFAULT_IGNORED_FILES or name.startswith(".env."):
                     self._record_skip(result, "sensitive-config")
-                elif path.suffix.lower() not in self.extensions:
+                elif (
+                    name not in DEFAULT_FILENAMES
+                    and path.suffix.lower() not in self.extensions
+                ):
                     self._record_skip(result, "unsupported-extension")
                 else:
                     candidates.append(path)

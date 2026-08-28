@@ -40,6 +40,105 @@ from cxx_analyzer.source_scan import LayerResult, parse_semgrep_json, run_source
 from lima.workspace import RepositoryWorkspace
 
 
+def _dockerfile_instructions(dockerfile: str) -> list[tuple[str, str]]:
+    instructions: list[tuple[str, str]] = []
+    pending = ""
+    for raw_line in dockerfile.splitlines():
+        line = raw_line.strip()
+        if not pending and (not line or line.startswith("#")):
+            continue
+        pending = f"{pending} {line}".strip() if pending else line
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+            continue
+        parts = pending.split(maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError("Dockerfile instruction is incomplete")
+        instructions.append((parts[0].upper(), parts[1]))
+        pending = ""
+    if pending:
+        raise ValueError("Dockerfile continuation is incomplete")
+    return instructions
+
+
+def _validate_sidecar_dockerfile_contract(dockerfile: str) -> None:
+    instructions = _dockerfile_instructions(dockerfile)
+    pinned_image = (
+        "public.ecr.aws/docker/library/python:3.11-slim@sha256:"
+        "9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
+    )
+    expected_first = ("FROM", f"{pinned_image} AS base")
+    if not instructions or instructions[0] != expected_first:
+        raise ValueError("analyzer base image is not pinned")
+
+    stages: dict[str, tuple[str, list[tuple[str, str]]]] = {}
+    current_stage: str | None = None
+    for operation, value in instructions:
+        if operation == "FROM":
+            match = re.fullmatch(r"(\S+)\s+AS\s+([A-Za-z0-9_.-]+)", value, re.IGNORECASE)
+            if match is None:
+                raise ValueError("every Dockerfile stage must be named")
+            base, name = match.groups()
+            if name in stages:
+                raise ValueError("Dockerfile stage name is duplicated")
+            stages[name] = (base, [])
+            current_stage = name
+            continue
+        if current_stage is None:
+            raise ValueError("Dockerfile instruction appears before FROM")
+        stages[current_stage][1].append((operation, value))
+
+    if set(stages) != {"base", "runtime", "test"}:
+        raise ValueError("Dockerfile stages do not match the analyzer contract")
+    if stages["base"][0] != pinned_image:
+        raise ValueError("base stage image is not pinned")
+    if stages["runtime"][0] != "base" or stages["test"][0] != "base":
+        raise ValueError("runtime and test stages must inherit the pinned base")
+
+    def inherited(stage: str, chain: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+        if stage in chain:
+            raise ValueError("Dockerfile stage inheritance is cyclic")
+        parent, own = stages[stage]
+        parent_instructions = inherited(parent, (*chain, stage)) if parent in stages else []
+        return [*parent_instructions, *own]
+
+    runtime = inherited("runtime")
+    test = inherited("test")
+    if any(operation == "ARG" for operation, _ in runtime):
+        raise ValueError("runtime ancestry accepts build arguments")
+
+    run_values = [value for operation, value in runtime if operation == "RUN"]
+    run_contract = "\n".join(run_values)
+    for required in (
+        'python -m pip install "semgrep==1.130.0"',
+        '"clang-14"',
+        '"clang-tools-14"',
+        '"llvm-14"',
+        'grep --quiet "^cmake version 3\\."',
+        "groupadd --gid 10002 analyzer",
+        "useradd --uid 10002 --gid 10002",
+    ):
+        if required not in run_contract:
+            raise ValueError(f"runtime is missing fixed contract: {required}")
+
+    content_instructions = [
+        (operation, value)
+        for operation, value in runtime
+        if operation in {"COPY", "ADD"}
+    ]
+    if content_instructions != [
+        ("COPY", "--chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer")
+    ]:
+        raise ValueError("runtime COPY/ADD boundary is not analyzer-only")
+
+    runtime_users = [value for operation, value in runtime if operation == "USER"]
+    test_users = [value for operation, value in test if operation == "USER"]
+    if not runtime_users or runtime_users[-1] != "analyzer:analyzer":
+        raise ValueError("runtime effective user is not analyzer")
+    if not test_users or test_users[-1] != "analyzer:analyzer":
+        raise ValueError("test effective user is not analyzer")
+
+
 class AnalyzerBoundaryTests(unittest.TestCase):
     def _repository(self, temporary: str) -> tuple[Path, Path, Path]:
         base = Path(temporary)
@@ -1008,35 +1107,29 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
         dockerfile = (
             Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile"
         ).read_text(encoding="utf-8")
-        lines = [line.strip() for line in dockerfile.splitlines() if line.strip()]
-        self.assertRegex(
-            lines[0],
-            re.compile(
-                r"^FROM public\.ecr\.aws/docker/library/python:3\.11-slim"
-                r"@sha256:[0-9a-f]{64} AS base$"
+        _validate_sidecar_dockerfile_contract(dockerfile)
+
+    def test_sidecar_dockerfile_contract_rejects_late_root_and_add_mutations(self):
+        dockerfile = (
+            Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        mutations = {
+            "late runtime root": dockerfile.replace(
+                "USER analyzer:analyzer\nCMD",
+                "USER analyzer:analyzer\nUSER root\nCMD",
+                1,
             ),
-        )
-        runtime_ancestry, test_stage = dockerfile.split("FROM base AS test", 1)
-        self.assertNotRegex(runtime_ancestry, re.compile(r"^ARG ", re.MULTILINE))
-        self.assertIn('python -m pip install "semgrep==1.130.0"', runtime_ancestry)
-        self.assertIn('"clang-14"', runtime_ancestry)
-        self.assertIn('"clang-tools-14"', runtime_ancestry)
-        self.assertIn('"llvm-14"', runtime_ancestry)
-        self.assertIn('grep --quiet "^cmake version 3\\."', runtime_ancestry)
-        self.assertIn("groupadd --gid 10002 analyzer", runtime_ancestry)
-        self.assertIn("useradd --uid 10002 --gid 10002", runtime_ancestry)
-        self.assertEqual(
-            ["COPY --chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer"],
-            [line.strip() for line in runtime_ancestry.splitlines() if line.startswith("COPY ")],
-        )
-        runtime_stage = runtime_ancestry.split("FROM base AS runtime", 1)[1]
-        self.assertIn("USER analyzer:analyzer", runtime_stage)
-        self.assertNotIn("COPY ", runtime_stage)
-        self.assertEqual("USER analyzer:analyzer", test_stage.strip().splitlines()[-1])
-        self.assertFalse(any(
-            forbidden in runtime_ancestry
-            for forbidden in (".env", "lima ./lima", "skills", "repositories")
-        ))
+            "runtime ADD escape": dockerfile.replace(
+                "FROM base AS runtime\nUSER analyzer:analyzer",
+                "FROM base AS runtime\nADD . /app\nUSER analyzer:analyzer",
+                1,
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(dockerfile, mutated)
+                with self.assertRaises(ValueError):
+                    _validate_sidecar_dockerfile_contract(mutated)
 
 
 class SourceScanTests(unittest.TestCase):

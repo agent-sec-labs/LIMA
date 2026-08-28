@@ -417,7 +417,7 @@ Invoke-RestMethod https://<公网域名>/health
 LIMA_REPAIR_TEST_COMMAND=python -m unittest discover -s tests
 ```
 
-未配置测试命令时，检测和补丁规划仍可工作，但 CWE-78/CWE-89/CWE-22 修复会在发布门禁处失败，不会创建 commit 或 PR。发布前依次执行编译、独立 AST 安全 Oracle、完整仓库差分复扫和原生测试；全部通过后才从固定的 PR commit SHA 创建单个原子提交与 Draft PR，仍需人工批准。CWE-22 模板会在解析符号链接后检查规范路径包含关系，但无法跨平台消除“检查后到打开前”文件系统并发变更的 TOCTOU 风险；高对抗文件系统场景还需要 OS 沙箱或 descriptor-relative open。
+自动修复还会在服务端做显式授权检查：租户必须先由管理员通过 `POST /v1/repository-grants` 为目标仓库授予 `auto_fix=true`，否则 `POST /v1/tasks/{id}/fix` 会被拒绝。没有配置任何授权的租户不再默认放行自动修复；只读审查不受影响。未配置测试命令时，检测和补丁规划仍可工作，但 CWE-78/CWE-89/CWE-22 修复会在发布门禁处失败，不会创建 commit 或 PR。发布前依次执行编译、独立 AST 安全 Oracle、完整仓库差分复扫和原生测试；全部通过后才从固定的 PR commit SHA 创建单个原子提交与 Draft PR，仍需人工批准。CWE-22 模板会在解析符号链接后检查规范路径包含关系，但无法跨平台消除“检查后到打开前”文件系统并发变更的 TOCTOU 风险；高对抗文件系统场景还需要 OS 沙箱或 descriptor-relative open。
 
 ### 修复约束评测
 
@@ -531,11 +531,13 @@ Redis 的非容器运行模式会自动退回 SQLite 与进程内线程队列，
 | `GET` | `/v1/tasks/{id}` | 获取状态、轨迹和报告 |
 | `GET` | `/v1/tasks/{id}/report` | 获取 Markdown 报告 |
 | `GET` | `/v1/tasks/{id}/feedback` | 获取该已完成任务的反馈历史 |
-| `POST` | `/v1/tasks/{id}/fix` | 创建自动修复分支和提交 |
+| `POST` | `/v1/tasks/{id}/fix` | 创建自动修复分支和提交（需先通过 `/v1/repository-grants` 授予该仓库 `auto_fix`） |
 | `POST` | `/v1/tasks/{id}/repair-preview` | 为完成的仓库扫描生成快照固定、只读的验证修复预览 |
 | `POST` | `/v1/tasks/{id}/feedback` | 回流误报、漏报或坏修复 |
 | `POST` | `/v1/tasks/{id}/cancel` | 请求取消任务 |
 | `POST` | `/v1/tasks/{id}/resume` | 从最近 checkpoint 续跑任务 |
+| `GET/POST` | `/v1/repository-grants` | 管理员查询或授予租户的仓库授权；`auto_fix=true` 是自动修复的前置条件 |
+| `POST` | `/v1/github/installations` | 管理员登记 GitHub App installation 并绑定当前租户 |
 | `POST` | `/v1/experiments` | 创建可恢复的 repository-disjoint 后台实验 |
 | `GET` | `/v1/experiments` | 查询当前租户的实验列表 |
 | `GET` | `/v1/experiments/{id}` | 查询实验、逐案例状态和最终结果 |

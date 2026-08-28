@@ -3,6 +3,7 @@ import json
 import mimetypes
 import os
 import re
+import traceback
 import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -143,6 +144,36 @@ class ApiHandler(BaseHTTPRequestHandler):
                                   "llm_provider": self.service.llm_config.get("provider", "local"),
                                   "llm_model": self.service.llm_config.get("model", "")})
             return
+        if path == "/github/install":
+            if not self.settings.github_app_slug:
+                self._send_json(503, {"error": "LIMA_GITHUB_APP_SLUG is not configured"})
+                return
+            location = (
+                "https://github.com/apps/"
+                f"{self.settings.github_app_slug}/installations/new"
+            )
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+            return
+        if path == "/github/setup":
+            # GitHub App 安装完成后由浏览器重定向到此地址；浏览器导航无法携带
+            # Bearer Token，因此这里不做任何服务端写入，只把参数转发给管理台，
+            # 由已登录的管理员前端调用 POST /v1/github/installations 完成登记。
+            installation_id = query.get("installation_id", [""])[0]
+            if not installation_id.isdigit() or len(installation_id) > 20:
+                self._send_json(400, {"error": "installation_id must be a numeric identifier"})
+                return
+            account = query.get("account", ["github-app"])[0][:100]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]*", account):
+                account = "github-app"
+            self.send_response(302)
+            target = urllib.parse.urlencode({
+                "installation_id": installation_id, "account": account,
+            })
+            self.send_header("Location", "/#github-install?" + target)
+            self.end_headers()
+            return
         principal = self._authenticate_or_send("read")
         if principal is None:
             return
@@ -199,6 +230,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "permission denied"})
                 return
             self._send_json(200, self.service.repository_scan_capabilities())
+            return
+        if path == "/v1/repository-grants":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {
+                "grants": self.service.list_repository_grants(principal.tenant_id)
+            })
             return
         if path == "/api/skills":
             self._send_json(200, {
@@ -287,25 +326,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"versions": self.service.store.list_skill_artifact_versions(
                 match.group(1), principal.tenant_id
             )})
-            return
-        if path == "/github/install":
-            if not self.settings.github_app_slug:
-                self._send_json(503, {"error": "LIMA_GITHUB_APP_SLUG is not configured"})
-                return
-            self.send_response(302)
-            self.send_header("Location", "https://github.com/apps/%s/installations/new" % self.settings.github_app_slug)
-            self.end_headers()
-            return
-        if path == "/github/setup":
-            try:
-                installation_id = int(query.get("installation_id", [""])[0])
-            except ValueError:
-                self._send_json(400, {"error": "missing installation_id"})
-                return
-            self.service.store.save_installation(installation_id, query.get("account", ["github-app"])[0])
-            self.send_response(302)
-            self.send_header("Location", "/#github")
-            self.end_headers()
             return
         report_match = REPORT.match(path)
         task_match = TASK.match(path)
@@ -448,6 +468,40 @@ class ApiHandler(BaseHTTPRequestHandler):
                     {"repository_key": result["repository"]},
                 )
                 self._send_json(202, result)
+                return
+            if path == "/v1/repository-grants":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                auto_fix = payload.get("auto_fix", False)
+                if not isinstance(auto_fix, bool):
+                    raise ValueError("auto_fix must be a boolean")
+                result = self.service.grant_repository(
+                    principal.tenant_id,
+                    str(payload.get("repository", "")), auto_fix,
+                    actor=principal.username,
+                )
+                self._send_json(201, result)
+                return
+            if path == "/v1/github/installations":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                installation_id = payload.get("installation_id")
+                if not isinstance(installation_id, int) or installation_id <= 0:
+                    raise ValueError("installation_id must be a positive integer")
+                account = str(payload.get("account", "github-app"))[:100]
+                self.service.store.save_installation(
+                    installation_id, account, principal.tenant_id
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "github.installation.register", str(installation_id),
+                    {"account": account},
+                )
+                self._send_json(201, {
+                    "installation_id": installation_id,
+                    "account": account,
+                    "tenant_id": principal.tenant_id,
+                })
                 return
             if path == "/webhooks/github":
                 if self.headers.get("X-GitHub-Event", "") != "pull_request":
@@ -657,9 +711,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
         except PermissionError as exc:
             self._send_json(403, {"error": str(exc)})
-        except Exception as exc:
+        except Exception:
             metrics.inc("http_errors_total")
-            self._send_json(500, {"error": "operation failed", "detail": str(exc)})
+            self.log_error(
+                "unhandled error on POST %s\n%s", self.path, traceback.format_exc()
+            )
+            self._send_json(500, {"error": "operation failed"})
 
 
 def run() -> None:

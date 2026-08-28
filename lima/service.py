@@ -1,4 +1,5 @@
 import hashlib
+import re
 import uuid
 from typing import Any, Dict, Optional
 
@@ -898,3 +899,28 @@ class ReviewService:
     def _authorize_repository(self, tenant_id: str, repository: str) -> None:
         if not self.store.repository_allowed(tenant_id, repository):
             raise PermissionError("repository is not authorized for this tenant")
+
+    def list_repository_grants(self, tenant_id: str) -> list:
+        return self.store.list_repository_grants(tenant_id)
+
+    def grant_repository(
+        self, tenant_id: str, repository: str, auto_fix: bool,
+        actor: str = "",
+    ) -> dict:
+        repository = repository.strip()
+        valid_name = (
+            len(repository) <= 200
+            and ".." not in repository
+            and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+                repository,
+            )
+        )
+        if not valid_name:
+            raise ValueError("repository must be a GitHub-style owner/name identifier")
+        self.store.grant_repository(tenant_id, repository, bool(auto_fix))
+        self.store.audit(
+            tenant_id, actor or "api", "repository.grant", repository,
+            {"auto_fix": bool(auto_fix)},
+        )
+        return {"repository": repository, "auto_fix": bool(auto_fix)}

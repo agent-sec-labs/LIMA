@@ -1,11 +1,14 @@
 import copy
 import hashlib
+import http.client
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import FrozenInstanceError
@@ -851,6 +854,57 @@ class AnalyzerServiceTests(unittest.TestCase):
 
         self.assertEqual([b"{}"], received)
 
+    def test_real_http_handler_routes_every_method_through_stable_json_boundary(self):
+        handler_type = type(
+            "ConfiguredAnalyzerHandler",
+            (analyzer_server.AnalyzerRequestHandler,),
+            {"analyzer_settings": self._settings()},
+        )
+        server = analyzer_server.ThreadingHTTPServer(("127.0.0.1", 0), handler_type)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        try:
+            for method in (
+                "GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE",
+                "CONNECT", "BREW",
+            ):
+                with self.subTest(method=method):
+                    connection = http.client.HTTPConnection(host, port, timeout=2)
+                    try:
+                        connection.request(method, "/v1/analyze")
+                        response = connection.getresponse()
+                        body = response.read()
+                    finally:
+                        connection.close()
+                    self.assertEqual(405, response.status)
+                    self.assertEqual("application/json", response.getheader("Content-Type"))
+                    if method == "HEAD":
+                        self.assertEqual(b"", body)
+                        self.assertGreater(int(response.getheader("Content-Length")), 0)
+                    else:
+                        self.assertEqual(
+                            {"error": "method_not_allowed", "request_id": None},
+                            json.loads(body),
+                        )
+
+            connection = http.client.HTTPConnection(host, port, timeout=2)
+            try:
+                connection.request("GET", "/health")
+                response = connection.getresponse()
+                health = json.loads(response.read())
+            finally:
+                connection.close()
+            self.assertEqual(200, response.status)
+            self.assertEqual(1, health["schema_version"])
+            self.assertEqual({"semgrep", "cmake", "clang"}, set(health["tools"]))
+            self.assertTrue(all(type(value) is bool for value in health["tools"].values()))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
 
 class AnalyzerComposeSecurityTests(unittest.TestCase):
     @staticmethod
@@ -868,10 +922,10 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
         self.assertTrue(service["read_only"])
         self.assertEqual(["ALL"], service["cap_drop"])
         self.assertIn("no-new-privileges:true", service["security_opt"])
-        self.assertNotIn(str(service["user"]).lower(), {"root", "0", "0:0"})
-        self.assertIn("pids_limit", service)
-        self.assertIn("mem_limit", service)
-        self.assertIn("cpus", service)
+        self.assertEqual("10002:10002", service["user"])
+        self.assertEqual("${LIMA_CXX_MAX_PROCESSES:-128}", service["pids_limit"])
+        self.assertEqual("${LIMA_CXX_MAX_MEMORY_MB:-2048}m", service["mem_limit"])
+        self.assertEqual("2.0", service["cpus"])
         self.assertEqual({"cxx_analysis"}, set(service["networks"]))
         self.assertTrue(compose["networks"]["cxx_analysis"]["internal"])
 
@@ -884,10 +938,21 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
         ))
         tmpfs = service["tmpfs"]
         self.assertEqual(
-            {"/tmp", "/work"},  # noqa: S108 - Bounded container tmpfs contract.
-            {str(item).split(":", 1)[0] for item in tmpfs},
+            {
+                "/tmp": {  # noqa: S108 - Bounded container tmpfs contract.
+                    "size": "64m", "mode": "0700", "uid": "10002", "gid": "10002",
+                },
+                "/work": {
+                    "size": "512m", "mode": "0700", "uid": "10002", "gid": "10002",
+                },
+            },
+            {
+                str(item).split(":", 1)[0]: dict(
+                    option.split("=", 1) for option in str(item).split(":", 1)[1].split(",")
+                )
+                for item in tmpfs
+            },
         )
-        self.assertTrue(all("size=" in str(item) for item in tmpfs))
 
     def test_compose_passes_only_admin_configuration_and_shared_snapshot_limits(self):
         compose = self._compose()
@@ -906,7 +971,20 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             "LIMA_CXX_MAX_PROCESSES", "LIMA_CXX_MAX_OUTPUT_BYTES",
         }
         self.assertTrue(main_configuration <= set(lima["environment"]))
-        self.assertTrue(sidecar_configuration <= set(analyzer["environment"]))
+        snapshot_limits = {
+            "LIMA_REPOSITORY_SCAN_MAX_FILES",
+            "LIMA_REPOSITORY_SCAN_MAX_FILE_BYTES",
+            "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES",
+        }
+        self.assertEqual(
+            sidecar_configuration | snapshot_limits,
+            set(analyzer["environment"]),
+        )
+        self.assertFalse(any(
+            marker in name
+            for name in analyzer["environment"]
+            for marker in ("DATABASE", "POSTGRES", "REDIS", "GITHUB", "TOKEN", "SECRET", "KEY")
+        ))
         self.assertEqual(
             "${LIMA_CXX_ANALYZER_URL:-http://cxx-analyzer:8090}",
             lima["environment"]["LIMA_CXX_ANALYZER_URL"],
@@ -925,6 +1003,40 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES",
         ):
             self.assertEqual(lima["environment"][name], analyzer["environment"][name])
+
+    def test_sidecar_dockerfile_pins_runtime_identity_tools_and_copy_boundary(self):
+        dockerfile = (
+            Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        lines = [line.strip() for line in dockerfile.splitlines() if line.strip()]
+        self.assertRegex(
+            lines[0],
+            re.compile(
+                r"^FROM public\.ecr\.aws/docker/library/python:3\.11-slim"
+                r"@sha256:[0-9a-f]{64} AS base$"
+            ),
+        )
+        runtime_ancestry, test_stage = dockerfile.split("FROM base AS test", 1)
+        self.assertNotRegex(runtime_ancestry, re.compile(r"^ARG ", re.MULTILINE))
+        self.assertIn('python -m pip install "semgrep==1.130.0"', runtime_ancestry)
+        self.assertIn('"clang-14"', runtime_ancestry)
+        self.assertIn('"clang-tools-14"', runtime_ancestry)
+        self.assertIn('"llvm-14"', runtime_ancestry)
+        self.assertIn('grep --quiet "^cmake version 3\\."', runtime_ancestry)
+        self.assertIn("groupadd --gid 10002 analyzer", runtime_ancestry)
+        self.assertIn("useradd --uid 10002 --gid 10002", runtime_ancestry)
+        self.assertEqual(
+            ["COPY --chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer"],
+            [line.strip() for line in runtime_ancestry.splitlines() if line.startswith("COPY ")],
+        )
+        runtime_stage = runtime_ancestry.split("FROM base AS runtime", 1)[1]
+        self.assertIn("USER analyzer:analyzer", runtime_stage)
+        self.assertNotIn("COPY ", runtime_stage)
+        self.assertEqual("USER analyzer:analyzer", test_stage.strip().splitlines()[-1])
+        self.assertFalse(any(
+            forbidden in runtime_ancestry
+            for forbidden in (".env", "lima ./lima", "skills", "repositories")
+        ))
 
 
 class SourceScanTests(unittest.TestCase):

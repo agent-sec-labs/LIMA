@@ -236,6 +236,11 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
     server_version = "LimaCxxAnalyzer/1"
     sys_version = ""
 
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("do_"):
+            return self._handle
+        raise AttributeError(name)
+
     def _send(self, status: int, payload: dict[str, object]) -> None:
         body = json.dumps(
             payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True

@@ -12,6 +12,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import cxx_analyzer.server as analyzer_server
 import cxx_analyzer.source_scan as source_scan
 from cxx_analyzer.config import AnalyzerSettings, parse_steps_json
 from cxx_analyzer.execution import (
@@ -32,7 +33,7 @@ from cxx_analyzer.sandbox import (
     landlock_abi,
 )
 from cxx_analyzer.snapshot import prepare_snapshot
-from cxx_analyzer.source_scan import parse_semgrep_json, run_source_scan
+from cxx_analyzer.source_scan import LayerResult, parse_semgrep_json, run_source_scan
 from lima.workspace import RepositoryWorkspace
 
 
@@ -681,6 +682,251 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                         run_step(argv, snapshot, ".", timeout, output_limit, {})
 
 
+class AnalyzerServiceTests(unittest.TestCase):
+    REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000"
+    SNAPSHOT_SHA256 = "a" * 64
+
+    @staticmethod
+    def _settings() -> AnalyzerSettings:
+        return AnalyzerSettings(
+            auto_cmake=True,
+            build_steps=(),
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=90,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    def _payload(self, **changes):
+        payload = {
+            "request_id": self.REQUEST_ID,
+            "repository_key": "team/project",
+            "snapshot_sha256": self.SNAPSHOT_SHA256,
+            "requested_layers": ["source-only"],
+        }
+        payload.update(changes)
+        return payload
+
+    @patch("cxx_analyzer.server.prepare_snapshot")
+    def test_request_schema_rejects_every_invalid_payload_before_snapshot(self, prepare):
+        missing = self._payload()
+        missing.pop("snapshot_sha256")
+        invalid_payloads = (
+            ("non-object", []),
+            ("missing field", missing),
+            ("unknown field", self._payload(extra=True)),
+            ("client path", self._payload(path="/repo")),
+            ("client command", self._payload(command=["cmake"])),
+            ("client environment", self._payload(environment={"TOKEN": "secret"})),
+            ("invalid UUID", self._payload(request_id="not-a-uuid")),
+            ("duplicate layer", self._payload(requested_layers=["source-only", "source-only"])),
+            ("unknown layer", self._payload(requested_layers=["run-command"])),
+            ("empty layers", self._payload(requested_layers=[])),
+            ("non-list layers", self._payload(requested_layers="source-only")),
+            ("unsafe repository key", self._payload(repository_key="../project")),
+            ("absolute repository key", self._payload(repository_key="/team/project")),
+            ("uppercase digest", self._payload(snapshot_sha256="A" * 64)),
+            ("short digest", self._payload(snapshot_sha256="a" * 63)),
+        )
+
+        for description, payload in invalid_payloads:
+            with self.subTest(description=description):
+                prepare.reset_mock()
+                with self.assertRaises(analyzer_server.RequestError) as caught:
+                    analyzer_server.analyze_request(payload, self._settings())
+                self.assertEqual("invalid_request", caught.exception.code)
+                prepare.assert_not_called()
+
+    @patch("cxx_analyzer.server.run_source_scan")
+    @patch("cxx_analyzer.server.prepare_snapshot")
+    def test_analyze_request_returns_fixed_schema_and_completed_layer_diagnostics(
+        self, prepare, source_scan_runner
+    ):
+        snapshot = prepare.return_value.__enter__.return_value
+        snapshot.files = ("src/main.cpp", "include/main.hpp")
+        source_scan_runner.return_value = LayerResult(
+            (),
+            ("Semgrep source scan did not complete",),
+            ({"tool": "semgrep", "status": "failed"},),
+        )
+
+        result = analyzer_server.analyze_request(self._payload(), self._settings())
+
+        self.assertEqual(
+            {
+                "schema_version", "request_id", "status", "snapshot_sha256",
+                "tool_runs", "findings", "coverage", "diagnostics",
+            },
+            set(result),
+        )
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(self.REQUEST_ID, result["request_id"])
+        self.assertEqual(self.SNAPSHOT_SHA256, result["snapshot_sha256"])
+        self.assertEqual(
+            [{"tool": "semgrep", "status": "failed"}], result["tool_runs"]
+        )
+        self.assertEqual([], result["findings"])
+        self.assertEqual(
+            ["Semgrep source scan did not complete"], result["diagnostics"]
+        )
+        self.assertEqual(
+            {"source_files": 1, "snapshot_files": 2}, result["coverage"]
+        )
+        prepare.assert_called_once_with(
+            analyzer_server.IMPORT_ROOT,
+            "team/project",
+            self.SNAPSHOT_SHA256,
+            analyzer_server.WORK_ROOT,
+        )
+        source_scan_runner.assert_called_once_with(snapshot, self._settings())
+
+    def test_dispatch_rejects_http_boundary_errors_with_sanitized_payloads(self):
+        valid_body = json.dumps(self._payload()).encode("utf-8")
+        cases = (
+            ("GET", "/v1/analyze", "application/json", valid_body, 405, "method_not_allowed"),
+            ("POST", "/wrong", "application/json", valid_body, 404, "not_found"),
+            ("POST", "/v1/analyze", "text/plain", valid_body, 415, "unsupported_media_type"),
+            (
+                "POST", "/v1/analyze", "application/json",
+                b"x" * (analyzer_server.MAX_REQUEST_BYTES + 1),
+                413, "request_too_large",
+            ),
+            ("POST", "/v1/analyze", "application/json", b"{", 400, "invalid_json"),
+            (
+                "POST", "/v1/analyze", "application/json",
+                json.dumps(self._payload(command=["echo", "secret"])).encode("utf-8"),
+                400, "invalid_request",
+            ),
+        )
+
+        for method, path, content_type, body, expected_status, expected_code in cases:
+            with self.subTest(code=expected_code):
+                status, response = analyzer_server.dispatch_request(
+                    method, path, content_type, body, self._settings()
+                )
+                self.assertEqual(expected_status, status)
+                self.assertEqual({"error", "request_id"}, set(response))
+                self.assertEqual(expected_code, response["error"])
+                rendered = json.dumps(response)
+                self.assertNotIn("echo", rendered)
+                self.assertNotIn("secret", rendered)
+                self.assertNotIn("Traceback", rendered)
+
+    @patch("cxx_analyzer.server.shutil.which")
+    def test_health_discloses_only_schema_and_tool_availability(self, which):
+        which.side_effect = lambda tool: "/usr/bin/" + tool if tool != "clang" else None
+
+        status, payload = analyzer_server.dispatch_request(
+            "GET", "/health", "", b"", self._settings()
+        )
+
+        self.assertEqual(200, status)
+        self.assertEqual(
+            {
+                "schema_version": 1,
+                "tools": {"semgrep": True, "cmake": True, "clang": False},
+            },
+            payload,
+        )
+
+    def test_http_handler_reads_exactly_the_declared_content_length(self):
+        class ExactBody:
+            def read(self, size):
+                if size != 2:
+                    raise AssertionError(f"read requested {size} bytes instead of 2")
+                return b"{}"
+
+        received = []
+        handler = object.__new__(analyzer_server.AnalyzerRequestHandler)
+        handler.headers = {"Content-Length": "2"}
+        handler.rfile = ExactBody()
+        handler._handle = received.append
+
+        handler.do_POST()
+
+        self.assertEqual([b"{}"], received)
+
+
+class AnalyzerComposeSecurityTests(unittest.TestCase):
+    @staticmethod
+    def _compose():
+        import yaml
+
+        compose_path = Path(__file__).parents[1] / "docker-compose.yml"
+        return yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    def test_cxx_analyzer_is_an_internal_non_root_read_only_sidecar(self):
+        compose = self._compose()
+        service = compose["services"]["cxx-analyzer"]
+
+        self.assertNotIn("ports", service)
+        self.assertTrue(service["read_only"])
+        self.assertEqual(["ALL"], service["cap_drop"])
+        self.assertIn("no-new-privileges:true", service["security_opt"])
+        self.assertNotIn(str(service["user"]).lower(), {"root", "0", "0:0"})
+        self.assertIn("pids_limit", service)
+        self.assertIn("mem_limit", service)
+        self.assertIn("cpus", service)
+        self.assertEqual({"cxx_analysis"}, set(service["networks"]))
+        self.assertTrue(compose["networks"]["cxx_analysis"]["internal"])
+
+        volumes = service.get("volumes", [])
+        self.assertTrue(any(str(item).endswith(":/repositories:ro") for item in volumes))
+        self.assertFalse(any("/var/run/docker.sock" in str(item) for item in volumes))
+        self.assertFalse(any(
+            "/var/run/docker.sock" in str(item)
+            for item in compose["services"]["lima"].get("volumes", [])
+        ))
+        tmpfs = service["tmpfs"]
+        self.assertEqual(
+            {"/tmp", "/work"},  # noqa: S108 - Bounded container tmpfs contract.
+            {str(item).split(":", 1)[0] for item in tmpfs},
+        )
+        self.assertTrue(all("size=" in str(item) for item in tmpfs))
+
+    def test_compose_passes_only_admin_configuration_and_shared_snapshot_limits(self):
+        compose = self._compose()
+        lima = compose["services"]["lima"]
+        analyzer = compose["services"]["cxx-analyzer"]
+        self.assertEqual({"default", "cxx_analysis"}, set(lima["networks"]))
+        self.assertEqual({"cxx_analysis"}, set(analyzer["networks"]))
+
+        main_configuration = {
+            "LIMA_CXX_MEMORY_MODE", "LIMA_CXX_ANALYZER_URL",
+            "LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS", "LIMA_CXX_MAX_RESPONSE_BYTES",
+        }
+        sidecar_configuration = {
+            "LIMA_CXX_AUTO_CMAKE", "LIMA_CXX_BUILD_STEPS_JSON",
+            "LIMA_CXX_TEST_STEPS_JSON", "LIMA_CXX_MAX_MEMORY_MB",
+            "LIMA_CXX_MAX_PROCESSES", "LIMA_CXX_MAX_OUTPUT_BYTES",
+        }
+        self.assertTrue(main_configuration <= set(lima["environment"]))
+        self.assertTrue(sidecar_configuration <= set(analyzer["environment"]))
+        self.assertEqual(
+            "${LIMA_CXX_ANALYZER_URL:-http://cxx-analyzer:8090}",
+            lima["environment"]["LIMA_CXX_ANALYZER_URL"],
+        )
+        self.assertEqual(
+            "${LIMA_CXX_BUILD_STEPS_JSON:-[]}",
+            analyzer["environment"]["LIMA_CXX_BUILD_STEPS_JSON"],
+        )
+        self.assertEqual(
+            "${LIMA_CXX_TEST_STEPS_JSON:-[]}",
+            analyzer["environment"]["LIMA_CXX_TEST_STEPS_JSON"],
+        )
+        for name in (
+            "LIMA_REPOSITORY_SCAN_MAX_FILES",
+            "LIMA_REPOSITORY_SCAN_MAX_FILE_BYTES",
+            "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES",
+        ):
+            self.assertEqual(lima["environment"][name], analyzer["environment"][name])
+
+
 class SourceScanTests(unittest.TestCase):
     @staticmethod
     def _settings() -> AnalyzerSettings:
@@ -933,6 +1179,7 @@ class SourceScanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
 
+class SourceScanContainerTests(unittest.TestCase):
     def test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates(self):
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
         manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
@@ -979,6 +1226,7 @@ class SourceScanTests(unittest.TestCase):
             all(item["path"] not in hit_paths for item in manifest if not item["vulnerable"])
         )
 
+class SourceRuleTests(unittest.TestCase):
     def test_rules_tie_three_distinct_oob_shapes_to_known_object_bounds(self):
         import yaml
 

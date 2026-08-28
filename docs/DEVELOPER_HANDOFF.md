@@ -112,8 +112,11 @@ Scan / Triage
 可选的隔离 RepairWorkspace
 ```
 
-目前只有第一层 `RepositorySource` 契约已经落地。不要把 `canonical_name=owner/repo`
-重新解释为服务器路径，也不要在扫描器中直接加入下载逻辑。
+目前只有第一层 `RepositorySource` 契约与第三层 `RepositoryCache`（issue #12，T3）已经落地。
+`RepositoryCache` 是独立模块：身份为 `provider + canonical identity + resolved_revision`
+（不可变 commit SHA 或内容指纹），提供 `lookup/reserve/publish/touch/pin/cleanup`，
+尚未接入服务编排。不要把 `canonical_name=owner/repo` 重新解释为服务器路径，
+也不要在扫描器中直接加入下载逻辑；缓存接线属于 T4（issue #13）。
 
 ### 3.2 Finding 的证据等级
 
@@ -146,6 +149,7 @@ candidate
 | 上下文/记忆 | `lima/context_manager.py`, `lima/memory.py` | 上下文压缩、租户级记忆、过期清理 | `test_runtime_memory_context.py` |
 | 仓库来源契约 | `lima/repository_source.py` | GitHub/local-import 规范化；不联网、不物化 | `test_repository_source.py` |
 | 本地导入边界 | `lima/repository_import.py` | `repository_key` 归一化和根目录逃逸防护 | `test_repository_import.py` |
+| 快照缓存 | `lima/repository_cache.py` | 不可变 RepositorySnapshot 的有界缓存：TTL、配额、LRU、并发物化去重、原子发布 | `test_repository_cache.py` |
 | 有界工作区 | `lima/workspace.py` | 文件枚举、大小预算、敏感路径/符号链接过滤、指纹 | `test_workspace.py` |
 | 仓库扫描 | `lima/repository_scanner.py` | AST、数据流、SAST 和规则结果融合 | `test_workspace.py`, `test_sast.py` |
 | Python 分析 | `lima/python_analyzer.py`, `lima/python_dataflow.py` | Python AST 与同/跨文件 source-to-sink | `test_python_dataflow.py` |
@@ -390,6 +394,10 @@ python -m unittest -v `
 ### 修复和 GitHub 写操作
 
 - 未验证候选不得触发修复。
+- 自动修复要求租户对目标仓库持有显式 `auto_fix` 授权（`POST /v1/repository-grants`）；
+  零授权租户对 `/v1/tasks/{id}/fix` fail-closed，只读审查不受影响。
+- GitHub App installation 登记只能由 `manage` 权限通过 `POST /v1/github/installations`
+  完成（`GET /github/setup` 仅做无副作用重定向，登记绑定注册者租户并写入审计）。
 - 修复模板必须保持 CWE 专属不变量和最小 diff。
 - 编译、独立安全 Oracle、全仓差分复扫、授权仓库原生测试任一失败时，不得产生 GitHub 写操作。
 - 普通本地修复不能修改源 Snapshot、`/repositories` 或远程 GitHub。
@@ -410,7 +418,7 @@ python -m unittest -v `
 |---|---|---|
 | [T1 #10](https://github.com/agent-sec-labs/LIMA/issues/10) RepositorySource | Closed | PR #18 已合并；契约在 `repository_source.py`，不得在此层联网或物化文件 |
 | [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | `status:blocked` | 虽然 T1 已合并，当前仍标记 contract freeze；等待维护者明确解除，不要自行开工 |
-| [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | `status:in-progress` | 已有人进行中，不要重复实现；需要接口时在 Epic 协调 |
+| [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | 本地已实现 | 契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
 | [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | `status:blocked` | 依赖 T1/T2/T3；可讨论 mock，但不要在依赖未完成时进入正式集成 |
 | [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | `status:ready` | 可认领；不得削弱非 root、只读根文件系统、capability drop |
 | [T6 #15](https://github.com/agent-sec-labs/LIMA/issues/15) GitHub Source UI | `status:ready` | 可基于合同和 mock 开发；最终 API 集成需协调 T4 |

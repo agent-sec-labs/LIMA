@@ -155,6 +155,11 @@ class Settings:
     experiment_max_llm_calls: int = 20
     experiment_max_total_tokens: int = 100_000
     repository_import_root: str = ""
+    repository_cache_root: str = ""
+    repository_cache_ttl_seconds: int = 14 * 24 * 3600
+    repository_cache_quota_bytes: int = 2 * 1024 * 1024 * 1024
+    repository_cache_min_free_bytes: int = 512 * 1024 * 1024
+    repository_cache_materialization_timeout_seconds: int = 3600
     repository_scan_sast_mode: str = "required"
     repository_scan_max_files: int = 5000
     repository_scan_max_file_bytes: int = 512 * 1024
@@ -284,6 +289,13 @@ class Settings:
             self.repository_scan_llm_max_completion_tokens,
         ) < 1:
             raise ValueError("repository scan limits must be positive")
+        if min(
+            self.repository_cache_ttl_seconds,
+            self.repository_cache_quota_bytes,
+            self.repository_cache_min_free_bytes,
+            self.repository_cache_materialization_timeout_seconds,
+        ) < 1:
+            raise ValueError("repository cache limits must be positive")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -381,6 +393,19 @@ class Settings:
                 "LIMA_EXPERIMENT_MAX_TOTAL_TOKENS", 100_000
             ),
             repository_import_root=os.getenv("LIMA_REPOSITORY_IMPORT_ROOT", ""),
+            repository_cache_root=os.getenv("LIMA_REPOSITORY_CACHE_ROOT", ""),
+            repository_cache_ttl_seconds=_int(
+                "LIMA_REPOSITORY_CACHE_TTL_SECONDS", 14 * 24 * 3600
+            ),
+            repository_cache_quota_bytes=_int(
+                "LIMA_REPOSITORY_CACHE_QUOTA_BYTES", 2 * 1024 * 1024 * 1024
+            ),
+            repository_cache_min_free_bytes=_int(
+                "LIMA_REPOSITORY_CACHE_MIN_FREE_BYTES", 512 * 1024 * 1024
+            ),
+            repository_cache_materialization_timeout_seconds=_int(
+                "LIMA_REPOSITORY_CACHE_MATERIALIZATION_TIMEOUT_SECONDS", 3600
+            ),
             repository_scan_sast_mode=os.getenv(
                 "LIMA_REPOSITORY_SCAN_SAST_MODE", "required"
             ).strip().lower(),

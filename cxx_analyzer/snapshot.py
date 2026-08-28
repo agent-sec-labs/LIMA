@@ -6,7 +6,7 @@ import hashlib
 import os
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
 
 from .config import AnalyzerSettings
@@ -53,9 +53,53 @@ class PreparedSnapshot:
     sha256: str
     files: tuple[str, ...]
     _temporary_directory: tempfile.TemporaryDirectory[str]
+    _root_identity: tuple[int, int]
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def cleanup(self) -> None:
+        self._closed = True
         self._temporary_directory.cleanup()
+
+    def resolve_cwd(self, relative_cwd: str | os.PathLike[str]) -> Path:
+        """Resolve a real directory below this live snapshot without following links."""
+
+        if self._closed:
+            raise ValueError("prepared snapshot is no longer live")
+        raw = Path(relative_cwd)
+        if raw.is_absolute() or raw.drive or "\0" in os.fspath(relative_cwd):
+            raise ValueError("tool cwd must be relative to the prepared snapshot")
+        if ".." in raw.parts:
+            raise ValueError("tool cwd must not contain parent traversal")
+        try:
+            root_metadata = self.root.lstat()
+        except OSError as exc:
+            raise ValueError("prepared snapshot is no longer live") from exc
+        if (
+            _is_symlink_or_reparse(self.root, root_metadata)
+            or not stat.S_ISDIR(root_metadata.st_mode)
+            or (root_metadata.st_dev, root_metadata.st_ino) != self._root_identity
+        ):
+            raise ValueError("prepared snapshot is no longer live")
+
+        current = self.root
+        for part in raw.parts:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            try:
+                metadata = current.lstat()
+            except OSError as exc:
+                raise ValueError("tool cwd must be an existing snapshot directory") from exc
+            if _is_symlink_or_reparse(current, metadata):
+                raise ValueError("tool cwd must not contain a symbolic link")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("tool cwd must reference a snapshot directory")
+        try:
+            resolved = current.resolve(strict=True)
+            resolved.relative_to(self.root)
+        except (OSError, ValueError) as exc:
+            raise ValueError("tool cwd escapes the prepared snapshot") from exc
+        return resolved
 
     def __enter__(self) -> PreparedSnapshot:
         return self
@@ -326,6 +370,7 @@ def prepare_snapshot(
 
     temporary_directory = tempfile.TemporaryDirectory(prefix="lima-cxx-", dir=work)
     snapshot_root = Path(temporary_directory.name).resolve(strict=True)
+    snapshot_metadata = snapshot_root.lstat()
     try:
         copied = [
             _copy_inventory_file(
@@ -346,4 +391,5 @@ def prepare_snapshot(
         sha256=expected_sha256,
         files=tuple(item.path for item in copied),
         _temporary_directory=temporary_directory,
+        _root_identity=(snapshot_metadata.st_dev, snapshot_metadata.st_ino),
     )

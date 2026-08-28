@@ -1,14 +1,26 @@
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cxx_analyzer.config import AnalyzerSettings, parse_steps_json
-from cxx_analyzer.execution import CLEAN_ENVIRONMENT, run_step
+from cxx_analyzer.execution import (
+    CLEAN_ENVIRONMENT,
+    StreamCapture,
+    _stream_process,
+    run_step,
+)
+from cxx_analyzer.sandbox import (
+    MIN_LANDLOCK_ABI,
+    build_launcher_argv,
+    build_policy,
+    landlock_abi,
+)
 from cxx_analyzer.snapshot import prepare_snapshot
 from lima.workspace import RepositoryWorkspace
 
@@ -259,10 +271,229 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 prepare_snapshot(import_root, "team/project", expected, work_root)
 
-    @patch("cxx_analyzer.execution.subprocess.run")
-    def test_run_step_uses_argv_shell_false_snapshot_cwd_and_clean_env(self, run):
-        run.return_value = subprocess.CompletedProcess(
-            ["cmake", "--version"], 0, stdout=b"cmake ok\n", stderr=b""
+    @patch("cxx_analyzer.execution._stream_process")
+    @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=3)
+    def test_run_step_uses_launcher_snapshot_cwd_and_clean_env(
+        self, _abi, popen, stream
+    ):
+        process = Mock()
+        process.pid = 1234
+        popen.return_value = process
+        stdout = b"cmake ok\n"
+        stream.return_value = StreamCapture(
+            returncode=0,
+            timed_out=False,
+            stdout=stdout,
+            stderr=b"",
+            stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+            stderr_sha256=hashlib.sha256(b"").hexdigest(),
+            output_truncated=False,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            source = repository / "src" / "main.cpp"
+            source.parent.mkdir()
+            source.write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            ) as snapshot:
+                status_read, status_write = os.pipe()
+                os.write(status_write, b"R")
+                with patch(
+                    "cxx_analyzer.execution.os.pipe",
+                    return_value=(status_read, status_write),
+                ):
+                    result = run_step(
+                        ("cmake", "--version"),
+                        snapshot,
+                        "src",
+                        timeout_seconds=17,
+                        max_output_bytes=1024,
+                        env={
+                            "PATH": "C:/attacker/bin",
+                            "HTTP_PROXY": "http://proxy.invalid",
+                            "LIMA_DATABASE_URL": "postgres://secret",
+                            "TOKEN": "secret",
+                        },
+                    )
+
+        self.assertEqual("completed", result.status)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("cmake ok\n", result.stdout)
+        called_argv = popen.call_args.args[0]
+        called_options = popen.call_args.kwargs
+        self.assertIsInstance(called_argv, list)
+        self.assertEqual(["cmake", "--version"], called_argv[-2:])
+        self.assertTrue(Path(called_argv[1]).is_absolute())
+        self.assertEqual("sandbox.py", Path(called_argv[1]).name)
+        self.assertFalse(called_options["shell"])
+        self.assertEqual(snapshot.root / "src", Path(called_options["cwd"]))
+        self.assertEqual(CLEAN_ENVIRONMENT, called_options["env"])
+        self.assertEqual(subprocess.DEVNULL, called_options["stdin"])
+        self.assertEqual(subprocess.PIPE, called_options["stdout"])
+        self.assertEqual(subprocess.PIPE, called_options["stderr"])
+        self.assertTrue(called_options["close_fds"])
+        self.assertTrue(called_options["start_new_session"])
+        self.assertEqual(1, len(called_options["pass_fds"]))
+        stream.assert_called_once_with(process, 17, 1024)
+
+    def test_stream_process_bounds_high_throughput_output_and_hashes_all_bytes(self):
+        stdout = b"A" * (2 * 1024 * 1024 + 17)
+        stderr = b"B" * (2 * 1024 * 1024 + 31)
+        script = (
+            "import os\n"
+            f"os.write(1, b'A' * {len(stdout)})\n"
+            f"os.write(2, b'B' * {len(stderr)})\n"
+        )
+        process = subprocess.Popen(  # noqa: S603 - fixed local test child
+            [sys.executable, "-c", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+        )
+
+        captured = _stream_process(process, timeout_seconds=10, max_output_bytes=4096)
+
+        self.assertEqual(0, captured.returncode)
+        self.assertFalse(captured.timed_out)
+        self.assertLessEqual(len(captured.stdout) + len(captured.stderr), 4096)
+        self.assertTrue(captured.output_truncated)
+        self.assertEqual(hashlib.sha256(stdout).hexdigest(), captured.stdout_sha256)
+        self.assertEqual(hashlib.sha256(stderr).hexdigest(), captured.stderr_sha256)
+        self.assertLess(len(captured.stdout), len(stdout))
+        self.assertLess(len(captured.stderr), len(stderr))
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_stream_process_timeout_terminates_and_returns_bounded_prefix(self):
+        script = (
+            "import os, time\n"
+            "os.write(1, b'prefix-sensitive-tail')\n"
+            "os.write(2, b'diagnostic-secret')\n"
+            "time.sleep(30)\n"
+        )
+        process = subprocess.Popen(  # noqa: S603 - fixed local test child
+            [sys.executable, "-c", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+        )
+
+        captured = _stream_process(process, timeout_seconds=1, max_output_bytes=8)
+
+        self.assertTrue(captured.timed_out)
+        self.assertIsNotNone(captured.returncode)
+        self.assertLessEqual(len(captured.stdout) + len(captured.stderr), 8)
+        self.assertNotIn(b"sensitive-tail", captured.stdout)
+        self.assertNotIn(b"diagnostic-secret", captured.stderr)
+
+    def test_output_digest_uses_tagged_complete_stream_digests(self):
+        stdout = b"stdout beyond retained prefix"
+        stderr = b"stderr beyond retained prefix"
+        stdout_sha256 = hashlib.sha256(stdout).hexdigest()
+        stderr_sha256 = hashlib.sha256(stderr).hexdigest()
+        expected = hashlib.sha256(
+            b"LIMA-TOOL-OUTPUT-SHA256-v1\0stdout\0"
+            + bytes.fromhex(stdout_sha256)
+            + b"\0stderr\0"
+            + bytes.fromhex(stderr_sha256)
+        ).hexdigest()
+        capture = StreamCapture(
+            returncode=0,
+            timed_out=False,
+            stdout=stdout[:3],
+            stderr=b"",
+            stdout_sha256=stdout_sha256,
+            stderr_sha256=stderr_sha256,
+            output_truncated=True,
+        )
+        self.assertEqual(expected, capture.output_sha256)
+
+    @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=0)
+    def test_run_step_fails_closed_without_landlock(self, _abi, popen):
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            ) as snapshot:
+                result = run_step(["tool"], snapshot, ".", 3, 8, {})
+
+        self.assertEqual("sandbox-unavailable", result.status)
+        self.assertIsNone(result.returncode)
+        self.assertEqual("filesystem sandbox unavailable", result.diagnostic)
+        self.assertEqual("", result.stderr)
+        popen.assert_not_called()
+
+    @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch(
+        "cxx_analyzer.execution.sandbox.landlock_abi",
+        side_effect=PermissionError("seccomp denied Landlock query"),
+    )
+    def test_run_step_fails_closed_when_landlock_query_is_denied(self, _abi, popen):
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            ) as snapshot:
+                result = run_step(["tool"], snapshot, ".", 3, 8, {})
+
+        self.assertEqual("sandbox-unavailable", result.status)
+        self.assertEqual("filesystem sandbox unavailable", result.diagnostic)
+        popen.assert_not_called()
+
+    def test_sandbox_policy_and_launcher_exclude_import_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            ) as snapshot:
+                policy = build_policy(snapshot.root)
+                launcher = build_launcher_argv(
+                    ["cmake", "--version"], snapshot.root, status_fd=9
+                )
+
+        allowed = {str(rule.path) for rule in policy.rules}
+        self.assertIn(str(snapshot.root), allowed)
+        self.assertNotIn(str(import_root), allowed)
+        self.assertNotIn(str(repository), allowed)
+        self.assertEqual(["cmake", "--version"], launcher[-2:])
+        self.assertTrue(Path(launcher[1]).is_absolute())
+        self.assertEqual("sandbox.py", Path(launcher[1]).name)
+        self.assertNotIn("-m", launcher[:3])
+        self.assertIn("--status-fd", launcher)
+        self.assertIn("--snapshot-root", launcher)
+
+    @patch("cxx_analyzer.execution._stream_process")
+    @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=3)
+    def test_run_step_fails_closed_when_launcher_never_reports_ready(
+        self, _abi, popen, stream
+    ):
+        popen.return_value = Mock(pid=1234)
+        empty_sha256 = hashlib.sha256(b"").hexdigest()
+        stream.return_value = StreamCapture(
+            returncode=1,
+            timed_out=False,
+            stdout=b"",
+            stderr=b"launcher failed",
+            stdout_sha256=empty_sha256,
+            stderr_sha256=hashlib.sha256(b"launcher failed").hexdigest(),
+            output_truncated=False,
         )
         with tempfile.TemporaryDirectory() as temporary:
             import_root, repository, work_root = self._repository(temporary)
@@ -271,84 +502,99 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             with prepare_snapshot(
                 import_root, "team/project", expected, work_root
             ) as snapshot:
+                result = run_step(["tool"], snapshot, ".", 3, 64, {})
+
+        self.assertEqual("sandbox-failed", result.status)
+        self.assertEqual("filesystem sandbox setup failed", result.diagnostic)
+        self.assertEqual("", result.stdout)
+        self.assertEqual("", result.stderr)
+        self.assertNotIn("launcher failed", repr(result))
+
+    def test_run_step_rejects_non_snapshot_absolute_dotdot_and_cleaned_cwd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            source = repository / "src" / "main.cpp"
+            source.parent.mkdir()
+            source.write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            snapshot = prepare_snapshot(import_root, "team/project", expected, work_root)
+
+            invalid_calls = (
+                (["tool"], work_root, ".", 1, 1, {}),
+                (["tool"], snapshot, str(snapshot.root), 1, 1, {}),
+                (["tool"], snapshot, "../", 1, 1, {}),
+                (["tool"], snapshot, "src/../../", 1, 1, {}),
+                (["tool"], snapshot, "missing", 1, 1, {}),
+            )
+            for arguments in invalid_calls:
+                with self.subTest(arguments=arguments[1:3]):
+                    with self.assertRaises(ValueError):
+                        run_step(*arguments)
+
+            snapshot.cleanup()
+            with self.assertRaisesRegex(ValueError, "no longer live"):
+                run_step(["tool"], snapshot, ".", 1, 1, {})
+
+    def test_run_step_rejects_symlink_cwd_inside_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            source = repository / "src" / "main.cpp"
+            source.parent.mkdir()
+            source.write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            ) as snapshot:
+                try:
+                    (snapshot.root / "linked-cwd").symlink_to(
+                        snapshot.root / "src", target_is_directory=True
+                    )
+                except OSError as exc:
+                    self.skipTest(f"platform denied symlink creation: {exc}")
+                with self.assertRaisesRegex(ValueError, "symbolic link"):
+                    run_step(["tool"], snapshot, "linked-cwd", 1, 1, {})
+
+    def test_landlock_child_reads_snapshot_but_denies_outside_sentinel(self):
+        if sys.platform != "linux":
+            self.skipTest("real Landlock test requires Linux")
+        abi = landlock_abi()
+        if abi < MIN_LANDLOCK_ABI:
+            self.skipTest(f"Landlock ABI {abi} is below required {MIN_LANDLOCK_ABI}")
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "main.cpp").write_text("snapshot-ok\n", encoding="utf-8")
+            outside = Path(temporary) / "outside-sentinel.txt"
+            outside.write_text("outside-secret\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            code = (
+                "from pathlib import Path; import sys; "
+                "print(Path('main.cpp').read_text().strip(), end='|'); "
+                "\ntry: Path(sys.argv[1]).read_text()"
+                "\nexcept PermissionError: print('outside-denied')"
+                "\nelse: print('outside-readable'); raise SystemExit(9)"
+            )
+            with prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            ) as snapshot:
                 result = run_step(
-                    ("cmake", "--version"),
-                    snapshot.root,
-                    timeout_seconds=17,
+                    [sys.executable, "-c", code, str(outside)],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
                     max_output_bytes=1024,
-                    env={
-                        "PATH": "C:/attacker/bin",
-                        "HTTP_PROXY": "http://proxy.invalid",
-                        "LIMA_DATABASE_URL": "postgres://secret",
-                        "TOKEN": "secret",
-                    },
+                    env={},
                 )
 
-        self.assertEqual("completed", result.status)
-        self.assertEqual(0, result.returncode)
-        self.assertEqual("cmake ok\n", result.stdout)
-        called_argv = run.call_args.args[0]
-        called_options = run.call_args.kwargs
-        self.assertIsInstance(called_argv, list)
-        self.assertEqual(["cmake", "--version"], called_argv)
-        self.assertFalse(called_options["shell"])
-        self.assertEqual(snapshot.root, Path(called_options["cwd"]))
-        self.assertEqual(CLEAN_ENVIRONMENT, called_options["env"])
-        self.assertEqual(subprocess.DEVNULL, called_options["stdin"])
-        self.assertEqual(17, called_options["timeout"])
-        self.assertTrue(called_options["capture_output"])
-        self.assertFalse(called_options["check"])
-
-    @patch("cxx_analyzer.execution.subprocess.run")
-    def test_run_step_bounds_combined_output_and_hashes_the_full_log(self, run):
-        stdout = b"abcdefgh"
-        stderr = b"WXYZ"
-        run.return_value = subprocess.CompletedProcess(
-            ["tool"], 7, stdout=stdout, stderr=stderr
-        )
-        with tempfile.TemporaryDirectory() as cwd:
-            result = run_step(
-                ["tool"], cwd, timeout_seconds=5, max_output_bytes=6, env={}
-            )
-
-        self.assertEqual("failed", result.status)
-        self.assertEqual(7, result.returncode)
-        self.assertEqual("abcdef", result.stdout)
-        self.assertEqual("", result.stderr)
-        self.assertLessEqual(
-            len(result.stdout.encode("utf-8")) + len(result.stderr.encode("utf-8")),
-            6,
-        )
-        self.assertTrue(result.output_truncated)
-        self.assertEqual(hashlib.sha256(stdout).hexdigest(), result.stdout_sha256)
-        self.assertEqual(hashlib.sha256(stderr).hexdigest(), result.stderr_sha256)
-        self.assertEqual(
-            hashlib.sha256(stdout + b"\0" + stderr).hexdigest(),
-            result.output_sha256,
-        )
-
-    @patch("cxx_analyzer.execution.subprocess.run")
-    def test_run_step_timeout_returns_only_bounded_log_summary(self, run):
-        output = b"prefix-" + b"sensitive-tail" * 100
-        run.side_effect = subprocess.TimeoutExpired(
-            ["tool"], 3, output=output, stderr=b"diagnostic-secret"
-        )
-        with tempfile.TemporaryDirectory() as cwd:
-            result = run_step(
-                ["tool"], cwd, timeout_seconds=3, max_output_bytes=8, env={}
-            )
-
-        self.assertEqual("timed-out", result.status)
-        self.assertIsNone(result.returncode)
-        self.assertEqual("prefix-s", result.stdout)
-        self.assertEqual("", result.stderr)
-        self.assertTrue(result.output_truncated)
-        self.assertNotIn("sensitive-tail", repr(result))
-        self.assertNotIn("diagnostic-secret", repr(result))
-        self.assertEqual(hashlib.sha256(output).hexdigest(), result.stdout_sha256)
+        self.assertEqual("completed", result.status, result.diagnostic)
+        self.assertEqual("snapshot-ok|outside-denied\n", result.stdout)
 
     def test_run_step_rejects_non_argv_and_nonpositive_bounds(self):
-        with tempfile.TemporaryDirectory() as cwd:
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            snapshot = prepare_snapshot(import_root, "team/project", expected, work_root)
+            self.addCleanup(snapshot.cleanup)
             for argv, timeout, output_limit in (
                 ("tool --flag", 1, 1),
                 ([], 1, 1),
@@ -358,7 +604,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             ):
                 with self.subTest(argv=argv, timeout=timeout, output=output_limit):
                     with self.assertRaises(ValueError):
-                        run_step(argv, cwd, timeout, output_limit, {})
+                        run_step(argv, snapshot, ".", timeout, output_limit, {})
 
 
 if __name__ == "__main__":

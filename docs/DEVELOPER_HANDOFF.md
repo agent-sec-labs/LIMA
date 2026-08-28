@@ -3,7 +3,7 @@
 本文面向第一次接触 LIMA 的开发者，目标是帮助你快速建立正确的项目心智模型，
 找到修改入口，并在不破坏安全边界、评测完整性和多人协作约束的前提下交付代码。
 
-> 基线：`main@80b0ee1`（2026-08-28，PR #20 合并后）  
+> 基线：`main@5471a56`（2026-08-28，PR #23 合并后；同窗口合入 #22 API 安全边界修复）  
 > 当前版本：`lima.__version__ == "1.6.0"`  
 > 远程仓库：<https://github.com/agent-sec-labs/LIMA>  
 > 实时任务状态以 GitHub Issue 的标签和维护者意见为准；本文的状态表只是交接快照。
@@ -418,7 +418,7 @@ python -m unittest -v `
 |---|---|---|
 | [T1 #10](https://github.com/agent-sec-labs/LIMA/issues/10) RepositorySource | Closed | PR #18 已合并；契约在 `repository_source.py`，不得在此层联网或物化文件 |
 | [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | `status:blocked` | 虽然 T1 已合并，当前仍标记 contract freeze；等待维护者明确解除，不要自行开工 |
-| [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | 本地已实现 | 契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
+| [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | Closed | PR #23 已合并；契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
 | [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | `status:blocked` | 依赖 T1/T2/T3；可讨论 mock，但不要在依赖未完成时进入正式集成 |
 | [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | `status:ready` | 可认领；不得削弱非 root、只读根文件系统、capability drop |
 | [T6 #15](https://github.com/agent-sec-labs/LIMA/issues/15) GitHub Source UI | `status:ready` | 可基于合同和 mock 开发；最终 API 集成需协调 T4 |

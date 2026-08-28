@@ -13,10 +13,11 @@
 1. **LIMA 是证据驱动的仓库安全 Agent，不是通用聊天 Agent。** 默认本地模式不调用
    远程模型；LLM 只负责可选的语义增强，不能替代静态证据。
 2. **不要执行待审计仓库的代码。** 仓库导入、扫描和快照处理必须把目标代码当作不可信数据。
-3. **GitHub 物化层尚未接入服务编排。** T1 提供 `RepositorySource` 契约，
-   T2 `GitHubMaterializer` 负责把 GitHub ref 解析为不可变 SHA、下载加固归档并
-   发布到 T3 `RepositoryCache`；三者均已落地，但异步扫描集成（T4）仍是
-   Epic #17 的后续工作，`POST /v1/repository-scans` 仍只接受本地 `repository_key`。
+3. **远程 GitHub 扫描已可用但默认关闭。** `LIMA_REPOSITORY_SCAN_SOURCES`
+   （默认 `local-import`）控制接受来源；启用 `github`/`both` 后
+   `POST /v1/repository-scans` 接受 `{"source": {"type": "github", ...}}`，
+   物化只发生在异步 worker（请求路径零网络），缓存命中时整条流水线零网络。
+   Epic #17 剩余 T5/T6/T7。
 4. **候选告警不能直接触发自动修复。** 只有已验证、受支持且通过安全 Oracle 的
    CWE-22、CWE-78、CWE-89 修复才可能进入修复闭环。
 5. **一个 Issue、一个责任边界、一个 PR。** 不要顺手重构其他模块，也不要开发
@@ -449,7 +450,7 @@ python -m unittest -v `
 | [T1 #10](https://github.com/agent-sec-labs/LIMA/issues/10) RepositorySource | Closed | PR #18 已合并；契约在 `repository_source.py`，不得在此层联网或物化文件 |
 | [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | 本地已实现 | 契约在 `repository_materializer.py`（ref 钉死/加固下载/发布到 RepositoryCache）；未接服务编排，接线属于 T4 |
 | [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | Closed | PR #23 已合并；契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
-| [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | `status:blocked` | 依赖 T1/T2/T3；可讨论 mock，但不要在依赖未完成时进入正式集成 |
+| [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | 本地已实现 | worker 侧 github 物化 + pin + 扫描；`LIMA_REPOSITORY_SCAN_SOURCES` 门禁；缓存命中零网络 |
 | [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | `status:ready` | 可认领；不得削弱非 root、只读根文件系统、capability drop |
 | [T6 #15](https://github.com/agent-sec-labs/LIMA/issues/15) GitHub Source UI | `status:ready` | 可基于合同和 mock 开发；最终 API 集成需协调 T4 |
 | [T7 #16](https://github.com/agent-sec-labs/LIMA/issues/16) RepairWorkspace | `status:ready` | 可认领；不得接入 GitHub 写 API，不得修改源 Snapshot |

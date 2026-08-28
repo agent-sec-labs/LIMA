@@ -924,6 +924,18 @@ class PostgresTaskStore:
                 (tenant_id, repository, auto_fix),
             )
 
+    def list_repository_grants(self, tenant_id: str) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT repository,auto_fix FROM repository_grants "
+                "WHERE tenant_id=%s ORDER BY repository",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {"repository": row["repository"], "auto_fix": bool(row["auto_fix"])}
+            for row in rows
+        ]
+
     def repository_allowed(
         self, tenant_id: str, repository: str, require_auto_fix: bool = False,
     ) -> bool:
@@ -935,7 +947,11 @@ class PostgresTaskStore:
                 "SELECT auto_fix FROM repository_grants WHERE tenant_id=%s AND repository=%s",
                 (tenant_id, repository),
             ).fetchone()
-        return True if total == 0 else bool(row and (not require_auto_fix or row["auto_fix"]))
+        # 未配置任何授权时，审查（只读分析）保持放行以兼容默认部署；
+        # 自动修复会触发 GitHub 写操作，必须依赖显式授权，fail-closed。
+        if total == 0:
+            return not require_auto_fix
+        return bool(row and (not require_auto_fix or row["auto_fix"]))
 
     def audit(
         self, tenant_id: str, actor: str, action: str, resource: str,

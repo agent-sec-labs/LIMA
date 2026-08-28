@@ -414,6 +414,10 @@ async function mockApi(path, options = {}) {
     return { decision: "未激活，仅保留候选", candidate_score: 0.842, baseline_score: 0.811, holdout_delta: 0.004, candidate_version: "1.6.0-candidate" };
   }
   if (path === "/health") return { status: "ok", version: "demo" };
+  if (path === "/v1/github/installations") {
+    const body = JSON.parse(options.body || "{}");
+    return { installation_id: body.installation_id, tenant_id: "demo" };
+  }
   throw new Error("演示数据未覆盖此操作");
 }
 
@@ -457,6 +461,49 @@ function show(view, updateHash = true) {
   if (view === "evolution") loadFailures();
   setExperimentPolling(view === "experiments");
   window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" });
+}
+
+let pendingGithubInstall = null;
+
+function consumeGithubInstallHash() {
+  const hash = location.hash.slice(1);
+  if (!hash.startsWith("github-install")) return false;
+  const queryIndex = hash.indexOf("?");
+  const params = queryIndex >= 0
+    ? new URLSearchParams(hash.slice(queryIndex + 1))
+    : new URLSearchParams();
+  const installationId = parseInt(params.get("installation_id") || "", 10);
+  const account = (params.get("account") || "github-app").slice(0, 100);
+  history.replaceState(null, "", "#overview");
+  show("overview", false);
+  if (!Number.isInteger(installationId) || installationId <= 0) {
+    toast("GitHub 安装登记失败", "回跳链接缺少有效的 installation_id。", "error");
+    return true;
+  }
+  pendingGithubInstall = { installation_id: installationId, account };
+  completeGithubInstall();
+  return true;
+}
+
+async function completeGithubInstall() {
+  if (!pendingGithubInstall) return;
+  if (!accessToken) {
+    $("#login-overlay").classList.remove("hidden");
+    toast("请先登录", "使用管理员账号登录后将自动完成 GitHub 安装登记。", "warning");
+    return;
+  }
+  const params = pendingGithubInstall;
+  try {
+    await api("/v1/github/installations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    pendingGithubInstall = null;
+    toast("GitHub 安装已登记", `installation ${params.installation_id} 已绑定到当前租户。`, "success");
+  } catch (error) {
+    toast("GitHub 安装登记失败", error.message, "error");
+  }
 }
 
 function statCard(label, value, note, color = "", iconName = "report") {
@@ -1723,7 +1770,9 @@ function updateDiffStats() {
 
 $$(".nav-item").forEach((button) => button.addEventListener("click", () => show(button.dataset.view)));
 $$("[data-jump]").forEach((button) => button.addEventListener("click", () => show(button.dataset.jump)));
-window.addEventListener("hashchange", () => show(location.hash.slice(1), false));
+window.addEventListener("hashchange", () => {
+  if (!consumeGithubInstallHash()) show(location.hash.slice(1), false);
+});
 
 $("#overview-demo").addEventListener("click", () => enterDemo(true));
 $("#demo-login").addEventListener("click", () => enterDemo(false));
@@ -2012,6 +2061,7 @@ $("#login-form").addEventListener("submit", async (event) => {
     $("#logout").classList.remove("hidden");
     toast("登录成功", "正在加载你的安全工作区。", "success");
     await loadDashboard();
+    await completeGithubInstall();
     if ((location.hash.slice(1) || "overview") === "experiments") {
       await loadExperiments();
       setExperimentPolling(true);
@@ -2052,5 +2102,5 @@ setExperimentStep(1);
 updateDiffStats();
 updateProviderDefaults();
 if (isDemoMode || accessToken) $("#logout").classList.remove("hidden");
-show(location.hash.slice(1) || "overview", false);
+if (!consumeGithubInstallHash()) show(location.hash.slice(1) || "overview", false);
 loadDashboard();

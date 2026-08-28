@@ -46,31 +46,73 @@ _MAX_DATABASE_BYTES: Final = 4 * 1024 * 1024
 _MAX_DATABASE_ENTRIES: Final = 2048
 _MAX_PLIST_BYTES: Final = 4 * 1024 * 1024
 _ANALYZER_TEMP_ROOT: Final = Path("/work/tmp")
-_SEPARATE_PATH_OPTIONS: Final = frozenset(
+MAX_COMPILATION_UNITS: Final = 256
+MAX_FINDINGS: Final = 256
+MAX_DIAGNOSTICS: Final = 256
+MAX_TOOL_RUNS: Final = 320
+MAX_AGGREGATE_PLIST_BYTES: Final = 8 * 1024 * 1024
+_BUDGET_DIAGNOSTIC: Final = "analysis-budget-exhausted"
+_SUPPORTED_PATH_OPTIONS: Final = frozenset(
     {
         "-I",
         "-F",
+        "-B",
         "-include",
+        "-include-pch",
+        "-include-pth",
         "-imacros",
         "-isystem",
+        "-isysroot",
         "-iquote",
         "-idirafter",
         "-iframework",
+        "-iframeworkwithsysroot",
+        "-iprefix",
+        "-iwithprefix",
+        "-iwithprefixbefore",
+        "-ivfsoverlay",
         "-resource-dir",
+        "-stdlib++-isystem",
         "--sysroot",
+        "--gcc-toolchain",
+        "-gcc-toolchain",
+        "-fmodule-file",
+        "-fmodule-map-file",
+        "-fprofile-use",
+        "-fprofile-instr-use",
+        "-fprofile-sample-use",
+        "-fprofile-list",
+        "-fmodules-cache-path",
     }
 )
-_JOINED_PATH_OPTIONS: Final = (
-    "--sysroot=",
-    "-resource-dir=",
-    "-isystem",
-    "-iquote",
-    "-idirafter",
-    "-iframework",
-    "-include",
-    "-imacros",
-    "-I",
-    "-F",
+_CONCATENATED_PATH_OPTIONS: Final = ("-I", "-F", "-B")
+_FORBIDDEN_PASSTHROUGH_OPTIONS: Final = frozenset(
+    {
+        "-cc1",
+        "-fplugin",
+        "-load",
+        "-mllvm",
+        "-plugin",
+        "-Xanalyzer",
+        "-Xassembler",
+        "-Xclang",
+        "-Xlinker",
+        "-Xpreprocessor",
+        "--config",
+    }
+)
+_FORBIDDEN_PASSTHROUGH_PREFIXES: Final = ("-Wa,", "-Wl,", "-Wp,")
+_FORBIDDEN_JOINED_PASSTHROUGH_PREFIXES: Final = (
+    "--config=",
+    "-fplugin=",
+    "-load=",
+    "-mllvm=",
+    "-plugin=",
+    "-Xanalyzer=",
+    "-Xassembler=",
+    "-Xclang=",
+    "-Xlinker=",
+    "-Xpreprocessor=",
 )
 
 
@@ -81,6 +123,10 @@ class CompilationUnit:
     directory: str
     file: str
     arguments: tuple[str, ...]
+
+
+class AnalysisBudgetExceeded(ValueError):
+    """A stable internal signal that analysis must stop without more tool launches."""
 
 
 def select_build_steps(
@@ -134,38 +180,76 @@ def _validate_argument_paths(
 ) -> None:
     if not arguments[0]:
         raise ValueError("compilation database executable is empty")
-    expect_path = False
+    expected_path_option: str | None = None
     for argument in arguments[1:]:
         if argument.startswith("@"):
             raise ValueError("compilation database response files are forbidden")
-        if expect_path:
+        if expected_path_option is not None:
+            if expected_path_option == "-fmodule-file" and "=" in argument:
+                argument = argument.rsplit("=", 1)[1]
+            if not argument:
+                raise ValueError("compilation database path option is empty")
             _inside_snapshot(
                 root,
                 Path(argument)
                 if Path(argument).is_absolute()
                 else working_directory / argument,
             )
-            expect_path = False
+            expected_path_option = None
             continue
-        if argument in _SEPARATE_PATH_OPTIONS:
-            expect_path = True
+        if argument in _FORBIDDEN_PASSTHROUGH_OPTIONS or argument.startswith(
+            (*_FORBIDDEN_PASSTHROUGH_PREFIXES, *_FORBIDDEN_JOINED_PASSTHROUGH_PREFIXES)
+        ):
+            raise ValueError("compilation database passthrough options are forbidden")
+        if argument in _SUPPORTED_PATH_OPTIONS:
+            expected_path_option = argument
             continue
-        joined_path = next(
+        option, separator, option_value = argument.partition("=")
+        if separator and option in _SUPPORTED_PATH_OPTIONS:
+            if option == "-fmodule-file" and "=" in option_value:
+                option_value = option_value.rsplit("=", 1)[1]
+            if not option_value:
+                raise ValueError("compilation database path option is empty")
+            _inside_snapshot(
+                root,
+                Path(option_value)
+                if Path(option_value).is_absolute()
+                else working_directory / option_value,
+            )
+            continue
+        concatenated_path = next(
             (
                 argument[len(prefix) :]
-                for prefix in _JOINED_PATH_OPTIONS
+                for prefix in _CONCATENATED_PATH_OPTIONS
                 if argument.startswith(prefix) and len(argument) > len(prefix)
             ),
             None,
         )
-        if joined_path is not None:
+        if concatenated_path is not None:
             _inside_snapshot(
                 root,
-                Path(joined_path)
-                if Path(joined_path).is_absolute()
-                else working_directory / joined_path,
+                Path(concatenated_path)
+                if Path(concatenated_path).is_absolute()
+                else working_directory / concatenated_path,
             )
             continue
+        if (
+            argument.startswith("-")
+            and not argument.startswith(("-D", "-U"))
+            and ("/" in argument or "\\" in argument)
+        ):
+            raise ValueError("unknown joined path-bearing option is forbidden")
+        if (
+            separator
+            and not option.startswith(("-D", "-U"))
+            and (
+                Path(option_value).is_absolute()
+                or "/" in option_value
+                or "\\" in option_value
+                or option_value.startswith(".")
+            )
+        ):
+            raise ValueError("unknown path-bearing compiler option is forbidden")
         if not argument.startswith("-"):
             _inside_snapshot(
                 root,
@@ -173,7 +257,7 @@ def _validate_argument_paths(
                 if Path(argument).is_absolute()
                 else working_directory / argument,
             )
-    if expect_path:
+    if expected_path_option is not None:
         raise ValueError("compilation database path option lacks a value")
 
 
@@ -187,6 +271,8 @@ def load_compilation_database(
     document = _bounded_json(database)
     if not isinstance(document, list) or len(document) > _MAX_DATABASE_ENTRIES:
         raise ValueError("compilation database must be a bounded array")
+    if len(document) > MAX_COMPILATION_UNITS:
+        raise AnalysisBudgetExceeded("compilation unit budget exhausted")
 
     snapshot_files = set(snapshot.files)
     units: list[CompilationUnit] = []
@@ -230,18 +316,17 @@ def load_compilation_database(
 
 
 def _safe_plist_path(
-    value: object, snapshot: PreparedSnapshot
+    value: object, snapshot: PreparedSnapshot, relative_cwd: str
 ) -> str | None:
     if not isinstance(value, str) or not value or "\0" in value or "\\" in value:
         raise ValueError("Clang plist file path is invalid")
+    root = Path(snapshot.root).resolve()
+    working_directory, _ = _inside_snapshot(root, root / relative_cwd)
     candidate = Path(value)
     if candidate.is_absolute():
-        _, relative = _inside_snapshot(Path(snapshot.root), candidate)
+        _, relative = _inside_snapshot(root, candidate)
     else:
-        parsed = PurePosixPath(value)
-        if any(part in {"", ".", ".."} for part in parsed.parts):
-            raise ValueError("Clang plist file path escapes the snapshot")
-        relative = parsed.as_posix()
+        _, relative = _inside_snapshot(root, working_directory / value)
     return relative if relative in set(snapshot.files) else None
 
 
@@ -269,7 +354,10 @@ def _structured_location(
 
 
 def parse_clang_plist(
-    raw: bytes, snapshot: PreparedSnapshot
+    raw: bytes,
+    snapshot: PreparedSnapshot,
+    *,
+    relative_cwd: str = ".",
 ) -> tuple[tuple[NormalizedFinding, ...], list[str]]:
     """Normalize only structured plist locations; never scrape human diagnostics."""
 
@@ -285,7 +373,9 @@ def parse_clang_plist(
     raw_diagnostics = document.get("diagnostics")
     if not isinstance(raw_files, list) or not isinstance(raw_diagnostics, list):
         raise ValueError("Clang plist lacks files or diagnostics")
-    files = tuple(_safe_plist_path(path, snapshot) for path in raw_files)
+    files = tuple(
+        _safe_plist_path(path, snapshot, relative_cwd) for path in raw_files
+    )
 
     findings: list[NormalizedFinding] = []
     diagnostics: list[str] = []
@@ -320,21 +410,47 @@ def parse_clang_plist(
             for frame in raw_trace:
                 if not isinstance(frame, dict):
                     raise ValueError("Clang plist trace frame is invalid")
-                frame_path, frame_line, frame_column = _structured_location(
-                    frame.get("location"), files
-                )
-                trace.append(
-                    {
-                        "path": frame_path,
-                        "line": frame_line,
-                        "column": frame_column,
-                    }
-                )
+                kind = frame.get("kind")
+                if kind == "event":
+                    frame_path, frame_line, frame_column = _structured_location(
+                        frame.get("location"), files
+                    )
+                    trace.append(
+                        {
+                            "kind": "event",
+                            "path": frame_path,
+                            "line": frame_line,
+                            "column": frame_column,
+                        }
+                    )
+                    continue
+                if kind != "control" or not isinstance(frame.get("edges"), list):
+                    raise ValueError("Clang plist trace kind is unsupported")
+                for edge in frame["edges"]:
+                    if not isinstance(edge, dict):
+                        raise ValueError("Clang plist control edge is invalid")
+                    for endpoint, trace_kind in (
+                        ("start", "control-start"),
+                        ("end", "control-end"),
+                    ):
+                        frame_path, frame_line, frame_column = _structured_location(
+                            edge.get(endpoint), files
+                        )
+                        trace.append(
+                            {
+                                "kind": trace_kind,
+                                "path": frame_path,
+                                "line": frame_line,
+                                "column": frame_column,
+                            }
+                        )
         except LookupError:
             diagnostics.append("Clang trace outside snapshot inventory")
             continue
         if not trace:
-            trace.append({"path": path, "line": line, "column": 1})
+            trace.append(
+                {"kind": "event", "path": path, "line": line, "column": 1}
+            )
         language = "c++" if PurePosixPath(path).suffix.lower() in _CPP_SUFFIXES else "c"
         findings.append(
             NormalizedFinding.create(
@@ -376,6 +492,50 @@ def _tool_run(
         "output_truncated": execution.output_truncated,
         "digests_complete": execution.digests_complete,
     }
+
+
+def _deadline_run(tool: str) -> dict[str, object]:
+    return {
+        "tool": tool,
+        "status": "timed-out",
+        "returncode": None,
+        "output_sha256": "",
+        "output_truncated": False,
+        "digests_complete": False,
+    }
+
+
+def _remaining_timeout(deadline: float, step_timeout: int) -> int:
+    remaining = int(deadline - time.monotonic())
+    return min(step_timeout, remaining) if remaining > 0 else 0
+
+
+def _mark_budget_exhausted(diagnostics: list[str]) -> None:
+    if _BUDGET_DIAGNOSTIC in diagnostics:
+        return
+    if len(diagnostics) >= MAX_DIAGNOSTICS:
+        diagnostics[-1] = _BUDGET_DIAGNOSTIC
+    else:
+        diagnostics.append(_BUDGET_DIAGNOSTIC)
+
+
+def _extend_parsed_results(
+    findings: list[NormalizedFinding],
+    diagnostics: list[str],
+    parsed_findings: tuple[NormalizedFinding, ...],
+    parsed_diagnostics: list[str],
+) -> bool:
+    for finding in parsed_findings:
+        if len(findings) >= MAX_FINDINGS:
+            _mark_budget_exhausted(diagnostics)
+            return False
+        findings.append(finding)
+    for diagnostic in parsed_diagnostics:
+        if len(diagnostics) >= MAX_DIAGNOSTICS:
+            _mark_budget_exhausted(diagnostics)
+            return False
+        diagnostics.append(diagnostic)
+    return True
 
 
 def _find_database(snapshot: PreparedSnapshot) -> Path | None:
@@ -434,12 +594,17 @@ def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> La
     deadline = time.monotonic() + settings.total_timeout_seconds
     tool_runs: list[dict[str, object]] = []
     for step in steps:
-        remaining = max(1, int(deadline - time.monotonic()))
+        if len(tool_runs) >= MAX_TOOL_RUNS:
+            return LayerResult((), (_BUDGET_DIAGNOSTIC,), tuple(tool_runs))
+        remaining = _remaining_timeout(deadline, settings.step_timeout_seconds)
+        if remaining <= 0:
+            tool_runs.append(_deadline_run(step[0]))
+            return LayerResult((), ("timed-out",), tuple(tool_runs))
         execution = run_step(
             step,
             snapshot,
             ".",
-            timeout_seconds=min(settings.step_timeout_seconds, remaining),
+            timeout_seconds=remaining,
             max_output_bytes=settings.max_output_bytes,
             env={},
         )
@@ -454,6 +619,8 @@ def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> La
         return LayerResult((), ("compile-commands-missing",), tuple(tool_runs))
     try:
         units = load_compilation_database(snapshot, database)
+    except AnalysisBudgetExceeded:
+        return LayerResult((), (_BUDGET_DIAGNOSTIC,), tuple(tool_runs))
     except ValueError:
         return LayerResult((), ("compile-commands-rejected",), tuple(tool_runs))
     if not units:
@@ -461,24 +628,41 @@ def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> La
 
     findings: list[NormalizedFinding] = []
     diagnostics: list[str] = []
+    aggregate_plist_bytes = 0
     try:
         with tempfile.TemporaryDirectory(
             prefix="lima-clang-", dir=_ANALYZER_TEMP_ROOT
         ) as temporary:
             output_root = Path(temporary)
             for index, unit in enumerate(units):
+                if len(tool_runs) >= MAX_TOOL_RUNS:
+                    _mark_budget_exhausted(diagnostics)
+                    break
+                if (
+                    len(findings) >= MAX_FINDINGS
+                    or len(diagnostics) >= MAX_DIAGNOSTICS
+                    or aggregate_plist_bytes >= MAX_AGGREGATE_PLIST_BYTES
+                ):
+                    _mark_budget_exhausted(diagnostics)
+                    break
                 output = output_root / f"{index}.plist"
                 try:
                     argv = _analyzer_argv(unit, output)
                 except ValueError:
                     diagnostics.append("compile-commands-rejected")
                     continue
-                remaining = max(1, int(deadline - time.monotonic()))
+                remaining = _remaining_timeout(
+                    deadline, settings.step_timeout_seconds
+                )
+                if remaining <= 0:
+                    tool_runs.append(_deadline_run("clang"))
+                    diagnostics.append("timed-out")
+                    break
                 execution = run_step(
                     argv,
                     snapshot,
                     unit.directory,
-                    timeout_seconds=min(settings.step_timeout_seconds, remaining),
+                    timeout_seconds=remaining,
                     max_output_bytes=settings.max_output_bytes,
                     env={},
                 )
@@ -488,14 +672,34 @@ def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> La
                         "timed-out" if execution.status == "timed-out" else "clang_failed"
                     )
                     continue
+                remaining_bytes = MAX_AGGREGATE_PLIST_BYTES - aggregate_plist_bytes
+                if remaining_bytes <= 0:
+                    _mark_budget_exhausted(diagnostics)
+                    break
                 try:
-                    raw = _bounded_bytes(output, _MAX_PLIST_BYTES, "Clang plist")
-                    parsed, parser_diagnostics = parse_clang_plist(raw, snapshot)
+                    output_size = output.stat().st_size
+                    if output_size > remaining_bytes:
+                        _mark_budget_exhausted(diagnostics)
+                        break
+                    aggregate_plist_bytes += output_size
+                    raw = _bounded_bytes(
+                        output,
+                        min(_MAX_PLIST_BYTES, remaining_bytes),
+                        "Clang plist",
+                    )
+                    parsed, parser_diagnostics = parse_clang_plist(
+                        raw, snapshot, relative_cwd=unit.directory
+                    )
                 except (OSError, ValueError):
+                    if aggregate_plist_bytes >= MAX_AGGREGATE_PLIST_BYTES:
+                        _mark_budget_exhausted(diagnostics)
+                        break
                     diagnostics.append("clang-output-rejected")
                     continue
-                findings.extend(parsed)
-                diagnostics.extend(parser_diagnostics)
+                if not _extend_parsed_results(
+                    findings, diagnostics, parsed, parser_diagnostics
+                ):
+                    break
     except OSError:
         return LayerResult((), ("clang-output-unavailable",), tuple(tool_runs))
     return LayerResult(tuple(findings), tuple(diagnostics), tuple(tool_runs))

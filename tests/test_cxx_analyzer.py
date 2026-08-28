@@ -929,6 +929,24 @@ class AnalyzerServiceTests(unittest.TestCase):
                 self.assertNotIn("secret", rendered)
                 self.assertNotIn("Traceback", rendered)
 
+    @patch("cxx_analyzer.server.analyze_request")
+    def test_dispatch_rejects_whole_oversized_response_with_minimal_error(
+        self, analyze
+    ):
+        analyze.return_value = {"findings": ["x" * (2 * 1024 * 1024 + 1)]}
+        body = json.dumps(self._payload()).encode("utf-8")
+
+        status, response = analyzer_server.dispatch_request(
+            "POST", "/v1/analyze", "application/json", body, self._settings()
+        )
+
+        self.assertEqual(500, status)
+        self.assertEqual(
+            {"error": "response_too_large", "request_id": self.REQUEST_ID},
+            response,
+        )
+        self.assertLess(len(json.dumps(response).encode("utf-8")), 1024)
+
     @patch("cxx_analyzer.server.shutil.which")
     def test_health_discloses_only_schema_and_tool_availability(self, which):
         which.side_effect = lambda tool: (
@@ -1454,7 +1472,7 @@ class SourceScanTests(unittest.TestCase):
 
 class BuildScanTests(unittest.TestCase):
     @staticmethod
-    def _settings(*, auto_cmake=True, build_steps=()):
+    def _settings(*, auto_cmake=True, build_steps=(), total_timeout_seconds=90):
         return AnalyzerSettings(
             auto_cmake=auto_cmake,
             build_steps=build_steps,
@@ -1463,7 +1481,7 @@ class BuildScanTests(unittest.TestCase):
             max_processes=32,
             max_output_bytes=8192,
             step_timeout_seconds=17,
-            total_timeout_seconds=90,
+            total_timeout_seconds=total_timeout_seconds,
             repository_scan_max_files=100,
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
@@ -1483,6 +1501,55 @@ class BuildScanTests(unittest.TestCase):
             digests_complete=True,
             diagnostic="",
         )
+
+    def _run_completed_budget_fixture(self, unit_count):
+        import cxx_analyzer.build_scan as build_scan
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        sample = (fixture_root / "clang-sample.plist").read_text(encoding="utf-8")
+        sample = sample.replace("cwe-787/vulnerable-1.c", "src/unit-0.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "src").mkdir()
+            sources = []
+            for index in range(unit_count):
+                source = root / "src" / f"unit-{index}.c"
+                source.write_text("int value(void) { return 0; }\n", encoding="utf-8")
+                sources.append(source)
+            output_root = root / "tool-output"
+            output_root.mkdir()
+            snapshot = Mock(
+                root=root,
+                files=tuple(f"src/unit-{index}.c" for index in range(unit_count)),
+            )
+
+            def completed_tool(argv, *args, **kwargs):
+                if argv[0] == "configure":
+                    (root / "compile_commands.json").write_text(
+                        json.dumps([
+                            {
+                                "directory": str(root),
+                                "file": str(source),
+                                "arguments": ["cc", "-c", str(source)],
+                            }
+                            for source in sources
+                        ]),
+                        encoding="utf-8",
+                    )
+                elif argv[0] == "clang-14":
+                    Path(argv[-1]).write_text(sample, encoding="utf-8")
+                return self._execution()
+
+            with patch("cxx_analyzer.build_scan.run_step", side_effect=completed_tool) as run_tool:
+                with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", output_root):
+                    result = build_scan.run_build_scan(
+                        snapshot,
+                        self._settings(
+                            auto_cmake=False,
+                            build_steps=(("configure",),),
+                        ),
+                    )
+            return result, run_tool.call_count
 
     def test_build_plan_uses_only_fixed_cmake_or_admin_argv(self):
         from cxx_analyzer.build_scan import select_build_steps
@@ -1533,6 +1600,212 @@ class BuildScanTests(unittest.TestCase):
                 )
                 self.assertEqual(1, run_tool.call_count)
 
+    @patch("cxx_analyzer.build_scan.time.monotonic")
+    @patch("cxx_analyzer.build_scan.run_step")
+    def test_total_deadline_stops_later_build_steps(self, run_tool, monotonic):
+        from cxx_analyzer.build_scan import run_build_scan
+
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Mock(root=Path(temporary), files=("src/main.cpp",))
+            settings = self._settings(
+                auto_cmake=False,
+                build_steps=(("first-build",), ("second-build",)),
+                total_timeout_seconds=2,
+            )
+            monotonic.side_effect = (0.0, 0.1, 2.1)
+            run_tool.return_value = self._execution()
+
+            result = run_build_scan(snapshot, settings)
+
+        self.assertEqual(1, run_tool.call_count)
+        self.assertEqual(("timed-out",), result.diagnostics)
+        self.assertEqual(
+            ("completed", "timed-out"),
+            tuple(item["status"] for item in result.tool_runs),
+        )
+        self.assertEqual("second-build", result.tool_runs[-1]["tool"])
+
+    @patch("cxx_analyzer.build_scan.time.monotonic")
+    @patch("cxx_analyzer.build_scan.run_step")
+    def test_total_deadline_stops_later_clang_units(self, run_tool, monotonic):
+        import cxx_analyzer.build_scan as build_scan
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        sample = (fixture_root / "clang-sample.plist").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "src").mkdir()
+            sources = (root / "src" / "main.c", root / "src" / "other.c")
+            for source in sources:
+                source.write_text("int value(void) { return 0; }\n", encoding="utf-8")
+            output_root = root / "tool-output"
+            output_root.mkdir()
+            snapshot = Mock(
+                root=root,
+                files=("src/main.c", "src/other.c"),
+            )
+
+            def completed_tool(argv, *args, **kwargs):
+                if argv[0] == "configure":
+                    (root / "compile_commands.json").write_text(
+                        json.dumps([
+                            {
+                                "directory": str(root),
+                                "file": str(source),
+                                "arguments": ["cc", "-c", str(source)],
+                            }
+                            for source in sources
+                        ]),
+                        encoding="utf-8",
+                    )
+                elif argv[0] == "clang-14":
+                    Path(argv[-1]).write_text(
+                        sample.replace("cwe-787/vulnerable-1.c", "src/main.c"),
+                        encoding="utf-8",
+                    )
+                return self._execution()
+
+            run_tool.side_effect = completed_tool
+            monotonic.side_effect = (0.0, 0.1, 0.2, 2.1)
+            settings = self._settings(
+                auto_cmake=False,
+                build_steps=(("configure",),),
+                total_timeout_seconds=2,
+            )
+            with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", output_root):
+                result = build_scan.run_build_scan(snapshot, settings)
+
+        self.assertEqual(2, run_tool.call_count)
+        self.assertEqual("timed-out", result.diagnostics[-1])
+        self.assertEqual("timed-out", result.tool_runs[-1]["status"])
+        self.assertEqual("clang", result.tool_runs[-1]["tool"])
+
+    def test_global_scan_budgets_stop_units_tool_runs_bytes_and_result_growth(self):
+        import cxx_analyzer.build_scan as build_scan
+
+        cases = (
+            ("units", {"MAX_COMPILATION_UNITS": 1}, 1),
+            ("tool-runs", {"MAX_TOOL_RUNS": 1}, 1),
+            ("aggregate-bytes", {"MAX_AGGREGATE_PLIST_BYTES": 32}, 2),
+            (
+                "findings-and-diagnostics",
+                {"MAX_FINDINGS": 1, "MAX_DIAGNOSTICS": 2},
+                2,
+            ),
+        )
+        for name, limits, maximum_calls in cases:
+            with self.subTest(name=name):
+                patches = [patch.object(build_scan, key, value) for key, value in limits.items()]
+                for active_patch in patches:
+                    active_patch.start()
+                try:
+                    result, call_count = self._run_completed_budget_fixture(2)
+                finally:
+                    for active_patch in reversed(patches):
+                        active_patch.stop()
+
+                self.assertLessEqual(call_count, maximum_calls)
+                self.assertLessEqual(len(result.tool_runs), limits.get("MAX_TOOL_RUNS", 999))
+                self.assertLessEqual(len(result.findings), limits.get("MAX_FINDINGS", 999))
+                self.assertLessEqual(
+                    len(result.diagnostics), limits.get("MAX_DIAGNOSTICS", 999)
+                )
+                self.assertIn("analysis-budget-exhausted", result.diagnostics)
+
+    def test_diagnostic_budget_stops_direct_clang_failures(self):
+        import cxx_analyzer.build_scan as build_scan
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "src").mkdir()
+            (root / "tool-output").mkdir()
+            sources = tuple(root / "src" / f"unit-{index}.c" for index in range(2))
+            for source in sources:
+                source.write_text("int value(void) { return 0; }\n", encoding="utf-8")
+            snapshot = Mock(
+                root=root,
+                files=tuple(f"src/unit-{index}.c" for index in range(2)),
+            )
+
+            def failing_tool(argv, *args, **kwargs):
+                if argv[0] == "configure":
+                    (root / "compile_commands.json").write_text(
+                        json.dumps([
+                            {
+                                "directory": str(root),
+                                "file": str(source),
+                                "arguments": ["cc", "-c", str(source)],
+                            }
+                            for source in sources
+                        ]),
+                        encoding="utf-8",
+                    )
+                    return self._execution()
+                return self._execution(status="sandbox-unavailable", returncode=None)
+
+            with patch("cxx_analyzer.build_scan.run_step", side_effect=failing_tool) as run_tool:
+                with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", root / "tool-output"):
+                    with patch.object(build_scan, "MAX_DIAGNOSTICS", 1):
+                        result = build_scan.run_build_scan(
+                            snapshot,
+                            self._settings(
+                                auto_cmake=False,
+                                build_steps=(("configure",),),
+                            ),
+                        )
+
+        self.assertEqual(2, run_tool.call_count)
+        self.assertEqual(("analysis-budget-exhausted",), result.diagnostics)
+
+    def test_aggregate_plist_budget_counts_rejected_outputs(self):
+        import cxx_analyzer.build_scan as build_scan
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "src").mkdir()
+            (root / "tool-output").mkdir()
+            sources = tuple(root / "src" / f"unit-{index}.c" for index in range(3))
+            for source in sources:
+                source.write_text("int value(void) { return 0; }\n", encoding="utf-8")
+            snapshot = Mock(
+                root=root,
+                files=tuple(f"src/unit-{index}.c" for index in range(3)),
+            )
+
+            def invalid_output_tool(argv, *args, **kwargs):
+                if argv[0] == "configure":
+                    (root / "compile_commands.json").write_text(
+                        json.dumps([
+                            {
+                                "directory": str(root),
+                                "file": str(source),
+                                "arguments": ["cc", "-c", str(source)],
+                            }
+                            for source in sources
+                        ]),
+                        encoding="utf-8",
+                    )
+                else:
+                    Path(argv[-1]).write_bytes(b"x" * 32)
+                return self._execution()
+
+            with patch(
+                "cxx_analyzer.build_scan.run_step", side_effect=invalid_output_tool
+            ) as run_tool:
+                with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", root / "tool-output"):
+                    with patch.object(build_scan, "_MAX_PLIST_BYTES", 32):
+                        with patch.object(build_scan, "MAX_AGGREGATE_PLIST_BYTES", 64):
+                            result = build_scan.run_build_scan(
+                                snapshot,
+                                self._settings(
+                                    auto_cmake=False,
+                                    build_steps=(("configure",),),
+                                ),
+                            )
+
+        self.assertEqual(3, run_tool.call_count)
+        self.assertEqual(("analysis-budget-exhausted",), result.diagnostics[-1:])
+
     def test_build_not_configured_never_executes_repository_script(self):
         from cxx_analyzer.build_scan import run_build_scan
 
@@ -1550,6 +1823,7 @@ class BuildScanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             (root / "src").mkdir()
+            (root / "include").mkdir()
             source = root / "src" / "main.cpp"
             source.write_text("int main() { return 0; }\n", encoding="utf-8")
             database = root / "compile_commands.json"
@@ -1558,11 +1832,24 @@ class BuildScanTests(unittest.TestCase):
             valid = [{
                 "directory": str(root),
                 "file": str(source),
-                "arguments": ["clang++", "-c", str(source)],
+                "arguments": [
+                    "clang++",
+                    "-c",
+                    "-DDEBUG=1",
+                    "-std=c++20",
+                    "-Wall",
+                    "-O2",
+                    "-I",
+                    str(root / "include"),
+                    f"-fmodule-file={root / 'modules' / 'safe.pcm'}",
+                    f"-fprofile-use={root / 'profiles' / 'safe.profdata'}",
+                    str(source),
+                ],
             }]
             database.write_text(json.dumps(valid), encoding="utf-8")
             units = load_compilation_database(snapshot, database)
             self.assertEqual(("src/main.cpp",), tuple(unit.file for unit in units))
+            self.assertEqual(tuple(valid[0]["arguments"]), units[0].arguments)
 
             invalid_entries = (
                 [{
@@ -1594,6 +1881,51 @@ class BuildScanTests(unittest.TestCase):
                     "directory": str(root),
                     "file": str(source),
                     "arguments": ["clang++", "@../outside.rsp"],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": [
+                        "clang++", f"-fmodule-file={root.parent / 'outside.pcm'}"
+                    ],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": [
+                        "clang++",
+                        "-fmodule-file",
+                        f"named={root.parent.as_posix()}/outside.pcm",
+                    ],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": [
+                        "clang++", f"-fprofile-use={root.parent / 'outside.profdata'}"
+                    ],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": [
+                        "clang++", "-fmodule-map-file", str(root.parent / "outside.modulemap")
+                    ],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": ["clang++", "-Xclang", "-fplugin=/outside/plugin.so"],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": ["clang++", "-Xclang=-load"],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": ["clang++", f"-B{root.parent}"],
                 }],
             )
             for payload in invalid_entries:
@@ -1638,6 +1970,41 @@ class BuildScanTests(unittest.TestCase):
                 frame["path"] in snapshot.files and not Path(frame["path"]).is_absolute()
                 for frame in trace
             ))
+
+    def test_clang_plist_resolves_unit_cwd_and_structured_control_edges(self):
+        from cxx_analyzer.build_scan import parse_clang_plist
+
+        fixture = (
+            Path(__file__).parent
+            / "fixtures"
+            / "cxx_memory"
+            / "clang-relative-control.plist"
+        ).read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "build").mkdir()
+            (root / "src").mkdir()
+            (root / "src" / "main.c").write_text(
+                "int write_value(void) { return 0; }\n", encoding="utf-8"
+            )
+            snapshot = Mock(root=root, files=("src/main.c",))
+
+            findings, diagnostics = parse_clang_plist(
+                fixture, snapshot, relative_cwd="build"
+            )
+
+        self.assertEqual([], diagnostics)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("src/main.c", findings[0].path)
+        self.assertEqual(5, findings[0].line)
+        trace = json.loads(findings[0].trace)
+        self.assertEqual([2, 3, 5], [frame["line"] for frame in trace])
+        self.assertEqual(
+            ["control-start", "control-end", "event"],
+            [frame["kind"] for frame in trace],
+        )
+        self.assertTrue(all(frame["path"] == "src/main.c" for frame in trace))
+        self.assertNotIn("escape.c", json.dumps(trace))
 
     def test_fusion_promotes_only_matching_conservative_identity(self):
         from cxx_analyzer.build_scan import parse_clang_plist

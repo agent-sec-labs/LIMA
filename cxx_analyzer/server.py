@@ -19,6 +19,7 @@ SCHEMA_VERSION: Final = 1
 HOST: Final = "0.0.0.0"  # noqa: S104 - Reachable only on the internal Compose network.
 PORT: Final = 8090
 MAX_REQUEST_BYTES: Final = 64 * 1024
+MAX_RESPONSE_BYTES: Final = 2 * 1024 * 1024
 IMPORT_ROOT: Final = Path("/repositories")
 WORK_ROOT: Final = Path("/work/snapshots")
 
@@ -180,6 +181,27 @@ def _error_payload(code: str, request_id: str | None = None) -> dict[str, object
     return {"error": code, "request_id": request_id}
 
 
+def _json_encoder() -> json.JSONEncoder:
+    return json.JSONEncoder(
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _response_fits(payload: dict[str, object]) -> bool:
+    total = 0
+    for chunk in _json_encoder().iterencode(payload):
+        total += len(chunk.encode("utf-8"))
+        if total > MAX_RESPONSE_BYTES:
+            return False
+    return True
+
+
+def _encode_payload(payload: dict[str, object]) -> bytes:
+    return _json_encoder().encode(payload).encode("utf-8")
+
+
 def health_payload() -> dict[str, object]:
     """Return no process detail beyond versioned tool availability booleans."""
 
@@ -228,7 +250,15 @@ def dispatch_request(
         return 400, _error_payload("invalid_json")
 
     try:
-        return 200, analyze_request(payload, settings)
+        result = analyze_request(payload, settings)
+        if not _response_fits(result):
+            response_request_id = (
+                _canonical_request_id(payload.get("request_id"))
+                if isinstance(payload, dict)
+                else None
+            )
+            return 500, _error_payload("response_too_large", response_request_id)
+        return 200, result
     except RequestError as exc:
         return exc.status, _error_payload(exc.code, exc.request_id)
     except Exception:
@@ -253,9 +283,7 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
         raise AttributeError(name)
 
     def _send(self, status: int, payload: dict[str, object]) -> None:
-        body = json.dumps(
-            payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
+        body = _encode_payload(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

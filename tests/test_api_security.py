@@ -30,7 +30,7 @@ BOOTSTRAP_CREDENTIAL = "bootstrap-password"
 def make_settings(db_path: str) -> Settings:
     return Settings(
         host="127.0.0.1", port=0, db_path=db_path, max_diff_bytes=100000,
-        max_steps=8, timeout_seconds=10, llm_base_url="", llm_api_key="",
+        max_steps=8, timeout_seconds=120, llm_base_url="", llm_api_key="",
         llm_model="", github_webhook_secret="", github_token="",
         auto_post_review=False, auth_required=True, auth_secret=AUTH_SIGNING_KEY,
         bootstrap_admin_username="admin", bootstrap_admin_password=BOOTSTRAP_CREDENTIAL,

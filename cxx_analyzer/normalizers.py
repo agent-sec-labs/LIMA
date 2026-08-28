@@ -100,10 +100,15 @@ class NormalizedFinding:
             raise ValueError("finding severity is unsupported")
         if not _safe_path(values["path"]):
             raise ValueError("finding path must be a safe POSIX relative path")
-        if values["analysis_mode"] != "source-only" or values["verification_state"] != "candidate":
-            raise ValueError("source-only findings must remain candidates")
-        if values["tool"] != "semgrep":
-            raise ValueError("source-only findings must be attributed to semgrep")
+        mode_contract = {
+            "source-only": ("candidate", "semgrep"),
+            "build-backed": ("build-verified", "clang"),
+        }
+        contract = mode_contract.get(values["analysis_mode"])
+        if contract is None or (values["verification_state"], values["tool"]) != contract:
+            raise ValueError("finding analysis mode does not match its fixed evidence tier")
+        if values["fix"]:
+            raise ValueError("C/C++ findings must not contain automatic fixes")
         if values["language"] not in {"c", "c++"}:
             raise ValueError("finding language is unsupported")
         for field in strings - {"fix", "path"}:
@@ -133,3 +138,18 @@ class NormalizedFinding:
 
 def conservative_identity(finding: NormalizedFinding) -> tuple[str, str, str, int]:
     return finding.cwe, finding.path, finding.symbol, finding.line
+
+
+def fuse_findings(
+    source_findings: tuple[NormalizedFinding, ...],
+    build_findings: tuple[NormalizedFinding, ...],
+) -> tuple[NormalizedFinding, ...]:
+    """Replace only exact conservative source identities with build evidence."""
+
+    build_identities = {conservative_identity(item) for item in build_findings}
+    retained_source = tuple(
+        item
+        for item in source_findings
+        if conservative_identity(item) not in build_identities
+    )
+    return (*retained_source, *build_findings)

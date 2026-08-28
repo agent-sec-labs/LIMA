@@ -40,6 +40,16 @@ from cxx_analyzer.source_scan import LayerResult, parse_semgrep_json, run_source
 from lima.workspace import RepositoryWorkspace
 
 
+def _expected_cmake_steps():
+    return (
+        (
+            "cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug",
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        ),
+        ("cmake", "--build", "build", "--parallel", "2"),
+    )
+
+
 def _dockerfile_instructions(dockerfile: str) -> list[tuple[str, str]]:
     instructions: list[tuple[str, str]] = []
     pending = ""
@@ -921,7 +931,9 @@ class AnalyzerServiceTests(unittest.TestCase):
 
     @patch("cxx_analyzer.server.shutil.which")
     def test_health_discloses_only_schema_and_tool_availability(self, which):
-        which.side_effect = lambda tool: "/usr/bin/" + tool if tool != "clang" else None
+        which.side_effect = lambda tool: (
+            "/usr/bin/" + tool if tool != "clang" else None
+        )
 
         status, payload = analyzer_server.dispatch_request(
             "GET", "/health", "", b"", self._settings()
@@ -931,10 +943,64 @@ class AnalyzerServiceTests(unittest.TestCase):
         self.assertEqual(
             {
                 "schema_version": 1,
-                "tools": {"semgrep": True, "cmake": True, "clang": False},
+                "tools": {"semgrep": True, "cmake": True, "clang": True},
             },
             payload,
         )
+
+    @patch("cxx_analyzer.server.run_build_scan")
+    @patch("cxx_analyzer.server.run_source_scan")
+    @patch("cxx_analyzer.server.prepare_snapshot")
+    def test_requested_build_or_clang_failure_is_completed_and_preserves_source(
+        self, prepare, source_scan_runner, build_scan_runner
+    ):
+        snapshot = prepare.return_value.__enter__.return_value
+        snapshot.files = ("src/main.cpp",)
+        candidate = NormalizedFinding.create(
+            rule_id="cxx.source.oob-write.constant-index",
+            severity="high",
+            title="Potential out-of-bounds write",
+            explanation="A source candidate.",
+            path="src/main.cpp",
+            line=7,
+            evidence="values[2] = 1",
+            fix="",
+            test="Exercise the boundary.",
+            confidence=0.5,
+            cwe="CWE-787",
+            tool="semgrep",
+            evidence_kind="line",
+            verification_state="candidate",
+            language="c++",
+            symbol="write_value",
+            analysis_mode="source-only",
+            diagnostics=[],
+        )
+        source_scan_runner.return_value = LayerResult((candidate,), (), ())
+        for tool, tool_status, diagnostic in (
+            ("cmake", "build_failed", "build_failed"),
+            ("clang", "failed", "clang_failed"),
+        ):
+            with self.subTest(tool=tool):
+                build_scan_runner.reset_mock()
+                build_scan_runner.return_value = LayerResult(
+                    (),
+                    (diagnostic,),
+                    ({"tool": tool, "status": tool_status},),
+                )
+
+                result = analyzer_server.analyze_request(
+                    self._payload(requested_layers=["source-only", "build-backed"]),
+                    self._settings(),
+                )
+
+                self.assertEqual("completed", result["status"])
+                self.assertEqual([candidate.to_dict()], result["findings"])
+                self.assertEqual([diagnostic], result["diagnostics"])
+                self.assertEqual(
+                    [{"tool": tool, "status": tool_status}], result["tool_runs"]
+                )
+                build_scan_runner.assert_called_once_with(snapshot, self._settings())
 
     def test_http_handler_reads_exactly_the_declared_content_length(self):
         class ExactBody:
@@ -1295,7 +1361,7 @@ class SourceScanTests(unittest.TestCase):
             path="src/buffer.c",
             line=7,
             evidence="x" * 10_000,
-            fix="Add a bounds check.",
+            fix="",
             test="Exercise the boundary.",
             confidence=0.5,
             cwe="CWE-787",
@@ -1353,6 +1419,7 @@ class SourceScanTests(unittest.TestCase):
             {"path": "../escape.c"},
             {"line": 0},
             {"verification_state": "confirmed"},
+            {"fix": "Apply an automatic source rewrite."},
         ):
             with self.subTest(changes=changes):
                 with self.assertRaises(ValueError):
@@ -1384,6 +1451,386 @@ class SourceScanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
 
+
+class BuildScanTests(unittest.TestCase):
+    @staticmethod
+    def _settings(*, auto_cmake=True, build_steps=()):
+        return AnalyzerSettings(
+            auto_cmake=auto_cmake,
+            build_steps=build_steps,
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=90,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    @staticmethod
+    def _execution(status="completed", returncode=0):
+        return ToolExecution(
+            status=status,
+            returncode=returncode,
+            stdout="",
+            stderr="",
+            stdout_sha256="a" * 64,
+            stderr_sha256="b" * 64,
+            output_sha256="c" * 64,
+            output_truncated=False,
+            digests_complete=True,
+            diagnostic="",
+        )
+
+    def test_build_plan_uses_only_fixed_cmake_or_admin_argv(self):
+        from cxx_analyzer.build_scan import select_build_steps
+
+        cmake_snapshot = Mock(files=("CMakeLists.txt", "src/main.cpp"))
+        self.assertEqual(
+            (
+                (
+                    "cmake", "-S", ".", "-B", "build",
+                    "-DCMAKE_BUILD_TYPE=Debug",
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                ),
+                ("cmake", "--build", "build", "--parallel", "2"),
+            ),
+            select_build_steps(cmake_snapshot, self._settings()),
+        )
+
+        admin_steps = (("ninja", "-C", "out"),)
+        script_snapshot = Mock(files=("src/main.cpp", "build.sh"))
+        self.assertEqual(
+            admin_steps,
+            select_build_steps(
+                script_snapshot,
+                self._settings(build_steps=admin_steps),
+            ),
+        )
+        self.assertEqual((), select_build_steps(script_snapshot, self._settings()))
+
+    @patch("cxx_analyzer.build_scan.run_step")
+    def test_build_nonzero_and_timeout_are_bounded_layer_results(self, run_tool):
+        from cxx_analyzer.build_scan import run_build_scan
+
+        snapshot = Mock()
+        snapshot.files = ("CMakeLists.txt", "src/main.cpp")
+        for execution, expected_status in (
+            (self._execution("failed", 2), "build_failed"),
+            (self._execution("timed-out", None), "timed-out"),
+        ):
+            with self.subTest(status=execution.status):
+                run_tool.reset_mock()
+                run_tool.return_value = execution
+                result = run_build_scan(snapshot, self._settings())
+                self.assertEqual((), result.findings)
+                self.assertEqual((expected_status,), result.diagnostics)
+                self.assertEqual(expected_status, result.tool_runs[0]["status"])
+                self.assertLessEqual(
+                    len(result.diagnostics[0].encode("utf-8")), 2048
+                )
+                self.assertEqual(1, run_tool.call_count)
+
+    def test_build_not_configured_never_executes_repository_script(self):
+        from cxx_analyzer.build_scan import run_build_scan
+
+        snapshot = Mock(files=("src/main.cpp", "configure", "build.sh"))
+        with patch("cxx_analyzer.build_scan.run_step") as run_tool:
+            result = run_build_scan(snapshot, self._settings())
+        self.assertEqual((), result.findings)
+        self.assertEqual(("build-not-configured",), result.diagnostics)
+        self.assertEqual((), result.tool_runs)
+        run_tool.assert_not_called()
+
+    def test_compile_database_rejects_command_strings_and_escaping_paths(self):
+        from cxx_analyzer.build_scan import load_compilation_database
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "src").mkdir()
+            source = root / "src" / "main.cpp"
+            source.write_text("int main() { return 0; }\n", encoding="utf-8")
+            database = root / "compile_commands.json"
+            snapshot = Mock(root=root, files=("src/main.cpp",))
+
+            valid = [{
+                "directory": str(root),
+                "file": str(source),
+                "arguments": ["clang++", "-c", str(source)],
+            }]
+            database.write_text(json.dumps(valid), encoding="utf-8")
+            units = load_compilation_database(snapshot, database)
+            self.assertEqual(("src/main.cpp",), tuple(unit.file for unit in units))
+
+            invalid_entries = (
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "command": f"clang++ -c {source}",
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(root.parent / "escape.cpp"),
+                    "arguments": ["clang++", "-c", "../escape.cpp"],
+                }],
+                [{
+                    "directory": str(root.parent),
+                    "file": str(source),
+                    "arguments": ["clang++", "-c", str(source)],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": ["clang++", "-c", "../escape.cpp"],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": ["clang++", "-I", str(root.parent), str(source)],
+                }],
+                [{
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": ["clang++", "@../outside.rsp"],
+                }],
+            )
+            for payload in invalid_entries:
+                with self.subTest(payload=payload):
+                    database.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_compilation_database(snapshot, database)
+
+    def test_structured_clang_plist_maps_four_cwes_and_bounds_trace_paths(self):
+        from cxx_analyzer.build_scan import parse_clang_plist
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        raw = (fixture_root / "clang-sample.plist").read_bytes()
+        snapshot = Mock(
+            root=fixture_root.resolve(),
+            files=(
+                "cwe-787/vulnerable-1.c",
+                "cwe-125/vulnerable-1.c",
+                "cwe-416/vulnerable-1.c",
+                "cwe-415/vulnerable-1.c",
+            ),
+        )
+
+        findings, diagnostics = parse_clang_plist(raw, snapshot)
+
+        self.assertEqual([], diagnostics)
+        self.assertEqual(
+            {"CWE-787", "CWE-125", "CWE-416", "CWE-415"},
+            {finding.cwe for finding in findings},
+        )
+        self.assertTrue(all(
+            finding.analysis_mode == "build-backed"
+            and finding.verification_state == "build-verified"
+            and finding.tool == "clang"
+            and finding.fix == ""
+            for finding in findings
+        ))
+        for finding in findings:
+            trace = json.loads(finding.trace)
+            self.assertTrue(trace)
+            self.assertTrue(all(
+                frame["path"] in snapshot.files and not Path(frame["path"]).is_absolute()
+                for frame in trace
+            ))
+
+    def test_fusion_promotes_only_matching_conservative_identity(self):
+        from cxx_analyzer.build_scan import parse_clang_plist
+        from cxx_analyzer.normalizers import fuse_findings
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        snapshot = Mock(
+            root=fixture_root.resolve(),
+            files=("cwe-787/vulnerable-1.c",),
+        )
+        build_findings, _ = parse_clang_plist(
+            (fixture_root / "clang-sample.plist").read_bytes(), snapshot
+        )
+        build = build_findings[0]
+        candidate = NormalizedFinding.create(
+            rule_id="cxx.source.oob-write.constant-index",
+            severity="high",
+            title="Potential out-of-bounds write",
+            explanation="A source candidate.",
+            path=build.path,
+            line=build.line,
+            evidence="values[2] = 1",
+            fix="",
+            test="Exercise the boundary.",
+            confidence=0.5,
+            cwe=build.cwe,
+            tool="semgrep",
+            evidence_kind="line",
+            verification_state="candidate",
+            language=build.language,
+            symbol=build.symbol,
+            analysis_mode="source-only",
+            diagnostics=[],
+        )
+        different_line = NormalizedFinding.create(
+            **{**candidate.to_dict(), "line": candidate.line + 1},
+            diagnostics=[],
+        )
+
+        fused = fuse_findings((candidate, different_line), (build,))
+
+        self.assertEqual(2, len(fused))
+        self.assertIn(build, fused)
+        self.assertIn(different_line, fused)
+        self.assertNotIn(candidate, fused)
+
+    @patch("cxx_analyzer.build_scan.run_step")
+    def test_clang_runs_only_after_successful_build_and_valid_database(self, run_tool):
+        import cxx_analyzer.build_scan as build_scan
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        sample = (fixture_root / "clang-sample.plist").read_text(encoding="utf-8")
+        first_diagnostic = sample.replace(
+            "cwe-787/vulnerable-1.c", "src/main.c"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "src").mkdir()
+            source = root / "src" / "main.c"
+            source.write_text(
+                "void oob_write_array(void) { int values[2]; values[2] = 1; }\n",
+                encoding="utf-8",
+            )
+            temp_root = root / "tool-output"
+            temp_root.mkdir()
+            snapshot = Mock(
+                root=root,
+                files=("CMakeLists.txt", "src/main.c"),
+            )
+
+            def successful_tool(argv, *args, **kwargs):
+                if argv[:3] == ("cmake", "--build", "build"):
+                    build = root / "build"
+                    build.mkdir(exist_ok=True)
+                    (build / "compile_commands.json").write_text(
+                        json.dumps([{
+                            "directory": str(root),
+                            "file": str(source),
+                            "arguments": ["cc", "-c", str(source), "-o", "main.o"],
+                        }]),
+                        encoding="utf-8",
+                    )
+                if argv[0] == "clang-14":
+                    Path(argv[-1]).write_text(first_diagnostic, encoding="utf-8")
+                return self._execution()
+
+            run_tool.side_effect = successful_tool
+            with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", temp_root):
+                result = build_scan.run_build_scan(snapshot, self._settings())
+
+            self.assertEqual(3, run_tool.call_count)
+            self.assertEqual(_expected_cmake_steps(), tuple(
+                call.args[0] for call in run_tool.call_args_list[:2]
+            ))
+            clang_call = run_tool.call_args_list[2]
+            self.assertEqual("clang-14", clang_call.args[0][0])
+            self.assertIn("--analyze", clang_call.args[0])
+            self.assertIn(
+                "-analyzer-checker=core,unix,alpha.security.ArrayBoundV2",
+                clang_call.args[0],
+            )
+            self.assertIs(snapshot, clang_call.args[1])
+            self.assertEqual(".", clang_call.args[2])
+            self.assertEqual(1, len(result.findings))
+            self.assertEqual("build-verified", result.findings[0].verification_state)
+
+            (root / "build" / "compile_commands.json").write_text(
+                json.dumps([{
+                    "directory": str(root),
+                    "file": str(source),
+                    "command": f"cc -c {source}",
+                }]),
+                encoding="utf-8",
+            )
+            run_tool.reset_mock()
+            run_tool.side_effect = [self._execution(), self._execution()]
+            with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", temp_root):
+                rejected = build_scan.run_build_scan(snapshot, self._settings())
+            self.assertEqual(2, run_tool.call_count)
+        self.assertEqual(("compile-commands-rejected",), rejected.diagnostics)
+
+
+class BuildScanContainerTests(unittest.TestCase):
+    def test_build_backed_fixture_coverage_lists_every_uncovered_identity(self):
+        if sys.platform != "linux":
+            self.skipTest("build-backed container regression requires Linux")
+        if shutil.which("cmake") is None or shutil.which("clang-14") is None:
+            self.skipTest("CMake and clang-14 are required for build-backed fixtures")
+
+        import cxx_analyzer.build_scan as build_scan
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
+            base = Path(temporary)
+            import_root = base / "imports"
+            repository = import_root / "team" / "project"
+            work_root = base / "snapshots"
+            repository.mkdir(parents=True)
+            work_root.mkdir()
+            sources = []
+            for item in manifest:
+                source = fixture_root / item["path"]
+                target = repository / item["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                sources.append(item["path"])
+            cmake_sources = "\n  ".join(f'"{path}"' for path in sources)
+            (repository / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "project(lima_cxx_memory_fixtures LANGUAGES C CXX)\n"
+                f"add_library(fixtures OBJECT\n  {cmake_sources}\n)\n",
+                encoding="utf-8",
+            )
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", fingerprint, work_root
+            ) as snapshot:
+                tool_output = base / "tool-output"
+                tool_output.mkdir()
+                with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", tool_output):
+                    result = build_scan.run_build_scan(
+                        snapshot, BuildScanTests._settings()
+                    )
+
+        found = {
+            (finding.cwe, finding.path, finding.symbol)
+            for finding in result.findings
+        }
+        expected = {
+            (item["cwe"], item["path"], item["symbol"])
+            for item in manifest
+            if item["clang_expected"]
+        }
+        safe = {
+            (item["cwe"], item["path"], item["symbol"])
+            for item in manifest
+            if not item["vulnerable"]
+        }
+        uncovered = sorted(expected - found)
+        print(f"uncovered build-backed fixture identities: {uncovered}")
+        self.assertFalse(
+            uncovered,
+            f"uncovered build-backed fixture identities: {uncovered}; "
+            f"diagnostics: {result.diagnostics}",
+        )
+        self.assertTrue(found.isdisjoint(safe), f"safe identities reported: {found & safe}")
+        self.assertTrue(all(
+            finding.verification_state == "build-verified" and finding.fix == ""
+            for finding in result.findings
+        ))
+
+
 class SourceScanContainerTests(unittest.TestCase):
     def test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates(self):
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
@@ -1392,7 +1839,7 @@ class SourceScanContainerTests(unittest.TestCase):
         self.assertTrue(all(
             set(item) == {
                 "id", "cwe", "path", "symbol", "vulnerable", "allowed_layers",
-                "asan_expected",
+                "asan_expected", "clang_expected",
             }
             for item in manifest
         ))

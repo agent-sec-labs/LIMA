@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>files</key>
+  <array>
+    <string>cwe-787/vulnerable-1.c</string>
+    <string>cwe-125/vulnerable-1.c</string>
+    <string>cwe-416/vulnerable-1.c</string>
+    <string>cwe-415/vulnerable-1.c</string>
+  </array>
+  <key>diagnostics</key>
+  <array>
+    <dict>
+      <key>check_name</key><string>alpha.security.ArrayBoundV2</string>
+      <key>type</key><string>Out-of-bound write</string>
+      <key>description</key><string>Array write is outside the known bound</string>
+      <key>issue_context_kind</key><string>function</string>
+      <key>issue_context</key><string>oob_write_array</string>
+      <key>location</key><dict><key>line</key><integer>1</integer><key>col</key><integer>52</integer><key>file</key><integer>0</integer></dict>
+      <key>path</key><array><dict><key>kind</key><string>event</string><key>location</key><dict><key>line</key><integer>1</integer><key>col</key><integer>52</integer><key>file</key><integer>0</integer></dict></dict></array>
+    </dict>
+    <dict>
+      <key>check_name</key><string>alpha.security.ArrayBoundV2</string>
+      <key>type</key><string>Out-of-bound read</string>
+      <key>description</key><string>Array read is outside the known bound</string>
+      <key>issue_context_kind</key><string>function</string>
+      <key>issue_context</key><string>oob_read_array</string>
+      <key>location</key><dict><key>line</key><integer>1</integer><key>col</key><integer>58</integer><key>file</key><integer>1</integer></dict>
+      <key>path</key><array><dict><key>kind</key><string>event</string><key>location</key><dict><key>line</key><integer>1</integer><key>col</key><integer>58</integer><key>file</key><integer>1</integer></dict></dict></array>
+    </dict>
+    <dict>
+      <key>check_name</key><string>unix.Malloc</string>
+      <key>type</key><string>Use-after-free</string>
+      <key>description</key><string>Memory is accessed after it is released</string>
+      <key>issue_context_kind</key><string>function</string>
+      <key>issue_context</key><string>use_after_free_read</string>
+      <key>location</key><dict><key>line</key><integer>2</integer><key>col</key><integer>87</integer><key>file</key><integer>2</integer></dict>
+      <key>path</key><array><dict><key>kind</key><string>event</string><key>location</key><dict><key>line</key><integer>2</integer><key>col</key><integer>87</integer><key>file</key><integer>2</integer></dict></dict></array>
+    </dict>
+    <dict>
+      <key>check_name</key><string>unix.Malloc</string>
+      <key>type</key><string>Double free</string>
+      <key>description</key><string>Memory is released for a second time</string>
+      <key>issue_context_kind</key><string>function</string>
+      <key>issue_context</key><string>double_free_c</string>
+      <key>location</key><dict><key>line</key><integer>2</integer><key>col</key><integer>75</integer><key>file</key><integer>3</integer></dict>
+      <key>path</key><array><dict><key>kind</key><string>event</string><key>location</key><dict><key>line</key><integer>2</integer><key>col</key><integer>75</integer><key>file</key><integer>3</integer></dict></dict></array>
+    </dict>
+  </array>
+</dict>
+</plist>

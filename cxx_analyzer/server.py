@@ -9,7 +9,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
+from .build_scan import run_build_scan
 from .config import AnalyzerSettings
+from .normalizers import NormalizedFinding, fuse_findings
 from .snapshot import _normalize_repository_key, prepare_snapshot
 from .source_scan import run_source_scan
 
@@ -120,18 +122,22 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
             "snapshot_rejected", request_id=request_id  # type: ignore[arg-type]
         ) from exc
 
-    findings: list[dict[str, object]] = []
+    source_findings: tuple[NormalizedFinding, ...] = ()
+    build_findings: tuple[NormalizedFinding, ...] = ()
     tool_runs: list[dict[str, object]] = []
     diagnostics: list[object] = []
     with prepared as snapshot:
         requested_layers = request["requested_layers"]
         if "source-only" in requested_layers:
             result = run_source_scan(snapshot, settings)
-            findings.extend(finding.to_dict() for finding in result.findings)
+            source_findings = result.findings
             tool_runs.extend(result.tool_runs)
             diagnostics.extend(result.diagnostics)
         if "build-backed" in requested_layers:
-            diagnostics.append("build-backed-not-available")
+            result = run_build_scan(snapshot, settings)
+            build_findings = result.findings
+            tool_runs.extend(result.tool_runs)
+            diagnostics.extend(result.diagnostics)
         if "sanitizer-confirmed" in requested_layers:
             diagnostics.append("sanitizer-confirmed-not-available")
         source_files = sum(
@@ -140,13 +146,15 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
         )
         snapshot_files = len(snapshot.files)
 
+    findings = fuse_findings(source_findings, build_findings)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": request_id,
         "status": "completed",
         "snapshot_sha256": request["snapshot_sha256"],
         "tool_runs": tool_runs,
-        "findings": findings,
+        "findings": [finding.to_dict() for finding in findings],
         "coverage": {
             "source_files": source_files,
             "snapshot_files": snapshot_files,
@@ -180,7 +188,10 @@ def health_payload() -> dict[str, object]:
         "tools": {
             "semgrep": shutil.which("semgrep") is not None,
             "cmake": shutil.which("cmake") is not None,
-            "clang": shutil.which("clang") is not None,
+            "clang": any(
+                shutil.which(executable) is not None
+                for executable in ("clang-14", "clang")
+            ),
         },
     }
 

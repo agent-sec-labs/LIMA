@@ -1,5 +1,8 @@
+import copy
 import hashlib
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +19,10 @@ from cxx_analyzer.execution import (
     _stream_process,
     run_step,
 )
+from cxx_analyzer.normalizers import (
+    NormalizedFinding,
+    conservative_identity,
+)
 from cxx_analyzer.sandbox import (
     MIN_LANDLOCK_ABI,
     build_launcher_argv,
@@ -23,6 +30,7 @@ from cxx_analyzer.sandbox import (
     landlock_abi,
 )
 from cxx_analyzer.snapshot import prepare_snapshot
+from cxx_analyzer.source_scan import parse_semgrep_json
 from lima.workspace import RepositoryWorkspace
 
 
@@ -669,6 +677,140 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 with self.subTest(argv=argv, timeout=timeout, output=output_limit):
                     with self.assertRaises(ValueError):
                         run_step(argv, snapshot, ".", timeout, output_limit, {})
+
+
+class SourceScanTests(unittest.TestCase):
+    def test_normalized_finding_enforces_the_client_schema_and_bounds_text(self):
+        diagnostics = []
+        finding = NormalizedFinding.create(
+            rule_id="cxx.source.oob-write",
+            severity="high",
+            title="Potential out-of-bounds write",
+            explanation="A narrow source pattern found an unchecked write.",
+            path="src/buffer.c",
+            line=7,
+            evidence="x" * 10_000,
+            fix="Add a bounds check.",
+            test="Exercise the boundary.",
+            confidence=0.5,
+            cwe="CWE-787",
+            tool="semgrep",
+            evidence_kind="line",
+            verification_state="candidate",
+            language="c",
+            symbol="write_value",
+            analysis_mode="source-only",
+            trace="y" * 10_000,
+            diagnostics=diagnostics,
+        )
+
+        self.assertEqual(
+            (
+                "rule_id", "severity", "title", "explanation", "path", "line",
+                "evidence", "fix", "test", "confidence", "cwe", "tool",
+                "evidence_kind", "verification_state", "language", "symbol",
+                "analysis_mode",
+            ),
+            tuple(finding.to_dict()),
+        )
+        self.assertLess(len(finding.evidence), 10_000)
+        self.assertLess(len(finding.trace), 10_000)
+        self.assertTrue(diagnostics)
+        self.assertEqual(
+            ("CWE-787", "src/buffer.c", "write_value", 7),
+            conservative_identity(finding),
+        )
+        title_diagnostics = []
+        title_bounded = NormalizedFinding.create(
+            **{**finding.to_dict(), "title": "z" * 10_000},
+            trace="",
+            diagnostics=title_diagnostics,
+        )
+        self.assertLess(len(title_bounded.title), 10_000)
+        self.assertTrue(title_diagnostics)
+
+        for changes in (
+            {"cwe": "CWE-119"},
+            {"severity": "urgent"},
+            {"path": "../escape.c"},
+            {"line": 0},
+            {"verification_state": "confirmed"},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    NormalizedFinding.create(
+                        **{**finding.to_dict(), **changes}, trace="", diagnostics=[]
+                    )
+
+    def test_parse_semgrep_json_rejects_untrusted_results_and_yields_candidates(self):
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        valid = json.loads((fixture_root / "semgrep-sample.json").read_text(encoding="utf-8"))
+        findings, diagnostics = parse_semgrep_json(json.dumps(valid), {"src/buffer.c"})
+
+        self.assertEqual([], diagnostics)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("candidate", findings[0].verification_state)
+        self.assertEqual("source-only", findings[0].analysis_mode)
+        self.assertEqual("write_value", findings[0].symbol)
+
+        invalid = copy.deepcopy(valid)
+        invalid["results"][0]["extra"]["metadata"].pop("cwe")
+        with self.assertRaises(ValueError):
+            parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
+        invalid = copy.deepcopy(valid)
+        invalid["results"][0]["path"] = "../escape.c"
+        with self.assertRaises(ValueError):
+            parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
+        invalid = copy.deepcopy(valid)
+        invalid["results"][0]["start"]["line"] = 0
+        with self.assertRaises(ValueError):
+            parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
+
+    def test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates(self):
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(24, len(manifest))
+        self.assertTrue(all(
+            set(item) == {
+                "id", "cwe", "path", "symbol", "vulnerable", "allowed_layers",
+                "asan_expected",
+            }
+            for item in manifest
+        ))
+        self.assertEqual(
+            {"CWE-787", "CWE-125", "CWE-416", "CWE-415"},
+            {item["cwe"] for item in manifest},
+        )
+        semgrep_path = shutil.which("semgrep")
+        if semgrep_path is None:
+            self.skipTest("Semgrep is not installed on this host")
+
+        completed = subprocess.run(  # noqa: S603 - fixed local Semgrep regression tool.
+            [
+                semgrep_path, "--json", "--quiet", "--config",
+                str(Path("cxx_analyzer/rules/cxx-memory.yml").resolve()), ".",
+            ],
+            cwd=fixture_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if completed.returncode == 2 and "Fatal error:" in completed.stderr:
+            self.skipTest("Semgrep is installed but unavailable on this host")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        findings, _ = parse_semgrep_json(
+            completed.stdout,
+            {item["path"] for item in manifest},
+        )
+        self.assertTrue(all(item.verification_state == "candidate" for item in findings))
+        hit_paths = {item.path for item in findings}
+        self.assertTrue(
+            all(item["path"] in hit_paths for item in manifest if item["vulnerable"])
+        )
+        self.assertTrue(
+            all(item["path"] not in hit_paths for item in manifest if not item["vulnerable"])
+        )
 
 
 if __name__ == "__main__":

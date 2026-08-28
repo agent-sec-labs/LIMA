@@ -1,0 +1,83 @@
+rules:
+  - id: cxx.source.oob-write.constant-index
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow fixed-index write requires runtime confirmation.
+    metadata:
+      cwe: CWE-787
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: $ARRAY[8] = $VALUE;
+          - pattern: $ARRAY[9] = $VALUE;
+          - pattern: $ARRAY[3] = $VALUE;
+  - id: cxx.source.oob-read.fixed-return
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow fixed-index read requires runtime confirmation.
+    metadata:
+      cwe: CWE-125
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: return $ARRAY[8];
+          - pattern: int $RESULT = $ARRAY[9];
+          - pattern: return $ARRAY[7];
+  - id: cxx.source.use-after-free.reused-pointer
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow post-release reuse requires runtime confirmation.
+    metadata:
+      cwe: CWE-416
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: |
+              free($PTR);
+              ...
+              return $PTR[0];
+          - pattern: |
+              delete $PTR;
+              ...
+              return *$PTR;
+          - pattern: |
+              free($PTR);
+              ...
+              $PTR[0] = $VALUE;
+  - id: cxx.source.double-free.same-pointer
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow repeated release requires runtime confirmation.
+    metadata:
+      cwe: CWE-415
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: |
+              free($PTR);
+              ...
+              free($PTR);
+          - pattern: |
+              delete $PTR;
+              ...
+              delete $PTR;
+          - pattern: |
+              std::free($PTR);
+              ...
+              std::free($PTR);

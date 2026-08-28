@@ -286,7 +286,11 @@ git push --set-upstream origin <branch-name>
 ```
 
 PR 必须填写 Summary、Security impact、Verification、Evidence、Experiment integrity 和
-Review notes。仓库近期 PR 使用线性 squash 历史；一个逻辑 PR 通常选择 **Squash and merge**。
+Review notes，禁止保留空模板描述直接合并。创建 PR 时必须在描述中使用
+`Closes #<issue>`（或 `Fixes #<issue>`）绑定对应 Issue，使其在合并时自动关闭；
+Issue 改造完成、`merge-gate` 通过并合并后，必须回头确认对应 Issue 已关闭且第 11 节
+状态表已同步，不允许出现已实现的 Issue 长期未关闭的情况。仓库近期 PR 使用线性
+squash 历史；一个逻辑 PR 通常选择 **Squash and merge**。
 禁止直接推送、强推或删除 `main`。
 
 ## 9. 验证矩阵

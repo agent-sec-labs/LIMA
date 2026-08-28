@@ -1,2 +1,9 @@
+# Keep repository text files consistent across Windows, Linux, and macOS.
+* text=auto eol=lf
+
+# Windows command scripts require/prefer CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # Skill manifests hash LF-canonical Python source on every platform.
 skills/**/skill.py text eol=lf

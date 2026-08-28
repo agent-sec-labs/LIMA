@@ -1,6 +1,6 @@
-psycopg[binary]>=3.1,<4
+psycopg[binary]>=3.3.4,<4
 redis>=5,<7
-PyJWT[crypto]>=2.8,<3
-opentelemetry-sdk>=1.24,<2
-opentelemetry-exporter-otlp-proto-http>=1.24,<2
-bandit>=1.7,<2
+PyJWT[crypto]>=2.13.0,<3
+opentelemetry-sdk>=1.44.0,<2
+opentelemetry-exporter-otlp-proto-http>=1.44.0,<2
+bandit>=1.9.4,<2

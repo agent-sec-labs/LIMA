@@ -289,8 +289,31 @@ PR 必须填写 Summary、Security impact、Verification、Evidence、Experiment
 Review notes，禁止保留空模板描述直接合并。创建 PR 时必须在描述中使用
 `Closes #<issue>`（或 `Fixes #<issue>`）绑定对应 Issue，使其在合并时自动关闭；
 Issue 改造完成、`merge-gate` 通过并合并后，必须回头确认对应 Issue 已关闭且第 11 节
-状态表已同步，不允许出现已实现的 Issue 长期未关闭的情况。仓库近期 PR 使用线性
-squash 历史；一个逻辑 PR 通常选择 **Squash and merge**。
+状态表已同步，不允许出现已实现的 Issue 长期未关闭的情况。
+
+PR 描述以 [PR #18](https://github.com/agent-sec-labs/LIMA/pull/18) 为基准格式，标题使用
+`[T<编号>] <英文祈使句概括>`（非任务类 PR 用 `docs:`/`fix:`/`test:` 前缀）：
+
+```markdown
+Closes #<issue>
+
+## Summary
+
+- <动词开头，一条描述一个行为变化或安全不变量，不写叙述性文字>
+
+## Validation
+
+- Ruff <版本>: passed
+- Bandit: no issues identified, no skipped findings
+- Windows full regression: <N>/<N> passed
+- <按改动补充 Docker 定向回归、required-SAST verified-high gate 等>
+```
+
+模板小节可按改动性质裁剪（纯文档 PR 可省略 Security impact 与 Experiment
+integrity），但 `Closes` 绑定、行为式 Summary 和量化 Validation 三项不可省略，
+且 Validation 只允许出现真实运行过的命令与结果。
+
+仓库近期 PR 使用线性 squash 历史；一个逻辑 PR 通常选择 **Squash and merge**。
 禁止直接推送、强推或删除 `main`。
 
 ## 9. 验证矩阵

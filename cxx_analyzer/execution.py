@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO
@@ -50,9 +51,16 @@ class StreamCapture:
     stdout_sha256: str
     stderr_sha256: str
     output_truncated: bool
+    digests_complete: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.digests_complete and (self.stdout_sha256 or self.stderr_sha256):
+            raise ValueError("incomplete stream capture must not expose digest claims")
 
     @property
     def output_sha256(self) -> str:
+        if not self.digests_complete:
+            return ""
         return _combined_digest(self.stdout_sha256, self.stderr_sha256)
 
 
@@ -68,6 +76,7 @@ class ToolExecution:
     stderr_sha256: str
     output_sha256: str
     output_truncated: bool
+    digests_complete: bool = True
     diagnostic: str = ""
 
 
@@ -116,29 +125,54 @@ def _drain(stream: BinaryIO, state: _StreamState) -> None:
         stream.close()
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+def _linux_group_exists(process_group: int) -> bool:
     try:
-        if sys.platform == "linux":
+        os.killpg(process_group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "linux":
+        try:
             os.killpg(process.pid, signal.SIGTERM)
-        else:
+        except ProcessLookupError:
+            pass
+        term_deadline = time.monotonic() + 0.5
+        while _linux_group_exists(process.pid) and time.monotonic() < term_deadline:
+            time.sleep(0.01)
+        if _linux_group_exists(process.pid):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    elif process.poll() is None:
+        try:
             process.terminate()
-        process.wait(timeout=1)
-        return
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+            process.wait(timeout=0.5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
     try:
-        if sys.platform == "linux":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except OSError:
-        pass
-    try:
-        process.wait(timeout=1)
+        process.wait(timeout=0.5)
     except subprocess.TimeoutExpired:
         pass
+
+
+def _join_drains_until(threads: tuple[threading.Thread, ...], deadline: float) -> bool:
+    while any(thread.is_alive() for thread in threads):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=min(0.05, remaining))
+    return True
 
 
 def _stream_process(
@@ -168,22 +202,28 @@ def _stream_process(
     for thread in threads:
         thread.start()
 
+    deadline = time.monotonic() + timeout_seconds
     timed_out = False
     try:
-        process.wait(timeout=timeout_seconds)
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         timed_out = True
-        _terminate_process(process)
-    for thread in threads:
-        thread.join(timeout=2)
+    drains_complete = _join_drains_until(threads, deadline)
+    if not drains_complete:
+        timed_out = True
+    if timed_out:
+        _terminate_process_group(process)
+        drains_complete = _join_drains_until(threads, time.monotonic() + 2.0)
 
     stdout, stdout_sha256, stdout_bytes = stdout_state.snapshot()
     stderr, stderr_sha256, stderr_bytes = stderr_state.snapshot()
-    drain_incomplete = any(thread.is_alive() for thread in threads)
     returncode = process.poll()
     if returncode is None:
-        _terminate_process(process)
+        _terminate_process_group(process)
         returncode = process.poll()
+    if not drains_complete:
+        stdout_sha256 = ""
+        stderr_sha256 = ""
     return StreamCapture(
         returncode=returncode if returncode is not None else -1,
         timed_out=timed_out,
@@ -192,8 +232,9 @@ def _stream_process(
         stdout_sha256=stdout_sha256,
         stderr_sha256=stderr_sha256,
         output_truncated=(
-            stdout_bytes + stderr_bytes > max_output_bytes or drain_incomplete
+            stdout_bytes + stderr_bytes > max_output_bytes or not drains_complete
         ),
+        digests_complete=drains_complete,
     )
 
 
@@ -236,6 +277,7 @@ def _empty_execution(status: str, diagnostic: str) -> ToolExecution:
         stderr_sha256=empty_sha256,
         output_sha256=_combined_digest(empty_sha256, empty_sha256),
         output_truncated=False,
+        digests_complete=True,
         diagnostic=diagnostic,
     )
 
@@ -312,6 +354,7 @@ def run_step(
             stderr_sha256=captured.stderr_sha256,
             output_sha256=captured.output_sha256,
             output_truncated=captured.output_truncated,
+            digests_complete=captured.digests_complete,
             diagnostic="filesystem sandbox setup failed",
         )
     status = (
@@ -328,4 +371,8 @@ def run_step(
         stderr_sha256=captured.stderr_sha256,
         output_sha256=captured.output_sha256,
         output_truncated=captured.output_truncated,
+        digests_complete=captured.digests_complete,
+        diagnostic=(
+            "" if captured.digests_complete else "tool output drain incomplete"
+        ),
     )

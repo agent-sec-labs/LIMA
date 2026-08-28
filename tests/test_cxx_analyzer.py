@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -395,6 +396,55 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         self.assertNotIn(b"sensitive-tail", captured.stdout)
         self.assertNotIn(b"diagnostic-secret", captured.stderr)
 
+    def test_stream_timeout_kills_group_after_leader_exits_and_hashes_to_eof(self):
+        if sys.platform != "linux":
+            self.skipTest("process-group descendant regression requires Linux")
+        stdout = b"descendant-stdout"
+        stderr = b"descendant-stderr"
+        child_code = (
+            "import os,time; "
+            f"os.write(1, {stdout!r}); "
+            f"os.write(2, {stderr!r}); "
+            "time.sleep(30)"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "descendant.pid"
+            script = (
+                "import pathlib,subprocess,sys; "
+                f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))"
+            )
+            process = subprocess.Popen(  # noqa: S603 - fixed local test child
+                [sys.executable, "-c", script],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                close_fds=True,
+                start_new_session=True,
+            )
+
+            def kill_descendant() -> None:
+                try:
+                    os.kill(int(pid_file.read_text()), 9)
+                except (OSError, ValueError):
+                    pass
+
+            self.addCleanup(kill_descendant)
+            started = time.monotonic()
+            captured = _stream_process(
+                process, timeout_seconds=1, max_output_bytes=1024
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertTrue(captured.timed_out)
+        self.assertTrue(captured.digests_complete)
+        self.assertLess(elapsed, 5)
+        self.assertEqual(stdout, captured.stdout)
+        self.assertEqual(stderr, captured.stderr)
+        self.assertEqual(hashlib.sha256(stdout).hexdigest(), captured.stdout_sha256)
+        self.assertEqual(hashlib.sha256(stderr).hexdigest(), captured.stderr_sha256)
+
     def test_output_digest_uses_tagged_complete_stream_digests(self):
         stdout = b"stdout beyond retained prefix"
         stderr = b"stderr beyond retained prefix"
@@ -416,6 +466,20 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             output_truncated=True,
         )
         self.assertEqual(expected, capture.output_sha256)
+
+    def test_incomplete_stream_capture_rejects_partial_digest_claims(self):
+        partial_sha256 = hashlib.sha256(b"partial").hexdigest()
+        with self.assertRaisesRegex(ValueError, "incomplete stream"):
+            StreamCapture(
+                returncode=-1,
+                timed_out=True,
+                stdout=b"partial",
+                stderr=b"",
+                stdout_sha256=partial_sha256,
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                output_truncated=True,
+                digests_complete=False,
+            )
 
     @patch("cxx_analyzer.execution.subprocess.Popen")
     @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=0)

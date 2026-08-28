@@ -13,8 +13,10 @@
 1. **LIMA 是证据驱动的仓库安全 Agent，不是通用聊天 Agent。** 默认本地模式不调用
    远程模型；LLM 只负责可选的语义增强，不能替代静态证据。
 2. **不要执行待审计仓库的代码。** 仓库导入、扫描和快照处理必须把目标代码当作不可信数据。
-3. **当前 GitHub URL 尚不能直接完成远程仓库扫描。** T1 已提供 `RepositorySource`
-   规范化契约，但下载、快照缓存和异步扫描集成仍属于 Epic #17 的后续工作。
+3. **GitHub 物化层尚未接入服务编排。** T1 提供 `RepositorySource` 契约，
+   T2 `GitHubMaterializer` 负责把 GitHub ref 解析为不可变 SHA、下载加固归档并
+   发布到 T3 `RepositoryCache`；三者均已落地，但异步扫描集成（T4）仍是
+   Epic #17 的后续工作，`POST /v1/repository-scans` 仍只接受本地 `repository_key`。
 4. **候选告警不能直接触发自动修复。** 只有已验证、受支持且通过安全 Oracle 的
    CWE-22、CWE-78、CWE-89 修复才可能进入修复闭环。
 5. **一个 Issue、一个责任边界、一个 PR。** 不要顺手重构其他模块，也不要开发
@@ -150,6 +152,7 @@ candidate
 | 仓库来源契约 | `lima/repository_source.py` | GitHub/local-import 规范化；不联网、不物化 | `test_repository_source.py` |
 | 本地导入边界 | `lima/repository_import.py` | `repository_key` 归一化和根目录逃逸防护 | `test_repository_import.py` |
 | 快照缓存 | `lima/repository_cache.py` | 不可变 RepositorySnapshot 的有界缓存：TTL、配额、LRU、并发物化去重、原子发布 | `test_repository_cache.py` |
+| GitHub 物化 | `lima/repository_materializer.py` | ref 解析钉死为不可变 SHA、codeload 加固下载、归档预算/防穿越/防 symlink、发布到 RepositoryCache | `test_repository_materializer.py` |
 | 有界工作区 | `lima/workspace.py` | 文件枚举、大小预算、敏感路径/符号链接过滤、指纹 | `test_workspace.py` |
 | 仓库扫描 | `lima/repository_scanner.py` | AST、数据流、SAST 和规则结果融合 | `test_workspace.py`, `test_sast.py` |
 | Python 分析 | `lima/python_analyzer.py`, `lima/python_dataflow.py` | Python AST 与同/跨文件 source-to-sink | `test_python_dataflow.py` |
@@ -444,7 +447,7 @@ python -m unittest -v `
 | 任务 | 当前状态 | 交接说明 |
 |---|---|---|
 | [T1 #10](https://github.com/agent-sec-labs/LIMA/issues/10) RepositorySource | Closed | PR #18 已合并；契约在 `repository_source.py`，不得在此层联网或物化文件 |
-| [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | `status:blocked` | 虽然 T1 已合并，当前仍标记 contract freeze；等待维护者明确解除，不要自行开工 |
+| [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | 本地已实现 | 契约在 `repository_materializer.py`（ref 钉死/加固下载/发布到 RepositoryCache）；未接服务编排，接线属于 T4 |
 | [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | Closed | PR #23 已合并；契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
 | [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | `status:blocked` | 依赖 T1/T2/T3；可讨论 mock，但不要在依赖未完成时进入正式集成 |
 | [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | `status:ready` | 可认领；不得削弱非 root、只读根文件系统、capability drop |

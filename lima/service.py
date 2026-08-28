@@ -1,6 +1,7 @@
 import hashlib
 import re
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .agents import MultiAgentCoordinator
@@ -28,7 +29,15 @@ from .task_queue import PermanentTaskError, TaskQueue
 from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 from .repository_import import RepositoryImportPolicy
+from .repository_cache import RepositoryCache
+from .repository_materializer import GitHubMaterializer
 from .repository_scanner import RepositoryScanner
+from .repository_source import (
+    GITHUB_SOURCE_TYPE,
+    LOCAL_IMPORT_SOURCE_TYPE,
+    RepositorySource,
+    parse_repository_source,
+)
 from .repository_triage import (
     RepositorySemanticTriage,
     RepositorySemanticTriageError,
@@ -122,6 +131,12 @@ class ReviewService:
         self.repository_import = RepositoryImportPolicy(
             settings.repository_import_root
         )
+        # 快照缓存与物化器惰性构建：local-import-only（默认）部署在启动时
+        # 不得触碰文件系统；只读根文件系统的容器只在真正需要 GitHub 物化时
+        # 才创建缓存目录，届时失败表现为单个任务失败而非服务崩溃。
+        self._repository_cache: RepositoryCache | None = None
+        # 物化只发生在异步 worker；测试可整体替换该实例注入离线 opener。
+        self.repository_materializer: GitHubMaterializer | None = None
         self.repository_scanner = RepositoryScanner(
             sast_mode=settings.repository_scan_sast_mode
         )
@@ -510,7 +525,13 @@ class ReviewService:
 
     def repository_scan_capabilities(self) -> Dict[str, Any]:
         result = self.repository_import.capabilities()
+        allowed = self.settings.repository_scan_sources
         result.update({
+            "scan_sources": {
+                "configured": allowed,
+                "local_import": allowed in {"local-import", "both"},
+                "github": allowed in {"github", "both"},
+            },
             "sast_mode": self.settings.repository_scan_sast_mode,
             "dataflow_enabled": True,
             "dataflow_scope": "repository-static-imports",
@@ -557,32 +578,106 @@ class ReviewService:
     ) -> Dict[str, Any]:
         key = self.repository_import.normalize_key(repository_key)
         self.repository_import.resolve(key)
+        return self._enqueue_scan_task(
+            RepositorySource.local_import(key), tenant_id, label=key
+        )
+
+    def _ensure_repository_cache(self) -> RepositoryCache:
+        """Lazily build the snapshot cache on first GitHub materialization."""
+
+        if self._repository_cache is None:
+            self._repository_cache = RepositoryCache(
+                self.settings.repository_cache_root or "output/repository-cache",
+                ttl_seconds=self.settings.repository_cache_ttl_seconds,
+                quota_bytes=self.settings.repository_cache_quota_bytes,
+                min_free_bytes=self.settings.repository_cache_min_free_bytes,
+                materialization_timeout_seconds=(
+                    self.settings.repository_cache_materialization_timeout_seconds
+                ),
+            )
+        return self._repository_cache
+
+    def _materializer(self) -> GitHubMaterializer:
+        if self.repository_materializer is None:
+            self.repository_materializer = GitHubMaterializer(
+                self._ensure_repository_cache()
+            )
+        return self.repository_materializer
+
+    def enqueue_repository_scan_source(
+        self, source: RepositorySource | dict[str, str], tenant_id: str = "default"
+    ) -> dict[str, Any]:
+        """Queue a repository scan from a normalized source description.
+
+        请求路径只做契约校验和来源枚举门禁，不做任何网络访问；
+        GitHub ref 的解析与快照物化只发生在异步 worker 内。
+        """
+
+        normalized = parse_repository_source(source)
+        allowed = self.settings.repository_scan_sources
+        if normalized.type == GITHUB_SOURCE_TYPE:
+            if allowed not in {"github", "both"}:
+                metrics.inc("repository_scan_source_github_rejected_total")
+                raise ValueError(
+                    "github repository scans are disabled by "
+                    "LIMA_REPOSITORY_SCAN_SOURCES"
+                )
+            return self._enqueue_scan_task(normalized, tenant_id)
+        if allowed not in {"local-import", "both"}:
+            metrics.inc("repository_scan_source_local_import_rejected_total")
+            raise ValueError(
+                "local-import repository scans are disabled by "
+                "LIMA_REPOSITORY_SCAN_SOURCES"
+            )
+        self.repository_import.resolve(normalized.repository_key)
+        return self._enqueue_scan_task(normalized, tenant_id)
+
+    def _enqueue_scan_task(
+        self, normalized: RepositorySource, tenant_id: str, label: str = ""
+    ) -> dict[str, Any]:
+        label = label or normalized.canonical_name or normalized.repository_key
+        is_local = normalized.type == LOCAL_IMPORT_SOURCE_TYPE
         task_id = str(uuid.uuid4())
-        self.store.create(task_id, key, None, {
-            "source": "repository-import",
+        scan_source = normalized.to_dict()
+        task_input: dict[str, Any] = {
+            "source": "repository-import" if is_local else "github-materializer",
             "task_type": "repository_scan",
-            "repository_key": key,
+            "scan_source": scan_source,
             "sast_mode": self.settings.repository_scan_sast_mode,
             "semantic_triage_mode": self.settings.repository_scan_llm_mode,
-        }, tenant_id)
-        self.queue.submit({
+        }
+        message: dict[str, Any] = {
             "task_id": task_id,
             "task_type": "repository_scan",
-            "repository_key": key,
+            "scan_source": scan_source,
             "tenant_id": tenant_id,
-        }, message_id=task_id)
+        }
+        if is_local:
+            task_input["repository_key"] = normalized.repository_key
+            message["repository_key"] = normalized.repository_key
+        self.store.create(task_id, label, None, task_input, tenant_id)
+        self.queue.submit(message, message_id=task_id)
         metrics.inc("repository_scans_enqueued_total")
+        metrics.inc(
+            f"repository_scan_source_{'local_import' if is_local else 'github'}_accepted_total"
+        )
         return {
             "task_id": task_id,
+            "scan_id": task_id,
             "task_type": "repository_scan",
-            "repository": key,
+            "repository": label,
+            "source": scan_source,
             "state": "PENDING",
             "queue": self.queue.backend,
         }
 
     def _process_repository_scan(
-        self, task_id: str, repository_key: str, tenant_id: str
+        self, task_id: str, repository_key: str, tenant_id: str,
+        scan_source: dict[str, Any] | None = None,
     ) -> None:
+        if scan_source:
+            self._process_github_repository_scan(task_id, scan_source, tenant_id)
+            return
         root = self.repository_import.resolve(repository_key)
         self.store.transition(
             task_id,
@@ -592,6 +687,47 @@ class ReviewService:
                 utc_now(),
             ),
         )
+        self._execute_repository_scan(
+            task_id, root, tenant_id, repository_key,
+            {"repository_key": repository_key},
+        )
+
+    def _process_github_repository_scan(
+        self, task_id: str, scan_source: dict[str, Any], tenant_id: str
+    ) -> None:
+        # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
+        source = parse_repository_source(scan_source)
+        materialized = self._materializer().materialize(source)
+        revision = materialized["resolved_revision"]
+        metrics.inc(
+            f"repository_scan_source_github_"
+            f"{'cache_hit' if materialized['cache_hit'] else 'materialized'}_total"
+        )
+        # 扫描全程 pin 住快照，防止并发缓存清理在扫描进行中驱逐工作目录。
+        with self._ensure_repository_cache().pin(source, revision):
+            self.store.transition(
+                task_id,
+                TraceEvent(
+                    1, TaskState.PLANNING,
+                    f"Materialized pinned GitHub snapshot at {revision}.",
+                    utc_now(),
+                ),
+            )
+            self._execute_repository_scan(
+                task_id, Path(materialized["path"]), tenant_id,
+                source.canonical_name,
+                {
+                    "source": source.to_dict(),
+                    "resolved_revision": revision,
+                    "cache_hit": materialized["cache_hit"],
+                    "archive_sha256": materialized["archive_sha256"],
+                },
+            )
+
+    def _execute_repository_scan(
+        self, task_id: str, root: Path, tenant_id: str,
+        repository_label: str, import_policy_extra: dict[str, Any],
+    ) -> None:
         workspace = RepositoryWorkspace(
             root,
             max_files=self.settings.repository_scan_max_files,
@@ -607,16 +743,16 @@ class ReviewService:
         )
         with self.observability.span(
             "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
-            repository=repository_key,
+            repository=repository_label,
         ), metrics.timer("repository_scan_duration"):
             result = self.repository_scanner.scan(workspace)
-        result.report.repository = repository_key
+        result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {
-            "repository_key": repository_key,
             "host_path_exposed": False,
             "repository_code_executed": False,
             "snapshot_sha256": result.inventory.fingerprint(),
             "snapshot_files": len(result.inventory.files),
+            **import_policy_extra,
         }
         if self.repository_semantic_triage is not None:
             try:
@@ -687,12 +823,24 @@ class ReviewService:
             "task_type", "review"
         )
         if task_type == "repository_scan":
-            self._process_repository_scan(
-                task_id,
-                payload.get("repository_key")
-                or (task.get("input") or {}).get("repository_key", ""),
-                tenant_id,
-            )
+            scan_source = payload.get("scan_source") or (
+                task.get("input") or {}
+            ).get("scan_source")
+            if scan_source and scan_source.get("type") == "github":
+                self._process_repository_scan(
+                    task_id,
+                    payload.get("repository_key")
+                    or (task.get("input") or {}).get("repository_key", ""),
+                    tenant_id,
+                    scan_source,
+                )
+            else:
+                self._process_repository_scan(
+                    task_id,
+                    payload.get("repository_key")
+                    or (task.get("input") or {}).get("repository_key", ""),
+                    tenant_id,
+                )
             return
         diff = self.store.get_task_payload(task_id)
         if diff is None and payload.get("diff_url"):

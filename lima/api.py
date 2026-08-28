@@ -458,14 +458,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/v1/repository-scans":
                 principal = self._principal("manage")
                 payload = self._read_json(body)
-                repository_key = str(payload.get("repository_key", ""))
-                result = self.service.enqueue_repository_scan(
-                    repository_key, principal.tenant_id
-                )
+                if "source" in payload:
+                    result = self.service.enqueue_repository_scan_source(
+                        payload["source"], principal.tenant_id
+                    )
+                else:
+                    result = self.service.enqueue_repository_scan(
+                        str(payload.get("repository_key", "")), principal.tenant_id
+                    )
                 self.service.store.audit(
                     principal.tenant_id, principal.username,
                     "repository.scan.create", result["task_id"],
-                    {"repository_key": result["repository"]},
+                    {
+                        "repository_key": result["repository"],
+                        "source": result.get("source"),
+                    },
                 )
                 self._send_json(202, result)
                 return

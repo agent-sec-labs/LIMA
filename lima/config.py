@@ -155,7 +155,8 @@ class Settings:
     experiment_max_llm_calls: int = 20
     experiment_max_total_tokens: int = 100_000
     repository_import_root: str = ""
-    repository_cache_root: str = ""
+    repository_cache_root: str = "output/repository-cache"
+    repository_scan_sources: str = "local-import"
     repository_cache_ttl_seconds: int = 14 * 24 * 3600
     repository_cache_quota_bytes: int = 2 * 1024 * 1024 * 1024
     repository_cache_min_free_bytes: int = 512 * 1024 * 1024
@@ -296,6 +297,10 @@ class Settings:
             self.repository_cache_materialization_timeout_seconds,
         ) < 1:
             raise ValueError("repository cache limits must be positive")
+        if self.repository_scan_sources not in {"local-import", "github", "both"}:
+            raise ValueError(
+                "LIMA_REPOSITORY_SCAN_SOURCES must be local-import, github or both"
+            )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -393,7 +398,12 @@ class Settings:
                 "LIMA_EXPERIMENT_MAX_TOTAL_TOKENS", 100_000
             ),
             repository_import_root=os.getenv("LIMA_REPOSITORY_IMPORT_ROOT", ""),
-            repository_cache_root=os.getenv("LIMA_REPOSITORY_CACHE_ROOT", ""),
+            repository_cache_root=os.getenv(
+                "LIMA_REPOSITORY_CACHE_ROOT", "output/repository-cache"
+            ),
+            repository_scan_sources=os.getenv(
+                "LIMA_REPOSITORY_SCAN_SOURCES", "local-import"
+            ).strip().lower(),
             repository_cache_ttl_seconds=_int(
                 "LIMA_REPOSITORY_CACHE_TTL_SECONDS", 14 * 24 * 3600
             ),

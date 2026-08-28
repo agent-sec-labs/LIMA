@@ -13,6 +13,7 @@
 完整定位、论文证据和实施阶段见 [LIMA_ROADMAP.md](LIMA_ROADMAP.md)。从旧版本升级时，
 请同时阅读 [品牌与配置迁移说明](docs/LIMA_BRAND_MIGRATION.md)。
 Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_BRAND_ASSETS.md)。
+首次接手项目开发时，请从 [开发者交接与上手指南](docs/DEVELOPER_HANDOFF.md) 开始。
 
 > 以证据审代码，以闭环修漏洞。Audit with evidence. Repair with confidence.
 

@@ -1,1 +1,2 @@
-void bounded_write_other(int *values, int index) { if (index >= 0 && index < 9) values[index] = 2; }
+#include <stdlib.h>
+void bounded_write_allocation(void) { int *values = malloc(sizeof(int) * 3); values[2] = 2; free(values); }

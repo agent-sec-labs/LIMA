@@ -1,1 +1,1 @@
-int bounded_read_pointer(const int *values, int index) { return index >= 0 && index < 8 ? values[index] : 0; }
+int bounded_read_array(void) { int values[3] = {0}; return values[2]; }

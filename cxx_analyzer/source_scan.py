@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass
 from importlib.resources import files
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from .config import AnalyzerSettings
 from .execution import ToolExecution, run_step
@@ -19,6 +20,7 @@ _RULE_PREFIXES = {
     "cxx.source.double-free": "CWE-415",
 }
 _RULE_FILE_NAME = ".lima-semgrep-rules.yml"
+RULES_TEMP_ROOT = Path("/work/tmp")
 _SOURCE_SUFFIXES = {".c": "c", ".cc": "c++", ".cpp": "c++", ".cxx": "c++"}
 
 
@@ -143,31 +145,34 @@ def run_source_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> L
     """Run packaged narrow rules without admitting any unbounded tool output."""
 
     snapshot.resolve_cwd(".")
-    rule_path = snapshot.root / _RULE_FILE_NAME
     rule_text = files("cxx_analyzer.rules").joinpath("cxx-memory.yml").read_text(encoding="utf-8")
     try:
-        rule_path.write_text(rule_text, encoding="utf-8")
-        execution = run_step(
-            (
-                "semgrep", "--json", "--quiet", "--config", _RULE_FILE_NAME,
-                "--include", "*.c", "--include", "*.cc", "--include", "*.cpp",
-                "--include", "*.cxx", ".",
-            ),
-            snapshot,
-            ".",
-            timeout_seconds=settings.step_timeout_seconds,
-            max_output_bytes=settings.max_output_bytes,
-            env={},
-        )
-    finally:
-        try:
-            rule_path.unlink()
-        except FileNotFoundError:
-            pass
+        with tempfile.TemporaryDirectory(
+            prefix="lima-semgrep-", dir=RULES_TEMP_ROOT
+        ) as rule_directory:
+            rule_path = Path(rule_directory) / _RULE_FILE_NAME
+            rule_path.write_text(rule_text, encoding="utf-8")
+            execution = run_step(
+                (
+                    "semgrep", "--json", "--quiet", "--config", str(rule_path),
+                    "--include", "*.c", "--include", "*.cc", "--include", "*.cpp",
+                    "--include", "*.cxx", ".",
+                ),
+                snapshot,
+                ".",
+                timeout_seconds=settings.step_timeout_seconds,
+                max_output_bytes=settings.max_output_bytes,
+                env={},
+            )
+    except OSError:
+        return LayerResult((), ("Semgrep rule staging was unavailable",), ())
     tool_runs = (_tool_run(execution),)
     if execution.status != "completed":
         return LayerResult((), ("Semgrep source scan did not complete",), tool_runs)
     if not execution.digests_complete or execution.output_truncated:
         return LayerResult((), ("Semgrep output was incomplete or truncated",), tool_runs)
-    findings, diagnostics = parse_semgrep_json(execution.stdout, set(snapshot.files))
+    try:
+        findings, diagnostics = parse_semgrep_json(execution.stdout, set(snapshot.files))
+    except ValueError:
+        return LayerResult((), ("Semgrep JSON was rejected",), tool_runs)
     return LayerResult(findings, tuple(diagnostics), tool_runs)

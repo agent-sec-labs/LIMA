@@ -1,1 +1,2 @@
-int oob_read_local(const int *values) { int result = values[9]; return result; }
+#include <cstdlib>
+int oob_read_allocation() { int *values = (int *)malloc(sizeof(int) * 2); return values[2]; }

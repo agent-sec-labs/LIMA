@@ -1,1 +1,2 @@
-void oob_write_array() { int values[2] = {}; values[3] = 3; }
+#include <array>
+void oob_write_container() { std::array<int, 2> values{}; values[2] = 3; }

@@ -12,10 +12,12 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import cxx_analyzer.source_scan as source_scan
 from cxx_analyzer.config import AnalyzerSettings, parse_steps_json
 from cxx_analyzer.execution import (
     CLEAN_ENVIRONMENT,
     StreamCapture,
+    ToolExecution,
     _stream_process,
     run_step,
 )
@@ -30,7 +32,7 @@ from cxx_analyzer.sandbox import (
     landlock_abi,
 )
 from cxx_analyzer.snapshot import prepare_snapshot
-from cxx_analyzer.source_scan import parse_semgrep_json
+from cxx_analyzer.source_scan import parse_semgrep_json, run_source_scan
 from lima.workspace import RepositoryWorkspace
 
 
@@ -680,6 +682,158 @@ class AnalyzerBoundaryTests(unittest.TestCase):
 
 
 class SourceScanTests(unittest.TestCase):
+    @staticmethod
+    def _settings() -> AnalyzerSettings:
+        return AnalyzerSettings(
+            auto_cmake=True,
+            build_steps=(),
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=90,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    @staticmethod
+    def _execution(status="completed", stdout="", truncated=False, complete=True):
+        return ToolExecution(
+            status=status,
+            returncode=0 if status == "completed" else None,
+            stdout=stdout,
+            stderr="",
+            stdout_sha256="a" * 64 if complete else "",
+            stderr_sha256="b" * 64 if complete else "",
+            output_sha256="c" * 64 if complete else "",
+            output_truncated=truncated,
+            digests_complete=complete,
+            diagnostic="",
+        )
+
+    @patch("cxx_analyzer.source_scan.run_step")
+    def test_source_scan_stages_rules_outside_snapshot_and_preserves_colliding_file(
+        self, run_tool
+    ):
+        sample = (
+            Path(__file__).parent / "fixtures" / "cxx_memory" / "semgrep-sample.json"
+        ).read_text(encoding="utf-8")
+        run_tool.return_value = self._execution(stdout=sample)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repository = base / "imports" / "team" / "project"
+            repository.mkdir(parents=True)
+            (repository / "src").mkdir()
+            (repository / "src" / "buffer.c").write_text(
+                "void write_value(int *values) { values[8] = 1; }\n",
+                encoding="utf-8",
+            )
+            colliding = repository / ".lima-semgrep-rules.yml"
+            original = "rules: []\n"
+            colliding.write_text(original, encoding="utf-8")
+            work_root = base / "work"
+            work_root.mkdir()
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                base / "imports", "team/project", fingerprint, work_root
+            ) as snapshot:
+                stage_root = base / "rule-stage"
+                stage_root.mkdir()
+                with patch.object(source_scan, "RULES_TEMP_ROOT", stage_root):
+                    result = run_source_scan(snapshot, self._settings())
+
+                self.assertEqual(original, (snapshot.root / colliding.name).read_text())
+                call = run_tool.call_args
+                self.assertEqual(
+                    (
+                        "semgrep",
+                        "--json",
+                        "--quiet",
+                        "--config",
+                        call.args[0][4],
+                        "--include",
+                        "*.c",
+                        "--include",
+                        "*.cc",
+                        "--include",
+                        "*.cpp",
+                        "--include",
+                        "*.cxx",
+                        ".",
+                    ),
+                    call.args[0],
+                )
+                self.assertIs(snapshot, call.args[1])
+                self.assertEqual(".", call.args[2])
+                self.assertEqual(17, call.kwargs["timeout_seconds"])
+                self.assertEqual(8192, call.kwargs["max_output_bytes"])
+                self.assertEqual({}, call.kwargs["env"])
+                self.assertFalse(
+                    Path(call.args[0][4]).resolve().is_relative_to(snapshot.root)
+                )
+                self.assertEqual(1, len(result.findings))
+                self.assertEqual([], list(stage_root.iterdir()))
+
+    @patch("cxx_analyzer.source_scan.run_step")
+    def test_source_scan_never_emits_findings_for_unusable_tool_or_parser_output(
+        self, run_tool
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repository = base / "imports" / "team" / "project"
+            repository.mkdir(parents=True)
+            (repository / "source.c").write_text("int source(void) { return 0; }\n")
+            work_root = base / "work"
+            work_root.mkdir()
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                base / "imports", "team/project", fingerprint, work_root
+            ) as snapshot:
+                stage_root = base / "rule-stage"
+                stage_root.mkdir()
+                cases = (
+                    (
+                        "failed",
+                        self._execution(status="failed"),
+                        "Semgrep source scan did not complete",
+                    ),
+                    (
+                        "timed-out",
+                        self._execution(status="timed-out"),
+                        "Semgrep source scan did not complete",
+                    ),
+                    (
+                        "truncated",
+                        self._execution(stdout="{}", truncated=True),
+                        "Semgrep output was incomplete or truncated",
+                    ),
+                    (
+                        "digest-incomplete",
+                        self._execution(stdout="{}", complete=False),
+                        "Semgrep output was incomplete or truncated",
+                    ),
+                    (
+                        "parser-failure",
+                        self._execution(stdout="{\"results\": [{\"bad\": true}]}"),
+                        "Semgrep JSON was rejected",
+                    ),
+                )
+                for name, execution, diagnostic in cases:
+                    with self.subTest(name=name):
+                        run_tool.return_value = execution
+                        with patch.object(source_scan, "RULES_TEMP_ROOT", stage_root):
+                            result = run_source_scan(snapshot, self._settings())
+                        self.assertEqual((), result.findings)
+                        self.assertEqual((diagnostic,), result.diagnostics)
+                        self.assertEqual(1, len(result.tool_runs))
+                        self.assertEqual(execution.status, result.tool_runs[0]["status"])
+                        self.assertEqual(
+                            execution.digests_complete,
+                            result.tool_runs[0]["digests_complete"],
+                        )
+                        self.assertEqual([], list(stage_root.iterdir()))
     def test_normalized_finding_enforces_the_client_schema_and_bounds_text(self):
         diagnostics = []
         finding = NormalizedFinding.create(
@@ -728,6 +882,19 @@ class SourceScanTests(unittest.TestCase):
         )
         self.assertLess(len(title_bounded.title), 10_000)
         self.assertTrue(title_diagnostics)
+        for identity_field, value in (
+            ("rule_id", "r" * 2049),
+            ("cwe", "CWE-" + "1" * 2045),
+            ("path", "a" * 2047 + "/b.c"),
+            ("symbol", "s" * 2049),
+        ):
+            with self.subTest(identity_field=identity_field):
+                with self.assertRaises(ValueError):
+                    NormalizedFinding.create(
+                        **{**finding.to_dict(), identity_field: value},
+                        trace="",
+                        diagnostics=[],
+                    )
 
         for changes in (
             {"cwe": "CWE-119"},
@@ -811,6 +978,56 @@ class SourceScanTests(unittest.TestCase):
         self.assertTrue(
             all(item["path"] not in hit_paths for item in manifest if not item["vulnerable"])
         )
+
+    def test_rules_tie_three_distinct_oob_shapes_to_known_object_bounds(self):
+        import yaml
+
+        rule_path = Path("cxx_analyzer/rules/cxx-memory.yml")
+        rules = {item["id"]: item for item in yaml.safe_load(rule_path.read_text())["rules"]}
+        oob_write = rules["cxx.source.oob-write.constant-index"]
+        oob_text = str(oob_write["patterns"])
+        self.assertIn("int $ARRAY[2]", oob_text)
+        self.assertIn("malloc(sizeof(int) * 2)", oob_text)
+        self.assertNotIn("$ARRAY[8] = $VALUE", oob_text)
+        self.assertIn("std::array<int, 2>", oob_text)
+        self.assertIn(
+            "(int *)malloc(sizeof(int) * 2)",
+            str(rules["cxx.source.oob-read.fixed-return"]["patterns"]),
+        )
+
+    def test_release_rules_exclude_same_pointer_rebinding_controls(self):
+        import yaml
+
+        rule_path = Path("cxx_analyzer/rules/cxx-memory.yml")
+        rules = {item["id"]: item for item in yaml.safe_load(rule_path.read_text())["rules"]}
+        uaf_text = str(
+            rules["cxx.source.use-after-free.reused-pointer"]["patterns"][1][
+                "pattern-either"
+            ]
+        )
+        double_free_text = str(
+            rules["cxx.source.double-free.same-pointer"]["patterns"][1][
+                "pattern-either"
+            ]
+        )
+        self.assertIn("pattern-not", uaf_text)
+        self.assertIn("$PTR = ...", uaf_text)
+        self.assertIn("pattern-not", double_free_text)
+        self.assertIn("$PTR = ...", double_free_text)
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        for relative_path, rebind in (
+            ("cwe-416/safe-1.c", "data = malloc"),
+            ("cwe-416/safe-2.cpp", "data = new int"),
+            ("cwe-416/safe-3.cpp", "data = static_cast"),
+            ("cwe-415/safe-1.c", "data = malloc"),
+            ("cwe-415/safe-2.cpp", "data = new int"),
+            ("cwe-415/safe-3.cpp", "data = static_cast"),
+        ):
+            with self.subTest(path=relative_path):
+                self.assertIn(
+                    rebind,
+                    (fixture_root / relative_path).read_text(encoding="utf-8"),
+                )
 
 
 if __name__ == "__main__":

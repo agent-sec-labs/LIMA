@@ -1,1 +1,1 @@
-int oob_read_pointer(const int *values) { return values[8]; }
+int oob_read_array(void) { int values[2] = {0}; return values[2]; }

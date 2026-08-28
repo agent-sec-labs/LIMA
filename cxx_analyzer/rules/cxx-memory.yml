@@ -12,9 +12,15 @@ rules:
             ...
           }
       - pattern-either:
-          - pattern: $ARRAY[8] = $VALUE;
-          - pattern: $ARRAY[9] = $VALUE;
-          - pattern: $ARRAY[3] = $VALUE;
+          - pattern: |
+              int $ARRAY[2] = ...;
+              $ARRAY[2] = $VALUE;
+          - pattern: |
+              int *$PTR = malloc(sizeof(int) * 2);
+              $PTR[2] = $VALUE;
+          - pattern: |
+              std::array<int, 2> $ARRAY = ...;
+              $ARRAY[2] = $VALUE;
   - id: cxx.source.oob-read.fixed-return
     languages: [c, cpp]
     severity: ERROR
@@ -28,9 +34,18 @@ rules:
             ...
           }
       - pattern-either:
-          - pattern: return $ARRAY[8];
-          - pattern: int $RESULT = $ARRAY[9];
-          - pattern: return $ARRAY[7];
+          - pattern: |
+              int $ARRAY[2] = ...;
+              return $ARRAY[2];
+          - pattern: |
+              int *$PTR = malloc(sizeof(int) * 2);
+              return $PTR[2];
+          - pattern: |
+              int *$PTR = (int *)malloc(sizeof(int) * 2);
+              return $PTR[2];
+          - pattern: |
+              std::array<int, 2> $ARRAY = ...;
+              int $RESULT = $ARRAY[2];
   - id: cxx.source.use-after-free.reused-pointer
     languages: [c, cpp]
     severity: ERROR
@@ -44,18 +59,39 @@ rules:
             ...
           }
       - pattern-either:
-          - pattern: |
-              free($PTR);
-              ...
-              return $PTR[0];
-          - pattern: |
-              delete $PTR;
-              ...
-              return *$PTR;
-          - pattern: |
-              free($PTR);
-              ...
-              $PTR[0] = $VALUE;
+          - patterns:
+              - pattern: |
+                  free($PTR);
+                  ...
+                  return $PTR[0];
+              - pattern-not: |
+                  free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  return $PTR[0];
+          - patterns:
+              - pattern: |
+                  delete $PTR;
+                  ...
+                  return *$PTR;
+              - pattern-not: |
+                  delete $PTR;
+                  ...
+                  $PTR = ...;
+                  ...
+                  return *$PTR;
+          - patterns:
+              - pattern: |
+                  std::free($PTR);
+                  ...
+                  $PTR[0] = $VALUE;
+              - pattern-not: |
+                  std::free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  $PTR[0] = $VALUE;
   - id: cxx.source.double-free.same-pointer
     languages: [c, cpp]
     severity: ERROR
@@ -69,15 +105,36 @@ rules:
             ...
           }
       - pattern-either:
-          - pattern: |
-              free($PTR);
-              ...
-              free($PTR);
-          - pattern: |
-              delete $PTR;
-              ...
-              delete $PTR;
-          - pattern: |
-              std::free($PTR);
-              ...
-              std::free($PTR);
+          - patterns:
+              - pattern: |
+                  free($PTR);
+                  ...
+                  free($PTR);
+              - pattern-not: |
+                  free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  free($PTR);
+          - patterns:
+              - pattern: |
+                  delete $PTR;
+                  ...
+                  delete $PTR;
+              - pattern-not: |
+                  delete $PTR;
+                  ...
+                  $PTR = ...;
+                  ...
+                  delete $PTR;
+          - patterns:
+              - pattern: |
+                  std::free($PTR);
+                  ...
+                  std::free($PTR);
+              - pattern-not: |
+                  std::free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  std::free($PTR);

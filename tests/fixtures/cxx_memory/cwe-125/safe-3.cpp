@@ -1,1 +1,2 @@
-int bounded_read_array() { int values[8] = {}; return values[6]; }
+#include <array>
+int bounded_read_container() { std::array<int, 3> values{}; int result = values[2]; return result; }

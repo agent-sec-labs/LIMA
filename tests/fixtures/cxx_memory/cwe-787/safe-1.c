@@ -1,1 +1,1 @@
-void bounded_write_pointer(int *values, int index) { if (index >= 0 && index < 8) values[index] = 1; }
+void bounded_write_array(void) { int values[3] = {0}; values[2] = 1; }

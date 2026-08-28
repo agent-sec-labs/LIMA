@@ -12,6 +12,7 @@ SUPPORTED_SEVERITIES: Final = frozenset({"low", "medium", "high", "critical"})
 MAX_FIELD_BYTES: Final = 2_048
 MAX_EVIDENCE_BYTES: Final = 4_096
 MAX_TRACE_BYTES: Final = 4_096
+_IDENTITY_FIELDS: Final = frozenset({"rule_id", "cwe", "path", "symbol"})
 
 _OUTPUT_FIELDS: Final = (
     "rule_id", "severity", "title", "explanation", "path", "line", "evidence",
@@ -77,6 +78,11 @@ class NormalizedFinding:
         for field in strings:
             if not isinstance(values[field], str):
                 raise ValueError(f"finding {field} must be text")
+            if (
+                field in _IDENTITY_FIELDS
+                and len(values[field].encode("utf-8")) > MAX_FIELD_BYTES
+            ):
+                raise ValueError(f"finding {field} exceeds the identity limit")
         if not isinstance(trace, str):
             raise ValueError("finding trace must be text")
         if type(values["line"]) is not int or values["line"] < 1:

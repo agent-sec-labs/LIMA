@@ -1,1 +1,2 @@
-void bounded_write_array() { int values[4] = {}; values[2] = 3; }
+#include <array>
+void bounded_write_container() { std::array<int, 3> values{}; values[2] = 3; }

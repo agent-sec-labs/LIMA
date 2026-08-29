@@ -34,6 +34,10 @@ SKILL_ARTIFACT_ACTIVATE = re.compile(
     r"^/v1/skill-evolution/([a-z0-9_-]+)/versions/(\d+)/activate$"
 )
 WEB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
+# React 构建产物（frontend/ npm run build）；存在时经 /app/ 前缀托管（T5）。
+APP_DIST_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -96,6 +100,34 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._headers(200, content_type, len(body))
         self.wfile.write(body)
 
+    def _serve_app_file(self, filename: str) -> None:
+        """Serve the React build under /app/ (only when frontend/dist exists)."""
+
+        path = os.path.abspath(os.path.join(APP_DIST_ROOT, filename))
+        if not path.startswith(APP_DIST_ROOT + os.sep):
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            with open(path, "rb") as handle:
+                body = handle.read()
+        except OSError:
+            # SPA 路由回退：未命中的 /app/ 路径返回应用外壳。
+            shell = os.path.join(APP_DIST_ROOT, "index.html")
+            try:
+                with open(shell, "rb") as handle:
+                    body = handle.read()
+            except OSError:
+                self._send_json(404, {"error": "not found"})
+                return
+            path = shell
+        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {
+            "application/javascript", "application/json",
+        }:
+            content_type += "; charset=utf-8"
+        self._headers(200, content_type, len(body))
+        self.wfile.write(body)
+
     def _read_body(self) -> bytes:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -120,6 +152,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
+        if path == "/app" or path == "/app/":
+            if os.path.isdir(APP_DIST_ROOT):
+                self._serve_app_file("index.html")
+            else:
+                self._send_json(404, {"error": "frontend build not present"})
+            return
+        if path.startswith("/app/"):
+            if os.path.isdir(APP_DIST_ROOT):
+                self._serve_app_file(path[len("/app/"):])
+            else:
+                self._send_json(404, {"error": "frontend build not present"})
+            return
         if path == "/":
             self._serve_file("index.html")
             return

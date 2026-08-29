@@ -73,6 +73,23 @@ def _bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+EPHEMERAL_CACHE_ROOT = "__ephemeral__"
+_DEFAULT_CACHE_ROOT = "output/repository-cache"
+
+
+def _repository_cache_root_from_env() -> str:
+    """Resolve LIMA_REPOSITORY_CACHE_ROOT; the ``__ephemeral__`` magic value
+    maps to a system-tmpdir cache root for disposable deployments (#14)."""
+
+    raw = os.getenv("LIMA_REPOSITORY_CACHE_ROOT", "").strip()
+    if raw == EPHEMERAL_CACHE_ROOT:
+        import tempfile
+        from pathlib import Path
+
+        return str(Path(tempfile.gettempdir()) / "lima-repository-cache")
+    return raw or _DEFAULT_CACHE_ROOT
+
+
 def _non_negative_int(name: str, default: int) -> int:
     value = int(os.getenv(name, str(default)))
     if value < 0:
@@ -398,9 +415,7 @@ class Settings:
                 "LIMA_EXPERIMENT_MAX_TOTAL_TOKENS", 100_000
             ),
             repository_import_root=os.getenv("LIMA_REPOSITORY_IMPORT_ROOT", ""),
-            repository_cache_root=os.getenv(
-                "LIMA_REPOSITORY_CACHE_ROOT", "output/repository-cache"
-            ),
+            repository_cache_root=_repository_cache_root_from_env(),
             repository_scan_sources=os.getenv(
                 "LIMA_REPOSITORY_SCAN_SOURCES", "local-import"
             ).strip().lower(),

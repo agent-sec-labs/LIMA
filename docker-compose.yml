@@ -44,6 +44,7 @@ services:
       - ${LIMA_REPOSITORY_IMPORT_PATH:-./repositories}:/repositories:ro
       - ${LIMA_EXPERIMENT_OUTPUT_PATH:-./output/experiments}:/experiments
       - experiment_cache:/experiment-cache
+      - repository_cache:/var/lib/lima/repository-cache
     cap_drop:
       - ALL
     security_opt:
@@ -58,6 +59,7 @@ services:
       LIMA_SKILLS_DIR: /app/skills
       LIMA_PUBLIC_BASE_URL: http://127.0.0.1:${LIMA_HTTP_PORT:-18080}
       LIMA_REPOSITORY_IMPORT_ROOT: /repositories
+      LIMA_REPOSITORY_CACHE_ROOT: ${LIMA_REPOSITORY_CACHE_ROOT:-/var/lib/lima/repository-cache}
       LIMA_REPOSITORY_SCAN_SAST_MODE: ${LIMA_REPOSITORY_SCAN_SAST_MODE:-required}
       LIMA_REPOSITORY_SCAN_LLM_MODE: ${LIMA_REPOSITORY_SCAN_LLM_MODE:-off}
       LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS: ${LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS:-60}
@@ -100,3 +102,11 @@ volumes:
     name: security-agent_redis_data
     external: true
   experiment_cache:
+  # Shared across replicas: the snapshot cache is content-addressed and its
+  # on-disk locks make cross-process materialization dedup safe (#12/#13/#14).
+  repository_cache:
+    name: lima-repository-cache
+  # Per-replica scratch space reserved for the T7 repair sidecar; deliberately
+  # NOT mounted into the lima service in this issue.
+  repair_workspace:
+    name: lima-repair-workspace

@@ -451,7 +451,7 @@ python -m unittest -v `
 | [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | 本地已实现 | 契约在 `repository_materializer.py`（ref 钉死/加固下载/发布到 RepositoryCache）；未接服务编排，接线属于 T4 |
 | [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | Closed | PR #23 已合并；契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
 | [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | 本地已实现 | worker 侧 github 物化 + pin + 扫描；`LIMA_REPOSITORY_SCAN_SOURCES` 门禁；缓存命中零网络 |
-| [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | `status:ready` | 可认领；不得削弱非 root、只读根文件系统、capability drop |
+| [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | 本地已实现 | `lima-repository-cache` 具名卷挂载 `/var/lib/lima/repository-cache`（跨副本共享）；`lima-repair-workspace` 卷声明保留给 T7，不挂载 lima 服务；`__ephemeral__` 魔值 → tmpdir；unmanaged 缓存根启动告警 |
 | [T6 #15](https://github.com/agent-sec-labs/LIMA/issues/15) GitHub Source UI | `status:ready` | 可基于合同和 mock 开发；最终 API 集成需协调 T4 |
 | [T7 #16](https://github.com/agent-sec-labs/LIMA/issues/16) RepairWorkspace | `status:ready` | 可认领；不得接入 GitHub 写 API，不得修改源 Snapshot |
 

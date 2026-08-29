@@ -1,5 +1,7 @@
 import hashlib
 import re
+import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -50,6 +52,41 @@ from .real_world_evaluation import (
     SnapshotStore,
 )
 from .workspace import RepositoryWorkspace
+
+DOCKER_REPOSITORY_CACHE_ROOT = Path("/var/lib/lima/repository-cache")
+
+
+def classify_repository_cache_root(root: str) -> str:
+    """Classify a cache root location for deployment visibility (#14).
+
+    ``named-volume`` roots live under the docker compose mount,
+    ``system-tmp`` roots are disposable by design; anything else is
+    ``unmanaged`` and only merits a startup warning, never enforcement.
+    """
+
+    resolved = Path(root).expanduser().resolve()
+    for label, base in (
+        ("named-volume", DOCKER_REPOSITORY_CACHE_ROOT),
+        ("system-tmp", Path(tempfile.gettempdir())),
+    ):
+        try:
+            resolved.relative_to(base.expanduser().resolve())
+            return label
+        except ValueError:
+            continue
+    return "unmanaged"
+
+
+def _warn_unmanaged_repository_cache_root(root: str) -> None:
+    if classify_repository_cache_root(root) == "unmanaged":
+        print(
+            f"WARNING: repository cache root "
+            f"'{Path(root).expanduser().resolve()}' is neither the docker "
+            f"named volume mount ({DOCKER_REPOSITORY_CACHE_ROOT}) nor under "
+            f"the system tmpdir; snapshots may not survive restarts and "
+            f"host disk usage is unmanaged.",
+            file=sys.stderr,
+        )
 
 
 class ReviewService:
@@ -586,8 +623,12 @@ class ReviewService:
         """Lazily build the snapshot cache on first GitHub materialization."""
 
         if self._repository_cache is None:
+            cache_root = (
+                self.settings.repository_cache_root or "output/repository-cache"
+            )
+            _warn_unmanaged_repository_cache_root(cache_root)
             self._repository_cache = RepositoryCache(
-                self.settings.repository_cache_root or "output/repository-cache",
+                cache_root,
                 ttl_seconds=self.settings.repository_cache_ttl_seconds,
                 quota_bytes=self.settings.repository_cache_quota_bytes,
                 min_free_bytes=self.settings.repository_cache_min_free_bytes,

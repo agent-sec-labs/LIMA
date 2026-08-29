@@ -41,9 +41,12 @@ function Import-LegacyLimaEnvironment([string]$Path) {
 function Ensure-LimaDataVolumes(
     [string[]]$VolumeNames = @(
         'security-agent_postgres_data',
-        'security-agent_redis_data'
+        'security-agent_redis_data',
+        'lima-repository-cache',
+        'lima-repair-workspace'
     )
 ) {
+    # docker volume create is idempotent: existing volumes are reused as-is.
     foreach ($volumeName in $VolumeNames) {
         docker volume create $volumeName | Out-Null
         if ($LASTEXITCODE -ne 0) {

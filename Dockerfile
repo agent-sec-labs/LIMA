@@ -12,7 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN groupadd --gid "${APP_GID}" lima \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home lima \
-    && install -d -o "${APP_UID}" -g "${APP_GID}" /experiments /experiment-cache
+    && install -d -o "${APP_UID}" -g "${APP_GID}" \
+        /experiments /experiment-cache /var/lib/lima/repository-cache
 
 WORKDIR /app
 COPY requirements.txt ./

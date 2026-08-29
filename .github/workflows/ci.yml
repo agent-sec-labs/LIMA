@@ -128,9 +128,13 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt
       - name: Fail on verified high-severity regressions
+        # fixtures 是 E2E 故意构造的含漏洞样本语料（eval 样本必须产出
+        # CWE-95 断言），与 tests/、evaluation_data/ 同为测试数据，不参与门禁；
+        # 排除按目录名匹配，仓库内命中项仅 frontend/e2e/fixtures。
         run: >-
           python scripts/scan_repository.py . --sast required --format json
           --exclude-dir tests --exclude-dir evaluation_data
+          --exclude-dir fixtures
           --output output/ci-security-audit.json --fail-on high --verified-only
       - name: Upload security evidence
         if: always()

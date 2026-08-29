@@ -55,6 +55,12 @@ export default defineConfig({
       LIMA_PORT: String(port),
       LIMA_DB_PATH: join(tmpdir(), `lima-e2e-${runId}.db`),
       LIMA_DATABASE_URL: "",
+      // E2E 的后端姿态必须显式自包含：LIMA_AUTH_REQUIRED 默认 false 时
+      // /v1/auth/login 返回 409（authentication is disabled）。本机曾靠根目录
+      // .env 隐性开启认证而 CI 检出没有 .env，导致 PR #53 的 e2e 失败。
+      LIMA_AUTH_REQUIRED: "true",
+      // 仅测试用固定密钥（认证开启时 validate_evolution 要求 ≥32 字节）。
+      LIMA_AUTH_SECRET: "e2e-insecure-secret-never-use-in-production",
       LIMA_BOOTSTRAP_ADMIN_USERNAME: process.env.E2E_ADMIN_USERNAME ?? "e2e-admin",
       LIMA_BOOTSTRAP_ADMIN_PASSWORD: process.env.E2E_ADMIN_PASSWORD ?? "e2e-local-pass",
       LIMA_REPOSITORY_SCAN_SOURCES: "both",

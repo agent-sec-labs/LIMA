@@ -46,6 +46,11 @@ FROM base AS test
 COPY --chown=lima:lima tests ./tests
 COPY --chown=lima:lima Dockerfile pyproject.toml docker-compose.yml .env.example LIMA_ROADMAP.md CONTRIBUTING.md ./
 COPY --chown=lima:lima .github ./.github
+# 契约测试在镜像内校验前端 CI 门禁与产物布局（T9）：只带配置原文，
+# 不带 e2e 夹具语料（故意含漏洞的样本不进入任何镜像层）。
+COPY --chown=lima:lima frontend/vitest.config.ts frontend/playwright.config.ts ./frontend/
+COPY --chown=lima:lima frontend/e2e/audit-lifecycle.spec.ts ./frontend/e2e/
+COPY --chown=lima:lima .gitignore ./
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
 COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
 USER lima:lima

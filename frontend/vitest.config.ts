@@ -14,6 +14,10 @@ export default defineConfig({
     globals: false,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    // CI 慢机（2 vCPU）下轮询类用例（真实 2s 定时器 + findByText）会超出
+    // Vitest 默认 5s 用例预算（PR #53 frontend-tests 实证），统一放宽到 20s。
+    testTimeout: 20_000,
+    hookTimeout: 20_000,
     coverage: {
       provider: "v8",
       reporter: ["lcov", "html"],

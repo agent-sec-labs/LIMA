@@ -745,7 +745,7 @@ function safeCxxText(value, maximum = 480) {
     .replace(/(?:"\/[^\"]*"|'\/[^']*')/g, "[运行路径已隐藏]")
     .replace(/[A-Za-z]:[\\/][^\s`]+/g, "[运行路径已隐藏]")
     .replace(/(^|[\s(])\/(?:[^\s`/]+\/)+[^\s`/]+/g, "$1[运行路径已隐藏]")
-    .replace(/(?:--)?(?:api[_-]?key|token|secret|password)(?:\s*=\s*|\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s`]+)/gi, "[敏感参数已隐藏]")
+    .replace(/(?:--|\b)(?:api[_-]?key|key|token|secret|password)(?:\s*=\s*|\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s`]+)/gi, "[敏感参数已隐藏]")
     .slice(0, maximum);
 }
 
@@ -784,7 +784,7 @@ function cxxEvidenceRecords(finding) {
   const records = Array.isArray(finding.evidence_records) && finding.evidence_records.length
     ? finding.evidence_records
     : [{ source: finding.source, path: finding.path, line: finding.line, snippet: finding.evidence }];
-  const safeRecords = records.filter((record) => record && typeof record === "object");
+  const safeRecords = records.filter((record) => record && typeof record === "object" && !Array.isArray(record) && Object.keys(record).length);
   const renderedRecords = safeRecords.length ? safeRecords : [{
     source: finding.source, path: finding.path, line: finding.line, snippet: finding.evidence,
   }];

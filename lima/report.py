@@ -1,4 +1,5 @@
 import re
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable
 
 
@@ -63,9 +64,9 @@ def _safe_cxx_text(value: Any, maximum: int = _MAX_CXX_RENDER_TEXT) -> str:
     message = re.sub(r"(?:\"[A-Za-z]:[\\/][^\"]*\"|'[A-Za-z]:[\\/][^']*')", "[运行路径已隐藏]", message)
     message = re.sub(r"(?:\"/[^\"]*\"|'/[^']*')", "[运行路径已隐藏]", message)
     message = re.sub(r"[A-Za-z]:[\\/][^\s`]+", "[运行路径已隐藏]", message)
-    message = re.sub(r"(?<!\w)/(?:[^\s`/]+/)+[^\s`/]+", "[运行路径已隐藏]", message)
+    message = re.sub(r"(?<![.\w])/(?:[^\s`/]+/)+[^\s`/]+", "[运行路径已隐藏]", message)
     message = re.sub(
-        r"(?i)(?:--)?(?:api[_-]?key|token|secret|password)(?:\s*=\s*|\s+)(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s`]+)",
+        r"(?i)(?:--|(?<![A-Z0-9_-]))(?:api[_-]?key|key|token|secret|password)(?:\s*=\s*|\s+)(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s`]+)",
         "[敏感参数已隐藏]",
         message,
     )
@@ -234,13 +235,12 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 "**工具证据 / trace**",
                 "",
             ])
+            raw_evidence_records = item.get("evidence_records")
             evidence_records = [
-                record for record in (item.get("evidence_records") or [])
-                if isinstance(record, dict)
-            ]
+                record for record in raw_evidence_records
+                if isinstance(record, Mapping) and record
+            ] if isinstance(raw_evidence_records, (list, tuple)) else []
             for record in evidence_records:
-                if not isinstance(record, dict):
-                    continue
                 lines.append("- `%s` · `%s:%s` · %s" % (
                     display(record.get("source", "unknown")), display(record.get("path", "")),
                     record.get("line", 0), display(record.get("snippet", "")),

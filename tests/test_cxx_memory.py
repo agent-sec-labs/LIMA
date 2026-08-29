@@ -727,7 +727,7 @@ class CxxReportTests(unittest.TestCase):
     def test_markdown_filters_malformed_evidence_records_and_falls_back_when_none_are_mappings(self):
         finding = cxx_finding("semgrep", "source-only").to_dict()
         finding["evidence"] = "top-level fallback evidence"
-        finding["evidence_records"] = [None, 3, {}, {
+        finding["evidence_records"] = [None, 3, {"source": "partial"}, {
             "source": "clang", "path": "src/free.c", "line": 12,
             "snippet": "valid trace",
         }]
@@ -736,7 +736,7 @@ class CxxReportTests(unittest.TestCase):
             "findings": [finding],
         })
         self.assertIn("valid trace", markdown)
-        self.assertIn("`unknown` · `:0`", markdown)
+        self.assertIn("`partial` · `:0`", markdown)
 
         finding["evidence_records"] = [None, 3]
         fallback_markdown = to_markdown({
@@ -745,6 +745,36 @@ class CxxReportTests(unittest.TestCase):
         })
         evidence_trace = fallback_markdown.split("**工具证据 / trace**", 1)[1]
         self.assertIn("top-level fallback evidence", evidence_trace)
+
+    def test_markdown_redactor_hides_key_forms_and_preserves_relative_paths(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding["evidence"] = (
+            "src/x.c ./src/x.c ../src/x.c /work/tmp/x C:\\secret\\x "
+            "--key secret key=secret --key \"quoted secret\" monkey=ordinary"
+        )
+        markdown = to_markdown({
+            "repository": "team/project", "summary": "redaction", "risk": "high",
+            "findings": [finding],
+        })
+
+        for leaked in ("/work/tmp/x", "C:\\secret\\x", "secret", "quoted secret"):
+            self.assertNotIn(leaked, markdown)
+        for relative_path in ("src/x.c", "./src/x.c", "../src/x.c"):
+            self.assertIn(relative_path, markdown)
+        self.assertIn("monkey=ordinary", markdown)
+
+    def test_markdown_falls_back_for_nonsequence_or_nonmapping_evidence_records(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding["evidence"] = "top-level fallback evidence"
+        for records in (7, "not-a-record-list", [[], None, 3, {}]):
+            with self.subTest(records=repr(records)):
+                finding["evidence_records"] = records
+                markdown = to_markdown({
+                    "repository": "team/project", "summary": "fallback", "risk": "high",
+                    "findings": [finding],
+                })
+                evidence_trace = markdown.split("**工具证据 / trace**", 1)[1]
+                self.assertIn("top-level fallback evidence", evidence_trace)
 
 
 if __name__ == "__main__":

@@ -165,8 +165,56 @@ def _check_cxx_frontend_contract_handles_malformed_records_and_never_enables_rep
     script = _read("app.js")
 
     assert "const cxxAutomaticRepairNote = cxxFinding ?" in script
-    assert "filter((record) => record && typeof record === \"object\")" in script
+    assert "filter((record) => record && typeof record === \"object\" && !Array.isArray(record) && Object.keys(record).length)" in script
     assert "const safeRecords = records.filter(" in script
+
+
+def _check_cxx_frontend_helpers_execute_safe_redaction_and_fallback() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for the frontend behavior gate"
+    program = r'''
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+function extractFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`missing ${name}`);
+  const bodyStart = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+const escapeHtml = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const safeCxxText = new Function(`${extractFunction("safeCxxText")}; return safeCxxText;`)();
+const cxxEvidenceRecords = new Function("escapeHtml", "safeCxxText", `${extractFunction("cxxEvidenceRecords")}; return cxxEvidenceRecords;`)(escapeHtml, safeCxxText);
+const rendered = safeCxxText('src/x.c ./src/x.c ../src/x.c /work/tmp/x C:\\secret\\x --key secret key=secret --key "quoted secret" monkey=ordinary');
+for (const value of ["/work/tmp/x", "C:\\secret\\x", "secret"]) {
+  if (rendered.includes(value)) throw new Error(`leaked ${value}`);
+}
+for (const value of ["src/x.c", "./src/x.c", "../src/x.c"]) {
+  if (!rendered.includes(value)) throw new Error(`lost ${value}`);
+}
+if (!rendered.includes("monkey=ordinary")) throw new Error("over-redacted ordinary evidence");
+const fallback = cxxEvidenceRecords({
+  evidence_records: [null, 3, [], {}], source: "tool", path: "src/x.c", line: 7,
+  evidence: "fallback <evidence>",
+});
+if (!fallback.includes("fallback &lt;evidence&gt;")) throw new Error("missing fallback");
+if (fallback.includes("undefined")) throw new Error("unsafe record field");
+const mixed = cxxEvidenceRecords({
+  evidence_records: [[], null, { source: "clang", path: "src/x.c", line: 7, snippet: "valid" }],
+  source: "tool", path: "src/x.c", line: 7, evidence: "fallback",
+});
+if (!mixed.includes("valid") || mixed.includes("fallback")) throw new Error("invalid mixed-record filtering");
+'''
+    completed = subprocess.run(
+        [node, "-e", program, str(WEB / "app.js")],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 class FrontendUiTests(unittest.TestCase):
@@ -202,3 +250,6 @@ class FrontendUiTests(unittest.TestCase):
 
     def test_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair(self) -> None:
         _check_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair()
+
+    def test_cxx_frontend_helpers_execute_safe_redaction_and_fallback(self) -> None:
+        _check_cxx_frontend_helpers_execute_safe_redaction_and_fallback()

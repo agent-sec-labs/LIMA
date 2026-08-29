@@ -141,6 +141,82 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  frontend-tests:
+    name: frontend-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Verify runner Node major version
+        run: >-
+          node -e "const m=Number(process.versions.node.split('.')[0]);
+          if (m < 18) { console.error('node ' + m + ' is below 18'); process.exit(1); }
+          console.log('node', process.versions.node);"
+      - name: Install locked frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Typecheck app and e2e programs
+        run: npm run typecheck
+        working-directory: frontend
+      - name: Unit tests with coverage threshold (lines >= 60)
+        run: npx vitest run --coverage
+        working-directory: frontend
+      - name: Production build
+        run: npm run build
+        working-directory: frontend
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend-e2e:
+    # 冻结决策 4（Epic #33）：Playwright E2E 只在 Linux CI 运行，
+    # 不进入 windows-latest 矩阵，也不要求贡献者本机执行。
+    name: frontend-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install runtime dependencies for the backend
+        run: python -m pip install -r requirements.txt
+      - name: Verify runner Node major version
+        run: >-
+          node -e "const m=Number(process.versions.node.split('.')[0]);
+          if (m < 18) { console.error('node ' + m + ' is below 18'); process.exit(1); }
+          console.log('node', process.versions.node);"
+      - name: Install locked frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Build the SPA served by the api handler
+        run: npm run build
+        working-directory: frontend
+      - name: Run audit lifecycle E2E
+        run: npx playwright test
+        working-directory: frontend
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frontend-e2e-report
+          path: frontend/test-results/
+          if-no-files-found: error
+          retention-days: 14
+
   merge-gate:
     name: merge-gate
     if: always()
@@ -150,6 +226,8 @@ jobs:
       - repair-constraints
       - container-tests
       - security-baseline
+      - frontend-tests
+      - frontend-e2e
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -161,3 +239,5 @@ jobs:
           test "${{ needs.repair-constraints.result }}" = "success"
           test "${{ needs.container-tests.result }}" = "success"
           test "${{ needs.security-baseline.result }}" = "success"
+          test "${{ needs.frontend-tests.result }}" = "success"
+          test "${{ needs.frontend-e2e.result }}" = "success"

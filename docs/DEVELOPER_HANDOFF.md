@@ -378,7 +378,12 @@ GitHub Actions 的稳定 Required Check 是 `merge-gate`。它汇总：
 - `unit-tests`：Windows/Linux × Python 3.11/3.12；
 - `repair-constraints`：修复约束准确率必须为 1.0；
 - `container-tests`：只读容器和数据卷初始化；
-- `security-baseline`：Bandit 必须可用，已验证高危回归失败关闭。
+- `security-baseline`：Bandit 必须可用，已验证高危回归失败关闭；
+- `frontend-tests`：React 前端 typecheck（应用 + E2E 两个程序）、Vitest/RTL
+  单测（行覆盖率 ≥ 60%）与生产构建，覆盖率证据上传 artifact；
+- `frontend-e2e`：Playwright 审计生命周期端到端（构建产物经 `/app/` 由 api
+  handler 托管，bootstrap admin 登录，真实队列推进）——**仅 Linux CI 运行**
+  （Epic #33 冻结决策 4），不进 Windows 矩阵。
 
 不要把矩阵中的每个动态 Job 名单独设为 Required Check。
 

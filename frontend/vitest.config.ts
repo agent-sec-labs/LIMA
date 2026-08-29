@@ -14,5 +14,12 @@ export default defineConfig({
     globals: false,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    coverage: {
+      provider: "v8",
+      reporter: ["lcov", "html"],
+      reportsDirectory: "./coverage",
+      // 冻结规格：只设行覆盖率阈值，不添加其他维度。
+      thresholds: { lines: 60 },
+    },
   },
 });

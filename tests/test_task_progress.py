@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from lima.store import TaskStore
+from lima.task_failure import GITHUB_NOT_FOUND, TaskFailure
 from lima.task_progress import (
     COMPLETED,
     DOWNLOADING_ARCHIVE,
@@ -162,9 +163,30 @@ class TaskProgressPersistenceTests(unittest.TestCase):
     def test_tasks_without_progress_expose_none(self):
         task = self.store.get("task-1")
         self.assertIsNone(task["progress"])
+        self.assertIsNone(task["failure"])
         self.assertIsNone(self.store.list_tasks(10)[0]["progress"])
         self.assertIsNone(progress_summary(None))
         self.assertIsNone(progress_summary({}))
+
+    def test_failure_persists_on_own_column_and_survives_restart(self):
+        failure = TaskFailure.from_code(
+            GITHUB_NOT_FOUND, stage="RESOLVING_REVISION",
+            technical_detail="HTTP 404",
+        )
+        self.store.update_task_failure("task-1", failure.to_dict())
+
+        reopened = TaskStore(self.db_path)
+        stored = reopened.get("task-1")["failure"]
+        self.assertEqual(GITHUB_NOT_FOUND, stored["code"])
+        self.assertEqual("RESOLVING_REVISION", stored["stage"])
+        self.assertFalse(stored["retryable"])
+        self.assertTrue(stored["suggestion"])
+        # 独立列：不污染 input，也不挤占 progress
+        task = reopened.get("task-1")
+        self.assertEqual({"task_type": "repository_scan"}, task["input"])
+        self.assertIsNone(task["progress"])
+        # 任务列表保持轻量：不携带 failure 载荷
+        self.assertNotIn("failure", self.store.list_tasks(10)[0])
 
     def test_progress_summary_tolerates_partial_payloads(self):
         summary = progress_summary({"stage": QUEUED, "message": "x"})

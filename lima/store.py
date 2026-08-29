@@ -54,6 +54,7 @@ class TaskStore:
                     report_json TEXT,
                     error TEXT,
                     progress_json TEXT,
+                    failure_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )"""
@@ -163,6 +164,8 @@ class TaskStore:
             self._ensure_column(conn, "tasks", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
             # 运行时进度独立于不可变的 input_json（T1 契约）。
             self._ensure_column(conn, "tasks", "progress_json", "TEXT")
+            # 结构化失败同样走独立列，与 TaskState/progress 正交（T2/T4 契约）。
+            self._ensure_column(conn, "tasks", "failure_json", "TEXT")
             self._ensure_column(conn, "installations", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS checkpoints (
@@ -431,6 +434,8 @@ class TaskStore:
         value["report"] = json.loads(report_json) if report_json else None
         progress_json = value.pop("progress_json", None)
         value["progress"] = json.loads(progress_json) if progress_json else None
+        failure_json = value.pop("failure_json", None)
+        value["failure"] = json.loads(failure_json) if failure_json else None
         value["trace"] = [dict(item) for item in events]
         value["collaboration"] = []
         for message in messages:
@@ -456,6 +461,15 @@ class TaskStore:
             conn.execute(
                 "UPDATE tasks SET progress_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(progress, ensure_ascii=False), utc_now(), task_id),
+            )
+
+    def update_task_failure(self, task_id: str, failure: dict[str, Any]) -> None:
+        """Persist the structured failure payload on its own column."""
+
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET failure_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(failure, ensure_ascii=False), utc_now(), task_id),
             )
 
     def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:

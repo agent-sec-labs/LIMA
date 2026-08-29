@@ -226,10 +226,12 @@ let selectedTask = null;
 let selectedTaskData = null;
 let allTasks = [];
 let taskFilter = "all";
+let taskPoller = null;
 let accessToken = localStorage.getItem("lima_token") || "";
 let isDemoMode = sessionStorage.getItem("lima_demo") === "1";
 let lastRuntime = {};
 let auditDraft = { mode: "repository", step: 1, sample: false, sourceMode: "local", repository: "", githubRef: "" };
+let auditSubmitting = false;
 let scanCapabilities = null;
 let demoFeedback = [];
 let allExperiments = [];
@@ -464,11 +466,15 @@ function show(view, updateHash = true) {
   if (updateHash) history.replaceState(null, "", `#${view}`);
   if (view === "tasks") loadTasks();
   if (view === "experiments") loadExperiments();
-  if (view === "scan") loadRepositoryScanCapabilities();
+  if (view === "scan") {
+    ensureAuditWizardReady();
+    loadRepositoryScanCapabilities();
+  }
   if (view === "skills") loadSkills();
   if (view === "settings") renderSettingsRuntime(lastRuntime);
   if (view === "evolution") loadFailures();
   setExperimentPolling(view === "experiments");
+  setTaskPolling(view === "tasks");
   window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" });
 }
 
@@ -786,6 +792,32 @@ function setWizardStep(step) {
   $("#audit-wizard").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth", block: "start" });
 }
 
+function resetAuditWizard() {
+  auditDraft = { mode: "repository", step: 1, sample: false, sourceMode: "local", repository: "", githubRef: "" };
+  $("#audit-target").value = "";
+  $("#audit-github-ref").value = "";
+  $("#audit-pr-number").value = "";
+  $("#audit-diff").value = "";
+  updateDiffStats();
+  $("#audit-step-one-error").textContent = "";
+  $("#audit-diff-error").textContent = "";
+  $("#github-ref-pin-warning").classList.add("hidden");
+  $("#wizard-running").classList.add("hidden");
+  updateSourceMode("local");
+  setWizardStep(1);
+}
+
+function ensureAuditWizardReady() {
+  if (auditSubmitting) return;
+  const running = $("#wizard-running");
+  // 提交请求已结束却仍停留在“正在创建”面板 = 卡死态，直接复位，不需要刷新浏览器。
+  if (running && !running.classList.contains("hidden")) {
+    resetAuditWizard();
+    return;
+  }
+  setWizardStep(auditDraft.step);
+}
+
 function validateAuditStep(step) {
   if (step === 1) {
     $("#audit-step-one-error").textContent = "";
@@ -858,7 +890,9 @@ function loadAuditSample() {
 }
 
 async function runAudit() {
+  if (auditSubmitting) return;
   if (!validateAuditStep(1) || !validateAuditStep(2)) return;
+  auditSubmitting = true;
   const button = $("#run-audit");
   setButtonBusy(button, true, "正在创建…");
   $$(".wizard-step").forEach((panel) => panel.classList.remove("active"));
@@ -897,6 +931,8 @@ async function runAudit() {
         });
     const taskId = data.task_id || data.id;
     toast("审计任务已创建", auditDraft.sample ? "示例报告已准备好。" : "任务会在后台运行，可随时查看状态。", "success");
+    // 收到 202 即视为受理成功：向导立即复位，后续异步状态只属于任务详情与轮询。
+    resetAuditWizard();
     await loadDashboard();
     if (taskId) await openTask(taskId);
     else {
@@ -908,6 +944,7 @@ async function runAudit() {
     $("#wizard-running").classList.add("hidden");
     setWizardStep(3);
   } finally {
+    auditSubmitting = false;
     setButtonBusy(button, false);
   }
 }
@@ -1230,6 +1267,47 @@ function renderTaskReport(task) {
   `;
 }
 
+function taskTerminal(state) {
+  return ["SUCCESS", "FAILED", "CANCELLED"].includes(normalizeState(state));
+}
+
+function applyTaskDetail(task) {
+  selectedTaskData = task;
+  $("#task-report").innerHTML = renderTaskReport(task);
+  const reportReady = normalizeState(task.state) === "SUCCESS" && task.report;
+  const repositoryScan = taskType(task) === "repository_scan";
+  $("#create-repair-preview").classList.toggle("hidden", !(reportReady && repositoryScan && (task.report.findings || []).length));
+  $("#create-fix").classList.toggle("hidden", !(reportReady && task.pull_request));
+  $("#feedback-panel").classList.toggle("hidden", !reportReady);
+  renderTaskList();
+  return reportReady;
+}
+
+function setTaskPolling(active) {
+  if (taskPoller) window.clearInterval(taskPoller);
+  taskPoller = null;
+  if (!active || !selectedTask || isDemoMode) return;
+  if (selectedTaskData && taskTerminal(selectedTaskData.state)) return;
+  taskPoller = window.setInterval(pollSelectedTask, 4000);
+}
+
+async function pollSelectedTask() {
+  if (document.hidden || location.hash.slice(1) !== "tasks" || !selectedTask) return;
+  try {
+    const task = await api(`/v1/tasks/${encodeURIComponent(selectedTask)}`);
+    if (task.id !== selectedTask) return;
+    const ready = applyTaskDetail(task);
+    if (ready) {
+      populateFeedbackFindings(task.report.findings || []);
+      await loadTaskFeedback(selectedTask);
+    }
+    if (taskTerminal(task.state)) setTaskPolling(false);
+  } catch {
+    // 轮询失败（含登录过期）安静停止，避免后台空转；刷新或重新打开任务可恢复。
+    setTaskPolling(false);
+  }
+}
+
 async function openTask(id) {
   show("tasks");
   selectedTask = id;
@@ -1242,18 +1320,12 @@ async function openTask(id) {
   $("#create-repair-preview").classList.add("hidden");
   try {
     const task = await api(`/v1/tasks/${encodeURIComponent(id)}`);
-    selectedTaskData = task;
-    $("#task-report").innerHTML = renderTaskReport(task);
-    const reportReady = normalizeState(task.state) === "SUCCESS" && task.report;
-    const repositoryScan = taskType(task) === "repository_scan";
-    $("#create-repair-preview").classList.toggle("hidden", !(reportReady && repositoryScan && (task.report.findings || []).length));
-    $("#create-fix").classList.toggle("hidden", !(reportReady && task.pull_request));
-    $("#feedback-panel").classList.toggle("hidden", !reportReady);
-    if (reportReady) {
+    const ready = applyTaskDetail(task);
+    if (ready) {
       populateFeedbackFindings(task.report.findings || []);
       await loadTaskFeedback(id);
     }
-    renderTaskList();
+    setTaskPolling(true);
   } catch (error) {
     selectedTaskData = null;
     $("#task-report").innerHTML = emptyState("报告加载失败", error.message, "返回任务列表", "tasks", "alert");
@@ -2196,6 +2268,7 @@ $("#logout").addEventListener("click", () => {
   experimentSampleVisible = false;
   allExperiments = [];
   setExperimentPolling(false);
+  setTaskPolling(false);
   $("#login-overlay").classList.remove("hidden");
   $("#logout").classList.add("hidden");
   $("#system-status").textContent = "等待登录";

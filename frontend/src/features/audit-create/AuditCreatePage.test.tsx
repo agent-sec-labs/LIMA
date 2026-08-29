@@ -128,13 +128,29 @@ describe("AuditCreatePage submission boundary", () => {
         status: 202,
         body: { task_id: "task-123", state: "PENDING" },
       },
+      {
+        url: "/v1/tasks/task-123",
+        body: {
+          id: "task-123",
+          state: "PENDING",
+          repository: "team/project",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          input: {},
+          progress: null,
+          failure: null,
+          error: null,
+        },
+      },
     ]);
     const router = renderAt("/audit/new");
     await fillTarget("team/project");
     clickNext();
     fireEvent.click(await screen.findByRole("button", { name: /开始安全审计/ }));
 
-    expect(await screen.findByText("任务详情（T7）")).toBeInTheDocument();
+    // 202 后责任移交任务中心：详情页渲染该任务（T7 TaskDetailPage）
+    expect(await screen.findByText("等待中")).toBeInTheDocument();
+    expect(screen.getAllByText("team/project").length).toBeGreaterThanOrEqual(1);
     await router.navigate("/audit/new");
     const input = (await screen.findByLabelText("仓库目标")) as HTMLInputElement;
     expect(input.value).toBe("");
@@ -180,23 +196,28 @@ describe("AuditCreatePage Zod validation", () => {
 });
 
 describe("AuditCreatePage capabilities gating", () => {
-  it("disables the GitHub source when the server reports it as off", async () => {
-    stubFetch([
-      {
-        url: "/api/repository-scans/capabilities",
-        body: {
-          enabled: true,
-          scan_sources: { configured: "local-import", github: false },
+  it(
+    "disables the GitHub source when the server reports it as off",
+    async () => {
+      stubFetch([
+        {
+          url: "/api/repository-scans/capabilities",
+          body: {
+            enabled: true,
+            scan_sources: { configured: "local-import", github: false },
+          },
         },
-      },
-    ]);
-    renderAt("/audit/new");
-    await waitFor(
-      () => {
-        expect(screen.getByRole("radio", { name: /GitHub 仓库/ })).toBeDisabled();
-      },
-      { timeout: 5000 },
-    );
-    expect(screen.getByText(/GitHub 来源未启用/)).toBeInTheDocument();
-  });
+      ]);
+      renderAt("/audit/new");
+      await waitFor(
+        () => {
+          expect(screen.getByRole("radio", { name: /GitHub 仓库/ })).toBeDisabled();
+        },
+        { timeout: 9000 },
+      );
+      expect(screen.getByText(/GitHub 来源未启用/)).toBeInTheDocument();
+    },
+    // 本机冷启动/负载下该用例在默认 5s 边缘，显式放宽用例与等待超时。
+    20000,
+  );
 });

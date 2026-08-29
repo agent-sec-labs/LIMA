@@ -13,7 +13,7 @@ describe("App foundation", () => {
 
   it("keeps brand identity in the shell", async () => {
     render(<App router={createAppRouter("memory", "/tasks")} />);
-    expect(await screen.findByText("审计结果（T7）")).toBeInTheDocument();
+    expect((await screen.findAllByText("审计结果")).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("砺码 · LIMA")).toBeInTheDocument();
   });
 });

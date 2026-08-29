@@ -83,10 +83,72 @@ export interface TaskListItem {
   state: TaskLifecycleState;
   repository: string;
   task_type: string;
+  pull_request?: number | null;
   created_at: string;
   updated_at: string;
   error: string | null;
   progress: TaskProgressSummary | null;
+}
+
+/** T4 完成载荷：progress.detail.completion（skip≥1 即 warnings）。 */
+export interface TaskCompletion {
+  status: "completed" | "completed_with_warnings";
+  warning_count: number;
+  warnings?: Record<string, number>;
+}
+
+export interface FindingItem {
+  severity?: string;
+  rule_id?: string;
+  cwe?: string;
+  path?: string;
+  line?: number;
+  title?: string;
+  verification_state?: string;
+  source?: string;
+  confidence?: number;
+  evidence?: string;
+  explanation?: string;
+  fix?: string;
+}
+
+export interface ScanReport {
+  repository?: string;
+  risk?: string;
+  reviewer?: string;
+  summary?: string;
+  findings?: FindingItem[];
+  files_reviewed?: string[] | number;
+  adjudication?: { policy?: string; overall_disposition?: string };
+  collaboration?: {
+    scanned_files?: number;
+    scanned_bytes?: number;
+    workspace_truncated?: boolean;
+    skipped?: Record<string, number>;
+    import_policy?: {
+      resolved_revision?: string;
+      cache_hit?: boolean;
+      repository_key?: string;
+      archive_sha256?: string;
+      source?: Record<string, unknown>;
+    };
+    [key: string]: unknown;
+  };
+}
+
+/** GET /v1/tasks/:id 的完整任务详情（store 水合后形态）。 */
+export interface TaskDetail {
+  id: string;
+  state: TaskLifecycleState;
+  repository: string;
+  pull_request?: number | null;
+  created_at?: string;
+  updated_at?: string;
+  error?: string | null;
+  input?: Record<string, unknown>;
+  report?: ScanReport | null;
+  progress?: TaskProgress | null;
+  failure?: TaskFailure | null;
 }
 
 export interface HealthPayload {

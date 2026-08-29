@@ -2,7 +2,7 @@ import React from "react";
 import { Navigate, Outlet, RouterProvider, createHashRouter, createMemoryRouter } from "react-router-dom";
 
 export type AppRouterInstance = ReturnType<typeof createHashRouter>;
-import { Layout, Menu, Typography } from "antd";
+import { Layout, Menu } from "antd";
 import {
   ExperimentOutlined,
   FileProtectOutlined,
@@ -13,6 +13,8 @@ import {
 } from "@ant-design/icons";
 import { Link, useLocation } from "react-router-dom";
 import { AuditCreatePage } from "@/features/audit-create/AuditCreatePage";
+import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
+import { TaskListPage } from "@/features/tasks/TaskListPage";
 import { AuthBar } from "@/features/auth/AuthBar";
 import { ExperimentsPage } from "@/features/experiments/ExperimentsPage";
 import { EvolutionPage } from "@/features/evolution/EvolutionPage";
@@ -20,20 +22,8 @@ import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SkillsPage } from "@/features/skills/SkillsPage";
 
 /**
- * T5 只交付地基：所有业务路由渲染同一个占位页。
- * T6/T7/T8 按 feature 目录逐页替换，不再修改本骨架。
+ * 业务路由由各 feature 目录提供（T6 audit-create / T7 tasks / T8 其余页面）。
  */
-function FeaturePlaceholder({ title }: { title: string }): React.JSX.Element {
-  return (
-    <div style={{ padding: 24 }}>
-      <Typography.Title level={3}>{title}</Typography.Title>
-      <Typography.Paragraph type="secondary">
-        该页面属于 React 迁移的后续任务，当前由前端地基占位。旧版界面仍在根路径可用。
-      </Typography.Paragraph>
-    </div>
-  );
-}
-
 const NAV_ITEMS = [
   { key: "/audit/new", icon: <RadarChartOutlined />, label: "发起审计" },
   { key: "/tasks", icon: <FileProtectOutlined />, label: "审计结果" },
@@ -92,8 +82,8 @@ function routeTree() {
       children: [
         { index: true, element: <Navigate to="/audit/new" replace /> },
         { path: "audit/new", element: <AuditCreatePage /> },
-        { path: "tasks", element: <FeaturePlaceholder title="审计结果（T7）" /> },
-        { path: "tasks/:taskId", element: <FeaturePlaceholder title="任务详情（T7）" /> },
+        { path: "tasks", element: <TaskListPage /> },
+        { path: "tasks/:taskId", element: <TaskDetailPage /> },
         { path: "experiments", element: <ExperimentsPage /> },
         { path: "skills", element: <SkillsPage /> },
         { path: "settings", element: <SettingsPage /> },

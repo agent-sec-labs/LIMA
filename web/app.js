@@ -667,7 +667,7 @@ async function loadRepositoryScanCapabilities() {
     const githubSources = data.scan_sources?.github;
     root.innerHTML = [
       ["扫描状态", data.enabled || githubSources ? "可用" : "仓库导入目录未就绪"],
-      ["GitHub 来源", githubSources ? "已启用（服务端物化）" : "未启用（LIMA_REPOSITORY_SCAN_SOURCES）"],
+      ["GitHub 来源", githubSources ? "已启用（服务端物化）" : "未启用（请联系管理员）"],
       ["代码执行", data.repository_code_executed ? "会执行（请复核配置）" : "不执行目标代码"],
       ["扫描上限", `${Number(data.max_files || 0).toLocaleString()} 文件 · ${bytesLabel(data.max_total_bytes)}`],
       ["数据流", data.dataflow_enabled ? `跨文件 · 最深 ${Number(data.dataflow_max_call_depth || 0)} 层` : "未启用"],

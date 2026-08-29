@@ -116,6 +116,39 @@ def _check_lima_logo_is_safe_scalable_and_wired_as_favicon() -> None:
     assert 'if path == "/assets/lima-mark.svg"' in api
 
 
+def _check_cxx_report_contract_exposes_layered_evidence_safely() -> None:
+    script = _read("app.js")
+    css = _read("app.css")
+
+    for token in (
+        "function analysisModeLabel", "纯源码候选", "构建支持的静态验证",
+        "Sanitizer 动态确认", "纯源码分析，尚未经过目标项目构建验证",
+        "工具证据 / trace", "分析降级说明", "不支持自动修复",
+        "finding.language", "finding.symbol", "evidence_records", "escapeHtml",
+        "automatic_repair !== false", "VERIFIED_STATES",
+    ):
+        assert token in script
+    assert "includes(\"verified\")" not in script
+    assert "escapeHtml(finding.language" in script
+    assert "escapeHtml(finding.symbol" in script
+    assert "escapeHtml(record.snippet" in script
+    assert "[内部地址已隐藏]" in script
+    assert "[运行路径已隐藏]" in script
+    assert "[敏感参数已隐藏]" in script
+    assert "finding-analysis-mode" in css
+    assert "source-only-warning" in css
+
+
+def _check_cxx_report_repair_gate_uses_explicit_eligibility() -> None:
+    script = _read("app.js")
+
+    assert "function canAutomaticallyRepair" in script
+    assert "!isCxxFinding(finding)" in script
+    assert "const hasRepairableFinding = findings.some(" in script
+    assert "reportReady && repositoryScan && hasRepairableFinding" in script
+    assert "reportReady && task.pull_request && hasRepairableFinding" in script
+
+
 class FrontendUiTests(unittest.TestCase):
     def test_task_oriented_navigation_and_first_run_guidance(self) -> None:
         _check_task_oriented_navigation_and_first_run_guidance()
@@ -137,3 +170,9 @@ class FrontendUiTests(unittest.TestCase):
 
     def test_lima_logo_is_safe_scalable_and_wired_as_favicon(self) -> None:
         _check_lima_logo_is_safe_scalable_and_wired_as_favicon()
+
+    def test_cxx_report_contract_exposes_layered_evidence_safely(self) -> None:
+        _check_cxx_report_contract_exposes_layered_evidence_safely()
+
+    def test_cxx_report_repair_gate_uses_explicit_eligibility(self) -> None:
+        _check_cxx_report_repair_gate_uses_explicit_eligibility()

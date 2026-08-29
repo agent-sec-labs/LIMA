@@ -684,12 +684,104 @@ function confidenceLabel(value) {
   return `${Math.round((number <= 1 ? number : number / 100) * 100)}%`;
 }
 
+const VERIFIED_STATES = new Set(["dataflow-verified", "syntax-verified", "build-verified", "confirmed"]);
+const CXX_ANALYSIS_MODES = new Set(["source-only", "build-backed", "sanitizer-confirmed"]);
+
+function isCxxFinding(finding) {
+  const language = String(finding?.language || "").trim().toLowerCase();
+  return ["c", "c++", "cpp", "cxx"].includes(language) || String(finding?.rule_id || "").toLowerCase().startsWith("cxx.");
+}
+
+function canAutomaticallyRepair(finding) {
+  return finding?.automatic_repair !== false && !isCxxFinding(finding);
+}
+
+function analysisModeLabel(value) {
+  const labels = {
+    "source-only": "纯源码候选",
+    "build-backed": "构建支持的静态验证",
+    "sanitizer-confirmed": "Sanitizer 动态确认",
+  };
+  return labels[String(value || "").toLowerCase()] || "未知分析模式（需人工复核）";
+}
+
 function verificationLabel(value) {
   const state = String(value || "candidate").toLowerCase();
-  if (state.includes("dataflow")) return "数据流已验证";
-  if (state.includes("syntax")) return "语法约束已验证";
-  if (state.includes("verified")) return "已验证";
-  return "候选 · 需复核";
+  const labels = {
+    candidate: "候选 · 需复核",
+    "dataflow-verified": "数据流已验证",
+    "syntax-verified": "语法约束已验证",
+    "build-verified": "构建支持的静态验证",
+    confirmed: "Sanitizer 动态确认",
+  };
+  return labels[state] || "未知验证状态（需人工复核）";
+}
+
+function verificationPillClass(finding) {
+  const state = String(finding?.verification_state || "candidate").toLowerCase();
+  const analysisMode = String(finding?.analysis_mode || "").toLowerCase();
+  if (state === "confirmed") return "pill-green verified-pill";
+  if (state === "build-verified") return "pill-blue build-verified-pill";
+  if (analysisMode === "source-only") return "pill-amber source-only-warning";
+  return VERIFIED_STATES.has(state) ? "pill-green" : "pill-neutral";
+}
+
+function diagnosticCode(diagnostic) {
+  const raw = diagnostic && typeof diagnostic === "object"
+    ? diagnostic.code || diagnostic.status || "analysis-limitation"
+    : diagnostic || "analysis-limitation";
+  return String(raw).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || "ANALYSIS_LIMITATION";
+}
+
+function safeDiagnosticMessage(value) {
+  if (typeof value !== "string") return "";
+  return value.trim()
+    .replace(/https?:\/\/[^\s`]+/gi, "[内部地址已隐藏]")
+    .replace(/[A-Za-z]:[\\/][^\s`]+/g, "[运行路径已隐藏]")
+    .replace(/(^|[\s(])\/(?:[^\s`/]+\/)+[^\s`/]+/g, "$1[运行路径已隐藏]")
+    .replace(/(?:--)?(?:api[_-]?key|token|secret|password)\s*=\s*[^\s`]+/gi, "[敏感参数已隐藏]")
+    .slice(0, 240);
+}
+
+function diagnosticLabel(code) {
+  const labels = {
+    BUILD_FAILED: "构建支持的静态验证未完成",
+    TIMED_OUT: "分析层超时，未完成验证",
+    SANITIZER_NOT_CONFIGURED: "Sanitizer 动态确认未配置",
+    SANITIZER_BUILD_CONTEXT_UNAVAILABLE: "Sanitizer 动态确认缺少构建上下文",
+    TEST_FAILED_WITHOUT_SANITIZER_EVIDENCE: "测试失败，未获得 Sanitizer 证据",
+    NEEDS_HUMAN_REVIEW: "工具输出需要人工复核",
+    ANALYSIS_BUDGET_EXHAUSTED: "分析预算已达到上限，结果可能不完整",
+  };
+  return labels[code] || "分析层未完成，结果需要人工复核";
+}
+
+function cxxDiagnostics(report) {
+  const cxxMemory = report?.collaboration?.cxx_memory;
+  const diagnostics = Array.isArray(cxxMemory?.diagnostics) ? cxxMemory.diagnostics.slice(0, 8) : [];
+  if (!diagnostics.length) return "";
+  return `
+    <section class="cxx-diagnostics" aria-label="C/C++ 分析降级说明">
+      <h3>分析降级说明</h3>
+      <p>层级未运行、构建失败或测试失败不表示目标项目没有漏洞。</p>
+      <ul>${diagnostics.map((diagnostic) => {
+        const code = diagnosticCode(diagnostic);
+        const message = safeDiagnosticMessage(diagnostic?.message);
+        const detail = message ? `${diagnosticLabel(code)}：${message}` : diagnosticLabel(code);
+        return `<li><code>${escapeHtml(code)}</code> ${escapeHtml(detail)}</li>`;
+      }).join("")}</ul>
+    </section>
+  `;
+}
+
+function cxxEvidenceRecords(finding) {
+  const records = Array.isArray(finding.evidence_records) && finding.evidence_records.length
+    ? finding.evidence_records
+    : [{ source: finding.source, path: finding.path, line: finding.line, snippet: finding.evidence }];
+  return records.map((record) => `
+    <li><code>${escapeHtml(record.source || "unknown")}</code> · <code>${escapeHtml(record.path || "未知文件")}:${escapeHtml(record.line || "?")}</code> · ${escapeHtml(record.snippet || "未提供")}</li>
+  `).join("");
+}
 }
 
 function renderTaskReport(task) {
@@ -710,7 +802,7 @@ function renderTaskReport(task) {
   const findings = Array.isArray(report.findings) ? report.findings : [];
   const counts = severityCounts(findings);
   const risk = reportRisk(report, findings);
-  const verified = findings.filter((finding) => String(finding.verification_state || "").toLowerCase().includes("verified")).length;
+  const verified = findings.filter((finding) => VERIFIED_STATES.has(String(finding.verification_state || "").toLowerCase())).length;
   const files = Array.isArray(report.files_reviewed) ? report.files_reviewed.length : Number(report.files_reviewed || report.file_count || 0);
   const highPriority = counts.critical + counts.high;
   const summary = report.summary || (findings.length
@@ -728,6 +820,17 @@ function renderTaskReport(task) {
     const severity = String(finding.severity || "info").toLowerCase();
     const safeSeverity = ["critical", "high", "medium", "low", "info"].includes(severity) ? severity : "info";
     const location = `${finding.path || "未知文件"}:${finding.line || "?"}`;
+    const cxxFinding = isCxxFinding(finding);
+    const analysisMode = String(finding.analysis_mode || "").toLowerCase();
+    const cxxDetails = cxxFinding ? `
+      <p><strong>语言 / symbol：</strong>${escapeHtml(finding.language || "unknown")} / ${escapeHtml(finding.symbol || "unknown")}</p>
+      <p><strong>分析模式：</strong>${escapeHtml(analysisMode || "unknown")} · ${escapeHtml(analysisModeLabel(analysisMode))}</p>
+      <p><strong>验证状态：</strong>${escapeHtml(finding.verification_state || "candidate")} · ${escapeHtml(verificationLabel(finding.verification_state))}</p>
+      <p><strong>工具证据 / trace：</strong></p>
+      <ul class="evidence-records">${cxxEvidenceRecords(finding)}</ul>
+      ${analysisMode === "source-only" ? '<p class="source-only-warning"><strong>纯源码分析，尚未经过目标项目构建验证</strong></p>' : ""}
+      ${finding.automatic_repair !== true ? '<p class="automatic-repair-disabled"><strong>不支持自动修复</strong></p>' : ""}
+    ` : "";
     return `
       <tr>
         <td><span class="pill ${safeSeverity === "critical" || safeSeverity === "high" ? "pill-red" : safeSeverity === "medium" ? "pill-amber" : "pill-green"}">${escapeHtml(severityLabels[safeSeverity] || safeSeverity)}</span></td>
@@ -740,11 +843,13 @@ function renderTaskReport(task) {
               <p><strong>为什么是问题：</strong>${escapeHtml(finding.explanation || "当前报告没有提供进一步解释。")}</p>
               <p><strong>关键证据：</strong>${escapeHtml(finding.evidence || "当前报告没有提供证据摘要。")}</p>
               <p><strong>建议修复：</strong>${escapeHtml(finding.fix || "建议由开发者结合业务上下文制定最小修复。")}</p>
+              ${cxxDetails}
             </div>
           </details>
         </td>
         <td><code>${escapeHtml(location)}</code></td>
-        <td><span class="pill pill-neutral">${escapeHtml(verificationLabel(finding.verification_state))}</span></td>
+        <td><span class="pill ${verificationPillClass(finding)}">${escapeHtml(verificationLabel(finding.verification_state))}</span></td>
+        <td class="finding-analysis-mode"><span class="pill ${analysisMode === "source-only" ? "pill-amber source-only-warning" : CXX_ANALYSIS_MODES.has(analysisMode) ? "pill-blue" : "pill-neutral"}">${escapeHtml(cxxFinding ? analysisModeLabel(analysisMode) : "—")}</span></td>
         <td class="confidence">${escapeHtml(confidenceLabel(finding.confidence))}</td>
       </tr>
     `;
@@ -769,12 +874,13 @@ function renderTaskReport(task) {
         <div><h3>严重度分布</h3><p>条形长度按当前报告中的最大类别归一化。</p></div>
         <div class="severity-bars">${bars}</div>
       </section>
+      ${cxxDiagnostics(report)}
       <div class="finding-section-head">
         <div><h3>问题清单</h3><p>按风险、位置和证据状态快速决定处理顺序。</p></div>
         <span class="pill pill-neutral">${findings.length} 项</span>
       </div>
       ${findingRows
-        ? `<div class="finding-table-wrap"><table class="finding-table"><thead><tr><th>风险</th><th>问题与依据</th><th>位置</th><th>证据状态</th><th>置信度</th></tr></thead><tbody>${findingRows}</tbody></table></div>`
+        ? `<div class="finding-table-wrap"><table class="finding-table"><thead><tr><th>风险</th><th>问题与依据</th><th>位置</th><th>证据状态</th><th>分析模式</th><th>置信度</th></tr></thead><tbody>${findingRows}</tbody></table></div>`
         : emptyState("未发现达到阈值的问题", "这不等于绝对安全。请结合依赖风险、部署配置和业务权限继续复核。", "发起另一项审计", "scan", "check")}
       <p class="report-footnote">${icon("info")}<span><strong>如何解读：</strong>“数据流已验证”表示系统确认了输入源到危险调用的路径；“候选”仍需要人工结合业务上下文判断。置信度不能替代漏洞可利用性分析。</span></p>
     </div>
@@ -797,8 +903,10 @@ async function openTask(id) {
     $("#task-report").innerHTML = renderTaskReport(task);
     const reportReady = normalizeState(task.state) === "SUCCESS" && task.report;
     const repositoryScan = taskType(task) === "repository_scan";
-    $("#create-repair-preview").classList.toggle("hidden", !(reportReady && repositoryScan && (task.report.findings || []).length));
-    $("#create-fix").classList.toggle("hidden", !(reportReady && task.pull_request));
+    const findings = Array.isArray(task.report?.findings) ? task.report.findings : [];
+    const hasRepairableFinding = findings.some((finding) => canAutomaticallyRepair(finding));
+    $("#create-repair-preview").classList.toggle("hidden", !(reportReady && repositoryScan && hasRepairableFinding));
+    $("#create-fix").classList.toggle("hidden", !(reportReady && task.pull_request && hasRepairableFinding));
     $("#feedback-panel").classList.toggle("hidden", !reportReady);
     if (reportReady) {
       populateFeedbackFindings(task.report.findings || []);

@@ -16,6 +16,7 @@ from lima.cxx_memory import (
 )
 from lima.fixer import SafeFixer
 from lima.models import Finding, Severity
+from lima.report import to_markdown
 from lima.repository_scanner import VERIFICATION_RANK, RepositoryScanner
 from lima.workspace import RepositoryWorkspace
 
@@ -575,6 +576,117 @@ class CxxMemoryClientTests(unittest.TestCase):
     def test_uaf_mapping_rejects_unrecognized_access_tokens(self):
         self.assertIsNone(map_asan_error("heap-use-after-free", "FREE"))
         self.assertIsNone(map_asan_error("heap-use-after-free", "BOGUS"))
+
+
+class CxxReportTests(unittest.TestCase):
+    def test_markdown_explains_source_only_evidence_and_degraded_layers(self):
+        finding = cxx_finding("semgrep", "source-only")
+        report = {
+            "repository": "team/project",
+            "summary": "C/C++ memory analysis completed with limitations.",
+            "risk": "high",
+            "reviewer": "local-rules",
+            "findings": [finding.to_dict()],
+            "collaboration": {
+                "cxx_memory": {
+                    "status": "completed",
+                    "tool_runs": [{"tool": "semgrep", "status": "completed"}],
+                    "diagnostics": [
+                        {
+                            "layer": "build-backed",
+                            "status": "build_failed",
+                            "message": "CMake configuration failed at C:\\container\\build --token=secret",
+                        },
+                        {
+                            "layer": "sanitizer-confirmed",
+                            "status": "sanitizer_not_configured",
+                            "message": "see http://cxx-analyzer:8090/?api_key=secret",
+                        },
+                    ],
+                },
+            },
+        }
+
+        markdown = to_markdown(report)
+
+        for text in (
+            "Language: `c`", "Symbol: `release`", "CWE-415", "src/free.c:12",
+            "纯源码候选", "candidate", "semgrep", "free(p)",
+            "纯源码分析，尚未经过目标项目构建验证", "不支持自动修复",
+            "BUILD_FAILED", "构建支持的静态验证未完成", "SANITIZER_NOT_CONFIGURED",
+            "Sanitizer 动态确认未配置",
+        ):
+            self.assertIn(text, markdown)
+        self.assertNotIn("C:\\container\\build", markdown)
+        self.assertNotIn("http://cxx-analyzer:8090", markdown)
+        self.assertNotIn("secret", markdown)
+
+    def test_markdown_uses_safe_fallbacks_and_bounds_cxx_diagnostics(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding["analysis_mode"] = "future-engine"
+        finding["verification_state"] = "future-state"
+        report = {
+            "repository": "team/project",
+            "summary": "limited analysis",
+            "risk": "medium",
+            "findings": [finding],
+            "collaboration": {
+                "cxx_memory": {
+                    "status": "completed",
+                    "diagnostics": ["diagnostic-%d" % index for index in range(20)],
+                },
+            },
+        }
+
+        markdown = to_markdown(report)
+
+        self.assertIn("未知分析模式（需人工复核）", markdown)
+        self.assertIn("未知验证状态（需人工复核）", markdown)
+        self.assertLessEqual(markdown.count("`DIAGNOSTIC_"), 8)
+
+    def test_non_cxx_markdown_keeps_existing_report_shape(self):
+        report = {
+            "repository": "team/project",
+            "summary": "Python finding",
+            "risk": "medium",
+            "findings": [{
+                "severity": "medium", "title": "Unsafe eval", "path": "app.py",
+                "line": 9, "rule_id": "SEC-EVAL", "cwe": "CWE-95",
+                "verification_state": "candidate", "explanation": "unsafe",
+                "evidence": "eval(value)", "fix": "remove eval", "test": "exercise input",
+                "source": "local-rule",
+            }],
+        }
+
+        markdown = to_markdown(report)
+
+        self.assertIn("**Suggested fix:** remove eval", markdown)
+        self.assertNotIn("纯源码分析，尚未经过目标项目构建验证", markdown)
+        self.assertNotIn("不支持自动修复", markdown)
+
+    def test_markdown_reserves_source_only_warning_for_source_only_findings(self):
+        finding = cxx_finding("clang", "build-backed").to_dict()
+        report = {
+            "repository": "team/project", "summary": "build evidence", "risk": "medium",
+            "findings": [finding],
+        }
+
+        markdown = to_markdown(report)
+
+        self.assertIn("构建支持的静态验证", markdown)
+        self.assertNotIn("纯源码分析，尚未经过目标项目构建验证", markdown)
+
+    def test_markdown_marks_legacy_cxx_findings_as_not_auto_repairable(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding.pop("automatic_repair")
+        report = {
+            "repository": "team/project", "summary": "legacy C/C++ finding", "risk": "high",
+            "findings": [finding],
+        }
+
+        markdown = to_markdown(report)
+
+        self.assertIn("不支持自动修复", markdown)
 
 
 if __name__ == "__main__":

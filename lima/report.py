@@ -1,4 +1,90 @@
-from typing import Any, Dict
+import re
+from typing import Any, Dict, Iterable
+
+
+_MAX_CXX_DIAGNOSTICS = 8
+_ANALYSIS_MODE_LABELS = {
+    "source-only": "纯源码候选",
+    "build-backed": "构建支持的静态验证",
+    "sanitizer-confirmed": "Sanitizer 动态确认",
+}
+_VERIFICATION_STATE_LABELS = {
+    "candidate": "候选 · 需复核",
+    "build-verified": "构建支持的静态验证",
+    "confirmed": "Sanitizer 动态确认",
+    "syntax-verified": "语法约束已验证",
+    "dataflow-verified": "数据流已验证",
+}
+_DIAGNOSTIC_LABELS = {
+    "BUILD_FAILED": "构建支持的静态验证未完成",
+    "TIMED_OUT": "分析层超时，未完成验证",
+    "SANITIZER_NOT_CONFIGURED": "Sanitizer 动态确认未配置",
+    "SANITIZER_BUILD_CONTEXT_UNAVAILABLE": "Sanitizer 动态确认缺少构建上下文",
+    "TEST_FAILED_WITHOUT_SANITIZER_EVIDENCE": "测试失败，未获得 Sanitizer 证据",
+    "NEEDS_HUMAN_REVIEW": "工具输出需要人工复核",
+    "ANALYSIS_BUDGET_EXHAUSTED": "分析预算已达到上限，结果可能不完整",
+}
+
+
+def _is_cxx_finding(item: Dict[str, Any]) -> bool:
+    language = str(item.get("language", "")).lower().strip()
+    return language in {"c", "c++", "cpp", "cxx"} or str(
+        item.get("rule_id", "")
+    ).lower().startswith("cxx.")
+
+
+def _analysis_mode_label(value: Any) -> str:
+    return _ANALYSIS_MODE_LABELS.get(
+        str(value or "").lower(), "未知分析模式（需人工复核）"
+    )
+
+
+def _verification_state_label(value: Any) -> str:
+    return _VERIFICATION_STATE_LABELS.get(
+        str(value or "").lower(), "未知验证状态（需人工复核）"
+    )
+
+
+def _diagnostic_code(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("code") or value.get("status") or "analysis-limitation"
+    code = re.sub(r"[^A-Z0-9]+", "_", str(value or "analysis-limitation").upper())
+    code = code.strip("_") or "ANALYSIS_LIMITATION"
+    return code[:64]
+
+
+def _safe_diagnostic_message(value: Any) -> str:
+    """Keep an actionable reason without exposing runtime addresses or secrets."""
+    if not isinstance(value, str):
+        return ""
+    message = value.strip()
+    message = re.sub(r"https?://[^\s`]+", "[内部地址已隐藏]", message, flags=re.I)
+    message = re.sub(r"[A-Za-z]:[\\/][^\s`]+", "[运行路径已隐藏]", message)
+    message = re.sub(r"(?<!\w)/(?:[^\s`/]+/)+[^\s`/]+", "[运行路径已隐藏]", message)
+    message = re.sub(
+        r"(?i)(?:--)?(?:api[_-]?key|token|secret|password)\s*=\s*[^\s`]+",
+        "[敏感参数已隐藏]",
+        message,
+    )
+    return message[:240]
+
+
+def _cxx_diagnostics(collaboration: Dict[str, Any]) -> Iterable[str]:
+    cxx_memory = collaboration.get("cxx_memory")
+    if not isinstance(cxx_memory, dict):
+        return ()
+    diagnostics = cxx_memory.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return ()
+    lines = []
+    for item in diagnostics[:_MAX_CXX_DIAGNOSTICS]:
+        code = _diagnostic_code(item)
+        message = _safe_diagnostic_message(item.get("message") if isinstance(item, dict) else "")
+        label = _DIAGNOSTIC_LABELS.get(code, "分析层未完成，结果需要人工复核")
+        if message:
+            label = "%s：%s" % (label, message)
+        lines.append("- `%s` %s" % (code, label))
+    return lines
 
 
 def to_markdown(report: Dict[str, Any]) -> str:
@@ -70,8 +156,21 @@ def to_markdown(report: Dict[str, Any]) -> str:
             "",
         ])
     findings = report.get("findings", [])
+    cxx_diagnostics = tuple(_cxx_diagnostics(collaboration))
+    if cxx_diagnostics:
+        lines.extend([
+            "## C/C++ 内存分析限制",
+            "",
+            "以下层级未完成或被降级；这不表示目标项目不存在漏洞。",
+            "",
+            *cxx_diagnostics,
+            "",
+        ])
     if not findings:
-        lines.append("✅ No actionable issue detected in the added lines.")
+        if cxx_diagnostics:
+            lines.append("ℹ️ 当前没有可报告的 C/C++ finding；受限分析结果不能作为“无漏洞”结论。")
+        else:
+            lines.append("✅ No actionable issue detected in the added lines.")
         return "\n".join(lines) + "\n"
     lines.extend(["## Findings", ""])
     icons = {"critical": "🚨", "high": "🔴", "medium": "🟠", "low": "🟡"}
@@ -102,6 +201,48 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 "",
             ]
         )
+        if _is_cxx_finding(item):
+            analysis_mode = str(item.get("analysis_mode", "")).lower()
+            lines.extend([
+                "**C/C++ memory-analysis details**",
+                "",
+                "- Language: `%s`" % item.get("language", "unknown"),
+                "- Symbol: `%s`" % item.get("symbol", "unknown"),
+                "- Location: `%s:%s`" % (item.get("path", ""), item.get("line", 0)),
+                "- CWE: `%s`" % (item.get("cwe", "unmapped") or "unmapped"),
+                "- Analysis mode: `%s` · **%s**" % (
+                    item.get("analysis_mode", "unknown"), _analysis_mode_label(analysis_mode),
+                ),
+                "- Verification state: `%s` · %s" % (
+                    item.get("verification_state", "candidate"),
+                    _verification_state_label(item.get("verification_state")),
+                ),
+                "- Tool: `%s`" % item.get("source", "unknown"),
+                "",
+                "**工具证据 / trace**",
+                "",
+            ])
+            evidence_records = item.get("evidence_records") or []
+            for record in evidence_records:
+                if not isinstance(record, dict):
+                    continue
+                lines.append("- `%s` · `%s:%s` · %s" % (
+                    record.get("source", "unknown"), record.get("path", ""),
+                    record.get("line", 0), record.get("snippet", ""),
+                ))
+            if not evidence_records:
+                lines.append("- `%s` · `%s:%s` · %s" % (
+                    item.get("source", "unknown"), item.get("path", ""),
+                    item.get("line", 0), item.get("evidence", ""),
+                ))
+            lines.append("")
+            if analysis_mode == "source-only":
+                lines.extend([
+                    "> ⚠️ **纯源码分析，尚未经过目标项目构建验证**",
+                    "",
+                ])
+            if item.get("automatic_repair") is not True:
+                lines.extend(["**不支持自动修复**", ""])
         if item.get("verification_state") == "dataflow-verified":
             lines.extend(["**Source-to-sink path**", ""])
             for step in item.get("evidence_records") or []:

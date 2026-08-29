@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
 from .store import utc_now
+from .task_progress import progress_summary
 
 
 class PostgresTaskStore:
@@ -32,7 +33,8 @@ class PostgresTaskStore:
             """CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, state TEXT NOT NULL, repository TEXT NOT NULL,
                 pull_request INTEGER, input_json JSONB NOT NULL, report_json JSONB,
-                error TEXT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""",
+                error TEXT, progress_json JSONB, created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS trace_events (
                 id BIGSERIAL PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), step INTEGER NOT NULL,
                 state TEXT NOT NULL, message TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)""",
@@ -72,6 +74,7 @@ class PostgresTaskStore:
             "ALTER TABLE skill_evolution_runs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS progress_json JSONB",
             "ALTER TABLE installations ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             """CREATE TABLE IF NOT EXISTS checkpoints (
                 task_id TEXT NOT NULL REFERENCES tasks(id), node TEXT NOT NULL, status TEXT NOT NULL,
@@ -203,6 +206,7 @@ class PostgresTaskStore:
         value = dict(row)
         value["input"] = value.pop("input_json")
         value["report"] = value.pop("report_json")
+        value["progress"] = value.pop("progress_json", None)
         value["trace"] = [dict(item) for item in events]
         value["collaboration"] = []
         for message in messages:
@@ -224,6 +228,15 @@ class PostgresTaskStore:
                 (task_id, message["sender"], message["recipient"], message["kind"],
                  message.get("correlation_id", ""),
                  json.dumps(message.get("content", {}), ensure_ascii=False), utc_now()),
+            )
+
+    def update_task_progress(self, task_id: str, progress: dict[str, Any]) -> None:
+        """Persist runtime progress without touching immutable task input."""
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET progress_json=%s::jsonb, updated_at=%s WHERE id=%s",
+                (json.dumps(progress, ensure_ascii=False), utc_now(), task_id),
             )
 
     def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
@@ -303,7 +316,8 @@ class PostgresTaskStore:
             where = " WHERE tenant_id=%s" if tenant_id is not None else ""
             params = ([tenant_id] if tenant_id is not None else []) + [max(1, min(limit, 200))]
             rows = conn.execute(
-                "SELECT id,state,repository,pull_request,error,created_at,updated_at,tenant_id,input_json "
+                "SELECT id,state,repository,pull_request,error,created_at,"
+                "updated_at,tenant_id,input_json,progress_json "
                 "FROM tasks" + where + " ORDER BY created_at DESC LIMIT %s", params
             ).fetchall()
         values = []
@@ -311,6 +325,7 @@ class PostgresTaskStore:
             value = dict(row)
             payload = value.pop("input_json") or {}
             value["task_type"] = payload.get("task_type", "review")
+            value["progress"] = progress_summary(value.pop("progress_json", None))
             values.append(value)
         for value in values:
             value["created_at"] = value["created_at"].isoformat()

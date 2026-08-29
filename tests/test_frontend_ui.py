@@ -181,7 +181,9 @@ def _check_github_source_capabilities_gating() -> None:
     assert "githubButton.disabled = enabled === false" in script
     assert "updateSourceMode(\"local\")" in script
     assert 'id="github-source-unavailable"' in html
-    assert "LIMA_REPOSITORY_SCAN_SOURCES" in html
+    # 用户可见文案不暴露服务端环境变量名（管理员术语不出现在 UI）。
+    assert "LIMA_REPOSITORY_SCAN_SOURCES" not in html
+    assert "请联系管理员启用" in html
     assert 'data-source-mode="github"' in html
     assert 'data-source-mode="local"' in html
 

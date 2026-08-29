@@ -3,7 +3,7 @@
 本文面向第一次接触 LIMA 的开发者，目标是帮助你快速建立正确的项目心智模型，
 找到修改入口，并在不破坏安全边界、评测完整性和多人协作约束的前提下交付代码。
 
-> 基线：`main@5471a56`（2026-08-28，PR #23 合并后；同窗口合入 #22 API 安全边界修复）  
+> 基线：`main@b312c60`（2026-08-29，PR #31 合并后；Epic #17 T1–T7 全部闭环：T1 #18、T3 #23、T2 #27、T4 #28、T5 #29、T6 #30、T7 #31；同窗口合入 #22 API 安全边界修复）。
 > 当前版本：`lima.__version__ == "1.6.0"`  
 > 远程仓库：<https://github.com/agent-sec-labs/LIMA>  
 > 实时任务状态以 GitHub Issue 的标签和维护者意见为准；本文的状态表只是交接快照。
@@ -448,12 +448,12 @@ python -m unittest -v `
 | 任务 | 当前状态 | 交接说明 |
 |---|---|---|
 | [T1 #10](https://github.com/agent-sec-labs/LIMA/issues/10) RepositorySource | Closed | PR #18 已合并；契约在 `repository_source.py`，不得在此层联网或物化文件 |
-| [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | 本地已实现 | 契约在 `repository_materializer.py`（ref 钉死/加固下载/发布到 RepositoryCache）；未接服务编排，接线属于 T4 |
+| [T2 #11](https://github.com/agent-sec-labs/LIMA/issues/11) GitHub Materializer | Closed | PR #27；契约在 `repository_materializer.py`（ref 钉死/加固下载/发布到 RepositoryCache） |
 | [T3 #12](https://github.com/agent-sec-labs/LIMA/issues/12) Snapshot Cache | Closed | PR #23 已合并；契约在 `repository_cache.py`（lookup/reserve/publish/touch/pin/cleanup/stats）；`LIMA_REPOSITORY_CACHE_*` 配置已定义但 T4 接线前不生效 |
-| [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | 本地已实现 | worker 侧 github 物化 + pin + 扫描；`LIMA_REPOSITORY_SCAN_SOURCES` 门禁；缓存命中零网络 |
-| [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | 本地已实现 | `lima-repository-cache` 具名卷挂载 `/var/lib/lima/repository-cache`（跨副本共享）；`lima-repair-workspace` 卷声明保留给 T7，不挂载 lima 服务；`__ephemeral__` 魔值 → tmpdir；unmanaged 缓存根启动告警 |
-| [T6 #15](https://github.com/agent-sec-labs/LIMA/issues/15) GitHub Source UI | 本地已实现 | 扫描向导支持 GitHub 来源（capabilities 门禁、ref 钉死警告、`{"source": {...}}` envelope、报告展示 resolved_revision）；浏览器零 `api.github.com` 调用 |
-| [T7 #16](https://github.com/agent-sec-labs/LIMA/issues/16) RepairWorkspace | 本地已实现 | 契约在 `repair_workspace.py`（compose 持 pin/子集拷贝/预算/fail-closed/dispose 幂等）；service 仅薄接线 `compose_repair_workspace`；compose 挂载 `lima-repair-workspace` 卷；未接 GitHub 写 API，未修改源 Snapshot |
+| [T4 #13](https://github.com/agent-sec-labs/LIMA/issues/13) Async Scan Integration | Closed | PR #28；worker 侧 github 物化 + pin + 扫描；`LIMA_REPOSITORY_SCAN_SOURCES` 门禁（默认 local-import）；缓存命中零网络 |
+| [T5 #14](https://github.com/agent-sec-labs/LIMA/issues/14) Runtime Storage | Closed | PR #29；`lima-repository-cache` 具名卷（跨副本共享）；`__ephemeral__` 魔值 → tmpdir；unmanaged 缓存根启动告警 |
+| [T6 #15](https://github.com/agent-sec-labs/LIMA/issues/15) GitHub Source UI | Closed | PR #30；capabilities 门禁、ref 钉死警告、`{"source": {...}}` envelope、报告展示 resolved_revision；浏览器零 `api.github.com` 调用；UI 文案不暴露服务端环境变量名 |
+| [T7 #16](https://github.com/agent-sec-labs/LIMA/issues/16) RepairWorkspace | Closed | PR #31；`repair_workspace.py`（持 pin/子集拷贝/预算/fail-closed/dispose 幂等）；service 薄接线 `compose_repair_workspace`；`lima-repair-workspace` 卷挂载 lima 服务；未接 GitHub 写 API，未修改源 Snapshot |
 
 依赖关系：
 

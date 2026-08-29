@@ -209,6 +209,7 @@ describe("AuditCreatePage capabilities gating", () => {
         },
       ]);
       renderAt("/audit/new");
+      // 用例预算由 vitest.config 的全局 testTimeout 统一放宽（CI 慢机）。
       await waitFor(
         () => {
           expect(screen.getByRole("radio", { name: /GitHub 仓库/ })).toBeDisabled();
@@ -217,7 +218,5 @@ describe("AuditCreatePage capabilities gating", () => {
       );
       expect(screen.getByText(/GitHub 来源未启用/)).toBeInTheDocument();
     },
-    // 本机冷启动/负载下该用例在默认 5s 边缘，显式放宽用例与等待超时。
-    20000,
   );
 });

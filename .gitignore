@@ -33,3 +33,8 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+
+# T9: 前端覆盖率与 Playwright 产物（报告固定在 frontend/ 下，绝不进 tests/）
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/

@@ -27,6 +27,21 @@ CI stores UTF-8 unit-test logs for 14 days and security/repair evidence for 30
 days. The stable `merge-gate` check is the only status name branch protection
 needs to require; it fails closed unless every underlying engineering job passes.
 
+The React frontend under `frontend/` has its own local checks (Node 18+):
+
+```powershell
+cd frontend
+npm ci
+npm run typecheck       # 应用与 e2e 两个 TypeScript 程序
+npm run test:coverage   # Vitest/RTL，行覆盖率阈值 60%
+npm run build
+```
+
+Playwright audit-lifecycle E2E runs **on Linux CI only** (frozen decision in
+Epic #33) and is not part of the Windows local gate; to reproduce it locally:
+`cd frontend; npm run build; npx playwright test` — the test boots the real
+Python backend serving the built SPA under `/app/`.
+
 ## Workflow
 
 1. Create or claim an issue for non-trivial work.

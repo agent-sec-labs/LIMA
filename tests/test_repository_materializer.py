@@ -15,10 +15,21 @@ from unittest import mock
 from lima.repository_cache import RepositoryCache
 from lima.repository_materializer import (
     GitHubMaterializer,
-    RepositoryMaterializerError,
+    TaskFailureError,
     _WhitelistedRedirectHandler,
 )
 from lima.repository_source import RepositorySource
+
+
+def assert_typed_failure(testcase, code: str, stage: str, call):
+    """Assert that ``call`` raises a TaskFailureError with the given code/stage."""
+    with testcase.assertRaises(TaskFailureError) as caught:
+        call()
+    failure = caught.exception.failure
+    testcase.assertEqual(code, failure.code)
+    testcase.assertEqual(stage, failure.stage)
+    testcase.assertTrue(failure.technical_detail or failure.message)
+    return failure
 
 GITHUB = RepositorySource.github("agent-sec-labs/LIMA")
 SHA = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
@@ -26,10 +37,11 @@ OTHER_SHA = "b1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b"
 
 
 def build_archive(
-    files: dict[str, str] | None = None,
+    files: dict[str, str | bytes] | None = None,
     symlinks: dict[str, str] | None = None,
     member_names: list[str] | None = None,
 ) -> bytes:
+    """Build a codeload-shaped zip; file values may be str or raw bytes."""
     """Build a codeload-shaped zip under a single ``repo-main/`` directory.
 
     ``member_names`` builds literal archive entries verbatim (used for
@@ -39,7 +51,8 @@ def build_archive(
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
         for name, data in (files or {}).items():
-            bundle.writestr("repo-main/" + name, data)
+            payload = data.encode("utf-8") if isinstance(data, str) else data
+            bundle.writestr("repo-main/" + name, payload)
         for name, target in (symlinks or {}).items():
             info = zipfile.ZipInfo("repo-main/" + name)
             info.external_attr = (0o120000 << 16) | 0o644
@@ -134,9 +147,11 @@ class MaterializerTestCase(unittest.TestCase):
 
         shutil.rmtree(self.cache_root, ignore_errors=True)
 
-    def make_materializer(self, **opener_kwargs):
+    def make_materializer(self, _extra=None, **opener_kwargs):
         self.opener = FakeOpener(**opener_kwargs)
-        self.materializer = GitHubMaterializer(self.cache, opener=self.opener)
+        self.materializer = GitHubMaterializer(
+            self.cache, opener=self.opener, **(_extra or {})
+        )
         return self.materializer
 
     def snapshot_files(self, result: dict) -> dict[str, str]:
@@ -192,8 +207,10 @@ class MaterializationTests(MaterializerTestCase):
 
     def test_ref_resolution_failure(self):
         self.make_materializer(archive=ARCHIVE, resolve_failures=1)
-        with self.assertRaises(RepositoryMaterializerError):
-            self.materializer.materialize(GITHUB, "main")
+        assert_typed_failure(
+            self, "GITHUB_NOT_FOUND", "RESOLVING_REVISION",
+            lambda: self.materializer.materialize(GITHUB, "main"),
+        )
         # 解析失败不得产生任何缓存条目或残留
         stats = self.cache.stats()
         self.assertEqual(0, stats["entries"])
@@ -205,8 +222,10 @@ class MaterializationTests(MaterializerTestCase):
         materializer = GitHubMaterializer(
             self.cache, opener=self.opener, timeout_seconds=1
         )
-        with self.assertRaisesRegex(RepositoryMaterializerError, "budget"):
-            materializer.materialize(GITHUB, SHA)
+        assert_typed_failure(
+            self, "GITHUB_TIMEOUT", "DOWNLOADING_ARCHIVE",
+            lambda: materializer.materialize(GITHUB, SHA),
+        )
         self.assertEqual(0, self.cache.stats()["entries"])
         self.assertEqual(0, self.cache.stats()["locks"])
 
@@ -214,8 +233,10 @@ class MaterializationTests(MaterializerTestCase):
         # 成员数超限：构造 10_001 个成员
         huge = build_archive({f"f{i:05d}.txt": "x" for i in range(10_001)})
         self.make_materializer(archive=huge)
-        with self.assertRaisesRegex(RepositoryMaterializerError, "too many entries"):
-            self.materializer.materialize(GITHUB, SHA)
+        assert_typed_failure(
+            self, "ARCHIVE_TOO_MANY_FILES", "VALIDATING_ARCHIVE",
+            lambda: self.materializer.materialize(GITHUB, SHA),
+        )
         self.assertEqual(0, self.cache.stats()["entries"])
 
         # 解压总量超限：将预算临时调小后用真实归档触发
@@ -224,10 +245,10 @@ class MaterializationTests(MaterializerTestCase):
         with mock.patch(
             "lima.repository_materializer.MAX_UNCOMPRESSED_BYTES", 1024
         ):
-            with self.assertRaisesRegex(
-                RepositoryMaterializerError, "decompression limit"
-            ):
-                self.materializer.materialize(GITHUB, SHA)
+            assert_typed_failure(
+                self, "ARCHIVE_DECOMPRESSION_LIMIT", "VALIDATING_ARCHIVE",
+                lambda: self.materializer.materialize(GITHUB, SHA),
+            )
         self.assertEqual(0, self.cache.stats()["entries"])
         self.assertEqual(0, self.cache.stats()["staging"])
 
@@ -240,10 +261,23 @@ class MaterializationTests(MaterializerTestCase):
             # 不带前缀的绝对路径成员
             build_archive(member_names=["/abs.txt"]),
         ]
-        for archive in dangerous:
+        expected = [
+            ("ARCHIVE_UNSAFE_PATH", "repo-main/../evil.txt"),
+            ("ARCHIVE_UNSAFE_PATH", "repo-main/dir/../../up.txt"),
+            # 仅含 symlink 的归档：条目全部被跳过后快照为空，发布拒绝。
+            ("CACHE_PUBLISH_FAILED", "symlink-link.txt"),
+            ("ARCHIVE_UNSAFE_PATH", "/abs.txt"),
+        ]
+        stages = {
+            "ARCHIVE_UNSAFE_PATH": "VALIDATING_ARCHIVE",
+            "CACHE_PUBLISH_FAILED": "PREPARING_WORKSPACE",
+        }
+        for (code, _marker), archive in zip(expected, dangerous, strict=True):
             self.make_materializer(archive=archive)
-            with self.assertRaises(RepositoryMaterializerError):
-                self.materializer.materialize(GITHUB, SHA)
+            assert_typed_failure(
+                self, code, stages[code],
+                lambda: self.materializer.materialize(GITHUB, SHA),
+            )
         self.assertEqual(0, self.cache.stats()["entries"])
 
     def test_no_secrets_in_snapshot(self):
@@ -264,8 +298,10 @@ class MaterializationTests(MaterializerTestCase):
 
     def test_resume_after_interruption(self):
         self.make_materializer(archive=ARCHIVE, download_failures=1)
-        with self.assertRaisesRegex(RepositoryMaterializerError, "download"):
-            self.materializer.materialize(GITHUB, SHA)
+        assert_typed_failure(
+            self, "GITHUB_NETWORK_ERROR", "DOWNLOADING_ARCHIVE",
+            lambda: self.materializer.materialize(GITHUB, SHA),
+        )
         # 中断后不留任何部分数据或锁
         self.assertEqual(0, self.cache.stats()["entries"])
         self.assertEqual(0, self.cache.stats()["staging"])
@@ -315,6 +351,121 @@ class MaterializationTests(MaterializerTestCase):
         self.assertEqual(1, self.cache.stats()["entries"])
 
 
+class MaterializerProgressTests(MaterializerTestCase):
+    def collect_events(self, **materializer_kwargs):
+        events = []
+
+        def callback(stage, message, **detail):
+            events.append((stage, message, detail))
+
+        self.make_materializer(**materializer_kwargs)
+        result = self.materializer.materialize(GITHUB, SHA, progress_callback=callback)
+        return events, result
+
+    def test_progress_events_report_all_stages(self):
+        events, result = self.collect_events(archive=ARCHIVE)
+        stages = [stage for stage, _, _ in events]
+        # SHA ref：无解析阶段；命中缓存前的检查在下载前
+        self.assertEqual("CHECKING_CACHE", stages[0])
+        self.assertIn("DOWNLOADING_ARCHIVE", stages)
+        self.assertIn("VALIDATING_ARCHIVE", stages)
+        self.assertEqual("PREPARING_WORKSPACE", stages[-1])
+        self.assertEqual([], result["warnings"])
+
+    def test_moving_ref_reports_resolving_stage_first(self):
+        events = []
+
+        def callback(stage, message, **detail):
+            events.append((stage, detail))
+
+        self.make_materializer(archive=ARCHIVE)
+        self.materializer.materialize(GITHUB, "main", progress_callback=callback)
+        self.assertEqual("RESOLVING_REVISION", events[0][0])
+        self.assertEqual({"requested_ref": "main"}, events[0][1])
+        self.assertEqual(
+            {"resolved_revision": SHA}, events[1][1]
+        )
+
+    def test_cache_hit_reports_without_download(self):
+        self.make_materializer(archive=ARCHIVE)
+        self.materializer.materialize(GITHUB, SHA)
+        events = []
+
+        def callback(stage, message, **detail):
+            events.append((stage, detail))
+
+        result = self.materializer.materialize(GITHUB, SHA, progress_callback=callback)
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(2, len(events))
+        self.assertEqual("CHECKING_CACHE", events[0][0])
+        self.assertTrue(events[1][1].get("cache_hit"))
+
+    def test_download_progress_is_throttled_by_bytes(self):
+        # 不可压缩字节：下载字节数即归档字节数。
+        # SHA-256 链式扩展：确定性且不可压缩的测试字节流。
+        import hashlib
+
+        chunks = []
+        digest = b"lima-throttle-fixture"
+        remaining = 5 * 1024 * 1024
+        while remaining > 0:
+            digest = hashlib.sha256(digest).digest()
+            chunks.append(digest)
+            remaining -= len(digest)
+        blob = b"".join(chunks)[: 5 * 1024 * 1024]
+        big = build_archive({"blob.bin": blob})
+        events, _ = self.collect_events(
+            archive=big,
+            _extra={
+                "progress_throttle_bytes": 2 * 1024 * 1024,
+                "progress_throttle_interval": 3600.0,
+            },
+        )
+        download_events = [
+            detail for stage, _, detail in events if stage == "DOWNLOADING_ARCHIVE"
+        ]
+        # 5 MiB / 2 MiB 节流：约 3 次回调，而不是每 1 MiB 一次（5+ 次）。
+        self.assertLessEqual(len(download_events), 4)
+        self.assertGreaterEqual(len(download_events), 2)
+        self.assertGreater(download_events[-1]["current"], 4 * 1024 * 1024)
+
+    def test_symlink_is_skipped_with_warning_and_scan_continues(self):
+        mixed = build_archive(
+            {"app.py": "print('ok')\n"},
+            symlinks={"link.py": "app.py"},
+        )
+        events, result = self.collect_events(archive=mixed)
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(
+            [{
+                "code": "SYMLINK_SKIPPED",
+                "category": "coverage",
+                "path": "link.py",
+                "message": "符号链接未被跟随，已从快照中跳过。",
+            }],
+            result["warnings"],
+        )
+        # 快照内绝不创建 symlink；普通文件照常物化
+        snapshot_root = Path(result["path"])
+        self.assertFalse((snapshot_root / "link.py").exists())
+        self.assertFalse((snapshot_root / "link.py").is_symlink())
+        self.assertEqual(
+            "print('ok')\n",
+            (snapshot_root / "app.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn("PREPARING_WORKSPACE", [s for s, _, _ in events])
+
+    def test_multiple_symlinks_are_all_reported(self):
+        mixed = build_archive(
+            {"a.py": "1\n", "b.py": "2\n"},
+            symlinks={"l1": "a.py", "l2": "b.py"},
+        )
+        _, result = self.collect_events(archive=mixed)
+        self.assertEqual(
+            ["l1", "l2"], [item["path"] for item in result["warnings"]]
+        )
+
+
 class MaterializerContractTests(unittest.TestCase):
     def test_local_import_source_is_rejected(self):
         cache_root = tempfile.mkdtemp(suffix="-t2contract")
@@ -327,7 +478,7 @@ class MaterializerContractTests(unittest.TestCase):
     def test_redirect_outside_allowlist_is_refused(self):
         handler = _WhitelistedRedirectHandler()
         request = urllib.request.Request("https://codeload.github.com/a/b/zip/x")
-        with self.assertRaises(RepositoryMaterializerError):
+        with self.assertRaises(TaskFailureError):
             handler.redirect_request(
                 request, None, 302, "Found", {}, "https://evil.example.com/payload"
             )
@@ -338,11 +489,15 @@ class MaterializerContractTests(unittest.TestCase):
         cache = RepositoryCache(cache_root, min_free_bytes=1)
         opener = FakeOpener(archive=b"not-a-zip")
         materializer = GitHubMaterializer(cache, opener=opener)
-        with self.assertRaisesRegex(RepositoryMaterializerError, "zip"):
-            materializer.materialize(GITHUB, SHA)
+        assert_typed_failure(
+            self, "ARCHIVE_INVALID", "VALIDATING_ARCHIVE",
+            lambda: materializer.materialize(GITHUB, SHA),
+        )
         opener.archive = b""
-        with self.assertRaisesRegex(RepositoryMaterializerError, "empty"):
-            materializer.materialize(GITHUB, OTHER_SHA)
+        assert_typed_failure(
+            self, "ARCHIVE_INVALID", "DOWNLOADING_ARCHIVE",
+            lambda: materializer.materialize(GITHUB, OTHER_SHA),
+        )
         self.assertEqual(0, cache.stats()["entries"])
 
 

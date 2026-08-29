@@ -173,6 +173,7 @@ class Settings:
     experiment_max_total_tokens: int = 100_000
     repository_import_root: str = ""
     repository_cache_root: str = "output/repository-cache"
+    repair_workspace_root: str = "output/repair-workspaces"
     repository_scan_sources: str = "local-import"
     repository_cache_ttl_seconds: int = 14 * 24 * 3600
     repository_cache_quota_bytes: int = 2 * 1024 * 1024 * 1024
@@ -416,6 +417,9 @@ class Settings:
             ),
             repository_import_root=os.getenv("LIMA_REPOSITORY_IMPORT_ROOT", ""),
             repository_cache_root=_repository_cache_root_from_env(),
+            repair_workspace_root=os.getenv(
+                "LIMA_REPAIR_WORKSPACE_ROOT", "output/repair-workspaces"
+            ).strip() or "output/repair-workspaces",
             repository_scan_sources=os.getenv(
                 "LIMA_REPOSITORY_SCAN_SOURCES", "local-import"
             ).strip().lower(),

@@ -152,6 +152,65 @@ def _check_lima_logo_is_safe_scalable_and_wired_as_favicon() -> None:
     assert 'if path == "/assets/lima-mark.svg"' in api
 
 
+def _check_github_source_scan_flow_is_offline_and_pinned() -> None:
+    html = _read("index.html")
+    script = _read("app.js")
+
+    # 浏览器绝不解析 ref：整个前端不出现 api.github.com。
+    assert "api.github.com" not in script
+    assert "api.github.com" not in html
+    # 请求体必须使用 T4 的 {"source": {...}} envelope。
+    assert 'source: {' in script
+    assert 'type: "github"' in script
+    assert 'url: auditDraft.repository' in script
+    # ref 原样透传给后端（worker 解析），并有移动 ref 钉死警告文案。
+    assert 'ref: auditDraft.githubRef' in script
+    assert "分支/标签会在扫描时被钉死为具体提交" in html
+    assert "pinned to a specific commit at scan time" in html
+    assert "function isMovingRef" in script
+    assert "function normalizeRepositoryTarget" in script
+
+
+def _check_github_source_capabilities_gating() -> None:
+    html = _read("index.html")
+    script = _read("app.js")
+
+    # capabilities 驱动门禁：scan_sources.github 为 false 时禁用输入并提示。
+    assert "scan_sources" in script
+    assert "function updateSourceModeAvailability" in script
+    assert "githubButton.disabled = enabled === false" in script
+    assert "updateSourceMode(\"local\")" in script
+    assert 'id="github-source-unavailable"' in html
+    assert "LIMA_REPOSITORY_SCAN_SOURCES" in html
+    assert 'data-source-mode="github"' in html
+    assert 'data-source-mode="local"' in html
+
+
+def _check_github_source_report_shows_resolved_sha() -> None:
+    script = _read("app.js")
+
+    assert "function renderSnapshotPin" in script
+    assert "resolved_revision" in script
+    assert "已扫描固定提交" in script
+    assert "${renderSnapshotPin(report)}" in script
+
+
+def _check_github_source_inputs_declare_no_secrets() -> None:
+    html = _read("index.html")
+    wizard = re.search(r'id="audit-wizard".*?id="wizard-running"', html, re.S)
+
+    # ref 输入与 40/64 位 SHA 提示存在；扫描向导不引入任何 token/API key 输入
+    # （登录密码框与模型配置的 key 输入位于向导之外，属于既有合法功能）。
+    assert 'id="audit-github-ref"' in html
+    assert "完整 40/64 位 commit SHA" in html
+    assert 'id="github-ref-pin-warning"' in html
+    assert 'id="github-ref-field"' in html
+    assert wizard is not None
+    assert not re.search(
+        r'id="[^"]*(?:token|api[_-]?key|password)[^"]*"', wizard.group(0), re.I
+    )
+
+
 class FrontendUiTests(unittest.TestCase):
     def test_task_oriented_navigation_and_first_run_guidance(self) -> None:
         _check_task_oriented_navigation_and_first_run_guidance()
@@ -176,3 +235,15 @@ class FrontendUiTests(unittest.TestCase):
 
     def test_lima_logo_is_safe_scalable_and_wired_as_favicon(self) -> None:
         _check_lima_logo_is_safe_scalable_and_wired_as_favicon()
+
+    def test_github_source_scan_flow_is_offline_and_pinned(self) -> None:
+        _check_github_source_scan_flow_is_offline_and_pinned()
+
+    def test_github_source_capabilities_gating(self) -> None:
+        _check_github_source_capabilities_gating()
+
+    def test_github_source_report_shows_resolved_sha(self) -> None:
+        _check_github_source_report_shows_resolved_sha()
+
+    def test_github_source_inputs_declare_no_secrets(self) -> None:
+        _check_github_source_inputs_declare_no_secrets()

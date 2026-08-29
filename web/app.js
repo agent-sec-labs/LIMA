@@ -153,6 +153,13 @@ const DEMO_TASK = {
       cross_file_call_edges: 5,
       unresolved_dataflow_calls: 2,
       dynamic_import_sites: 0,
+      import_policy: {
+        source: { type: "github", provider: "github", canonical_name: "demo/vulnerable-python", requested_ref: "main", repository_key: "" },
+        resolved_revision: "9f2c1ab37d5e8c40b6a2f1d3e5a7c9b0d4f6a8c2e1b3d5f7a9c0e2b4d6f8a1c3",
+        cache_hit: false,
+        host_path_exposed: false,
+        repository_code_executed: false,
+      },
       semantic_triage: {
         mode: "auto",
         status: "completed",
@@ -222,7 +229,8 @@ let taskFilter = "all";
 let accessToken = localStorage.getItem("lima_token") || "";
 let isDemoMode = sessionStorage.getItem("lima_demo") === "1";
 let lastRuntime = {};
-let auditDraft = { mode: "repository", step: 1, sample: false };
+let auditDraft = { mode: "repository", step: 1, sample: false, sourceMode: "local", repository: "", githubRef: "" };
+let scanCapabilities = null;
 let demoFeedback = [];
 let allExperiments = [];
 let experimentCatalog = [];
@@ -354,6 +362,7 @@ async function mockApi(path, options = {}) {
       enabled: true,
       sast_mode: "hybrid",
       repository_code_executed: false,
+      scan_sources: { configured: "both", local_import: true, github: true },
       max_files: 5000,
       max_file_bytes: 1048576,
       max_total_bytes: 52428800,
@@ -653,8 +662,12 @@ async function loadRepositoryScanCapabilities() {
   const root = $("#repository-scan-capabilities");
   try {
     const data = await api("/api/repository-scans/capabilities");
+    scanCapabilities = data;
+    updateSourceModeAvailability();
+    const githubSources = data.scan_sources?.github;
     root.innerHTML = [
-      ["扫描状态", data.enabled ? "可用" : "仓库导入目录未就绪"],
+      ["扫描状态", data.enabled || githubSources ? "可用" : "仓库导入目录未就绪"],
+      ["GitHub 来源", githubSources ? "已启用（服务端物化）" : "未启用（LIMA_REPOSITORY_SCAN_SOURCES）"],
       ["代码执行", data.repository_code_executed ? "会执行（请复核配置）" : "不执行目标代码"],
       ["扫描上限", `${Number(data.max_files || 0).toLocaleString()} 文件 · ${bytesLabel(data.max_total_bytes)}`],
       ["数据流", data.dataflow_enabled ? `跨文件 · 最深 ${Number(data.dataflow_max_call_depth || 0)} 层` : "未启用"],
@@ -701,10 +714,64 @@ function updateAuditMode(mode) {
   $("#diff-basic-fields").classList.toggle("hidden", !diff);
   $("#repository-scope").classList.toggle("hidden", diff);
   $("#diff-scope").classList.toggle("hidden", !diff);
-  $("#audit-target-label").textContent = diff ? "仓库名称或 GitHub 链接" : "GitHub 仓库链接或仓库键";
+  $("#repository-source-row").classList.toggle("hidden", diff);
+  $("#github-ref-field").classList.toggle("hidden", diff || auditDraft.sourceMode !== "github");
+  $("#github-ref-pin-warning").classList.toggle("hidden", diff || !isMovingRef(auditDraft.githubRef));
+  $("#github-source-unavailable").classList.toggle("hidden", diff || githubSourceEnabled() !== false);
+  $("#audit-target-label").textContent = diff
+    ? "仓库名称或 GitHub 链接"
+    : auditDraft.sourceMode === "github" ? "GitHub 仓库链接或 owner/project" : "GitHub 仓库链接或仓库键";
+  $("#audit-target-hint").textContent = diff
+    ? "只检查粘贴的新增代码，不读取或执行完整仓库。"
+    : auditDraft.sourceMode === "github"
+      ? "输入 github.com 链接或 owner/project。服务端会在后台下载并钉死快照，浏览器不发起 GitHub 请求。"
+      : "系统不会自动下载任意仓库。链接会被转换为 repositories 目录下的安全相对路径。";
   $("#scope-description").textContent = diff
     ? "只检查粘贴的新增代码，不读取或执行完整仓库。"
-    : "系统将使用默认工程基线扫描已安全导入的仓库，不执行目标代码。";
+    : auditDraft.sourceMode === "github"
+      ? "服务端将解析 ref、下载固定 commit 快照后离线扫描，不执行目标代码。"
+      : "系统将使用默认工程基线扫描已安全导入的仓库，不执行目标代码。";
+}
+
+function githubSourceEnabled() {
+  const sources = scanCapabilities?.scan_sources;
+  if (!sources) return null; // 能力未加载时不做门禁判断
+  return sources.github === true;
+}
+
+function isMovingRef(ref) {
+  const value = String(ref || "").trim();
+  if (!value) return false;
+  return !/^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(value);
+}
+
+function updateSourceMode(mode) {
+  const requested = mode === "github" ? "github" : "local";
+  if (requested === "github" && githubSourceEnabled() === false) return;
+  auditDraft.sourceMode = requested;
+  $$("[data-source-mode]").forEach((button) => {
+    const active = button.dataset.sourceMode === auditDraft.sourceMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  updateAuditMode(auditDraft.mode);
+}
+
+function updateSourceModeAvailability() {
+  const enabled = githubSourceEnabled();
+  const githubButton = $('[data-source-mode="github"]');
+  if (!githubButton) return;
+  githubButton.disabled = enabled === false;
+  $("#github-source-unavailable").classList.toggle(
+    "hidden",
+    auditDraft.mode === "diff" || enabled !== false
+  );
+  if (enabled === false && auditDraft.sourceMode === "github") updateSourceMode("local");
+}
+
+function updateGitHubRefHint() {
+  auditDraft.githubRef = $("#audit-github-ref").value;
+  $("#github-ref-pin-warning").classList.toggle("hidden", !isMovingRef(auditDraft.githubRef));
 }
 
 function setWizardStep(step) {
@@ -724,6 +791,15 @@ function validateAuditStep(step) {
     $("#audit-step-one-error").textContent = "";
     try {
       auditDraft.repository = normalizeRepositoryTarget($("#audit-target").value);
+      if (auditDraft.mode === "repository" && auditDraft.sourceMode === "github") {
+        auditDraft.githubRef = $("#audit-github-ref").value.trim();
+        if (auditDraft.githubRef && !/^[A-Za-z0-9_./-]{1,240}$/.test(auditDraft.githubRef)) {
+          throw new Error("ref 只能包含字母、数字、/、_、.、-，且不超过 240 个字符。");
+        }
+        if (auditDraft.githubRef.includes("..")) {
+          throw new Error("ref 不能包含 “..” 目录段。");
+        }
+      }
     } catch (error) {
       $("#audit-step-one-error").textContent = error.message;
       $("#audit-target").focus();
@@ -745,15 +821,21 @@ function validateAuditStep(step) {
 
 function renderAuditReview() {
   const modeText = auditDraft.mode === "repository" ? "完整仓库审计" : "PR / Diff 审查";
+  const githubScan = auditDraft.mode === "repository" && auditDraft.sourceMode === "github";
+  const targetText = auditDraft.mode === "repository"
+    ? `${githubScan ? "GitHub：" : "本地导入："}${auditDraft.repository || "未确认"}${githubScan && auditDraft.githubRef ? ` @ ${auditDraft.githubRef}` : ""}`
+    : `${auditDraft.repository || "未确认"}`;
   const scopeText = auditDraft.mode === "repository"
-    ? "AST + 跨文件数据流 + 可用 SAST；不执行目标代码"
+    ? githubScan
+      ? "服务端解析 ref 并物化固定 commit 快照后离线扫描；不执行目标代码"
+      : "AST + 跨文件数据流 + 可用 SAST；不执行目标代码"
     : `仅审查 ${($("#audit-diff").value.match(/^\+(?!\+\+)/gm) || []).length} 行新增代码`;
   const pr = Number($("#audit-pr-number").value);
   $("#audit-review-summary").innerHTML = `
     <div><span>审计方式</span><strong>${escapeHtml(modeText)}</strong></div>
-    <div><span>目标仓库</span><strong>${escapeHtml(auditDraft.repository || "未确认")}${pr > 0 ? ` · PR #${pr}` : ""}</strong></div>
+    <div><span>目标仓库</span><strong>${escapeHtml(targetText)}${!githubScan && pr > 0 ? ` · PR #${pr}` : ""}</strong></div>
     <div><span>分析范围</span><strong>${escapeHtml(scopeText)}</strong></div>
-    <div><span>数据处理</span><strong>${auditDraft.sample ? "内置演示数据，不连接外部服务" : "只处理你有权审查的本机代码或 Diff"}</strong></div>
+    <div><span>数据处理</span><strong>${auditDraft.sample ? "内置演示数据，不连接外部服务" : githubScan ? "服务端从 github.com 下载固定快照；浏览器不发起 GitHub 请求" : "只处理你有权审查的本机代码或 Diff"}</strong></div>
   `;
 }
 
@@ -789,11 +871,20 @@ async function runAudit() {
       $("#wizard-running-text").textContent = "正在准备内置证据和人类可读报告…";
     }
     const pr = Number($("#audit-pr-number").value);
+    const githubScan = auditDraft.mode === "repository" && auditDraft.sourceMode === "github";
     const data = auditDraft.mode === "repository"
       ? await api("/v1/repository-scans", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repository_key: auditDraft.repository }),
+          body: JSON.stringify(githubScan
+            ? {
+                source: {
+                  type: "github",
+                  url: auditDraft.repository,
+                  ...(auditDraft.githubRef ? { ref: auditDraft.githubRef } : {}),
+                },
+              }
+            : { repository_key: auditDraft.repository }),
         })
       : await api("/v1/reviews?async=true", {
           method: "POST",
@@ -981,6 +1072,24 @@ function decisionForFinding(finding, adjudication) {
   };
 }
 
+function renderSnapshotPin(report) {
+  const policy = report?.collaboration?.import_policy;
+  const revision = policy?.resolved_revision;
+  if (!revision) return "";
+  const requested = policy?.source?.requested_ref;
+  const cacheHit = policy?.cache_hit;
+  return `
+    <div class="snapshot-pin" aria-label="扫描快照钉定信息">
+      ${icon("github")}
+      <span>
+        <strong>已扫描固定提交：</strong><code>${escapeHtml(revision)}</code>
+        ${requested && !/^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(requested) ? `<small>（由 ${escapeHtml(requested)} 在扫描时解析钉死）</small>` : ""}
+        ${cacheHit === true ? "<small> · 命中快照缓存，未重新下载</small>" : ""}
+      </span>
+    </div>
+  `;
+}
+
 function renderTaskReport(task) {
   const state = normalizeState(task?.state);
   if (!["SUCCESS", "FAILED", "CANCELLED"].includes(state) && !task?.report) {
@@ -1092,6 +1201,7 @@ function renderTaskReport(task) {
         </div>
       </section>
       ${renderSemanticTriageStatus(report)}
+      ${renderSnapshotPin(report)}
       <section class="report-metrics" aria-label="报告摘要">
         <div class="report-metric"><span>问题总数</span><strong>${findings.length}</strong></div>
         <div class="report-metric"><span>严重 / 高危</span><strong>${highPriority}</strong></div>
@@ -1777,6 +1887,8 @@ window.addEventListener("hashchange", () => {
 $("#overview-demo").addEventListener("click", () => enterDemo(true));
 $("#demo-login").addEventListener("click", () => enterDemo(false));
 $$("[data-audit-mode]").forEach((button) => button.addEventListener("click", () => updateAuditMode(button.dataset.auditMode)));
+$$("[data-source-mode]").forEach((button) => button.addEventListener("click", () => updateSourceMode(button.dataset.sourceMode)));
+$("#audit-github-ref").addEventListener("input", updateGitHubRefHint);
 $$("[data-wizard-next]").forEach((button) => button.addEventListener("click", () => {
   if (validateAuditStep(auditDraft.step)) setWizardStep(auditDraft.step + 1);
 }));
@@ -2097,6 +2209,7 @@ document.addEventListener("click", (event) => {
 });
 
 updateAuditMode("repository");
+updateSourceMode("local");
 setWizardStep(1);
 setExperimentStep(1);
 updateDiffStats();

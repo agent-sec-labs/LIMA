@@ -262,6 +262,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7196f5
 .sample-callout b { font-size: 12px; }
 .sample-callout small { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .inline-error { min-height: 19px; margin: 8px 0 0; color: var(--red); font-size: 11px; }
+.inline-warning { margin: 8px 0 0; padding: 10px 12px; border: 1px solid rgba(178,92,0,.28); border-radius: 10px; background: rgba(255,149,0,.08); color: #8a4d00; font-size: 11.5px; line-height: 1.55; }
+.source-mode-row { display: flex; gap: 10px; margin-top: 16px; }
+.source-chip { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--ink); font-size: 12px; font-weight: 600; cursor: pointer; transition: .18s ease; }
+.source-chip svg { width: 14px; height: 14px; }
+.source-chip.active { border-color: #8faeff; background: var(--primary-soft); color: var(--primary); }
+.source-chip:disabled { opacity: .45; cursor: not-allowed; }
+.snapshot-pin { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--primary-line); border-radius: 11px; background: var(--surface-blue); font-size: 11.5px; }
+.snapshot-pin code { font: 11px "Cascadia Code", Consolas, monospace; word-break: break-all; }
 .wizard-actions, .form-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 24px; }
 .scope-summary { padding: 19px; border: 1px solid var(--primary-line); border-radius: 13px; background: var(--surface-blue); }
 .scope-summary > div { display: flex; align-items: center; gap: 12px; }

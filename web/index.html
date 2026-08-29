@@ -155,11 +155,31 @@
                 </button>
               </div>
 
+              <div class="source-mode-row" id="repository-source-row" role="radiogroup" aria-label="仓库来源">
+                <button class="source-chip" type="button" data-source-mode="github" role="radio" aria-checked="false">
+                  <svg><use href="#i-github"/></svg><span>GitHub 远程仓库</span>
+                </button>
+                <button class="source-chip" type="button" data-source-mode="local" role="radio" aria-checked="true">
+                  <svg><use href="#i-code"/></svg><span>本地已导入仓库</span>
+                </button>
+              </div>
+              <p class="inline-error hidden" id="github-source-unavailable" role="alert">
+                服务端未启用 GitHub 远程来源（LIMA_REPOSITORY_SCAN_SOURCES）。请让管理员启用后重试，或使用本地已导入仓库。
+              </p>
+
               <label class="field">
                 <span class="field-title" id="audit-target-label">GitHub 仓库链接或仓库键</span>
                 <span class="input-with-icon"><svg><use href="#i-github"/></svg><input id="audit-target" name="audit_target" autocomplete="off" placeholder="https://github.com/owner/project 或 owner/project"></span>
-                <small>系统不会自动下载任意仓库。链接会被转换为 repositories 目录下的安全相对路径。</small>
+                <small id="audit-target-hint">系统不会自动下载任意仓库。链接会被转换为 repositories 目录下的安全相对路径。</small>
               </label>
+              <label class="field hidden" id="github-ref-field">
+                <span class="field-title">版本引用 ref <em>可选</em></span>
+                <input id="audit-github-ref" name="audit_github_ref" autocomplete="off" placeholder="分支 / 标签 / 完整 40/64 位 commit SHA">
+                <small id="github-ref-hint">留空默认扫描仓库默认分支。浏览器不会解析 ref，解析由服务端完成。</small>
+              </label>
+              <p class="inline-warning hidden" id="github-ref-pin-warning" role="status">
+                分支/标签会在扫描时被钉死为具体提交（The branch/tag will be pinned to a specific commit at scan time.）。扫描报告会展示解析后的 commit SHA。
+              </p>
               <div class="field-row diff-basic-fields hidden" id="diff-basic-fields">
                 <label class="field"><span class="field-title">PR 编号 <em>可选</em></span><input id="audit-pr-number" type="number" min="1" placeholder="例如 42"></label>
                 <div class="field info-field"><span class="field-title">审查范围</span><p>只分析下一步粘贴的 Unified Diff，不读取完整仓库。</p></div>

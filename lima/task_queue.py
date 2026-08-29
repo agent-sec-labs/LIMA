@@ -8,6 +8,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
+from .task_failure import TaskFailureError
+
+RetryCallback = Callable[[dict[str, Any], int, int, BaseException, float], None]
+
 
 class PermanentTaskError(RuntimeError):
     """An error that must not be retried."""
@@ -24,12 +28,15 @@ class TaskQueue:
         on_dead_letter: Optional[Callable[[Dict[str, Any], str], None]] = None,
         *, stream: str = "", dead_letter_stream: str = "", group: str = "",
         thread_prefix: str = "lima-worker",
+        on_retry: RetryCallback | None = None,
     ):
         self.handler = handler
         self.redis_url = redis_url
         self.max_attempts = max_attempts
         self.lease_seconds = lease_seconds
         self.on_dead_letter = on_dead_letter
+        # T2：重试即将发生时的可观测回调（payload/attempt/max/error/delay）。
+        self.on_retry = on_retry
         self.stream = stream or self.STREAM
         self.dead_letter_stream = dead_letter_stream or self.DLQ
         self.group = group or self.GROUP
@@ -82,19 +89,42 @@ class TaskQueue:
         except PermanentTaskError as exc:
             self._dead_letter(envelope, str(exc))
             return False
-        except Exception as exc:
-            if envelope["attempt"] >= self.max_attempts:
+        except TaskFailureError as exc:
+            if not exc.failure.retryable:
+                # 分类为永久失败的错误直接进死信，不浪费重试预算。
                 self._dead_letter(envelope, str(exc))
-            elif self._redis:
-                self._redis.xadd(self.stream, {
-                    "envelope": json.dumps(envelope, ensure_ascii=False)
-                })
-            else:
-                delay = min(2 ** (envelope["attempt"] - 1), 10)
-                timer = threading.Timer(delay, self._submit_memory, args=(envelope,))
-                timer.daemon = True
-                timer.start()
+                return False
+            self._schedule_retry(envelope, exc)
             return False
+        except Exception as exc:
+            self._schedule_retry(envelope, exc)
+            return False
+
+    def _schedule_retry(
+        self, envelope: dict[str, Any], exc: BaseException
+    ) -> None:
+        if envelope["attempt"] >= self.max_attempts:
+            self._dead_letter(envelope, str(exc))
+            return
+        if self._redis:
+            if self.on_retry:
+                self.on_retry(
+                    envelope.get("payload") or {}, envelope["attempt"],
+                    self.max_attempts, exc, 0.0,
+                )
+            self._redis.xadd(self.stream, {
+                "envelope": json.dumps(envelope, ensure_ascii=False)
+            })
+        else:
+            delay = min(2 ** (envelope["attempt"] - 1), 10)
+            if self.on_retry:
+                self.on_retry(
+                    envelope.get("payload") or {}, envelope["attempt"],
+                    self.max_attempts, exc, float(delay),
+                )
+            timer = threading.Timer(delay, self._submit_memory, args=(envelope,))
+            timer.daemon = True
+            timer.start()
 
     def _submit_memory(self, envelope: Dict[str, Any]) -> None:
         if not self._stop.is_set():

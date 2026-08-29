@@ -27,10 +27,14 @@ _ERROR: Final = re.compile(
 )
 _SUMMARY: Final = re.compile(
     r"^SUMMARY: AddressSanitizer: (heap-buffer-overflow|stack-buffer-overflow|"
-    r"global-buffer-overflow|heap-use-after-free|attempting double-free)\b",
+    r"global-buffer-overflow|heap-use-after-free|double-free)\b",
     re.MULTILINE,
 )
 _ACCESS: Final = re.compile(r"^(READ|WRITE) of size \d+ at\b", re.MULTILINE)
+_AUXILIARY_STACK: Final = re.compile(
+    r"^(?:freed by thread|previously allocated by thread|allocated by thread)\b",
+    re.MULTILINE,
+)
 _FRAME: Final = re.compile(
     r"^\s*#\d+\s+(?:0x[0-9a-fA-F]+\s+in\s+)?"
     r"(?P<symbol>[^\r\n]*?)\s+(?P<path>(?:[A-Za-z]:)?/[^\r\n:]+):(?P<line>[1-9]\d*)(?::\d+)?\s*$",
@@ -94,12 +98,18 @@ def parse_asan_log(
         block = clean[match.start(): next_error.start() if next_error else len(clean)]
         error_type = match.group(1)
         summary = _SUMMARY.search(block)
-        if summary is None or summary.group(1) != error_type:
+        summary_type = "double-free" if error_type == "attempting double-free" else error_type
+        if summary is None or summary.group(1) != summary_type:
             return _review()
-        access_match = _ACCESS.search(block)
+        auxiliary = _AUXILIARY_STACK.search(block)
+        primary_end = min(
+            summary.start(), auxiliary.start() if auxiliary is not None else len(block)
+        )
+        primary = block[:primary_end]
+        access_match = _ACCESS.search(primary)
         access = access_match.group(1) if access_match else None
         cwe = _map(error_type, access)
-        frame = _safe_frame(block, snapshot)
+        frame = _safe_frame(primary, snapshot)
         if cwe is None or frame is None:
             return _review()
         path, line, symbol = frame
@@ -152,7 +162,6 @@ def run_sanitizer_scan(
     if not _valid_context(snapshot, build_context):
         return LayerResult((), ("sanitizer-build-context-unavailable",), ())
     snapshot.resolve_cwd(".")
-    deadline = time.monotonic() + settings.total_timeout_seconds
     findings: list[NormalizedFinding] = []
     diagnostics: list[str] = []
     tool_runs: list[dict[str, object]] = []
@@ -160,9 +169,12 @@ def run_sanitizer_scan(
         if len(tool_runs) >= MAX_TOOL_RUNS:
             diagnostics.append("analysis-budget-exhausted")
             break
-        remaining = min(settings.step_timeout_seconds, int(deadline - time.monotonic()))
+        remaining = min(
+            settings.step_timeout_seconds,
+            int(build_context.deadline - time.monotonic()),
+        )
         if remaining < 1:
-            diagnostics.append("needs-human-review")
+            diagnostics.append("timed-out")
             break
         execution = run_step(
             step, snapshot, ".", remaining, settings.max_output_bytes,

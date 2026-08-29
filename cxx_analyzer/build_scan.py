@@ -132,6 +132,7 @@ class BuildContext:
     snapshot_root: Path
     snapshot_files: tuple[str, ...]
     sanitizer_enabled: bool = False
+    deadline: float = 0.0
 
 
 class AnalysisBudgetExceeded(ValueError):
@@ -716,6 +717,7 @@ def run_build_scan(
     return LayerResult(
         tuple(findings), tuple(diagnostics), tuple(tool_runs),
         BuildContext(
-            Path(snapshot.root).resolve(), tuple(snapshot.files), sanitizer_enabled
+            Path(snapshot.root).resolve(), tuple(snapshot.files), sanitizer_enabled,
+            deadline,
         ),
     )

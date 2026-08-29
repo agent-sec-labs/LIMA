@@ -2255,7 +2255,7 @@ class SanitizerScanTests(unittest.TestCase):
                         f"==12==ERROR: AddressSanitizer: {error_type} on address 0x1\n"
                         f"{access_line}\n"
                         f"    #0 0x123 in \x1b[31mreport_memory\x1b[0m {root}/src/memory.c:9:3\n"
-                        f"SUMMARY: AddressSanitizer: {error_type} {root}/src/memory.c:9\n"
+                        f"SUMMARY: AddressSanitizer: {'double-free' if error_type == 'attempting double-free' else error_type} {root}/src/memory.c:9\n"
                     )
                     findings, diagnostics = parse_asan_log(text, snapshot)
                     self.assertEqual([], diagnostics)
@@ -2298,6 +2298,34 @@ class SanitizerScanTests(unittest.TestCase):
         finally:
             temporary.cleanup()
 
+    def test_parser_rejects_mismatched_summary_and_snapshot_only_auxiliary_frame(self):
+        from cxx_analyzer.sanitizer_scan import parse_asan_log
+
+        temporary, snapshot = self._snapshot()
+        try:
+            root = str(snapshot.root).replace("\\", "/")
+            mismatch = (
+                "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+                "READ of size 4 at 0x1\n"
+                f"#0 0x1 in report {root}/src/memory.c:5\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+            )
+            auxiliary = (
+                "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+                "READ of size 4 at 0x1\n"
+                "#0 0x1 in external /usr/lib/libforeign.so:5\n"
+                "freed by thread T0 here:\n"
+                f"#0 0x1 in report {root}/src/memory.c:9\n"
+                "SUMMARY: AddressSanitizer: heap-use-after-free\n"
+            )
+            for text in (mismatch, auxiliary):
+                with self.subTest(text=text.splitlines()[0]):
+                    findings, diagnostics = parse_asan_log(text, snapshot)
+                    self.assertEqual([], findings)
+                    self.assertEqual(["needs-human-review"], diagnostics)
+        finally:
+            temporary.cleanup()
+
     @patch("cxx_analyzer.sanitizer_scan.run_step")
     def test_runtime_gate_requires_test_steps_and_matching_successful_build_context(self, run_tool):
         from cxx_analyzer.build_scan import BuildContext
@@ -2318,6 +2346,32 @@ class SanitizerScanTests(unittest.TestCase):
         finally:
             temporary.cleanup()
 
+    @patch("cxx_analyzer.sanitizer_scan.time.monotonic")
+    @patch("cxx_analyzer.sanitizer_scan.run_step")
+    def test_shared_build_deadline_blocks_expired_and_later_test_steps(self, run_tool, monotonic):
+        from cxx_analyzer.build_scan import BuildContext
+        from cxx_analyzer.sanitizer_scan import run_sanitizer_scan
+
+        temporary, snapshot = self._snapshot()
+        try:
+            monotonic.side_effect = (5.0, 0.0, 1.0)
+            expired = run_sanitizer_scan(
+                snapshot, self._settings(test_steps=(("first",),)),
+                BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=4.0),
+            )
+            self.assertEqual(("timed-out",), expired.diagnostics)
+            run_tool.assert_not_called()
+
+            run_tool.return_value = self._execution(status="completed", returncode=0)
+            later = run_sanitizer_scan(
+                snapshot, self._settings(test_steps=(("first",), ("second",))),
+                BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=1.0),
+            )
+            self.assertEqual(1, run_tool.call_count)
+            self.assertEqual(("needs-human-review", "timed-out"), later.diagnostics)
+        finally:
+            temporary.cleanup()
+
     @patch("cxx_analyzer.sanitizer_scan.run_step")
     def test_sanitizer_runs_fixed_env_and_nonzero_without_asan_is_only_diagnostic(self, run_tool):
         from cxx_analyzer.build_scan import BuildContext
@@ -2327,7 +2381,7 @@ class SanitizerScanTests(unittest.TestCase):
         temporary, snapshot = self._snapshot()
         try:
             run_tool.return_value = self._execution(stderr="assertion failed")
-            result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("ctest", "--test-dir", "build"),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True))
+            result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("ctest", "--test-dir", "build"),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=time.monotonic() + 90))
             self.assertEqual((), result.findings)
             self.assertEqual(("test-failed-without-sanitizer-evidence",), result.diagnostics)
             self.assertEqual(SANITIZER_ENVIRONMENT, run_tool.call_args.kwargs["env"])
@@ -2347,7 +2401,7 @@ class SanitizerScanTests(unittest.TestCase):
             for execution in (self._execution(stderr=report, truncated=True), self._execution(status="timed-out", returncode=None, stderr=report)):
                 with self.subTest(status=execution.status):
                     run_tool.return_value = execution
-                    result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("test",),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True))
+                    result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("test",),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=time.monotonic() + 90))
                     self.assertEqual((), result.findings)
                     self.assertIn("needs-human-review", result.diagnostics)
         finally:

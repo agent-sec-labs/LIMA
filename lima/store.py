@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
+from .task_progress import progress_summary
 
 
 def utc_now() -> str:
@@ -52,6 +53,7 @@ class TaskStore:
                     input_json TEXT NOT NULL,
                     report_json TEXT,
                     error TEXT,
+                    progress_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )"""
@@ -159,6 +161,8 @@ class TaskStore:
             )
             self._ensure_column(conn, "tasks", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             self._ensure_column(conn, "tasks", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+            # 运行时进度独立于不可变的 input_json（T1 契约）。
+            self._ensure_column(conn, "tasks", "progress_json", "TEXT")
             self._ensure_column(conn, "installations", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS checkpoints (
@@ -425,6 +429,8 @@ class TaskStore:
         value["input"] = json.loads(value.pop("input_json"))
         report_json = value.pop("report_json")
         value["report"] = json.loads(report_json) if report_json else None
+        progress_json = value.pop("progress_json", None)
+        value["progress"] = json.loads(progress_json) if progress_json else None
         value["trace"] = [dict(item) for item in events]
         value["collaboration"] = []
         for message in messages:
@@ -441,6 +447,15 @@ class TaskStore:
                 (task_id, message["sender"], message["recipient"], message["kind"],
                  message.get("correlation_id", ""),
                  json.dumps(message.get("content", {}), ensure_ascii=False), utc_now()),
+            )
+
+    def update_task_progress(self, task_id: str, progress: dict[str, Any]) -> None:
+        """Persist runtime progress without touching immutable task input."""
+
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET progress_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(progress, ensure_ascii=False), utc_now(), task_id),
             )
 
     def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
@@ -515,15 +530,20 @@ class TaskStore:
 
     def list_tasks(self, limit: int = 50, tenant_id: Optional[str] = None) -> list:
         with self._connect() as conn:
+            select_columns = (
+                "id,state,repository,pull_request,error,created_at,updated_at,"
+                "tenant_id,input_json,progress_json"
+            )
             if tenant_id is None:
                 rows = conn.execute(
-                    "SELECT id,state,repository,pull_request,error,created_at,updated_at,tenant_id,input_json "
-                    "FROM tasks ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 200)),)
+                    "SELECT " + select_columns + " FROM tasks "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (max(1, min(limit, 200)),),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id,state,repository,pull_request,error,created_at,updated_at,tenant_id,input_json "
-                    "FROM tasks WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?",
+                    "SELECT " + select_columns + " FROM tasks WHERE tenant_id=? "
+                    "ORDER BY created_at DESC LIMIT ?",
                     (tenant_id, max(1, min(limit, 200))),
                 ).fetchall()
         values = []
@@ -531,6 +551,10 @@ class TaskStore:
             value = dict(row)
             payload = json.loads(value.pop("input_json"))
             value["task_type"] = payload.get("task_type", "review")
+            progress_json = value.pop("progress_json", None)
+            value["progress"] = progress_summary(
+                json.loads(progress_json) if progress_json else None
+            )
             values.append(value)
         return values
 

@@ -47,31 +47,29 @@ class ComposeStorageContractTests(unittest.TestCase):
             text,
         )
 
-    def test_repair_workspace_volume_is_reserved_not_mounted(self):
+    def test_repair_workspace_volume_is_mounted_for_t7(self):
         text = compose_text()
-        # Declared for the future T7 repair sidecar but deliberately NOT
-        # mounted into the lima service in this issue: least privilege —
-        # the main process gains no write access before the repair workflow
-        # exists. All mount syntaxes are covered: long form (source:target),
-        # short list form (- repair_workspace) and read-only variants.
-        self.assertNotIn("repair_workspace:/", text)
-        self.assertNotIn("- repair_workspace", text)
-        # The volume only ever appears as the top-level declaration.
-        self.assertEqual(
-            1, text.count("repair_workspace:"),
-            "repair_workspace must appear exactly once (top-level declaration)",
+        # T5 期间该卷只声明不挂载（最小权限：修复流不存在即不授权）；
+        # T7（#16）落地可抛弃修复工作区后，按预留用途挂载给 lima 服务。
+        self.assertIn(
+            "repair_workspace:/var/lib/lima/repair-workspace\n", text
         )
+        self.assertNotIn("/var/lib/lima/repair-workspace:ro", text)
 
     def test_storage_trust_domains_are_mounted_with_expected_access(self):
         # /repositories → lima, read-only; /var/lib/lima/repository-cache →
-        # lima, read-write; /repair-workspaces → not mounted in T5 (#14).
+        # lima, read-write; /var/lib/lima/repair-workspace → lima, read-write
+        # (T7 disposable repair workspaces). (#14/#16)
         text = compose_text()
         self.assertIn(":/repositories:ro", text)
         self.assertIn("repository_cache:/var/lib/lima/repository-cache\n", text)
         self.assertNotIn("/var/lib/lima/repository-cache:ro", text)
-        self.assertNotIn("repair-workspaces", text.replace(
-            "lima-repair-workspace", ""
-        ))
+        self.assertIn("repair_workspace:/var/lib/lima/repair-workspace", text)
+        self.assertIn(
+            "LIMA_REPAIR_WORKSPACE_ROOT: "
+            "${LIMA_REPAIR_WORKSPACE_ROOT:-/var/lib/lima/repair-workspace}",
+            text,
+        )
 
     def test_security_posture_is_not_weakened(self):
         text = compose_text()

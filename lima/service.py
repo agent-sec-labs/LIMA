@@ -32,6 +32,7 @@ from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 from .repository_import import RepositoryImportPolicy
 from .repository_cache import RepositoryCache
+from .repair_workspace import RepairWorkspace
 from .repository_materializer import GitHubMaterializer
 from .repository_scanner import RepositoryScanner
 from .repository_source import (
@@ -644,6 +645,23 @@ class ReviewService:
                 self._ensure_repository_cache()
             )
         return self.repository_materializer
+
+    def compose_repair_workspace(
+        self, task_id: str, entry, requested_paths: list[str]
+    ) -> "RepairWorkspace":
+        """Compose a disposable repair workspace for a worker-side task.
+
+        仅接线（issue #16）：工作区由异步 worker 按任务创建与销毁，
+        不经过任何 API 端点；源快照、缓存卷与 GitHub 均不被修改。
+        """
+
+        return RepairWorkspace.compose(
+            self._ensure_repository_cache(),
+            self.settings.repair_workspace_root or "output/repair-workspaces",
+            task_id,
+            entry,
+            requested_paths,
+        )
 
     def enqueue_repository_scan_source(
         self, source: RepositorySource | dict[str, str], tenant_id: str = "default"

@@ -28,13 +28,22 @@ from .skills import SkillRegistry
 from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
 from .store import utc_now
 from .task_queue import PermanentTaskError, TaskQueue
+from .task_failure import classify_exception
+from .task_progress import (
+    COMPLETED,
+    FINALIZING,
+    PREPARING_WORKSPACE,
+    QUEUED,
+    SEMANTIC_TRIAGE,
+    TaskProgress,
+)
 from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 from .repository_import import RepositoryImportPolicy
 from .repository_cache import RepositoryCache
 from .repair_workspace import RepairWorkspace
 from .repository_materializer import GitHubMaterializer
-from .repository_scanner import RepositoryScanner
+from .repository_scanner import RepositoryScanner, coverage_warning_counts
 from .repository_source import (
     GITHUB_SOURCE_TYPE,
     LOCAL_IMPORT_SOURCE_TYPE,
@@ -88,6 +97,56 @@ def _warn_unmanaged_repository_cache_root(root: str) -> None:
             f"host disk usage is unmanaged.",
             file=sys.stderr,
         )
+
+
+class ScanProgressTracker:
+    """Bridge pipeline stage events into the durable TaskProgress record.
+
+    物化器与扫描器共用 ``pipeline_event(stage, message, **detail)`` 回调契约；
+    同阶段重复事件只刷新计数，不重置 ``stage_started_at``。每次变化立即落库
+    （轻量 UPDATE），报告仍由 ``store.succeed`` 单次最终提交。
+    """
+
+    def __init__(self, store, task_id: str, progress: TaskProgress) -> None:
+        self._store = store
+        self._task_id = task_id
+        self.progress = progress
+
+    @property
+    def stage(self) -> str:
+        return self.progress.stage
+
+    def advance(self, stage: str, message: str = "") -> None:
+        self.progress.advance(stage, message)
+        self._flush()
+
+    def pipeline_event(self, stage: str, message: str = "", **detail: Any) -> None:
+        counters = {
+            key: detail.pop(key)
+            for key in ("current", "total", "unit")
+            if key in detail
+        }
+        if stage != self.progress.stage:
+            self.progress.advance(stage, message)
+        elif message:
+            self.progress.update(message)
+        if counters:
+            self.progress.update(
+                current=counters.get("current"),
+                total=counters.get("total"),
+                unit=str(counters.get("unit", "")),
+            )
+        if detail:
+            self.progress.update(detail=detail)
+        self._flush()
+
+    def complete(self, completion: dict[str, Any]) -> None:
+        self.progress.advance(COMPLETED, "任务完成")
+        self.progress.update(detail={"completion": completion})
+        self._flush()
+
+    def _flush(self) -> None:
+        self._store.update_task_progress(self._task_id, self.progress.to_dict())
 
 
 class ReviewService:
@@ -196,6 +255,7 @@ class ReviewService:
             self._process_queued, settings.async_workers, settings.redis_url,
             settings.queue_max_attempts, settings.queue_lease_seconds,
             self._on_dead_letter,
+            on_retry=self._on_task_retry,
         )
         self.experiment_queue = TaskQueue(
             self._process_experiment_queued,
@@ -715,6 +775,13 @@ class ReviewService:
             task_input["repository_key"] = normalized.repository_key
             message["repository_key"] = normalized.repository_key
         self.store.create(task_id, label, None, task_input, tenant_id)
+        # 任务实例化即开始进度跟踪（QUEUED），失败也始终有 progress 佐证 stage。
+        self.store.update_task_progress(
+            task_id,
+            TaskProgress.begin(
+                max_attempts=self.settings.queue_max_attempts
+            ).to_dict(),
+        )
         self.queue.submit(message, message_id=task_id)
         metrics.inc("repository_scans_enqueued_total")
         metrics.inc(
@@ -730,33 +797,70 @@ class ReviewService:
             "queue": self.queue.backend,
         }
 
+    def _scan_progress_tracker(self, task_id: str) -> ScanProgressTracker:
+        """Restore persisted progress (retry continuity) or begin a new one."""
+
+        existing = (self.store.get(task_id) or {}).get("progress")
+        if existing:
+            progress = TaskProgress.from_dict(existing)
+        else:
+            progress = TaskProgress.begin(
+                max_attempts=self.settings.queue_max_attempts
+            )
+        return ScanProgressTracker(self.store, task_id, progress)
+
+    def _record_task_failure(
+        self, task_id: str, exc: BaseException,
+        tracker: ScanProgressTracker | None = None,
+    ) -> None:
+        """Persist the typed failure (stage preserved) before queue routing.
+
+        显式 typed 失败（T3 物化器）原样保留；未分类异常经 classify_exception
+        兜底，stage 取自当前 progress，保证 UI 不再只有裸异常字符串。
+        """
+
+        stage = tracker.stage if tracker is not None else ""
+        failure = classify_exception(exc, stage)
+        self.store.update_task_failure(task_id, failure.to_dict())
+
     def _process_repository_scan(
         self, task_id: str, repository_key: str, tenant_id: str,
         scan_source: dict[str, Any] | None = None,
     ) -> None:
-        if scan_source:
-            self._process_github_repository_scan(task_id, scan_source, tenant_id)
-            return
-        root = self.repository_import.resolve(repository_key)
-        self.store.transition(
-            task_id,
-            TraceEvent(
-                1, TaskState.PLANNING,
-                "Validated repository key within the configured import root.",
-                utc_now(),
-            ),
-        )
-        self._execute_repository_scan(
-            task_id, root, tenant_id, repository_key,
-            {"repository_key": repository_key},
-        )
+        tracker = self._scan_progress_tracker(task_id)
+        try:
+            if scan_source:
+                self._process_github_repository_scan(
+                    task_id, scan_source, tenant_id, tracker
+                )
+                return
+            tracker.pipeline_event(PREPARING_WORKSPACE, "正在准备本地导入工作区")
+            root = self.repository_import.resolve(repository_key)
+            self.store.transition(
+                task_id,
+                TraceEvent(
+                    1, TaskState.PLANNING,
+                    "Validated repository key within the configured import root.",
+                    utc_now(),
+                ),
+            )
+            self._execute_repository_scan(
+                task_id, root, tenant_id, repository_key,
+                {"repository_key": repository_key}, tracker,
+            )
+        except Exception as exc:
+            self._record_task_failure(task_id, exc, tracker)
+            raise
 
     def _process_github_repository_scan(
-        self, task_id: str, scan_source: dict[str, Any], tenant_id: str
+        self, task_id: str, scan_source: dict[str, Any], tenant_id: str,
+        tracker: ScanProgressTracker,
     ) -> None:
         # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
         source = parse_repository_source(scan_source)
-        materialized = self._materializer().materialize(source)
+        materialized = self._materializer().materialize(
+            source, progress_callback=tracker.pipeline_event
+        )
         revision = materialized["resolved_revision"]
         metrics.inc(
             f"repository_scan_source_github_"
@@ -768,7 +872,7 @@ class ReviewService:
                 task_id,
                 TraceEvent(
                     1, TaskState.PLANNING,
-                    f"Materialized pinned GitHub snapshot at {revision}.",
+                    "Materialized pinned GitHub snapshot at %s." % revision,
                     utc_now(),
                 ),
             )
@@ -781,11 +885,15 @@ class ReviewService:
                     "cache_hit": materialized["cache_hit"],
                     "archive_sha256": materialized["archive_sha256"],
                 },
+                tracker,
+                materializer_warnings=materialized.get("warnings") or [],
             )
 
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
         repository_label: str, import_policy_extra: dict[str, Any],
+        progress: ScanProgressTracker | None = None,
+        materializer_warnings: list[dict[str, Any]] | None = None,
     ) -> None:
         workspace = RepositoryWorkspace(
             root,
@@ -804,7 +912,12 @@ class ReviewService:
             "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
             repository=repository_label,
         ), metrics.timer("repository_scan_duration"):
-            result = self.repository_scanner.scan(workspace)
+            result = self.repository_scanner.scan(
+                workspace,
+                progress_callback=(
+                    progress.pipeline_event if progress is not None else None
+                ),
+            )
         result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {
             "host_path_exposed": False,
@@ -814,6 +927,8 @@ class ReviewService:
             **import_policy_extra,
         }
         if self.repository_semantic_triage is not None:
+            if progress is not None:
+                progress.pipeline_event(SEMANTIC_TRIAGE, "正在语义复核候选发现")
             try:
                 with metrics.timer("repository_semantic_triage_duration"):
                     triage = self.repository_semantic_triage.run(
@@ -861,6 +976,26 @@ class ReviewService:
                 ),
                 "secret_persisted": False,
             }
+        # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
+        warnings_by_reason = coverage_warning_counts(result.inventory)
+        for warning in materializer_warnings or []:
+            if warning.get("category") == "coverage":
+                code = str(warning.get("code") or "COVERAGE_SKIPPED")
+                warnings_by_reason[code] = warnings_by_reason.get(code, 0) + 1
+        warning_count = sum(warnings_by_reason.values())
+        completion: dict[str, Any] = {
+            "status": (
+                "completed_with_warnings" if warning_count else "completed"
+            ),
+            "warning_count": warning_count,
+        }
+        if warnings_by_reason:
+            completion["warnings"] = warnings_by_reason
+        if progress is not None:
+            progress.pipeline_event(FINALIZING, "正在生成审计报告")
+            # 先落 COMPLETED progress 再翻状态：避免轮询方看到
+            # SUCCESS + 非 COMPLETED progress 的矛盾快照。
+            progress.complete(completion)
         self.store.succeed(
             task_id, result.report,
             TraceEvent(
@@ -871,6 +1006,27 @@ class ReviewService:
             ),
         )
         metrics.inc("repository_scans_total")
+
+    def _on_task_retry(
+        self, payload: Dict[str, Any], attempt: int, max_attempts: int,
+        exc: BaseException, delay: float,
+    ) -> None:
+        """Queue retry callback: bump progress attempt (scan tasks only).
+
+        评审类任务没有 progress 记录，直接跳过；attempt 反映队列重试计数。
+        """
+
+        task_id = payload.get("task_id", "")
+        if not task_id:
+            return
+        task = self.store.get(task_id)
+        progress = (task or {}).get("progress")
+        if not progress:
+            return
+        restored = TaskProgress.from_dict(progress)
+        restored.attempt = min(attempt + 1, max_attempts)
+        restored.advance(QUEUED, "任务将自动重试")
+        self.store.update_task_progress(task_id, restored.to_dict())
 
     def _process_queued(self, payload: Dict[str, Any]) -> None:
         task_id = payload["task_id"]

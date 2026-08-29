@@ -12,6 +12,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { Link, useLocation } from "react-router-dom";
+import { AuditCreatePage } from "@/features/audit-create/AuditCreatePage";
 import { AuthBar } from "@/features/auth/AuthBar";
 import { ExperimentsPage } from "@/features/experiments/ExperimentsPage";
 import { EvolutionPage } from "@/features/evolution/EvolutionPage";
@@ -90,7 +91,7 @@ function routeTree() {
       element: <Shell />,
       children: [
         { index: true, element: <Navigate to="/audit/new" replace /> },
-        { path: "audit/new", element: <FeaturePlaceholder title="发起审计（T6）" /> },
+        { path: "audit/new", element: <AuditCreatePage /> },
         { path: "tasks", element: <FeaturePlaceholder title="审计结果（T7）" /> },
         { path: "tasks/:taskId", element: <FeaturePlaceholder title="任务详情（T7）" /> },
         { path: "experiments", element: <ExperimentsPage /> },

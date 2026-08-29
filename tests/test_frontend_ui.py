@@ -213,6 +213,33 @@ def _check_github_source_inputs_declare_no_secrets() -> None:
     )
 
 
+def _check_audit_wizard_recovers_without_refresh_and_task_detail_polls() -> None:
+    script = _read("app.js")
+    html = _read("index.html")
+
+    # 提交成功后向导立即复位（202 后责任移交任务中心），运行面板不得残留。
+    assert "function resetAuditWizard" in script
+    assert "resetAuditWizard();" in script
+    assert '$("#wizard-running").classList.add("hidden")' in script
+    assert "function ensureAuditWizardReady" in script
+    assert "ensureAuditWizardReady();" in script
+    assert "auditSubmitting" in script
+    assert 'if (view === "scan") {' in script
+    # 同步失败必须回到可编辑态并保留草稿（setWizardStep(3) 在 catch 分支内）。
+    assert "setWizardStep(3);" in script
+    # 任务详情轮询：进入任务视图启动、离开/登出/终态/出错停止，防重入守卫存在。
+    assert "function setTaskPolling" in script
+    assert "function pollSelectedTask" in script
+    assert "function taskTerminal" in script
+    assert '["SUCCESS", "FAILED", "CANCELLED"].includes(normalizeState(state))' in script
+    assert "taskPoller = window.setInterval" in script
+    assert "window.clearInterval(taskPoller)" in script
+    assert 'setTaskPolling(view === "tasks")' in script
+    assert "setTaskPolling(false);" in script
+    assert "document.hidden || location.hash.slice(1) !== \"tasks\"" in script
+    assert 'id="wizard-running"' in html
+
+
 class FrontendUiTests(unittest.TestCase):
     def test_task_oriented_navigation_and_first_run_guidance(self) -> None:
         _check_task_oriented_navigation_and_first_run_guidance()
@@ -249,3 +276,6 @@ class FrontendUiTests(unittest.TestCase):
 
     def test_github_source_inputs_declare_no_secrets(self) -> None:
         _check_github_source_inputs_declare_no_secrets()
+
+    def test_audit_wizard_recovers_without_refresh_and_task_detail_polls(self) -> None:
+        _check_audit_wizard_recovers_without_refresh_and_task_detail_polls()

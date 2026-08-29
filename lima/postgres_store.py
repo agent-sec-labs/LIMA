@@ -33,7 +33,8 @@ class PostgresTaskStore:
             """CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, state TEXT NOT NULL, repository TEXT NOT NULL,
                 pull_request INTEGER, input_json JSONB NOT NULL, report_json JSONB,
-                error TEXT, progress_json JSONB, created_at TIMESTAMPTZ NOT NULL,
+                error TEXT, progress_json JSONB, failure_json JSONB,
+                created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS trace_events (
                 id BIGSERIAL PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), step INTEGER NOT NULL,
@@ -75,6 +76,7 @@ class PostgresTaskStore:
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS progress_json JSONB",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS failure_json JSONB",
             "ALTER TABLE installations ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             """CREATE TABLE IF NOT EXISTS checkpoints (
                 task_id TEXT NOT NULL REFERENCES tasks(id), node TEXT NOT NULL, status TEXT NOT NULL,
@@ -207,6 +209,7 @@ class PostgresTaskStore:
         value["input"] = value.pop("input_json")
         value["report"] = value.pop("report_json")
         value["progress"] = value.pop("progress_json", None)
+        value["failure"] = value.pop("failure_json", None)
         value["trace"] = [dict(item) for item in events]
         value["collaboration"] = []
         for message in messages:
@@ -237,6 +240,15 @@ class PostgresTaskStore:
             conn.execute(
                 "UPDATE tasks SET progress_json=%s::jsonb, updated_at=%s WHERE id=%s",
                 (json.dumps(progress, ensure_ascii=False), utc_now(), task_id),
+            )
+
+    def update_task_failure(self, task_id: str, failure: dict[str, Any]) -> None:
+        """Persist the structured failure payload on its own column."""
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET failure_json=%s::jsonb, updated_at=%s WHERE id=%s",
+                (json.dumps(failure, ensure_ascii=False), utc_now(), task_id),
             )
 
     def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:

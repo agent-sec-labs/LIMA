@@ -10,12 +10,16 @@ from typing import Iterable, Iterator, Optional
 
 DEFAULT_EXTENSIONS = frozenset(
     {
-        ".c", ".cc", ".cmake", ".cpp", ".cxx", ".go", ".h", ".hh", ".hpp",
-        ".hxx", ".java", ".js", ".json", ".jsx", ".php", ".py", ".rb", ".rs",
-        ".sh", ".toml", ".ts", ".tsx", ".yaml", ".yml",
+        ".ac", ".am", ".c", ".cc", ".cmake", ".conf", ".cpp", ".css",
+        ".cxx", ".go", ".h", ".hh", ".hpp", ".html", ".hxx", ".in",
+        ".java", ".js", ".json", ".jsx", ".list", ".m4", ".php", ".po",
+        ".pot", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
+        ".yaml", ".yml",
     }
 )
-DEFAULT_FILENAMES = frozenset({"CMakeLists.txt"})
+DEFAULT_FILENAMES = frozenset(
+    {"CMakeLists.txt", "LINGUAS", "Makefile", "Makefile.inc", "Makevars", "config.mk"}
+)
 CXX_SOURCE_EXTENSIONS = frozenset(
     {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 )

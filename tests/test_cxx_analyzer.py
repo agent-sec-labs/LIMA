@@ -43,7 +43,12 @@ from lima.workspace import RepositoryWorkspace
 def _expected_cmake_steps():
     return (
         (
-            "cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug",
+            "cmake",
+            "-S",
+            ".",
+            "-B",
+            "build",
+            "-DCMAKE_BUILD_TYPE=Debug",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         ),
         ("cmake", "--build", "build", "--parallel", "2"),
@@ -132,13 +137,9 @@ def _validate_sidecar_dockerfile_contract(dockerfile: str) -> None:
             raise ValueError(f"runtime is missing fixed contract: {required}")
 
     content_instructions = [
-        (operation, value)
-        for operation, value in runtime
-        if operation in {"COPY", "ADD"}
+        (operation, value) for operation, value in runtime if operation in {"COPY", "ADD"}
     ]
-    if content_instructions != [
-        ("COPY", "--chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer")
-    ]:
+    if content_instructions != [("COPY", "--chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer")]:
         raise ValueError("runtime COPY/ADD boundary is not analyzer-only")
 
     runtime_users = [value for operation, value in runtime if operation == "USER"]
@@ -184,9 +185,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                     parse_steps_json("LIMA_CXX_BUILD_STEPS_JSON", raw)
 
     def test_settings_are_admin_environment_only_and_have_safe_defaults(self):
-        with patch.dict(
-            os.environ, {"LIMA_DATABASE_URL": "postgres://secret"}, clear=True
-        ):
+        with patch.dict(os.environ, {"LIMA_DATABASE_URL": "postgres://secret"}, clear=True):
             settings = AnalyzerSettings.from_env()
 
         self.assertTrue(settings.auto_cmake)
@@ -255,7 +254,24 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 "src/main.cpp": "int main() { return 0; }\n",
                 "CMakeLists.txt": "add_executable(app src/main.cpp)\n",
                 "cmake/toolchain.cmake": "set(CMAKE_CXX_STANDARD 17)\n",
+                "configure.ac": "AC_INIT([app], [1])\n",
+                "Makefile.am": "bin_PROGRAMS = app\n",
+                "config.h.in": "#undef APP_FEATURE\n",
+                "m4/app.m4": "AC_DEFUN([APP_CHECK], [])\n",
+                "po/messages.po": "msgid \"\"\nmsgstr \"\"\n",
+                "po/messages.pot": "msgid \"\"\nmsgstr \"\"\n",
+                "resources/app.css": "body { color: black; }\n",
+                "resources/tpls.html": "<main></main>\n",
+                "config/browsers.list": "Browser\n",
+                "config/app.conf": "enabled=true\n",
+                "lib/Makefile.inc": "CSOURCES = main.c\n",
+                "po/LINGUAS": "en\n",
+                "po/Makevars": "DOMAIN = app\n",
+                "Makefile": "all:\n\t@true\n",
+                "config.mk": "FEATURE = yes\n",
                 "notes.txt": "not inventoried\n",
+                "run-tool": "not inventoried\n",
+                "configure": "not inventoried\n",
                 ".env": "TOKEN=secret\n",
                 "build/generated.cpp": "int generated;\n",
             }
@@ -265,22 +281,40 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
             source_before = {
                 path.relative_to(repository).as_posix(): (
-                    path.read_bytes(), path.stat().st_mtime_ns
+                    path.read_bytes(),
+                    path.stat().st_mtime_ns,
                 )
                 for path in repository.rglob("*")
                 if path.is_file()
             }
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
 
-            snapshot = prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            )
+            snapshot = prepare_snapshot(import_root, "team/project", expected, work_root)
             self.addCleanup(snapshot.cleanup)
 
             self.assertEqual(expected, snapshot.sha256)
             self.assertEqual(work_root.resolve(), snapshot.root.parent)
             self.assertEqual(
-                ["CMakeLists.txt", "cmake/toolchain.cmake", "src/main.cpp"],
+                [
+                    "CMakeLists.txt",
+                    "Makefile",
+                    "Makefile.am",
+                    "cmake/toolchain.cmake",
+                    "config.h.in",
+                    "config.mk",
+                    "config/app.conf",
+                    "config/browsers.list",
+                    "configure.ac",
+                    "lib/Makefile.inc",
+                    "m4/app.m4",
+                    "po/LINGUAS",
+                    "po/Makevars",
+                    "po/messages.po",
+                    "po/messages.pot",
+                    "resources/app.css",
+                    "resources/tpls.html",
+                    "src/main.cpp",
+                ],
                 sorted(snapshot.files),
             )
             self.assertEqual(
@@ -295,7 +329,8 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 source_before,
                 {
                     path.relative_to(repository).as_posix(): (
-                        path.read_bytes(), path.stat().st_mtime_ns
+                        path.read_bytes(),
+                        path.stat().st_mtime_ns,
                     )
                     for path in repository.rglob("*")
                     if path.is_file()
@@ -332,9 +367,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "fingerprint"):
                 prepare_snapshot(import_root, "team/project", "0" * 64, work_root)
-            with patch.dict(
-                os.environ, {"LIMA_REPOSITORY_SCAN_MAX_FILES": "1"}, clear=False
-            ):
+            with patch.dict(os.environ, {"LIMA_REPOSITORY_SCAN_MAX_FILES": "1"}, clear=False):
                 with self.assertRaisesRegex(ValueError, "fingerprint"):
                     prepare_snapshot(import_root, "team/project", expected, work_root)
             with patch.dict(
@@ -398,9 +431,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
     @patch("cxx_analyzer.execution._stream_process")
     @patch("cxx_analyzer.execution.subprocess.Popen")
     @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=3)
-    def test_run_step_uses_launcher_snapshot_cwd_and_clean_env(
-        self, _abi, popen, stream
-    ):
+    def test_run_step_uses_launcher_snapshot_cwd_and_clean_env(self, _abi, popen, stream):
         process = Mock()
         process.pid = 1234
         popen.return_value = process
@@ -420,9 +451,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             source.parent.mkdir()
             source.write_text("int main() {}\n", encoding="utf-8")
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 status_read, status_write = os.pipe()
                 os.write(status_write, b"R")
                 with patch(
@@ -462,9 +491,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         stdout = b"A" * (2 * 1024 * 1024 + 17)
         stderr = b"B" * (2 * 1024 * 1024 + 31)
         script = (
-            "import os\n"
-            f"os.write(1, b'A' * {len(stdout)})\n"
-            f"os.write(2, b'B' * {len(stderr)})\n"
+            f"import os\nos.write(1, b'A' * {len(stdout)})\nos.write(2, b'B' * {len(stderr)})\n"
         )
         process = subprocess.Popen(  # noqa: S603 - fixed local test child
             [sys.executable, "-c", script],
@@ -520,10 +547,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         stdout = b"descendant-stdout"
         stderr = b"descendant-stderr"
         child_code = (
-            "import os,time; "
-            f"os.write(1, {stdout!r}); "
-            f"os.write(2, {stderr!r}); "
-            "time.sleep(30)"
+            f"import os,time; os.write(1, {stdout!r}); os.write(2, {stderr!r}); time.sleep(30)"
         )
         with tempfile.TemporaryDirectory() as temporary:
             pid_file = Path(temporary) / "descendant.pid"
@@ -550,9 +574,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
 
             self.addCleanup(kill_descendant)
             started = time.monotonic()
-            captured = _stream_process(
-                process, timeout_seconds=1, max_output_bytes=1024
-            )
+            captured = _stream_process(process, timeout_seconds=1, max_output_bytes=1024)
             elapsed = time.monotonic() - started
 
         self.assertTrue(captured.timed_out)
@@ -606,9 +628,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             import_root, repository, work_root = self._repository(temporary)
             (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 result = run_step(["tool"], snapshot, ".", 3, 8, {})
 
         self.assertEqual("sandbox-unavailable", result.status)
@@ -627,9 +647,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             import_root, repository, work_root = self._repository(temporary)
             (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 result = run_step(["tool"], snapshot, ".", 3, 8, {})
 
         self.assertEqual("sandbox-unavailable", result.status)
@@ -641,13 +659,9 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             import_root, repository, work_root = self._repository(temporary)
             (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 policy = build_policy(snapshot.root)
-                launcher = build_launcher_argv(
-                    ["cmake", "--version"], snapshot.root, status_fd=9
-                )
+                launcher = build_launcher_argv(["cmake", "--version"], snapshot.root, status_fd=9)
 
         allowed = {str(rule.path) for rule in policy.rules}
         self.assertIn(str(snapshot.root), allowed)
@@ -663,9 +677,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
     @patch("cxx_analyzer.execution._stream_process")
     @patch("cxx_analyzer.execution.subprocess.Popen")
     @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=3)
-    def test_run_step_fails_closed_when_launcher_never_reports_ready(
-        self, _abi, popen, stream
-    ):
+    def test_run_step_fails_closed_when_launcher_never_reports_ready(self, _abi, popen, stream):
         popen.return_value = Mock(pid=1234)
         empty_sha256 = hashlib.sha256(b"").hexdigest()
         stream.return_value = StreamCapture(
@@ -681,9 +693,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             import_root, repository, work_root = self._repository(temporary)
             (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 result = run_step(["tool"], snapshot, ".", 3, 64, {})
 
         self.assertEqual("sandbox-failed", result.status)
@@ -724,9 +734,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             source.parent.mkdir()
             source.write_text("int main() {}\n", encoding="utf-8")
             expected = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 try:
                     (snapshot.root / "linked-cwd").symlink_to(
                         snapshot.root / "src", target_is_directory=True
@@ -755,9 +763,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 "\nexcept PermissionError: print('outside-denied')"
                 "\nelse: print('outside-readable'); raise SystemExit(9)"
             )
-            with prepare_snapshot(
-                import_root, "team/project", expected, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
                 result = run_step(
                     [sys.executable, "-c", code, str(outside)],
                     snapshot,
@@ -866,24 +872,24 @@ class AnalyzerServiceTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "schema_version", "request_id", "status", "snapshot_sha256",
-                "tool_runs", "findings", "coverage", "diagnostics",
+                "schema_version",
+                "request_id",
+                "status",
+                "snapshot_sha256",
+                "tool_runs",
+                "findings",
+                "coverage",
+                "diagnostics",
             },
             set(result),
         )
         self.assertEqual("completed", result["status"])
         self.assertEqual(self.REQUEST_ID, result["request_id"])
         self.assertEqual(self.SNAPSHOT_SHA256, result["snapshot_sha256"])
-        self.assertEqual(
-            [{"tool": "semgrep", "status": "failed"}], result["tool_runs"]
-        )
+        self.assertEqual([{"tool": "semgrep", "status": "failed"}], result["tool_runs"])
         self.assertEqual([], result["findings"])
-        self.assertEqual(
-            ["Semgrep source scan did not complete"], result["diagnostics"]
-        )
-        self.assertEqual(
-            {"source_files": 1, "snapshot_files": 2}, result["coverage"]
-        )
+        self.assertEqual(["Semgrep source scan did not complete"], result["diagnostics"])
+        self.assertEqual({"source_files": 1, "snapshot_files": 2}, result["coverage"])
         prepare.assert_called_once_with(
             analyzer_server.IMPORT_ROOT,
             "team/project",
@@ -899,15 +905,21 @@ class AnalyzerServiceTests(unittest.TestCase):
             ("POST", "/wrong", "application/json", valid_body, 404, "not_found"),
             ("POST", "/v1/analyze", "text/plain", valid_body, 415, "unsupported_media_type"),
             (
-                "POST", "/v1/analyze", "application/json",
+                "POST",
+                "/v1/analyze",
+                "application/json",
                 b"x" * (analyzer_server.MAX_REQUEST_BYTES + 1),
-                413, "request_too_large",
+                413,
+                "request_too_large",
             ),
             ("POST", "/v1/analyze", "application/json", b"{", 400, "invalid_json"),
             (
-                "POST", "/v1/analyze", "application/json",
+                "POST",
+                "/v1/analyze",
+                "application/json",
                 json.dumps(self._payload(command=["echo", "secret"])).encode("utf-8"),
-                400, "invalid_request",
+                400,
+                "invalid_request",
             ),
         )
 
@@ -925,9 +937,7 @@ class AnalyzerServiceTests(unittest.TestCase):
                 self.assertNotIn("Traceback", rendered)
 
     @patch("cxx_analyzer.server.analyze_request")
-    def test_dispatch_rejects_whole_oversized_response_with_minimal_error(
-        self, analyze
-    ):
+    def test_dispatch_rejects_whole_oversized_response_with_minimal_error(self, analyze):
         analyze.return_value = {"findings": ["x" * (2 * 1024 * 1024 + 1)]}
         body = json.dumps(self._payload()).encode("utf-8")
 
@@ -944,9 +954,7 @@ class AnalyzerServiceTests(unittest.TestCase):
 
     @patch("cxx_analyzer.server.shutil.which")
     def test_health_discloses_only_schema_and_tool_availability(self, which):
-        which.side_effect = lambda tool: (
-            "/usr/bin/" + tool if tool != "clang" else None
-        )
+        which.side_effect = lambda tool: ("/usr/bin/" + tool if tool != "clang" else None)
 
         status, payload = analyzer_server.dispatch_request(
             "GET", "/health", "", b"", self._settings()
@@ -1010,9 +1018,7 @@ class AnalyzerServiceTests(unittest.TestCase):
                 self.assertEqual("completed", result["status"])
                 self.assertEqual([candidate.to_dict()], result["findings"])
                 self.assertEqual([diagnostic], result["diagnostics"])
-                self.assertEqual(
-                    [{"tool": tool, "status": tool_status}], result["tool_runs"]
-                )
+                self.assertEqual([{"tool": tool, "status": tool_status}], result["tool_runs"])
                 build_scan_runner.assert_called_once_with(snapshot, self._settings())
 
     def test_http_handler_reads_exactly_the_declared_content_length(self):
@@ -1045,8 +1051,15 @@ class AnalyzerServiceTests(unittest.TestCase):
         host, port = server.server_address
         try:
             for method in (
-                "GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE",
-                "CONNECT", "BREW",
+                "GET",
+                "HEAD",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "OPTIONS",
+                "TRACE",
+                "CONNECT",
+                "BREW",
             ):
                 with self.subTest(method=method):
                     connection = http.client.HTTPConnection(host, port, timeout=2)
@@ -1110,18 +1123,26 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
         volumes = service.get("volumes", [])
         self.assertTrue(any(str(item).endswith(":/repositories:ro") for item in volumes))
         self.assertFalse(any("/var/run/docker.sock" in str(item) for item in volumes))
-        self.assertFalse(any(
-            "/var/run/docker.sock" in str(item)
-            for item in compose["services"]["lima"].get("volumes", [])
-        ))
+        self.assertFalse(
+            any(
+                "/var/run/docker.sock" in str(item)
+                for item in compose["services"]["lima"].get("volumes", [])
+            )
+        )
         tmpfs = service["tmpfs"]
         self.assertEqual(
             {
                 "/tmp": {  # noqa: S108 - Bounded container tmpfs contract.
-                    "size": "64m", "mode": "0700", "uid": "10002", "gid": "10002",
+                    "size": "64m",
+                    "mode": "0700",
+                    "uid": "10002",
+                    "gid": "10002",
                 },
                 "/work": {
-                    "size": "512m", "mode": "0700", "uid": "10002", "gid": "10002",
+                    "size": "512m",
+                    "mode": "0700",
+                    "uid": "10002",
+                    "gid": "10002",
                 },
             },
             {
@@ -1140,13 +1161,18 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
         self.assertEqual({"cxx_analysis"}, set(analyzer["networks"]))
 
         main_configuration = {
-            "LIMA_CXX_MEMORY_MODE", "LIMA_CXX_ANALYZER_URL",
-            "LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS", "LIMA_CXX_MAX_RESPONSE_BYTES",
+            "LIMA_CXX_MEMORY_MODE",
+            "LIMA_CXX_ANALYZER_URL",
+            "LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS",
+            "LIMA_CXX_MAX_RESPONSE_BYTES",
         }
         sidecar_configuration = {
-            "LIMA_CXX_AUTO_CMAKE", "LIMA_CXX_BUILD_STEPS_JSON",
-            "LIMA_CXX_TEST_STEPS_JSON", "LIMA_CXX_MAX_MEMORY_MB",
-            "LIMA_CXX_MAX_PROCESSES", "LIMA_CXX_MAX_OUTPUT_BYTES",
+            "LIMA_CXX_AUTO_CMAKE",
+            "LIMA_CXX_BUILD_STEPS_JSON",
+            "LIMA_CXX_TEST_STEPS_JSON",
+            "LIMA_CXX_MAX_MEMORY_MB",
+            "LIMA_CXX_MAX_PROCESSES",
+            "LIMA_CXX_MAX_OUTPUT_BYTES",
         }
         self.assertTrue(main_configuration <= set(lima["environment"]))
         snapshot_limits = {
@@ -1158,11 +1184,13 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             sidecar_configuration | snapshot_limits,
             set(analyzer["environment"]),
         )
-        self.assertFalse(any(
-            marker in name
-            for name in analyzer["environment"]
-            for marker in ("DATABASE", "POSTGRES", "REDIS", "GITHUB", "TOKEN", "SECRET", "KEY")
-        ))
+        self.assertFalse(
+            any(
+                marker in name
+                for name in analyzer["environment"]
+                for marker in ("DATABASE", "POSTGRES", "REDIS", "GITHUB", "TOKEN", "SECRET", "KEY")
+            )
+        )
         self.assertEqual(
             "${LIMA_CXX_ANALYZER_URL:-http://cxx-analyzer:8090}",
             lima["environment"]["LIMA_CXX_ANALYZER_URL"],
@@ -1183,15 +1211,23 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             self.assertEqual(lima["environment"][name], analyzer["environment"][name])
 
     def test_sidecar_dockerfile_pins_runtime_identity_tools_and_copy_boundary(self):
-        dockerfile = (
-            Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile"
-        ).read_text(encoding="utf-8")
+        dockerfile = (Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
         _validate_sidecar_dockerfile_contract(dockerfile)
 
+    def test_sidecar_dockerfile_installs_pinned_public_case_build_dependencies(self):
+        dockerfile = (Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        for package in ("libfreetype6-dev", "libxml2-dev", "zlib1g-dev"):
+            with self.subTest(package=package):
+                self.assertRegex(dockerfile, rf"(?m)^\s+{package}\s*\\?$")
+
     def test_sidecar_dockerfile_contract_rejects_late_root_and_add_mutations(self):
-        dockerfile = (
-            Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile"
-        ).read_text(encoding="utf-8")
+        dockerfile = (Path(__file__).parents[1] / "cxx_analyzer" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
         mutations = {
             "late runtime root": dockerfile.replace(
                 "USER analyzer:analyzer\nCMD",
@@ -1244,9 +1280,7 @@ class SourceScanTests(unittest.TestCase):
         )
 
     @patch("cxx_analyzer.source_scan.run_step")
-    def test_source_scan_stages_rules_outside_snapshot_and_preserves_colliding_file(
-        self, run_tool
-    ):
+    def test_source_scan_stages_rules_outside_snapshot_and_preserves_colliding_file(self, run_tool):
         sample = (
             Path(__file__).parent / "fixtures" / "cxx_memory" / "semgrep-sample.json"
         ).read_text(encoding="utf-8")
@@ -1300,16 +1334,12 @@ class SourceScanTests(unittest.TestCase):
                 self.assertEqual(17, call.kwargs["timeout_seconds"])
                 self.assertEqual(8192, call.kwargs["max_output_bytes"])
                 self.assertEqual({}, call.kwargs["env"])
-                self.assertFalse(
-                    Path(call.args[0][4]).resolve().is_relative_to(snapshot.root)
-                )
+                self.assertFalse(Path(call.args[0][4]).resolve().is_relative_to(snapshot.root))
                 self.assertEqual(1, len(result.findings))
                 self.assertEqual([], list(stage_root.iterdir()))
 
     @patch("cxx_analyzer.source_scan.run_step")
-    def test_source_scan_never_emits_findings_for_unusable_tool_or_parser_output(
-        self, run_tool
-    ):
+    def test_source_scan_never_emits_findings_for_unusable_tool_or_parser_output(self, run_tool):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             repository = base / "imports" / "team" / "project"
@@ -1346,7 +1376,7 @@ class SourceScanTests(unittest.TestCase):
                     ),
                     (
                         "parser-failure",
-                        self._execution(stdout="{\"results\": [{\"bad\": true}]}"),
+                        self._execution(stdout='{"results": [{"bad": true}]}'),
                         "Semgrep JSON was rejected",
                     ),
                 )
@@ -1364,6 +1394,7 @@ class SourceScanTests(unittest.TestCase):
                             result.tool_runs[0]["digests_complete"],
                         )
                         self.assertEqual([], list(stage_root.iterdir()))
+
     def test_normalized_finding_enforces_the_client_schema_and_bounds_text(self):
         diagnostics = []
         finding = NormalizedFinding.create(
@@ -1390,9 +1421,22 @@ class SourceScanTests(unittest.TestCase):
 
         self.assertEqual(
             (
-                "rule_id", "severity", "title", "explanation", "path", "line",
-                "evidence", "fix", "test", "confidence", "cwe", "tool",
-                "evidence_kind", "verification_state", "language", "symbol",
+                "rule_id",
+                "severity",
+                "title",
+                "explanation",
+                "path",
+                "line",
+                "evidence",
+                "fix",
+                "test",
+                "confidence",
+                "cwe",
+                "tool",
+                "evidence_kind",
+                "verification_state",
+                "language",
+                "symbol",
                 "analysis_mode",
             ),
             tuple(finding.to_dict()),
@@ -1521,14 +1565,16 @@ class BuildScanTests(unittest.TestCase):
             def completed_tool(argv, *args, **kwargs):
                 if argv[0] == "configure":
                     (root / "compile_commands.json").write_text(
-                        json.dumps([
-                            {
-                                "directory": str(root),
-                                "file": str(source),
-                                "arguments": ["cc", "-c", str(source)],
-                            }
-                            for source in sources
-                        ]),
+                        json.dumps(
+                            [
+                                {
+                                    "directory": str(root),
+                                    "file": str(source),
+                                    "arguments": ["cc", "-c", str(source)],
+                                }
+                                for source in sources
+                            ]
+                        ),
                         encoding="utf-8",
                     )
                 elif argv[0] == "clang-14":
@@ -1553,7 +1599,11 @@ class BuildScanTests(unittest.TestCase):
         self.assertEqual(
             (
                 (
-                    "cmake", "-S", ".", "-B", "build",
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    "build",
                     "-DCMAKE_BUILD_TYPE=Debug",
                     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
                 ),
@@ -1590,9 +1640,7 @@ class BuildScanTests(unittest.TestCase):
                 self.assertEqual((), result.findings)
                 self.assertEqual((expected_status,), result.diagnostics)
                 self.assertEqual(expected_status, result.tool_runs[0]["status"])
-                self.assertLessEqual(
-                    len(result.diagnostics[0].encode("utf-8")), 2048
-                )
+                self.assertLessEqual(len(result.diagnostics[0].encode("utf-8")), 2048)
                 self.assertEqual(1, run_tool.call_count)
 
     @patch("cxx_analyzer.build_scan.run_step")
@@ -1631,7 +1679,7 @@ class BuildScanTests(unittest.TestCase):
             ("completed", "timed-out"),
             tuple(item["status"] for item in result.tool_runs),
         )
-        self.assertEqual("second-build", result.tool_runs[-1]["tool"])
+        self.assertEqual("build-step", result.tool_runs[-1]["tool"])
 
     @patch("cxx_analyzer.build_scan.time.monotonic")
     @patch("cxx_analyzer.build_scan.run_step")
@@ -1656,14 +1704,16 @@ class BuildScanTests(unittest.TestCase):
             def completed_tool(argv, *args, **kwargs):
                 if argv[0] == "configure":
                     (root / "compile_commands.json").write_text(
-                        json.dumps([
-                            {
-                                "directory": str(root),
-                                "file": str(source),
-                                "arguments": ["cc", "-c", str(source)],
-                            }
-                            for source in sources
-                        ]),
+                        json.dumps(
+                            [
+                                {
+                                    "directory": str(root),
+                                    "file": str(source),
+                                    "arguments": ["cc", "-c", str(source)],
+                                }
+                                for source in sources
+                            ]
+                        ),
                         encoding="utf-8",
                     )
                 elif argv[0] == "clang-14":
@@ -1715,9 +1765,7 @@ class BuildScanTests(unittest.TestCase):
                 self.assertLessEqual(call_count, maximum_calls)
                 self.assertLessEqual(len(result.tool_runs), limits.get("MAX_TOOL_RUNS", 999))
                 self.assertLessEqual(len(result.findings), limits.get("MAX_FINDINGS", 999))
-                self.assertLessEqual(
-                    len(result.diagnostics), limits.get("MAX_DIAGNOSTICS", 999)
-                )
+                self.assertLessEqual(len(result.diagnostics), limits.get("MAX_DIAGNOSTICS", 999))
                 self.assertIn("analysis-budget-exhausted", result.diagnostics)
 
     def test_diagnostic_budget_stops_direct_clang_failures(self):
@@ -1738,14 +1786,16 @@ class BuildScanTests(unittest.TestCase):
             def failing_tool(argv, *args, **kwargs):
                 if argv[0] == "configure":
                     (root / "compile_commands.json").write_text(
-                        json.dumps([
-                            {
-                                "directory": str(root),
-                                "file": str(source),
-                                "arguments": ["cc", "-c", str(source)],
-                            }
-                            for source in sources
-                        ]),
+                        json.dumps(
+                            [
+                                {
+                                    "directory": str(root),
+                                    "file": str(source),
+                                    "arguments": ["cc", "-c", str(source)],
+                                }
+                                for source in sources
+                            ]
+                        ),
                         encoding="utf-8",
                     )
                     return self._execution()
@@ -1783,14 +1833,16 @@ class BuildScanTests(unittest.TestCase):
             def invalid_output_tool(argv, *args, **kwargs):
                 if argv[0] == "configure":
                     (root / "compile_commands.json").write_text(
-                        json.dumps([
-                            {
-                                "directory": str(root),
-                                "file": str(source),
-                                "arguments": ["cc", "-c", str(source)],
-                            }
-                            for source in sources
-                        ]),
+                        json.dumps(
+                            [
+                                {
+                                    "directory": str(root),
+                                    "file": str(source),
+                                    "arguments": ["cc", "-c", str(source)],
+                                }
+                                for source in sources
+                            ]
+                        ),
                         encoding="utf-8",
                     )
                 else:
@@ -1837,104 +1889,133 @@ class BuildScanTests(unittest.TestCase):
             database = root / "compile_commands.json"
             snapshot = Mock(root=root, files=("src/main.cpp",))
 
-            valid = [{
-                "directory": str(root),
-                "file": str(source),
-                "arguments": [
-                    "clang++",
-                    "-c",
-                    "-DDEBUG=1",
-                    "-std=c++20",
-                    "-Wall",
-                    "-O2",
-                    "-I",
-                    str(root / "include"),
-                    f"-fmodule-file={root / 'modules' / 'safe.pcm'}",
-                    f"-fprofile-use={root / 'profiles' / 'safe.profdata'}",
-                    str(source),
-                ],
-            }]
+            valid = [
+                {
+                    "directory": str(root),
+                    "file": str(source),
+                    "arguments": [
+                        "clang++",
+                        "-c",
+                        "-DDEBUG=1",
+                        "-std=c++20",
+                        "-Wall",
+                        "-O2",
+                        "-I",
+                        str(root / "include"),
+                        f"-fmodule-file={root / 'modules' / 'safe.pcm'}",
+                        f"-fprofile-use={root / 'profiles' / 'safe.profdata'}",
+                        str(source),
+                    ],
+                }
+            ]
             database.write_text(json.dumps(valid), encoding="utf-8")
             units = load_compilation_database(snapshot, database)
             self.assertEqual(("src/main.cpp",), tuple(unit.file for unit in units))
             self.assertEqual(tuple(valid[0]["arguments"]), units[0].arguments)
 
             invalid_entries = (
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "command": f"clang++ -c {source}",
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(root.parent / "escape.cpp"),
-                    "arguments": ["clang++", "-c", "../escape.cpp"],
-                }],
-                [{
-                    "directory": str(root.parent),
-                    "file": str(source),
-                    "arguments": ["clang++", "-c", str(source)],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": ["clang++", "-c", "../escape.cpp"],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": ["clang++", "-I", str(root.parent), str(source)],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": ["clang++", "@../outside.rsp"],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": [
-                        "clang++", f"-fmodule-file={root.parent / 'outside.pcm'}"
-                    ],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": [
-                        "clang++",
-                        "-fmodule-file",
-                        f"named={root.parent.as_posix()}/outside.pcm",
-                    ],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": [
-                        "clang++", f"-fprofile-use={root.parent / 'outside.profdata'}"
-                    ],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": [
-                        "clang++", "-fmodule-map-file", str(root.parent / "outside.modulemap")
-                    ],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": ["clang++", "-Xclang", "-fplugin=/outside/plugin.so"],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": ["clang++", "-Xclang=-load"],
-                }],
-                [{
-                    "directory": str(root),
-                    "file": str(source),
-                    "arguments": ["clang++", f"-B{root.parent}"],
-                }],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "command": f"clang++ -c {source}",
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(root.parent / "escape.cpp"),
+                        "arguments": ["clang++", "-c", "../escape.cpp"],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root.parent),
+                        "file": str(source),
+                        "arguments": ["clang++", "-c", str(source)],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", "-c", "../escape.cpp"],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", "-I", str(root.parent), str(source)],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", "@../outside.rsp"],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", f"-fmodule-file={root.parent / 'outside.pcm'}"],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": [
+                            "clang++",
+                            "-fmodule-file",
+                            f"named={root.parent.as_posix()}/outside.pcm",
+                        ],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": [
+                            "clang++",
+                            f"-fprofile-use={root.parent / 'outside.profdata'}",
+                        ],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": [
+                            "clang++",
+                            "-fmodule-map-file",
+                            str(root.parent / "outside.modulemap"),
+                        ],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", "-Xclang", "-fplugin=/outside/plugin.so"],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", "-Xclang=-load"],
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "arguments": ["clang++", f"-B{root.parent}"],
+                    }
+                ],
             )
             for payload in invalid_entries:
                 with self.subTest(payload=payload):
@@ -1964,29 +2045,30 @@ class BuildScanTests(unittest.TestCase):
             {"CWE-787", "CWE-125", "CWE-416", "CWE-415"},
             {finding.cwe for finding in findings},
         )
-        self.assertTrue(all(
-            finding.analysis_mode == "build-backed"
-            and finding.verification_state == "build-verified"
-            and finding.tool == "clang"
-            and finding.fix == ""
-            for finding in findings
-        ))
+        self.assertTrue(
+            all(
+                finding.analysis_mode == "build-backed"
+                and finding.verification_state == "build-verified"
+                and finding.tool == "clang"
+                and finding.fix == ""
+                for finding in findings
+            )
+        )
         for finding in findings:
             trace = json.loads(finding.trace)
             self.assertTrue(trace)
-            self.assertTrue(all(
-                frame["path"] in snapshot.files and not Path(frame["path"]).is_absolute()
-                for frame in trace
-            ))
+            self.assertTrue(
+                all(
+                    frame["path"] in snapshot.files and not Path(frame["path"]).is_absolute()
+                    for frame in trace
+                )
+            )
 
     def test_clang_plist_resolves_unit_cwd_and_structured_control_edges(self):
         from cxx_analyzer.build_scan import parse_clang_plist
 
         fixture = (
-            Path(__file__).parent
-            / "fixtures"
-            / "cxx_memory"
-            / "clang-relative-control.plist"
+            Path(__file__).parent / "fixtures" / "cxx_memory" / "clang-relative-control.plist"
         ).read_bytes()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -1997,9 +2079,7 @@ class BuildScanTests(unittest.TestCase):
             )
             snapshot = Mock(root=root, files=("src/main.c",))
 
-            findings, diagnostics = parse_clang_plist(
-                fixture, snapshot, relative_cwd="build"
-            )
+            findings, diagnostics = parse_clang_plist(fixture, snapshot, relative_cwd="build")
 
         self.assertEqual([], diagnostics)
         self.assertEqual(1, len(findings))
@@ -2065,9 +2145,7 @@ class BuildScanTests(unittest.TestCase):
 
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
         sample = (fixture_root / "clang-sample.plist").read_text(encoding="utf-8")
-        first_diagnostic = sample.replace(
-            "cwe-787/vulnerable-1.c", "src/main.c"
-        )
+        first_diagnostic = sample.replace("cwe-787/vulnerable-1.c", "src/main.c")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             (root / "src").mkdir()
@@ -2088,11 +2166,15 @@ class BuildScanTests(unittest.TestCase):
                     build = root / "build"
                     build.mkdir(exist_ok=True)
                     (build / "compile_commands.json").write_text(
-                        json.dumps([{
-                            "directory": str(root),
-                            "file": str(source),
-                            "arguments": ["cc", "-c", str(source), "-o", "main.o"],
-                        }]),
+                        json.dumps(
+                            [
+                                {
+                                    "directory": str(root),
+                                    "file": str(source),
+                                    "arguments": ["cc", "-c", str(source), "-o", "main.o"],
+                                }
+                            ]
+                        ),
                         encoding="utf-8",
                     )
                 if argv[0] == "clang-14":
@@ -2104,9 +2186,9 @@ class BuildScanTests(unittest.TestCase):
                 result = build_scan.run_build_scan(snapshot, self._settings())
 
             self.assertEqual(3, run_tool.call_count)
-            self.assertEqual(_expected_cmake_steps(), tuple(
-                call.args[0] for call in run_tool.call_args_list[:2]
-            ))
+            self.assertEqual(
+                _expected_cmake_steps(), tuple(call.args[0] for call in run_tool.call_args_list[:2])
+            )
             clang_call = run_tool.call_args_list[2]
             self.assertEqual("clang-14", clang_call.args[0][0])
             self.assertIn("--analyze", clang_call.args[0])
@@ -2120,11 +2202,15 @@ class BuildScanTests(unittest.TestCase):
             self.assertEqual("build-verified", result.findings[0].verification_state)
 
             (root / "build" / "compile_commands.json").write_text(
-                json.dumps([{
-                    "directory": str(root),
-                    "file": str(source),
-                    "command": f"cc -c {source}",
-                }]),
+                json.dumps(
+                    [
+                        {
+                            "directory": str(root),
+                            "file": str(source),
+                            "command": f"cc -c {source}",
+                        }
+                    ]
+                ),
                 encoding="utf-8",
             )
             run_tool.reset_mock()
@@ -2168,20 +2254,13 @@ class BuildScanContainerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
-            with prepare_snapshot(
-                import_root, "team/project", fingerprint, work_root
-            ) as snapshot:
+            with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
                 tool_output = base / "tool-output"
                 tool_output.mkdir()
                 with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", tool_output):
-                    result = build_scan.run_build_scan(
-                        snapshot, BuildScanTests._settings()
-                    )
+                    result = build_scan.run_build_scan(snapshot, BuildScanTests._settings())
 
-        found = {
-            (finding.cwe, finding.path, finding.symbol)
-            for finding in result.findings
-        }
+        found = {(finding.cwe, finding.path, finding.symbol) for finding in result.findings}
         expected = {
             (item["cwe"], item["path"], item["symbol"])
             for item in manifest
@@ -2200,30 +2279,44 @@ class BuildScanContainerTests(unittest.TestCase):
             f"diagnostics: {result.diagnostics}",
         )
         self.assertTrue(found.isdisjoint(safe), f"safe identities reported: {found & safe}")
-        self.assertTrue(all(
-            finding.verification_state == "build-verified" and finding.fix == ""
-            for finding in result.findings
-        ))
+        self.assertTrue(
+            all(
+                finding.verification_state == "build-verified" and finding.fix == ""
+                for finding in result.findings
+            )
+        )
 
 
 class SanitizerScanTests(unittest.TestCase):
     @staticmethod
     def _settings(*, test_steps=(), total_timeout_seconds=90):
         return AnalyzerSettings(
-            auto_cmake=False, build_steps=(("configure",),), test_steps=test_steps,
-            max_memory_mb=1024, max_processes=32, max_output_bytes=8192,
-            step_timeout_seconds=17, total_timeout_seconds=total_timeout_seconds,
-            repository_scan_max_files=100, repository_scan_max_file_bytes=4096,
+            auto_cmake=False,
+            build_steps=(("configure",),),
+            test_steps=test_steps,
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=total_timeout_seconds,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
         )
 
     @staticmethod
     def _execution(status="failed", returncode=1, *, stderr="", truncated=False):
         return ToolExecution(
-            status=status, returncode=returncode, stdout="", stderr=stderr,
-            stdout_sha256="a" * 64, stderr_sha256="b" * 64,
-            output_sha256="c" * 64, output_truncated=truncated,
-            digests_complete=True, diagnostic="",
+            status=status,
+            returncode=returncode,
+            stdout="",
+            stderr=stderr,
+            stdout_sha256="a" * 64,
+            stderr_sha256="b" * 64,
+            output_sha256="c" * 64,
+            output_truncated=truncated,
+            digests_complete=True,
+            diagnostic="",
         )
 
     def _snapshot(self):
@@ -2250,12 +2343,21 @@ class SanitizerScanTests(unittest.TestCase):
             )
             for error_type, access, expected_cwe in cases:
                 with self.subTest(error_type=error_type):
-                    access_line = "attempting double-free on 0x1" if access == "FREE" else f"{access} of size 4 at 0x1 thread T0"
+                    access_line = (
+                        "attempting double-free on 0x1"
+                        if access == "FREE"
+                        else f"{access} of size 4 at 0x1 thread T0"
+                    )
+                    summary_error = (
+                        "double-free" if error_type == "attempting double-free" else error_type
+                    )
                     text = (
                         f"==12==ERROR: AddressSanitizer: {error_type} on address 0x1\n"
                         f"{access_line}\n"
                         f"    #0 0x123 in \x1b[31mreport_memory\x1b[0m {root}/src/memory.c:9:3\n"
-                        f"SUMMARY: AddressSanitizer: {'double-free' if error_type == 'attempting double-free' else error_type} {root}/src/memory.c:9\n"
+                        "SUMMARY: AddressSanitizer: "
+                        f"{summary_error} "
+                        f"{root}/src/memory.c:9\n"
                     )
                     findings, diagnostics = parse_asan_log(text, snapshot)
                     self.assertEqual([], diagnostics)
@@ -2281,19 +2383,28 @@ class SanitizerScanTests(unittest.TestCase):
                 "ordinary test failed with exit status 1",
                 "==1==ERROR: LeakSanitizer: detected memory leaks",
                 "AddressSanitizer:DEADLYSIGNAL\nSEGV",
-                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in foreign /tmp/secret/repo.c:5\nSUMMARY: AddressSanitizer: heap-buffer-overflow /tmp/secret/repo.c:5",
-                f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\n",
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                "WRITE of size 4 at 0x1\n"
+                "#0 0x1 in foreign /tmp/secret/repo.c:5\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow /tmp/secret/repo.c:5",
+                f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                f"WRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\n",
             )
             for text in cases:
                 with self.subTest(text=text[:32]):
                     findings, diagnostics = parse_asan_log(text, snapshot)
                     self.assertEqual([], findings)
                     self.assertEqual(["needs-human-review"], diagnostics)
-            sensitive = f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\nenv TOKEN=top-secret /tmp/temporary\nSUMMARY: AddressSanitizer: heap-buffer-overflow"
+            sensitive = (
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                f"WRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\n"
+                "env TOKEN=top-secret /sensitive/temporary\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow"
+            )
             findings, _ = parse_asan_log(sensitive, snapshot)
             rendered = json.dumps(findings[0].to_dict())
             self.assertNotIn("top-secret", rendered)
-            self.assertNotIn("/tmp/temporary", rendered)
+            self.assertNotIn("/sensitive/temporary", rendered)
             self.assertNotIn(str(snapshot.root), rendered)
         finally:
             temporary.cleanup()
@@ -2335,10 +2446,15 @@ class SanitizerScanTests(unittest.TestCase):
         try:
             no_steps = run_sanitizer_scan(snapshot, self._settings(), None)
             self.assertEqual(("sanitizer-not-configured",), no_steps.diagnostics)
-            bad_context = run_sanitizer_scan(snapshot, self._settings(test_steps=(("test",),)), BuildContext(snapshot.root.parent, snapshot.files))
+            bad_context = run_sanitizer_scan(
+                snapshot,
+                self._settings(test_steps=(("test",),)),
+                BuildContext(snapshot.root.parent, snapshot.files),
+            )
             self.assertEqual(("sanitizer-build-context-unavailable",), bad_context.diagnostics)
             uninstrumented = run_sanitizer_scan(
-                snapshot, self._settings(test_steps=(("test",),)),
+                snapshot,
+                self._settings(test_steps=(("test",),)),
                 BuildContext(snapshot.root, snapshot.files),
             )
             self.assertEqual(("sanitizer-build-context-unavailable",), uninstrumented.diagnostics)
@@ -2356,7 +2472,8 @@ class SanitizerScanTests(unittest.TestCase):
         try:
             monotonic.side_effect = (5.0, 0.0, 1.0)
             expired = run_sanitizer_scan(
-                snapshot, self._settings(test_steps=(("first",),)),
+                snapshot,
+                self._settings(test_steps=(("first",),)),
                 BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=4.0),
             )
             self.assertEqual(("timed-out",), expired.diagnostics)
@@ -2364,7 +2481,8 @@ class SanitizerScanTests(unittest.TestCase):
 
             run_tool.return_value = self._execution(status="completed", returncode=0)
             later = run_sanitizer_scan(
-                snapshot, self._settings(test_steps=(("first",), ("second",))),
+                snapshot,
+                self._settings(test_steps=(("first",), ("second",))),
                 BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=1.0),
             )
             self.assertEqual(1, run_tool.call_count)
@@ -2381,7 +2499,16 @@ class SanitizerScanTests(unittest.TestCase):
         temporary, snapshot = self._snapshot()
         try:
             run_tool.return_value = self._execution(stderr="assertion failed")
-            result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("ctest", "--test-dir", "build"),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=time.monotonic() + 90))
+            result = run_sanitizer_scan(
+                snapshot,
+                self._settings(test_steps=(("ctest", "--test-dir", "build"),)),
+                BuildContext(
+                    snapshot.root,
+                    snapshot.files,
+                    sanitizer_enabled=True,
+                    deadline=time.monotonic() + 90,
+                ),
+            )
             self.assertEqual((), result.findings)
             self.assertEqual(("test-failed-without-sanitizer-evidence",), result.diagnostics)
             self.assertEqual(SANITIZER_ENVIRONMENT, run_tool.call_args.kwargs["env"])
@@ -2397,11 +2524,27 @@ class SanitizerScanTests(unittest.TestCase):
         temporary, snapshot = self._snapshot()
         try:
             root = str(snapshot.root).replace("\\", "/")
-            report = f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\nSUMMARY: AddressSanitizer: heap-buffer-overflow"
-            for execution in (self._execution(stderr=report, truncated=True), self._execution(status="timed-out", returncode=None, stderr=report)):
+            report = (
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                f"WRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow"
+            )
+            for execution in (
+                self._execution(stderr=report, truncated=True),
+                self._execution(status="timed-out", returncode=None, stderr=report),
+            ):
                 with self.subTest(status=execution.status):
                     run_tool.return_value = execution
-                    result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("test",),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=time.monotonic() + 90))
+                    result = run_sanitizer_scan(
+                        snapshot,
+                        self._settings(test_steps=(("test",),)),
+                        BuildContext(
+                            snapshot.root,
+                            snapshot.files,
+                            sanitizer_enabled=True,
+                            deadline=time.monotonic() + 90,
+                        ),
+                    )
                     self.assertEqual((), result.findings)
                     self.assertIn("needs-human-review", result.diagnostics)
         finally:
@@ -2420,20 +2563,44 @@ class SanitizerScanTests(unittest.TestCase):
         snapshot.root = Path("/work/snapshots/one")
         snapshot.files = ("src/memory.c",)
         candidate = NormalizedFinding.create(
-            rule_id="cxx.source.oob-write", severity="high", title="candidate",
-            explanation="candidate evidence", path="src/memory.c", line=5,
-            evidence="value[2]", fix="", test="exercise", confidence=0.5,
-            cwe="CWE-787", tool="semgrep", evidence_kind="line",
-            verification_state="candidate", language="c", symbol="report",
-            analysis_mode="source-only", diagnostics=[],
+            rule_id="cxx.source.oob-write",
+            severity="high",
+            title="candidate",
+            explanation="candidate evidence",
+            path="src/memory.c",
+            line=5,
+            evidence="value[2]",
+            fix="",
+            test="exercise",
+            confidence=0.5,
+            cwe="CWE-787",
+            tool="semgrep",
+            evidence_kind="line",
+            verification_state="candidate",
+            language="c",
+            symbol="report",
+            analysis_mode="source-only",
+            diagnostics=[],
         )
         confirmed = NormalizedFinding.create(
-            rule_id="cxx.asan.oob-write", severity="high", title="confirmed",
-            explanation="ASan report", path="src/memory.c", line=5,
+            rule_id="cxx.asan.oob-write",
+            severity="high",
+            title="confirmed",
+            explanation="ASan report",
+            path="src/memory.c",
+            line=5,
             evidence="AddressSanitizer reported heap-buffer-overflow (WRITE).",
-            fix="", test="exercise", confidence=1.0, cwe="CWE-787", tool="asan",
-            evidence_kind="sanitizer", verification_state="confirmed", language="c",
-            symbol="report", analysis_mode="sanitizer-confirmed", diagnostics=[],
+            fix="",
+            test="exercise",
+            confidence=1.0,
+            cwe="CWE-787",
+            tool="asan",
+            evidence_kind="sanitizer",
+            verification_state="confirmed",
+            language="c",
+            symbol="report",
+            analysis_mode="sanitizer-confirmed",
+            diagnostics=[],
         )
         source_runner.return_value = LayerResult((candidate,), (), ())
         context = BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True)
@@ -2469,18 +2636,44 @@ class SanitizerScanTests(unittest.TestCase):
 
     def test_server_response_budgets_keep_confirmed_evidence_and_bound_all_lists(self):
         low = NormalizedFinding.create(
-            rule_id="cxx.source.oob-write", severity="high", title="candidate",
-            explanation="candidate", path="src/memory.c", line=5, evidence="x",
-            fix="", test="test", confidence=0.5, cwe="CWE-787", tool="semgrep",
-            evidence_kind="line", verification_state="candidate", language="c",
-            symbol="report", analysis_mode="source-only", diagnostics=[],
+            rule_id="cxx.source.oob-write",
+            severity="high",
+            title="candidate",
+            explanation="candidate",
+            path="src/memory.c",
+            line=5,
+            evidence="x",
+            fix="",
+            test="test",
+            confidence=0.5,
+            cwe="CWE-787",
+            tool="semgrep",
+            evidence_kind="line",
+            verification_state="candidate",
+            language="c",
+            symbol="report",
+            analysis_mode="source-only",
+            diagnostics=[],
         )
         high = NormalizedFinding.create(
-            rule_id="cxx.asan.oob-write", severity="high", title="confirmed",
-            explanation="confirmed", path="src/memory.c", line=5, evidence="x",
-            fix="", test="test", confidence=1.0, cwe="CWE-787", tool="asan",
-            evidence_kind="sanitizer", verification_state="confirmed", language="c",
-            symbol="report", analysis_mode="sanitizer-confirmed", diagnostics=[],
+            rule_id="cxx.asan.oob-write",
+            severity="high",
+            title="confirmed",
+            explanation="confirmed",
+            path="src/memory.c",
+            line=5,
+            evidence="x",
+            fix="",
+            test="test",
+            confidence=1.0,
+            cwe="CWE-787",
+            tool="asan",
+            evidence_kind="sanitizer",
+            verification_state="confirmed",
+            language="c",
+            symbol="report",
+            analysis_mode="sanitizer-confirmed",
+            diagnostics=[],
         )
         with patch.object(analyzer_server, "MAX_FINDINGS", 1):
             with patch.object(analyzer_server, "MAX_DIAGNOSTICS", 1):
@@ -2506,10 +2699,14 @@ class SanitizerContainerTests(unittest.TestCase):
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
         manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
         selected = (
-            "cwe-787/vulnerable-1.c", "cwe-125/vulnerable-1.c",
-            "cwe-416/vulnerable-1.c", "cwe-415/vulnerable-1.c",
-            "cwe-787/safe-1.c", "cwe-125/safe-1.c",
-            "cwe-416/safe-1.c", "cwe-415/safe-1.c",
+            "cwe-787/vulnerable-1.c",
+            "cwe-125/vulnerable-1.c",
+            "cwe-416/vulnerable-1.c",
+            "cwe-415/vulnerable-1.c",
+            "cwe-787/safe-1.c",
+            "cwe-125/safe-1.c",
+            "cwe-416/safe-1.c",
+            "cwe-415/safe-1.c",
         )
         symbols = {item["path"]: item["symbol"] for item in manifest if item["path"] in selected}
         with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
@@ -2527,24 +2724,49 @@ class SanitizerContainerTests(unittest.TestCase):
                 runner = repository / "runner" / f"runner-{index}.c"
                 runner.parent.mkdir(exist_ok=True)
                 symbol = symbols[path]
-                runner.write_text(f"void {symbol}(void); int main(void) {{ (void){symbol}(); return 0; }}\n", encoding="utf-8")
-                targets.append(f"add_executable(case_{index} \"{path}\" \"runner/runner-{index}.c\")\nadd_test(NAME case_{index} COMMAND case_{index})")
+                runner.write_text(
+                    f"void {symbol}(void); int main(void) {{ (void){symbol}(); return 0; }}\n",
+                    encoding="utf-8",
+                )
+                targets.append(
+                    f'add_executable(case_{index} "{path}" '
+                    f'"runner/runner-{index}.c")\n'
+                    f"add_test(NAME case_{index} COMMAND case_{index})"
+                )
             (repository / "CMakeLists.txt").write_text(
-                "cmake_minimum_required(VERSION 3.16)\nproject(asan_cases C)\nenable_testing()\n" + "\n".join(targets), encoding="utf-8"
+                "cmake_minimum_required(VERSION 3.16)\nproject(asan_cases C)\nenable_testing()\n"
+                + "\n".join(targets),
+                encoding="utf-8",
             )
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
-            settings = SanitizerScanTests._settings(test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),), total_timeout_seconds=120)
+            settings = SanitizerScanTests._settings(
+                test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),),
+                total_timeout_seconds=120,
+            )
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
                 build = run_build_scan(snapshot, settings, sanitizer_enabled=True)
                 result = run_sanitizer_scan(snapshot, settings, build.build_context)
 
         found = {(item.cwe, item.path, item.symbol) for item in result.findings}
-        expected = {(item["cwe"], item["path"], item["symbol"]) for item in manifest if item["path"] in selected and item["asan_expected"]}
-        safe = {(item["cwe"], item["path"], item["symbol"]) for item in manifest if item["path"] in selected and not item["vulnerable"]}
+        expected = {
+            (item["cwe"], item["path"], item["symbol"])
+            for item in manifest
+            if item["path"] in selected and item["asan_expected"]
+        }
+        safe = {
+            (item["cwe"], item["path"], item["symbol"])
+            for item in manifest
+            if item["path"] in selected and not item["vulnerable"]
+        }
         print(f"uncovered ASan fixture identities: {sorted(expected - found)}")
         self.assertFalse(expected - found, f"diagnostics: {result.diagnostics}")
         self.assertTrue(found.isdisjoint(safe), f"safe identities reported: {found & safe}")
-        self.assertTrue(all(item.verification_state == "confirmed" and item.fix == "" for item in result.findings))
+        self.assertTrue(
+            all(
+                item.verification_state == "confirmed" and item.fix == ""
+                for item in result.findings
+            )
+        )
 
 
 class SourceScanContainerTests(unittest.TestCase):
@@ -2552,13 +2774,22 @@ class SourceScanContainerTests(unittest.TestCase):
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
         manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(24, len(manifest))
-        self.assertTrue(all(
-            set(item) == {
-                "id", "cwe", "path", "symbol", "vulnerable", "allowed_layers",
-                "asan_expected", "clang_expected",
-            }
-            for item in manifest
-        ))
+        self.assertTrue(
+            all(
+                set(item)
+                == {
+                    "id",
+                    "cwe",
+                    "path",
+                    "symbol",
+                    "vulnerable",
+                    "allowed_layers",
+                    "asan_expected",
+                    "clang_expected",
+                }
+                for item in manifest
+            )
+        )
         self.assertEqual(
             {"CWE-787", "CWE-125", "CWE-416", "CWE-415"},
             {item["cwe"] for item in manifest},
@@ -2569,8 +2800,12 @@ class SourceScanContainerTests(unittest.TestCase):
 
         completed = subprocess.run(  # noqa: S603 - fixed local Semgrep regression tool.
             [
-                semgrep_path, "--json", "--quiet", "--config",
-                str(Path("cxx_analyzer/rules/cxx-memory.yml").resolve()), ".",
+                semgrep_path,
+                "--json",
+                "--quiet",
+                "--config",
+                str(Path("cxx_analyzer/rules/cxx-memory.yml").resolve()),
+                ".",
             ],
             cwd=fixture_root,
             check=False,
@@ -2587,12 +2822,11 @@ class SourceScanContainerTests(unittest.TestCase):
         )
         self.assertTrue(all(item.verification_state == "candidate" for item in findings))
         hit_paths = {item.path for item in findings}
-        self.assertTrue(
-            all(item["path"] in hit_paths for item in manifest if item["vulnerable"])
-        )
+        self.assertTrue(all(item["path"] in hit_paths for item in manifest if item["vulnerable"]))
         self.assertTrue(
             all(item["path"] not in hit_paths for item in manifest if not item["vulnerable"])
         )
+
 
 class SourceRuleTests(unittest.TestCase):
     def test_rules_tie_three_distinct_oob_shapes_to_known_object_bounds(self):
@@ -2617,14 +2851,10 @@ class SourceRuleTests(unittest.TestCase):
         rule_path = Path("cxx_analyzer/rules/cxx-memory.yml")
         rules = {item["id"]: item for item in yaml.safe_load(rule_path.read_text())["rules"]}
         uaf_text = str(
-            rules["cxx.source.use-after-free.reused-pointer"]["patterns"][1][
-                "pattern-either"
-            ]
+            rules["cxx.source.use-after-free.reused-pointer"]["patterns"][1]["pattern-either"]
         )
         double_free_text = str(
-            rules["cxx.source.double-free.same-pointer"]["patterns"][1][
-                "pattern-either"
-            ]
+            rules["cxx.source.double-free.same-pointer"]["patterns"][1]["pattern-either"]
         )
         self.assertIn("pattern-not", uaf_text)
         self.assertIn("$PTR = ...", uaf_text)

@@ -32,17 +32,25 @@ class RepositoryWorkspaceTests(unittest.TestCase):
             supported = [
                 "main.c", "main.cc", "main.cpp", "main.cxx", "main.h",
                 "main.hh", "main.hpp", "main.hxx", "toolchain.cmake",
-                "CMakeLists.txt",
+                "configure.ac", "Makefile.am", "config.h.in", "macros.m4",
+                "messages.po", "messages.pot", "resources/app.css",
+                "resources/tpls.html", "config/browsers.list",
+                "config/goaccess.conf", "lib/Makefile.inc", "po/LINGUAS",
+                "po/Makevars", "Makefile", "config.mk", "CMakeLists.txt",
             ]
             for name in supported:
-                (root / name).write_text("// source\n", encoding="utf-8")
-            for name in ("compiled.obj", "program.exe", "Makefile"):
-                (root / name).write_text("not source\n", encoding="utf-8")
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# bounded text input\n", encoding="utf-8")
+            for name in ("compiled.obj", "program.exe", "run-tool", "configure"):
+                (root / name).write_text("excluded input\n", encoding="utf-8")
+            (root / "binary.in").write_bytes(b"text\0binary")
 
             inventory = RepositoryWorkspace(root).inventory()
 
             self.assertEqual(sorted(supported), sorted(item.path for item in inventory.files))
-            self.assertEqual(3, inventory.skipped["unsupported-extension"])
+            self.assertEqual(4, inventory.skipped["unsupported-extension"])
+            self.assertEqual(1, inventory.skipped["binary"])
 
     def test_import_area_is_not_recursively_scanned(self):
         with tempfile.TemporaryDirectory() as temporary:

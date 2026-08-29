@@ -14,12 +14,16 @@ from .config import AnalyzerSettings
 # These constants deliberately mirror lima.workspace without importing the application.
 DEFAULT_EXTENSIONS = frozenset(
     {
-        ".c", ".cc", ".cmake", ".cpp", ".cxx", ".go", ".h", ".hh", ".hpp",
-        ".hxx", ".java", ".js", ".json", ".jsx", ".php", ".py", ".rb", ".rs",
-        ".sh", ".toml", ".ts", ".tsx", ".yaml", ".yml",
+        ".ac", ".am", ".c", ".cc", ".cmake", ".conf", ".cpp", ".css",
+        ".cxx", ".go", ".h", ".hh", ".hpp", ".html", ".hxx", ".in",
+        ".java", ".js", ".json", ".jsx", ".list", ".m4", ".php", ".po",
+        ".pot", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
+        ".yaml", ".yml",
     }
 )
-DEFAULT_FILENAMES = frozenset({"CMakeLists.txt"})
+DEFAULT_FILENAMES = frozenset(
+    {"CMakeLists.txt", "LINGUAS", "Makefile", "Makefile.inc", "Makevars", "config.mk"}
+)
 DEFAULT_IGNORED_DIRECTORIES = frozenset(
     {
         ".git", ".hg", ".idea", ".mypy_cache", ".pytest_cache", ".ruff_cache",

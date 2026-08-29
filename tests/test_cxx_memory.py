@@ -24,6 +24,17 @@ REQUEST_ID = "00000000-0000-0000-0000-000000000001"
 SNAPSHOT_SHA256 = "a" * 64
 
 
+def valid_tool_run(tool="semgrep", status="completed"):
+    return {
+        "tool": tool,
+        "status": status,
+        "returncode": 0,
+        "output_sha256": "b" * 64,
+        "output_truncated": False,
+        "digests_complete": True,
+    }
+
+
 def valid_response_payload():
     return {
         "schema_version": 1,
@@ -31,26 +42,28 @@ def valid_response_payload():
         "status": "completed",
         "snapshot_sha256": SNAPSHOT_SHA256,
         "tool_runs": [],
-        "findings": [{
-            "rule_id": "cxx.double-free",
-            "severity": "high",
-            "title": "Potential double free",
-            "explanation": "free called twice",
-            "path": "src/free.c",
-            "line": 12,
-            "evidence": "free(p)",
-            "fix": "",
-            "test": "Reproduce under AddressSanitizer",
-            "confidence": 0.72,
-            "cwe": "CWE-415",
-            "tool": "semgrep",
-            "evidence_kind": "line",
-            "verification_state": "candidate",
-            "language": "c",
-            "symbol": "release",
-            "analysis_mode": "source-only",
-        }],
-        "coverage": {},
+        "findings": [
+            {
+                "rule_id": "cxx.double-free",
+                "severity": "high",
+                "title": "Potential double free",
+                "explanation": "free called twice",
+                "path": "src/free.c",
+                "line": 12,
+                "evidence": "free(p)",
+                "fix": "",
+                "test": "Reproduce under AddressSanitizer",
+                "confidence": 0.72,
+                "cwe": "CWE-415",
+                "tool": "semgrep",
+                "evidence_kind": "line",
+                "verification_state": "candidate",
+                "language": "c",
+                "symbol": "release",
+                "analysis_mode": "source-only",
+            }
+        ],
+        "coverage": {"source_files": 1, "snapshot_files": 2},
         "diagnostics": [],
     }
 
@@ -123,22 +136,39 @@ def cxx_finding(tool, analysis_mode, *, symbol="release"):
         "sanitizer-confirmed": "confirmed",
     }
     return Finding(
-        rule_id="cxx.double-free", severity=Severity.HIGH,
-        title="Potential double free", explanation="free called twice",
-        path="src/free.c", line=12, evidence="free(p)", fix="",
-        test="Reproduce under AddressSanitizer", confidence=0.72,
-        cwe="CWE-415", source=tool, evidence_kind="line",
-        verification_state=states[analysis_mode], language="c",
-        symbol=symbol, analysis_mode=analysis_mode, automatic_repair=False,
+        rule_id="cxx.double-free",
+        severity=Severity.HIGH,
+        title="Potential double free",
+        explanation="free called twice",
+        path="src/free.c",
+        line=12,
+        evidence="free(p)",
+        fix="",
+        test="Reproduce under AddressSanitizer",
+        confidence=0.72,
+        cwe="CWE-415",
+        source=tool,
+        evidence_kind="line",
+        verification_state=states[analysis_mode],
+        language="c",
+        symbol=symbol,
+        analysis_mode=analysis_mode,
+        automatic_repair=False,
     )
 
 
 class CxxFindingModelTests(unittest.TestCase):
     def test_new_evidence_fields_have_backward_compatible_defaults(self):
         finding = Finding(
-            rule_id="SEC-EVAL", severity=Severity.HIGH, title="eval",
-            explanation="unsafe", path="app.py", line=1, evidence="eval(x)",
-            fix="remove eval", test="exercise input",
+            rule_id="SEC-EVAL",
+            severity=Severity.HIGH,
+            title="eval",
+            explanation="unsafe",
+            path="app.py",
+            line=1,
+            evidence="eval(x)",
+            fix="remove eval",
+            test="exercise input",
         )
 
         self.assertEqual("", finding.language)
@@ -149,10 +179,17 @@ class CxxFindingModelTests(unittest.TestCase):
 
     def test_fallback_evidence_preserves_finding_metadata(self):
         finding = Finding(
-            rule_id="CXX-OOB-WRITE", severity=Severity.HIGH, title="overflow",
-            explanation="unsafe write", path="src/buffer.cpp", line=12,
-            evidence="buffer[index] = value", fix="bound the index",
-            test="exercise the boundary", language="c++", symbol="write_buffer",
+            rule_id="CXX-OOB-WRITE",
+            severity=Severity.HIGH,
+            title="overflow",
+            explanation="unsafe write",
+            path="src/buffer.cpp",
+            line=12,
+            evidence="buffer[index] = value",
+            fix="bound the index",
+            test="exercise the boundary",
+            language="c++",
+            symbol="write_buffer",
             analysis_mode="build-backed",
         )
 
@@ -162,10 +199,14 @@ class CxxFindingModelTests(unittest.TestCase):
         self.assertEqual("build-backed", evidence.analysis_mode)
 
     def test_explicitly_disabled_finding_is_rejected_before_rule_matching(self):
-        eligibility = SafeFixer.repair_eligibility({
-            "rule_id": "SEC-SQL-CONCAT", "cwe": "CWE-89",
-            "verification_state": "dataflow-verified", "automatic_repair": False,
-        })
+        eligibility = SafeFixer.repair_eligibility(
+            {
+                "rule_id": "SEC-SQL-CONCAT",
+                "cwe": "CWE-89",
+                "verification_state": "dataflow-verified",
+                "automatic_repair": False,
+            }
+        )
 
         self.assertEqual(
             {"eligible": False, "reason": "automatic-repair-disabled"},
@@ -177,8 +218,10 @@ class CxxRepositoryScannerTests(unittest.TestCase):
     @staticmethod
     def _scanner(adapter, mode="auto"):
         return RepositoryScanner(
-            sast_mode="off", dataflow_enabled=False,
-            cxx_memory_mode=mode, cxx_memory_adapter=adapter,
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_memory_mode=mode,
+            cxx_memory_adapter=adapter,
         )
 
     def test_sidecar_invocation_requires_cxx_source_or_header(self):
@@ -205,9 +248,9 @@ class CxxRepositoryScannerTests(unittest.TestCase):
                 RepositoryWorkspace(root), repository_key="team/project"
             )
 
-            self.assertEqual([
-                ("team/project", result.inventory.fingerprint(), REQUESTED_LAYERS)
-            ], adapter.calls)
+            self.assertEqual(
+                [("team/project", result.inventory.fingerprint(), REQUESTED_LAYERS)], adapter.calls
+            )
             self.assertEqual("completed", result.report.collaboration["cxx_memory"]["status"])
 
     def test_off_mode_never_invokes_sidecar(self):
@@ -227,11 +270,13 @@ class CxxRepositoryScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
-            adapter = FakeCxxAdapter(cxx_result(
-                cxx_finding("semgrep", "source-only"),
-                cxx_finding("clang", "build-backed"),
-                cxx_finding("asan", "sanitizer-confirmed"),
-            ))
+            adapter = FakeCxxAdapter(
+                cxx_result(
+                    cxx_finding("semgrep", "source-only"),
+                    cxx_finding("clang", "build-backed"),
+                    cxx_finding("asan", "sanitizer-confirmed"),
+                )
+            )
 
             result = self._scanner(adapter).scan(
                 RepositoryWorkspace(root), repository_key="team/project"
@@ -252,10 +297,12 @@ class CxxRepositoryScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
-            adapter = FakeCxxAdapter(cxx_result(
-                cxx_finding("semgrep", "source-only", symbol="release_left"),
-                cxx_finding("clang", "build-backed", symbol="release_right"),
-            ))
+            adapter = FakeCxxAdapter(
+                cxx_result(
+                    cxx_finding("semgrep", "source-only", symbol="release_left"),
+                    cxx_finding("clang", "build-backed", symbol="release_right"),
+                )
+            )
 
             result = self._scanner(adapter).scan(
                 RepositoryWorkspace(root), repository_key="team/project"
@@ -276,10 +323,12 @@ class CxxRepositoryScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
-            adapter = FakeCxxAdapter(cxx_result(
-                cxx_finding("semgrep", "source-only"),
-                cxx_finding("semgrep", "source-only"),
-            ))
+            adapter = FakeCxxAdapter(
+                cxx_result(
+                    cxx_finding("semgrep", "source-only"),
+                    cxx_finding("semgrep", "source-only"),
+                )
+            )
 
             result = self._scanner(adapter).scan(
                 RepositoryWorkspace(root), repository_key="team/project"
@@ -324,15 +373,12 @@ class CxxRepositoryScannerTests(unittest.TestCase):
                 payload = valid_response_payload()
                 payload["snapshot_sha256"] = workspace.inventory().fingerprint()
                 payload["tool_runs"] = [
-                    {"tool": "semgrep", "status": "completed"},
-                    {"tool": "clang", "status": "build_failed"},
+                    valid_tool_run(),
+                    valid_tool_run("build-step", "build_failed"),
                 ]
-                payload["coverage"] = {"source_files": 1, "build_backed_files": 0}
-                payload["diagnostics"] = [{
-                    "layer": "build-backed",
-                    "status": "build_failed",
-                    "message": "CMake configuration failed",
-                }]
+                payload["tool_runs"][1]["returncode"] = 1
+                payload["coverage"] = {"source_files": 1, "snapshot_files": 1}
+                payload["diagnostics"] = ["build_failed"]
                 adapter = CxxMemoryAnalyzerClient(
                     "http://cxx-analyzer:8090",
                     timeout_seconds=8,
@@ -384,12 +430,15 @@ class CxxMemoryClientTests(unittest.TestCase):
     def test_valid_response_is_converted_to_findings(self, _uuid4):
         opener = RecordingOpener(valid_response_payload())
         client = CxxMemoryAnalyzerClient(
-            "http://cxx-analyzer:8090", timeout_seconds=8,
-            max_response_bytes=4096, opener=opener,
+            "http://cxx-analyzer:8090",
+            timeout_seconds=8,
+            max_response_bytes=4096,
+            opener=opener,
         )
 
         result = client.analyze(
-            "team/project", SNAPSHOT_SHA256,
+            "team/project",
+            SNAPSHOT_SHA256,
             ("source-only", "build-backed"),
         )
 
@@ -408,19 +457,29 @@ class CxxMemoryClientTests(unittest.TestCase):
         )
         self.assertEqual("completed", result.status)
         self.assertEqual([], result.tool_runs)
-        self.assertEqual({}, result.coverage)
+        self.assertEqual({"source_files": 1, "snapshot_files": 2}, result.coverage)
         self.assertEqual([], result.diagnostics)
         self.assertEqual(1, len(result.findings))
         finding = result.findings[0]
         self.assertEqual(
             Finding(
-                rule_id="cxx.double-free", severity=Severity.HIGH,
-                title="Potential double free", explanation="free called twice",
-                path="src/free.c", line=12, evidence="free(p)", fix="",
-                test="Reproduce under AddressSanitizer", confidence=0.72,
-                cwe="CWE-415", source="semgrep", evidence_kind="line",
-                verification_state="candidate", language="c",
-                symbol="release", analysis_mode="source-only",
+                rule_id="cxx.double-free",
+                severity=Severity.HIGH,
+                title="Potential double free",
+                explanation="free called twice",
+                path="src/free.c",
+                line=12,
+                evidence="free(p)",
+                fix="",
+                test="Reproduce under AddressSanitizer",
+                confidence=0.72,
+                cwe="CWE-415",
+                source="semgrep",
+                evidence_kind="line",
+                verification_state="candidate",
+                language="c",
+                symbol="release",
+                analysis_mode="source-only",
                 automatic_repair=False,
             ),
             finding,
@@ -436,6 +495,52 @@ class CxxMemoryClientTests(unittest.TestCase):
         self.assertEqual("source-only", evidence.analysis_mode)
 
     @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
+    def test_non_finding_response_fields_are_strictly_validated(self, _uuid4):
+        mutations = {
+            "tool run extra field": lambda payload: payload.update(
+                tool_runs=[{**valid_tool_run(), "command": "secret"}]
+            ),
+            "unknown tool": lambda payload: payload.update(tool_runs=[valid_tool_run("unknown")]),
+            "unknown status": lambda payload: payload.update(
+                tool_runs=[valid_tool_run(status="unknown")]
+            ),
+            "boolean returncode": lambda payload: payload.update(
+                tool_runs=[{**valid_tool_run(), "returncode": True}]
+            ),
+            "invalid output digest": lambda payload: payload.update(
+                tool_runs=[{**valid_tool_run(), "output_sha256": "short"}]
+            ),
+            "coverage extra field": lambda payload: payload.update(
+                coverage={"source_files": 1, "snapshot_files": 2, "percent": 0.5}
+            ),
+            "coverage boolean": lambda payload: payload.update(
+                coverage={"source_files": True, "snapshot_files": 2}
+            ),
+            "coverage inconsistent": lambda payload: payload.update(
+                coverage={"source_files": 3, "snapshot_files": 2}
+            ),
+            "object diagnostic": lambda payload: payload.update(
+                diagnostics=[{"message": "not-v1"}]
+            ),
+            "oversized diagnostic": lambda payload: payload.update(diagnostics=["x" * 2049]),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                payload = valid_response_payload()
+                mutate(payload)
+                client = RecordingConversionClient(
+                    "http://cxx-analyzer:8090",
+                    timeout_seconds=8,
+                    max_response_bytes=8192,
+                    opener=RecordingOpener(payload),
+                )
+
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    client.analyze("team/project", SNAPSHOT_SHA256, ("source-only",))
+
+                self.assertEqual([], client.converted_findings)
+
+    @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
     def test_tool_cannot_claim_another_evidence_level(self, _uuid4):
         invalid_bindings = [
             ("semgrep", "sanitizer-confirmed", "confirmed"),
@@ -447,20 +552,24 @@ class CxxMemoryClientTests(unittest.TestCase):
         for tool, analysis_mode, verification_state in invalid_bindings:
             with self.subTest(tool=tool, analysis_mode=analysis_mode):
                 payload = valid_response_payload()
-                payload["findings"][0].update({
-                    "tool": tool,
-                    "analysis_mode": analysis_mode,
-                    "verification_state": verification_state,
-                })
+                payload["findings"][0].update(
+                    {
+                        "tool": tool,
+                        "analysis_mode": analysis_mode,
+                        "verification_state": verification_state,
+                    }
+                )
                 client = RecordingConversionClient(
-                    "http://cxx-analyzer:8090", timeout_seconds=8,
+                    "http://cxx-analyzer:8090",
+                    timeout_seconds=8,
                     max_response_bytes=4096,
                     opener=RecordingOpener(payload),
                 )
 
                 with self.assertRaises(CxxAnalyzerProtocolError):
                     client.analyze(
-                        "team/project", SNAPSHOT_SHA256,
+                        "team/project",
+                        SNAPSHOT_SHA256,
                         ("source-only", "build-backed"),
                     )
 
@@ -479,13 +588,16 @@ class CxxMemoryClientTests(unittest.TestCase):
             with self.subTest(name=name):
                 opener = RecordingOpener(valid_response_payload())
                 client = CxxMemoryAnalyzerClient(
-                    "http://cxx-analyzer:8090", timeout_seconds=8,
-                    max_response_bytes=4096, opener=opener,
+                    "http://cxx-analyzer:8090",
+                    timeout_seconds=8,
+                    max_response_bytes=4096,
+                    opener=opener,
                 )
 
                 with self.assertRaises(CxxAnalyzerProtocolError):
                     client.analyze(
-                        "team/project", SNAPSHOT_SHA256,
+                        "team/project",
+                        SNAPSHOT_SHA256,
                         requested_layers,
                     )
 
@@ -526,32 +638,36 @@ class CxxMemoryClientTests(unittest.TestCase):
         )
 
         valid_body = json.dumps(valid_response_payload()).encode("utf-8")
-        invalid_payloads.extend([
-            ("oversized body", valid_body, len(valid_body) - 1),
-            (
-                "duplicate JSON key",
-                valid_body.replace(
-                    b'"status": "completed"',
-                    b'"status": "completed", "status": "completed"',
-                    1,
+        invalid_payloads.extend(
+            [
+                ("oversized body", valid_body, len(valid_body) - 1),
+                (
+                    "duplicate JSON key",
+                    valid_body.replace(
+                        b'"status": "completed"',
+                        b'"status": "completed", "status": "completed"',
+                        1,
+                    ),
+                    4096,
                 ),
-                4096,
-            ),
-            ("non UTF-8", b"\xff", 4096),
-            ("non JSON", b"not-json", 4096),
-        ])
+                ("non UTF-8", b"\xff", 4096),
+                ("non JSON", b"not-json", 4096),
+            ]
+        )
 
         for name, body, max_response_bytes in invalid_payloads:
             with self.subTest(name=name):
                 client = RecordingConversionClient(
-                    "http://cxx-analyzer:8090", timeout_seconds=8,
+                    "http://cxx-analyzer:8090",
+                    timeout_seconds=8,
                     max_response_bytes=max_response_bytes,
                     opener=RecordingOpener(body=body),
                 )
 
                 with self.assertRaises(CxxAnalyzerProtocolError):
                     client.analyze(
-                        "team/project", SNAPSHOT_SHA256,
+                        "team/project",
+                        SNAPSHOT_SHA256,
                         ("source-only", "build-backed"),
                     )
 
@@ -595,7 +711,9 @@ class CxxReportTests(unittest.TestCase):
                         {
                             "layer": "build-backed",
                             "status": "build_failed",
-                            "message": "CMake configuration failed at C:\\container\\build --token=secret",
+                            "message": (
+                                "CMake configuration failed at C:\\container\\build --token=secret"
+                            ),
                         },
                         {
                             "layer": "sanitizer-confirmed",
@@ -610,10 +728,19 @@ class CxxReportTests(unittest.TestCase):
         markdown = to_markdown(report)
 
         for text in (
-            "Language: `c`", "Symbol: `release`", "CWE-415", "src/free.c:12",
-            "纯源码候选", "candidate", "semgrep", "free(p)",
-            "纯源码分析，尚未经过目标项目构建验证", "不支持自动修复",
-            "BUILD_FAILED", "构建支持的静态验证未完成", "SANITIZER_NOT_CONFIGURED",
+            "Language: `c`",
+            "Symbol: `release`",
+            "CWE-415",
+            "src/free.c:12",
+            "纯源码候选",
+            "candidate",
+            "semgrep",
+            "free(p)",
+            "纯源码分析，尚未经过目标项目构建验证",
+            "不支持自动修复",
+            "BUILD_FAILED",
+            "构建支持的静态验证未完成",
+            "SANITIZER_NOT_CONFIGURED",
             "Sanitizer 动态确认未配置",
         ):
             self.assertIn(text, markdown)
@@ -633,7 +760,7 @@ class CxxReportTests(unittest.TestCase):
             "collaboration": {
                 "cxx_memory": {
                     "status": "completed",
-                    "diagnostics": ["diagnostic-%d" % index for index in range(20)],
+                    "diagnostics": [f"diagnostic-{index}" for index in range(20)],
                 },
             },
         }
@@ -649,13 +776,22 @@ class CxxReportTests(unittest.TestCase):
             "repository": "team/project",
             "summary": "Python finding",
             "risk": "medium",
-            "findings": [{
-                "severity": "medium", "title": "Unsafe eval", "path": "app.py",
-                "line": 9, "rule_id": "SEC-EVAL", "cwe": "CWE-95",
-                "verification_state": "candidate", "explanation": "unsafe",
-                "evidence": "eval(value)", "fix": "remove eval", "test": "exercise input",
-                "source": "local-rule",
-            }],
+            "findings": [
+                {
+                    "severity": "medium",
+                    "title": "Unsafe eval",
+                    "path": "app.py",
+                    "line": 9,
+                    "rule_id": "SEC-EVAL",
+                    "cwe": "CWE-95",
+                    "verification_state": "candidate",
+                    "explanation": "unsafe",
+                    "evidence": "eval(value)",
+                    "fix": "remove eval",
+                    "test": "exercise input",
+                    "source": "local-rule",
+                }
+            ],
         }
 
         markdown = to_markdown(report)
@@ -667,7 +803,9 @@ class CxxReportTests(unittest.TestCase):
     def test_markdown_reserves_source_only_warning_for_source_only_findings(self):
         finding = cxx_finding("clang", "build-backed").to_dict()
         report = {
-            "repository": "team/project", "summary": "build evidence", "risk": "medium",
+            "repository": "team/project",
+            "summary": "build evidence",
+            "risk": "medium",
             "findings": [finding],
         }
 
@@ -680,7 +818,9 @@ class CxxReportTests(unittest.TestCase):
         finding = cxx_finding("semgrep", "source-only").to_dict()
         finding.pop("automatic_repair")
         report = {
-            "repository": "team/project", "summary": "legacy C/C++ finding", "risk": "high",
+            "repository": "team/project",
+            "summary": "legacy C/C++ finding",
+            "risk": "high",
             "findings": [finding],
         }
 
@@ -691,58 +831,95 @@ class CxxReportTests(unittest.TestCase):
     def test_markdown_never_allows_automatic_repair_for_cxx_findings(self):
         finding = cxx_finding("semgrep", "source-only").to_dict()
         finding["automatic_repair"] = True
-        markdown = to_markdown({
-            "repository": "team/project", "summary": "malformed C/C++ finding", "risk": "high",
-            "findings": [finding],
-        })
+        markdown = to_markdown(
+            {
+                "repository": "team/project",
+                "summary": "malformed C/C++ finding",
+                "risk": "high",
+                "findings": [finding],
+            }
+        )
 
         self.assertIn("不支持自动修复", markdown)
 
     def test_markdown_redacts_sensitive_cxx_fields_without_hiding_relative_evidence(self):
         finding = cxx_finding("https://internal.example/?token=secret", "source-only").to_dict()
-        finding.update({
-            "path": '"C:\\Program Files\\private source\\buffer.c"',
-            "evidence": 'src/buffer.c reads "/container/private source/input.c" --token secret --password "secret pass"',
-            "evidence_records": [{
-                "source": "clang --api_key=secret",
-                "path": "'/opt/private path/trace.c'",
-                "line": 12,
-                "snippet": "--secret secret --password='secret pass' relative/trace.c",
-            }],
-        })
+        finding.update(
+            {
+                "path": '"C:\\Program Files\\private source\\buffer.c"',
+                "evidence": (
+                    'src/buffer.c reads "/container/private source/input.c" '
+                    '--token secret --password "secret pass"'
+                ),
+                "evidence_records": [
+                    {
+                        "source": "clang --api_key=secret",
+                        "path": "'/opt/private path/trace.c'",
+                        "line": 12,
+                        "snippet": "--secret secret --password='secret pass' relative/trace.c",
+                    }
+                ],
+            }
+        )
 
-        markdown = to_markdown({
-            "repository": "team/project", "summary": "redaction", "risk": "high",
-            "findings": [finding],
-        })
+        markdown = to_markdown(
+            {
+                "repository": "team/project",
+                "summary": "redaction",
+                "risk": "high",
+                "findings": [finding],
+            }
+        )
 
         for leaked in (
-            "internal.example", "secret", "C:\\Program Files", "/container/private",
-            "/opt/private", "private source", "secret pass",
+            "internal.example",
+            "secret",
+            "C:\\Program Files",
+            "/container/private",
+            "/opt/private",
+            "private source",
+            "secret pass",
         ):
             self.assertNotIn(leaked, markdown)
         self.assertIn("src/buffer.c", markdown)
         self.assertIn("relative/trace.c", markdown)
 
-    def test_markdown_filters_malformed_evidence_records_and_falls_back_when_none_are_mappings(self):
+    def test_markdown_filters_malformed_evidence_records_and_falls_back_when_none_are_mappings(
+        self,
+    ):
         finding = cxx_finding("semgrep", "source-only").to_dict()
         finding["evidence"] = "top-level fallback evidence"
-        finding["evidence_records"] = [None, 3, {"source": "partial"}, {
-            "source": "clang", "path": "src/free.c", "line": 12,
-            "snippet": "valid trace",
-        }]
-        markdown = to_markdown({
-            "repository": "team/project", "summary": "mixed evidence", "risk": "high",
-            "findings": [finding],
-        })
+        finding["evidence_records"] = [
+            None,
+            3,
+            {"source": "partial"},
+            {
+                "source": "clang",
+                "path": "src/free.c",
+                "line": 12,
+                "snippet": "valid trace",
+            },
+        ]
+        markdown = to_markdown(
+            {
+                "repository": "team/project",
+                "summary": "mixed evidence",
+                "risk": "high",
+                "findings": [finding],
+            }
+        )
         self.assertIn("valid trace", markdown)
         self.assertIn("`partial` · `:0`", markdown)
 
         finding["evidence_records"] = [None, 3]
-        fallback_markdown = to_markdown({
-            "repository": "team/project", "summary": "fallback evidence", "risk": "high",
-            "findings": [finding],
-        })
+        fallback_markdown = to_markdown(
+            {
+                "repository": "team/project",
+                "summary": "fallback evidence",
+                "risk": "high",
+                "findings": [finding],
+            }
+        )
         evidence_trace = fallback_markdown.split("**工具证据 / trace**", 1)[1]
         self.assertIn("top-level fallback evidence", evidence_trace)
 
@@ -750,12 +927,16 @@ class CxxReportTests(unittest.TestCase):
         finding = cxx_finding("semgrep", "source-only").to_dict()
         finding["evidence"] = (
             "src/x.c ./src/x.c ../src/x.c /work/tmp/x C:\\secret\\x "
-            "--key secret key=secret --key \"quoted secret\" monkey=ordinary"
+            '--key secret key=secret --key "quoted secret" monkey=ordinary'
         )
-        markdown = to_markdown({
-            "repository": "team/project", "summary": "redaction", "risk": "high",
-            "findings": [finding],
-        })
+        markdown = to_markdown(
+            {
+                "repository": "team/project",
+                "summary": "redaction",
+                "risk": "high",
+                "findings": [finding],
+            }
+        )
 
         for leaked in ("/work/tmp/x", "C:\\secret\\x", "secret", "quoted secret"):
             self.assertNotIn(leaked, markdown)
@@ -769,10 +950,14 @@ class CxxReportTests(unittest.TestCase):
         for records in (7, "not-a-record-list", [[], None, 3, {}]):
             with self.subTest(records=repr(records)):
                 finding["evidence_records"] = records
-                markdown = to_markdown({
-                    "repository": "team/project", "summary": "fallback", "risk": "high",
-                    "findings": [finding],
-                })
+                markdown = to_markdown(
+                    {
+                        "repository": "team/project",
+                        "summary": "fallback",
+                        "risk": "high",
+                        "findings": [finding],
+                    }
+                )
                 evidence_trace = markdown.split("**工具证据 / trace**", 1)[1]
                 self.assertIn("top-level fallback evidence", evidence_trace)
 

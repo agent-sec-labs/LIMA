@@ -178,16 +178,12 @@ def _bounded_bytes(path: Path, maximum: int, label: str) -> bytes:
 
 def _bounded_json(path: Path) -> object:
     try:
-        return json.loads(
-            _bounded_bytes(path, _MAX_DATABASE_BYTES, "compilation database")
-        )
+        return json.loads(_bounded_bytes(path, _MAX_DATABASE_BYTES, "compilation database"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("compilation database is unreadable") from exc
 
 
-def _validate_argument_paths(
-    root: Path, working_directory: Path, arguments: list[str]
-) -> None:
+def _validate_argument_paths(root: Path, working_directory: Path, arguments: list[str]) -> None:
     if not arguments[0]:
         raise ValueError("compilation database executable is empty")
     expected_path_option: str | None = None
@@ -201,9 +197,7 @@ def _validate_argument_paths(
                 raise ValueError("compilation database path option is empty")
             _inside_snapshot(
                 root,
-                Path(argument)
-                if Path(argument).is_absolute()
-                else working_directory / argument,
+                Path(argument) if Path(argument).is_absolute() else working_directory / argument,
             )
             expected_path_option = None
             continue
@@ -263,9 +257,7 @@ def _validate_argument_paths(
         if not argument.startswith("-"):
             _inside_snapshot(
                 root,
-                Path(argument)
-                if Path(argument).is_absolute()
-                else working_directory / argument,
+                Path(argument) if Path(argument).is_absolute() else working_directory / argument,
             )
     if expected_path_option is not None:
         raise ValueError("compilation database path option lacks a value")
@@ -319,15 +311,11 @@ def load_compilation_database(
         _, relative_file = _inside_snapshot(root, source_path)
         if relative_file not in snapshot_files:
             raise ValueError("compilation database source is outside the snapshot inventory")
-        units.append(
-            CompilationUnit(relative_directory, relative_file, tuple(arguments))
-        )
+        units.append(CompilationUnit(relative_directory, relative_file, tuple(arguments)))
     return tuple(units)
 
 
-def _safe_plist_path(
-    value: object, snapshot: PreparedSnapshot, relative_cwd: str
-) -> str | None:
+def _safe_plist_path(value: object, snapshot: PreparedSnapshot, relative_cwd: str) -> str | None:
     if not isinstance(value, str) or not value or "\0" in value or "\\" in value:
         raise ValueError("Clang plist file path is invalid")
     root = Path(snapshot.root).resolve()
@@ -340,9 +328,7 @@ def _safe_plist_path(
     return relative if relative in set(snapshot.files) else None
 
 
-def _structured_location(
-    location: object, files: tuple[str | None, ...]
-) -> tuple[str, int, int]:
+def _structured_location(location: object, files: tuple[str | None, ...]) -> tuple[str, int, int]:
     if not isinstance(location, dict):
         raise ValueError("Clang plist location is missing")
     file_index = location.get("file")
@@ -383,9 +369,7 @@ def parse_clang_plist(
     raw_diagnostics = document.get("diagnostics")
     if not isinstance(raw_files, list) or not isinstance(raw_diagnostics, list):
         raise ValueError("Clang plist lacks files or diagnostics")
-    files = tuple(
-        _safe_plist_path(path, snapshot, relative_cwd) for path in raw_files
-    )
+    files = tuple(_safe_plist_path(path, snapshot, relative_cwd) for path in raw_files)
 
     findings: list[NormalizedFinding] = []
     diagnostics: list[str] = []
@@ -458,9 +442,7 @@ def parse_clang_plist(
             diagnostics.append("Clang trace outside snapshot inventory")
             continue
         if not trace:
-            trace.append(
-                {"kind": "event", "path": path, "line": line, "column": 1}
-            )
+            trace.append({"kind": "event", "path": path, "line": line, "column": 1})
         language = "c++" if PurePosixPath(path).suffix.lower() in _CPP_SUFFIXES else "c"
         findings.append(
             NormalizedFinding.create(
@@ -560,9 +542,7 @@ def _find_database(snapshot: PreparedSnapshot) -> Path | None:
 
 def _analyzer_argv(unit: CompilationUnit, output: Path) -> tuple[str, ...]:
     compiler = (
-        "clang++-14"
-        if PurePosixPath(unit.file).suffix.lower() in _CPP_SUFFIXES
-        else "clang-14"
+        "clang++-14" if PurePosixPath(unit.file).suffix.lower() in _CPP_SUFFIXES else "clang-14"
     )
     original = list(unit.arguments[1:])
     filtered: list[str] = []
@@ -610,7 +590,7 @@ def run_build_scan(
             return LayerResult((), (_BUDGET_DIAGNOSTIC,), tuple(tool_runs))
         remaining = _remaining_timeout(deadline, settings.step_timeout_seconds)
         if remaining <= 0:
-            tool_runs.append(_deadline_run(step[0]))
+            tool_runs.append(_deadline_run("build-step"))
             return LayerResult((), ("timed-out",), tuple(tool_runs))
         execution = run_step(
             step,
@@ -620,7 +600,7 @@ def run_build_scan(
             max_output_bytes=settings.max_output_bytes,
             env=SANITIZER_ENVIRONMENT if sanitizer_enabled else {},
         )
-        run = _tool_run(step[0], execution, build_step=True)
+        run = _tool_run("build-step", execution, build_step=True)
         tool_runs.append(run)
         if execution.status != "completed":
             diagnostic = "timed-out" if execution.status == "timed-out" else "build_failed"
@@ -663,9 +643,7 @@ def run_build_scan(
                 except ValueError:
                     diagnostics.append("compile-commands-rejected")
                     continue
-                remaining = _remaining_timeout(
-                    deadline, settings.step_timeout_seconds
-                )
+                remaining = _remaining_timeout(deadline, settings.step_timeout_seconds)
                 if remaining <= 0:
                     tool_runs.append(_deadline_run("clang"))
                     diagnostics.append("timed-out")
@@ -708,16 +686,18 @@ def run_build_scan(
                         break
                     diagnostics.append("clang-output-rejected")
                     continue
-                if not _extend_parsed_results(
-                    findings, diagnostics, parsed, parser_diagnostics
-                ):
+                if not _extend_parsed_results(findings, diagnostics, parsed, parser_diagnostics):
                     break
     except OSError:
         return LayerResult((), ("clang-output-unavailable",), tuple(tool_runs))
     return LayerResult(
-        tuple(findings), tuple(diagnostics), tuple(tool_runs),
+        tuple(findings),
+        tuple(diagnostics),
+        tuple(tool_runs),
         BuildContext(
-            Path(snapshot.root).resolve(), tuple(snapshot.files), sanitizer_enabled,
+            Path(snapshot.root).resolve(),
+            tuple(snapshot.files),
+            sanitizer_enabled,
             deadline,
         ),
     )

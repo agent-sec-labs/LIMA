@@ -19,26 +19,79 @@ ANALYSIS_STATES = {
     "build-backed": "build-verified",
     "sanitizer-confirmed": "confirmed",
 }
-_TOOL_ANALYSIS_BINDINGS = frozenset({
-    ("semgrep", "source-only", "candidate"),
-    ("clang", "build-backed", "build-verified"),
-    ("asan", "sanitizer-confirmed", "confirmed"),
-})
+_TOOL_ANALYSIS_BINDINGS = frozenset(
+    {
+        ("semgrep", "source-only", "candidate"),
+        ("clang", "build-backed", "build-verified"),
+        ("asan", "sanitizer-confirmed", "confirmed"),
+    }
+)
 _TOP_LEVEL_KEYS = {
-    "schema_version", "request_id", "status", "snapshot_sha256",
-    "tool_runs", "findings", "coverage", "diagnostics",
+    "schema_version",
+    "request_id",
+    "status",
+    "snapshot_sha256",
+    "tool_runs",
+    "findings",
+    "coverage",
+    "diagnostics",
 }
 _FINDING_KEYS = {
-    "rule_id", "severity", "title", "explanation", "path", "line",
-    "evidence", "fix", "test", "confidence", "cwe", "tool",
-    "evidence_kind", "verification_state", "language", "symbol",
+    "rule_id",
+    "severity",
+    "title",
+    "explanation",
+    "path",
+    "line",
+    "evidence",
+    "fix",
+    "test",
+    "confidence",
+    "cwe",
+    "tool",
+    "evidence_kind",
+    "verification_state",
+    "language",
+    "symbol",
     "analysis_mode",
 }
 _FINDING_STRING_KEYS = {
-    "rule_id", "severity", "title", "explanation", "path", "evidence",
-    "fix", "test", "cwe", "tool", "evidence_kind", "verification_state",
-    "language", "symbol", "analysis_mode",
+    "rule_id",
+    "severity",
+    "title",
+    "explanation",
+    "path",
+    "evidence",
+    "fix",
+    "test",
+    "cwe",
+    "tool",
+    "evidence_kind",
+    "verification_state",
+    "language",
+    "symbol",
+    "analysis_mode",
 }
+_TOOL_RUN_KEYS = {
+    "tool",
+    "status",
+    "returncode",
+    "output_sha256",
+    "output_truncated",
+    "digests_complete",
+}
+_TOOL_RUN_STATUSES = {
+    "semgrep": frozenset({"completed", "failed", "timed-out"}),
+    "build-step": frozenset({"completed", "build_failed", "timed-out"}),
+    "clang": frozenset({"completed", "failed", "timed-out"}),
+    "asan-test": frozenset({"completed", "failed", "timed-out"}),
+}
+_COVERAGE_KEYS = {"source_files", "snapshot_files"}
+_HEX64 = frozenset("0123456789abcdef")
+MAX_TOOL_RUNS = 320
+MAX_DIAGNOSTICS = 256
+MAX_DIAGNOSTIC_BYTES = 2_048
+MAX_COVERAGE_FILES = 1_000_000
 
 
 class CxxAnalyzerUnavailable(RuntimeError):
@@ -54,8 +107,8 @@ class CxxAnalysisResult:
     status: str
     tool_runs: list[dict[str, Any]]
     findings: list[Finding]
-    coverage: dict[str, Any]
-    diagnostics: list[Any]
+    coverage: dict[str, int]
+    diagnostics: list[str]
 
 
 class CxxMemoryAdapter(Protocol):
@@ -78,6 +131,57 @@ def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_non_json_number(value: str) -> None:
     raise ValueError(f"invalid JSON number: {value}")
+
+
+def validate_response_metadata(
+    tool_runs: object,
+    coverage: object,
+    diagnostics: object,
+) -> None:
+    """Reject any non-Finding v1 response field outside the bounded contract."""
+
+    if type(tool_runs) is not list or len(tool_runs) > MAX_TOOL_RUNS:
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool runs")
+    for run in tool_runs:
+        if type(run) is not dict or set(run) != _TOOL_RUN_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool run fields")
+        tool = run["tool"]
+        status = run["status"]
+        if type(tool) is not str or tool not in _TOOL_RUN_STATUSES:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool")
+        if type(status) is not str or status not in _TOOL_RUN_STATUSES[tool]:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool status")
+        returncode = run["returncode"]
+        if returncode is not None and (
+            type(returncode) is not int or not -(2**31) <= returncode < 2**31
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer return code")
+        if type(run["output_truncated"]) is not bool or type(run["digests_complete"]) is not bool:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool flags")
+        output_sha256 = run["output_sha256"]
+        expected_digest_length = 64 if run["digests_complete"] else 0
+        if (
+            type(output_sha256) is not str
+            or len(output_sha256) != expected_digest_length
+            or any(character not in _HEX64 for character in output_sha256)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer output digest")
+
+    if type(coverage) is not dict or set(coverage) != _COVERAGE_KEYS:
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer coverage fields")
+    for value in coverage.values():
+        if type(value) is not int or not 0 <= value <= MAX_COVERAGE_FILES:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer coverage value")
+    if coverage["source_files"] > coverage["snapshot_files"]:
+        raise CxxAnalyzerProtocolError("inconsistent C/C++ analyzer coverage")
+
+    if type(diagnostics) is not list or len(diagnostics) > MAX_DIAGNOSTICS:
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer diagnostics")
+    if any(
+        type(item) is not str or not item or len(item.encode("utf-8")) > MAX_DIAGNOSTIC_BYTES
+        for item in diagnostics
+    ):
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer diagnostic")
 
 
 def map_asan_error(error_type: str, access: str) -> str | None:
@@ -123,12 +227,14 @@ class CxxMemoryAnalyzerClient:
         ):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer requested layers")
         request_id = str(uuid.uuid4())
-        body = json.dumps({
-            "request_id": request_id,
-            "repository_key": repository_key,
-            "snapshot_sha256": snapshot_sha256,
-            "requested_layers": list(requested_layers),
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "request_id": request_id,
+                "repository_key": repository_key,
+                "snapshot_sha256": snapshot_sha256,
+                "requested_layers": list(requested_layers),
+            }
+        ).encode("utf-8")
         request = urllib.request.Request(  # noqa: S310 - Settings permits only HTTP(S).
             self.base_url + "/v1/analyze",
             data=body,
@@ -179,14 +285,11 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError("C/C++ analyzer snapshot identity mismatch")
         if payload["status"] != "completed":
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer status")
-        if (
-            not isinstance(payload["tool_runs"], list)
-            or not all(isinstance(item, dict) for item in payload["tool_runs"])
-            or not isinstance(payload["findings"], list)
-            or not isinstance(payload["coverage"], dict)
-            or not isinstance(payload["diagnostics"], list)
-        ):
+        if not isinstance(payload["findings"], list):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer response structure")
+        validate_response_metadata(
+            payload["tool_runs"], payload["coverage"], payload["diagnostics"]
+        )
         for item in payload["findings"]:
             cls._validate_finding(item)
 
@@ -196,10 +299,7 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer finding fields")
         if any(not isinstance(item[key], str) for key in _FINDING_STRING_KEYS):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer finding text")
-        if any(
-            not item[key]
-            for key in _FINDING_STRING_KEYS - {"fix"}
-        ):
+        if any(not item[key] for key in _FINDING_STRING_KEYS - {"fix"}):
             raise CxxAnalyzerProtocolError("empty C/C++ analyzer finding field")
         if item["cwe"] not in SUPPORTED_CWES:
             raise CxxAnalyzerProtocolError("unsupported C/C++ analyzer CWE")

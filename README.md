@@ -65,6 +65,10 @@ powershell -ExecutionPolicy Bypass -File scripts/lima.ps1 down
 
 容器中的应用以固定非 root 用户运行，根文件系统只读，丢弃 Linux capabilities，并只把 Web 端口绑定到本机。
 
+C/C++ 内存分析默认以独立 Sidecar 的 `auto` 模式运行，只检测、不自动修复；部署、三层证据、
+管理员 argv JSON、预算、故障诊断和评测方法见
+[C/C++ 内存安全分析说明](docs/CXX_MEMORY_ANALYSIS.md)。
+
 项目镜像默认从 AWS Public ECR 的 Docker Official Images 镜像拉取，并锁定 manifest digest，以规避部分网络环境中 `auth.docker.io` 的 DNS/IPv6 连接异常，同时避免使用来源不明的公共镜像站。
 
 无需服务、数据库或 API Key，也可以先对本地授权仓库运行确定性安全基线：

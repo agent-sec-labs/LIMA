@@ -3,6 +3,9 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 3'
 
 permissions:
   contents: read
@@ -41,6 +44,151 @@ jobs:
           persist-credentials: false
       - run: docker build --target test --tag lima:test .
       - run: docker run --rm --read-only --tmpfs /tmp:rw,size=256m lima:test
+
+  cxx-sidecar-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the pinned Sidecar test image
+        run: >-
+          docker build --file cxx_analyzer/Dockerfile --target test
+          --tag lima-cxx-analyzer:test .
+      - name: Exercise all 24 fixtures without network access
+        run: >-
+          docker run --rm --network none --read-only
+          --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002
+          --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002
+          --cap-drop ALL --security-opt no-new-privileges:true
+          --user 10002:10002 lima-cxx-analyzer:test
+          python -m unittest -v
+          tests.test_cxx_analyzer.SourceScanContainerTests
+          tests.test_cxx_analyzer.BuildScanContainerTests
+          tests.test_cxx_analyzer.SanitizerContainerTests
+      - name: Validate Compose security constraints
+        env:
+          LIMA_POSTGRES_PASSWORD: ci-only-database-password
+          LIMA_AUTH_SECRET: ci-only-auth-secret-with-at-least-32-bytes
+          LIMA_BOOTSTRAP_ADMIN_PASSWORD: ci-only-admin-password
+        run: docker compose config --quiet
+      - name: Build LIMA and Sidecar runtime images
+        run: |
+          docker build --target runtime --tag lima:ci .
+          docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:ci .
+      - name: Start LIMA and Sidecar on an internal-only network
+        run: |
+          docker network create --internal lima-cxx-ci
+          docker run --detach --name lima-cxx-analyzer --network lima-cxx-ci \
+            --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002 \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
+            --mount type=bind,source="${PWD}/tests/fixtures/cxx_memory",target=/repositories/fixtures,readonly \
+            lima-cxx-analyzer:ci
+          docker run --detach --name lima-cxx-app --network lima-cxx-ci \
+            --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount type=bind,source="${PWD}/tests/fixtures/cxx_memory",target=/repositories/fixtures,readonly \
+            --env LIMA_REPOSITORY_IMPORT_ROOT=/repositories \
+            --env LIMA_DB_PATH=/tmp/lima.db \
+            --env LIMA_CXX_MEMORY_MODE=required \
+            --env LIMA_CXX_ANALYZER_URL=http://lima-cxx-analyzer:8090 \
+            --env LIMA_AUTH_REQUIRED=true \
+            --env LIMA_AUTH_SECRET=ci-only-auth-secret-with-at-least-32-bytes \
+            --env LIMA_BOOTSTRAP_ADMIN_USERNAME=admin \
+            --env LIMA_BOOTSTRAP_ADMIN_PASSWORD=ci-only-admin-password \
+            lima:ci
+      - name: Probe the real LIMA-to-Sidecar protocol
+        run: |
+          for attempt in $(seq 1 30); do
+            docker exec lima-cxx-app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()" && break
+            if [ "$attempt" = 30 ]; then exit 1; fi
+            sleep 2
+          done
+          docker exec lima-cxx-app python -c "import json; from pathlib import Path; from lima.cxx_memory import CxxMemoryAnalyzerClient; from lima.workspace import RepositoryWorkspace; root=Path('/repositories/fixtures'); assert len(json.loads((root/'manifest.json').read_text())) == 24; snapshot=RepositoryWorkspace(root).inventory().fingerprint(); result=CxxMemoryAnalyzerClient('http://lima-cxx-analyzer:8090',300,2097152).analyze('fixtures',snapshot,('source-only',)); assert result.status == 'completed'"
+      - name: Stop isolated integration containers
+        if: always()
+        run: |
+          docker rm --force lima-cxx-app lima-cxx-analyzer 2>/dev/null || true
+          docker network rm lima-cxx-ci 2>/dev/null || true
+
+  public-cxx-memory-evaluation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        case-id:
+          - curl-curl-cve-2026-8925
+          - podofo-podofo-cve-2025-9394
+          - goaccess-cve-2026-55777
+          - goaccess-cve-2026-54715
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: .cache/cxx-memory/archives
+          key: cxx-memory-archives-${{ hashFiles('evaluation_data/cxx_memory_cases.json') }}
+      - name: Select one committed case and its trusted administrator argv
+        id: case
+        run: >-
+          python scripts/prepare_cxx_memory_evaluation_case.py
+          --cases evaluation_data/cxx_memory_cases.json
+          --case-id "${{ matrix.case-id }}"
+          --github-output "$GITHUB_OUTPUT"
+      - name: Build the analyzer and prepare shared cache
+        env:
+          LIMA_CXX_BUILD_STEPS_JSON: ${{ steps.case.outputs.build_steps_json }}
+          LIMA_CXX_TEST_STEPS_JSON: ${{ steps.case.outputs.test_steps_json }}
+        run: |
+          mkdir -p .cache/cxx-memory/repositories output
+          docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:eval .
+          docker network create --internal lima-cxx-public
+          docker run --detach --name lima-cxx-public-analyzer --network lima-cxx-public \
+            --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002 \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
+            --env LIMA_CXX_AUTO_CMAKE=false \
+            --env LIMA_CXX_BUILD_STEPS_JSON \
+            --env LIMA_CXX_TEST_STEPS_JSON \
+            --mount type=bind,source="${PWD}/.cache/cxx-memory/repositories",target=/repositories,readonly \
+            lima-cxx-analyzer:eval
+      - name: Run pinned public pairs from a separate evaluator
+        env:
+          LIMA_CXX_EVALUATION_CASE_ID: ${{ matrix.case-id }}
+        run: |
+          for attempt in $(seq 1 30); do
+            docker exec lima-cxx-public-analyzer python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()" && break
+            if [ "$attempt" = 30 ]; then exit 1; fi
+            sleep 2
+          done
+          docker create --name lima-cxx-evaluator \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env LIMA_CXX_EVALUATION_CASE_ID \
+            --mount type=bind,source="${PWD}",target=/workspace,readonly \
+            --mount type=bind,source="${PWD}/.cache/cxx-memory",target=/cache \
+            --mount type=bind,source="${PWD}/output",target=/output \
+            --workdir /workspace \
+            public.ecr.aws/docker/library/python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7 \
+            python scripts/run_cxx_memory_evaluation.py \
+            --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
+            --output /output/cxx-memory-evaluation.json \
+            --analyzer-url http://lima-cxx-public-analyzer:8090 --fail-under-precision 0.0
+          docker network connect lima-cxx-public lima-cxx-evaluator
+          docker start --attach lima-cxx-evaluator
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cxx-memory-evaluation-${{ matrix.case-id }}
+          path: output/cxx-memory-evaluation.json
+          if-no-files-found: warn
+      - name: Stop public evaluation containers
+        if: always()
+        run: |
+          docker rm --force lima-cxx-evaluator lima-cxx-public-analyzer 2>/dev/null || true
+          docker network rm lima-cxx-public 2>/dev/null || true
 
   security-baseline:
     runs-on: ubuntu-latest

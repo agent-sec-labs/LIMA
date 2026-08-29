@@ -10,10 +10,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
+        autoconf \
+        automake \
         "clang-14" \
         "clang-tools-14" \
         cmake \
+        libfreetype6-dev \
+        libgsasl7-dev \
+        libssl-dev \
+        libtool \
+        libxml2-dev \
         "llvm-14" \
+        make \
+        pkg-config \
+        zlib1g-dev \
     && cmake --version | grep --quiet "^cmake version 3\." \
     && rm -rf /var/lib/apt/lists/*
 

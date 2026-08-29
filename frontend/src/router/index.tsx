@@ -13,6 +13,11 @@ import {
 } from "@ant-design/icons";
 import { Link, useLocation } from "react-router-dom";
 import { AuditCreatePage } from "@/features/audit-create/AuditCreatePage";
+import { AuthBar } from "@/features/auth/AuthBar";
+import { ExperimentsPage } from "@/features/experiments/ExperimentsPage";
+import { EvolutionPage } from "@/features/evolution/EvolutionPage";
+import { SettingsPage } from "@/features/settings/SettingsPage";
+import { SkillsPage } from "@/features/skills/SkillsPage";
 
 /**
  * T5 只交付地基：所有业务路由渲染同一个占位页。
@@ -60,6 +65,17 @@ function Shell(): React.JSX.Element {
         />
       </Layout.Sider>
       <Layout>
+        <Layout.Header
+          style={{
+            background: "#fff",
+            padding: "0 24px",
+            display: "flex",
+            justifyContent: "flex-end",
+            alignItems: "center",
+          }}
+        >
+          <AuthBar />
+        </Layout.Header>
         <Layout.Content style={{ background: "#f4f7fb" }}>
           <Outlet />
         </Layout.Content>
@@ -78,10 +94,10 @@ function routeTree() {
         { path: "audit/new", element: <AuditCreatePage /> },
         { path: "tasks", element: <FeaturePlaceholder title="审计结果（T7）" /> },
         { path: "tasks/:taskId", element: <FeaturePlaceholder title="任务详情（T7）" /> },
-        { path: "experiments", element: <FeaturePlaceholder title="外部评测（T8）" /> },
-        { path: "skills", element: <FeaturePlaceholder title="系统能力（T8）" /> },
-        { path: "settings", element: <FeaturePlaceholder title="模型设置（T8）" /> },
-        { path: "evolution", element: <FeaturePlaceholder title="高级实验（T8）" /> },
+        { path: "experiments", element: <ExperimentsPage /> },
+        { path: "skills", element: <SkillsPage /> },
+        { path: "settings", element: <SettingsPage /> },
+        { path: "evolution", element: <EvolutionPage /> },
         { path: "*", element: <Navigate to="/audit/new" replace /> },
       ],
     },

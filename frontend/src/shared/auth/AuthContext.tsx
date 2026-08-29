@@ -34,3 +34,8 @@ export function useAuth(): AuthState {
   }
   return context;
 }
+
+/** Provider 之外返回 null：让 Shell 级可选 UI（登录入口）不强制依赖 Provider。 */
+export function useOptionalAuth(): AuthState | null {
+  return useContext(AuthContext);
+}

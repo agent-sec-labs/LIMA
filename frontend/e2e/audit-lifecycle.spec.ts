@@ -42,8 +42,10 @@ test("审计生命周期：登录 → 创建本地审计 → 实时进度 → �
   // 4) 202 后责任移交任务中心：hash 路由 URL 形如 /app/#/tasks/<uuid>
   await expect(page).toHaveURL(/\/app\/#\/tasks\/[0-9a-f-]+$/);
 
-  // 5) 真实进度：阶段列表多于 1 项，且至少观察到两个不同阶段的推进。
-  //    详情页轮询为 2s/4s，夹具体量保证任务跨越多个轮询窗口。
+  // 5) 真实进度：阶段列表多于 1 项，且时间线呈现至少两个不同阶段。
+  //    采样 finish+process 两类标题：finish 随推进单调累积，终态必然 ≥2 个——
+  //    只采 process 是采样运气（PR #53 第二轮实证：快机上任务可在两个 400ms
+  //    采样点之间直接跳到终态，process 只抓到一个阶段）。
   const observedStages = new Set<string>();
   let finished = false;
   const deadline = Date.now() + 110_000;
@@ -53,7 +55,10 @@ test("审计生命周期：登录 → 创建本地审计 → 实时进度 → �
     if (stepCount > 0) {
       expect(stepCount, "阶段时间线应包含全部 13 个阶段").toBeGreaterThan(1);
       for (const title of await page
-        .locator(".ant-steps-item-process .ant-steps-item-title")
+        .locator(
+          ".ant-steps-item-finish .ant-steps-item-title, " +
+            ".ant-steps-item-process .ant-steps-item-title",
+        )
         .allTextContents()) {
         observedStages.add(title.trim());
       }

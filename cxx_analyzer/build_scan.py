@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from .config import MAX_ARGUMENT_BYTES, MAX_ARGUMENTS_PER_STEP, AnalyzerSettings
-from .execution import ToolExecution, run_step
+from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
 from .normalizers import NormalizedFinding
 from .snapshot import PreparedSnapshot
 from .source_scan import LayerResult
@@ -123,6 +123,15 @@ class CompilationUnit:
     directory: str
     file: str
     arguments: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BuildContext:
+    """A narrow proof that this live snapshot completed its trusted build steps."""
+
+    snapshot_root: Path
+    snapshot_files: tuple[str, ...]
+    sanitizer_enabled: bool = False
 
 
 class AnalysisBudgetExceeded(ValueError):
@@ -584,7 +593,9 @@ def _analyzer_argv(unit: CompilationUnit, output: Path) -> tuple[str, ...]:
     )
 
 
-def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> LayerResult:
+def run_build_scan(
+    snapshot: PreparedSnapshot, settings: AnalyzerSettings, *, sanitizer_enabled: bool = False
+) -> LayerResult:
     """Build a trusted context and run Clang without turning target failures into HTTP errors."""
 
     steps = select_build_steps(snapshot, settings)
@@ -606,7 +617,7 @@ def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> La
             ".",
             timeout_seconds=remaining,
             max_output_bytes=settings.max_output_bytes,
-            env={},
+            env=SANITIZER_ENVIRONMENT if sanitizer_enabled else {},
         )
         run = _tool_run(step[0], execution, build_step=True)
         tool_runs.append(run)
@@ -702,4 +713,9 @@ def run_build_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> La
                     break
     except OSError:
         return LayerResult((), ("clang-output-unavailable",), tuple(tool_runs))
-    return LayerResult(tuple(findings), tuple(diagnostics), tuple(tool_runs))
+    return LayerResult(
+        tuple(findings), tuple(diagnostics), tuple(tool_runs),
+        BuildContext(
+            Path(snapshot.root).resolve(), tuple(snapshot.files), sanitizer_enabled
+        ),
+    )

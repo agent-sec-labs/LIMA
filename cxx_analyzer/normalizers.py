@@ -103,6 +103,7 @@ class NormalizedFinding:
         mode_contract = {
             "source-only": ("candidate", "semgrep"),
             "build-backed": ("build-verified", "clang"),
+            "sanitizer-confirmed": ("confirmed", "asan"),
         }
         contract = mode_contract.get(values["analysis_mode"])
         if contract is None or (values["verification_state"], values["tool"]) != contract:
@@ -143,13 +144,13 @@ def conservative_identity(finding: NormalizedFinding) -> tuple[str, str, str, in
 def fuse_findings(
     source_findings: tuple[NormalizedFinding, ...],
     build_findings: tuple[NormalizedFinding, ...],
+    sanitizer_findings: tuple[NormalizedFinding, ...] = (),
 ) -> tuple[NormalizedFinding, ...]:
-    """Replace only exact conservative source identities with build evidence."""
+    """Replace only exact conservative identities with higher-evidence layers."""
 
-    build_identities = {conservative_identity(item) for item in build_findings}
-    retained_source = tuple(
-        item
-        for item in source_findings
-        if conservative_identity(item) not in build_identities
-    )
-    return (*retained_source, *build_findings)
+    fused: list[NormalizedFinding] = []
+    for layer in (source_findings, build_findings, sanitizer_findings):
+        incoming = {conservative_identity(item) for item in layer}
+        fused = [item for item in fused if conservative_identity(item) not in incoming]
+        fused.extend(layer)
+    return tuple(fused)

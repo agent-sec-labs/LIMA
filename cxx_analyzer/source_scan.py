@@ -29,6 +29,7 @@ class LayerResult:
     findings: tuple[NormalizedFinding, ...]
     diagnostics: tuple[str, ...]
     tool_runs: tuple[dict[str, object], ...]
+    build_context: object | None = None
 
 
 def _safe_result_path(path: object, snapshot_files: set[str]) -> str:

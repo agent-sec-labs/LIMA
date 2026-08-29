@@ -435,12 +435,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                         "src",
                         timeout_seconds=17,
                         max_output_bytes=1024,
-                        env={
-                            "PATH": "C:/attacker/bin",
-                            "HTTP_PROXY": "http://proxy.invalid",
-                            "LIMA_DATABASE_URL": "postgres://secret",
-                            "TOKEN": "secret",
-                        },
+                        env={},
                     )
 
         self.assertEqual("completed", result.status)
@@ -1600,6 +1595,19 @@ class BuildScanTests(unittest.TestCase):
                 )
                 self.assertEqual(1, run_tool.call_count)
 
+    @patch("cxx_analyzer.build_scan.run_step")
+    def test_sanitizer_requested_build_uses_only_fixed_compiler_environment(self, run_tool):
+        from cxx_analyzer.build_scan import run_build_scan
+        from cxx_analyzer.execution import SANITIZER_ENVIRONMENT
+
+        snapshot = Mock(files=("CMakeLists.txt", "src/main.cpp"))
+        run_tool.return_value = self._execution("failed", 2)
+
+        result = run_build_scan(snapshot, self._settings(), sanitizer_enabled=True)
+
+        self.assertEqual(("build_failed",), result.diagnostics)
+        self.assertEqual(SANITIZER_ENVIRONMENT, run_tool.call_args.kwargs["env"])
+
     @patch("cxx_analyzer.build_scan.time.monotonic")
     @patch("cxx_analyzer.build_scan.run_step")
     def test_total_deadline_stops_later_build_steps(self, run_tool, monotonic):
@@ -2196,6 +2204,293 @@ class BuildScanContainerTests(unittest.TestCase):
             finding.verification_state == "build-verified" and finding.fix == ""
             for finding in result.findings
         ))
+
+
+class SanitizerScanTests(unittest.TestCase):
+    @staticmethod
+    def _settings(*, test_steps=(), total_timeout_seconds=90):
+        return AnalyzerSettings(
+            auto_cmake=False, build_steps=(("configure",),), test_steps=test_steps,
+            max_memory_mb=1024, max_processes=32, max_output_bytes=8192,
+            step_timeout_seconds=17, total_timeout_seconds=total_timeout_seconds,
+            repository_scan_max_files=100, repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    @staticmethod
+    def _execution(status="failed", returncode=1, *, stderr="", truncated=False):
+        return ToolExecution(
+            status=status, returncode=returncode, stdout="", stderr=stderr,
+            stdout_sha256="a" * 64, stderr_sha256="b" * 64,
+            output_sha256="c" * 64, output_truncated=truncated,
+            digests_complete=True, diagnostic="",
+        )
+
+    def _snapshot(self):
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name).resolve()
+        (root / "src").mkdir()
+        (root / "src" / "memory.c").write_text("int main(void) { return 0; }\n")
+        snapshot = Mock(root=root, files=("src/memory.c",))
+        snapshot.resolve_cwd.return_value = root
+        return temporary, snapshot
+
+    def test_parser_maps_only_complete_structured_asan_reports_to_four_cwes(self):
+        from cxx_analyzer.sanitizer_scan import parse_asan_log
+
+        temporary, snapshot = self._snapshot()
+        try:
+            root = str(snapshot.root).replace("\\", "/")
+            cases = (
+                ("heap-buffer-overflow", "WRITE", "CWE-787"),
+                ("stack-buffer-overflow", "READ", "CWE-125"),
+                ("global-buffer-overflow", "WRITE", "CWE-787"),
+                ("heap-use-after-free", "READ", "CWE-416"),
+                ("attempting double-free", "FREE", "CWE-415"),
+            )
+            for error_type, access, expected_cwe in cases:
+                with self.subTest(error_type=error_type):
+                    access_line = "attempting double-free on 0x1" if access == "FREE" else f"{access} of size 4 at 0x1 thread T0"
+                    text = (
+                        f"==12==ERROR: AddressSanitizer: {error_type} on address 0x1\n"
+                        f"{access_line}\n"
+                        f"    #0 0x123 in \x1b[31mreport_memory\x1b[0m {root}/src/memory.c:9:3\n"
+                        f"SUMMARY: AddressSanitizer: {error_type} {root}/src/memory.c:9\n"
+                    )
+                    findings, diagnostics = parse_asan_log(text, snapshot)
+                    self.assertEqual([], diagnostics)
+                    self.assertEqual(1, len(findings))
+                    finding = findings[0]
+                    self.assertEqual(expected_cwe, finding.cwe)
+                    self.assertEqual("sanitizer-confirmed", finding.analysis_mode)
+                    self.assertEqual("confirmed", finding.verification_state)
+                    self.assertEqual("src/memory.c", finding.path)
+                    self.assertEqual("report_memory", finding.symbol)
+                    self.assertEqual("", finding.fix)
+                    self.assertNotIn("\\x1b", finding.evidence + finding.trace)
+        finally:
+            temporary.cleanup()
+
+    def test_parser_rejects_incomplete_unknown_external_and_sensitive_logs(self):
+        from cxx_analyzer.sanitizer_scan import parse_asan_log
+
+        temporary, snapshot = self._snapshot()
+        try:
+            root = str(snapshot.root).replace("\\", "/")
+            cases = (
+                "ordinary test failed with exit status 1",
+                "==1==ERROR: LeakSanitizer: detected memory leaks",
+                "AddressSanitizer:DEADLYSIGNAL\nSEGV",
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in foreign /tmp/secret/repo.c:5\nSUMMARY: AddressSanitizer: heap-buffer-overflow /tmp/secret/repo.c:5",
+                f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\n",
+            )
+            for text in cases:
+                with self.subTest(text=text[:32]):
+                    findings, diagnostics = parse_asan_log(text, snapshot)
+                    self.assertEqual([], findings)
+                    self.assertEqual(["needs-human-review"], diagnostics)
+            sensitive = f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\nenv TOKEN=top-secret /tmp/temporary\nSUMMARY: AddressSanitizer: heap-buffer-overflow"
+            findings, _ = parse_asan_log(sensitive, snapshot)
+            rendered = json.dumps(findings[0].to_dict())
+            self.assertNotIn("top-secret", rendered)
+            self.assertNotIn("/tmp/temporary", rendered)
+            self.assertNotIn(str(snapshot.root), rendered)
+        finally:
+            temporary.cleanup()
+
+    @patch("cxx_analyzer.sanitizer_scan.run_step")
+    def test_runtime_gate_requires_test_steps_and_matching_successful_build_context(self, run_tool):
+        from cxx_analyzer.build_scan import BuildContext
+        from cxx_analyzer.sanitizer_scan import run_sanitizer_scan
+
+        temporary, snapshot = self._snapshot()
+        try:
+            no_steps = run_sanitizer_scan(snapshot, self._settings(), None)
+            self.assertEqual(("sanitizer-not-configured",), no_steps.diagnostics)
+            bad_context = run_sanitizer_scan(snapshot, self._settings(test_steps=(("test",),)), BuildContext(snapshot.root.parent, snapshot.files))
+            self.assertEqual(("sanitizer-build-context-unavailable",), bad_context.diagnostics)
+            uninstrumented = run_sanitizer_scan(
+                snapshot, self._settings(test_steps=(("test",),)),
+                BuildContext(snapshot.root, snapshot.files),
+            )
+            self.assertEqual(("sanitizer-build-context-unavailable",), uninstrumented.diagnostics)
+            run_tool.assert_not_called()
+        finally:
+            temporary.cleanup()
+
+    @patch("cxx_analyzer.sanitizer_scan.run_step")
+    def test_sanitizer_runs_fixed_env_and_nonzero_without_asan_is_only_diagnostic(self, run_tool):
+        from cxx_analyzer.build_scan import BuildContext
+        from cxx_analyzer.execution import SANITIZER_ENVIRONMENT
+        from cxx_analyzer.sanitizer_scan import run_sanitizer_scan
+
+        temporary, snapshot = self._snapshot()
+        try:
+            run_tool.return_value = self._execution(stderr="assertion failed")
+            result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("ctest", "--test-dir", "build"),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True))
+            self.assertEqual((), result.findings)
+            self.assertEqual(("test-failed-without-sanitizer-evidence",), result.diagnostics)
+            self.assertEqual(SANITIZER_ENVIRONMENT, run_tool.call_args.kwargs["env"])
+            self.assertEqual(("ctest", "--test-dir", "build"), run_tool.call_args.args[0])
+        finally:
+            temporary.cleanup()
+
+    @patch("cxx_analyzer.sanitizer_scan.run_step")
+    def test_truncated_or_timed_out_asan_output_never_confirms_a_finding(self, run_tool):
+        from cxx_analyzer.build_scan import BuildContext
+        from cxx_analyzer.sanitizer_scan import run_sanitizer_scan
+
+        temporary, snapshot = self._snapshot()
+        try:
+            root = str(snapshot.root).replace("\\", "/")
+            report = f"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 4 at 0x1\n#0 0x1 in report {root}/src/memory.c:5\nSUMMARY: AddressSanitizer: heap-buffer-overflow"
+            for execution in (self._execution(stderr=report, truncated=True), self._execution(status="timed-out", returncode=None, stderr=report)):
+                with self.subTest(status=execution.status):
+                    run_tool.return_value = execution
+                    result = run_sanitizer_scan(snapshot, self._settings(test_steps=(("test",),)), BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True))
+                    self.assertEqual((), result.findings)
+                    self.assertIn("needs-human-review", result.diagnostics)
+        finally:
+            temporary.cleanup()
+
+    @patch("cxx_analyzer.server.run_sanitizer_scan")
+    @patch("cxx_analyzer.server.run_build_scan")
+    @patch("cxx_analyzer.server.run_source_scan")
+    @patch("cxx_analyzer.server.prepare_snapshot")
+    def test_server_runs_dynamic_layer_and_fuses_by_conservative_identity(
+        self, prepare, source_runner, build_runner, sanitizer_runner
+    ):
+        from cxx_analyzer.build_scan import BuildContext
+
+        snapshot = prepare.return_value.__enter__.return_value
+        snapshot.root = Path("/work/snapshots/one")
+        snapshot.files = ("src/memory.c",)
+        candidate = NormalizedFinding.create(
+            rule_id="cxx.source.oob-write", severity="high", title="candidate",
+            explanation="candidate evidence", path="src/memory.c", line=5,
+            evidence="value[2]", fix="", test="exercise", confidence=0.5,
+            cwe="CWE-787", tool="semgrep", evidence_kind="line",
+            verification_state="candidate", language="c", symbol="report",
+            analysis_mode="source-only", diagnostics=[],
+        )
+        confirmed = NormalizedFinding.create(
+            rule_id="cxx.asan.oob-write", severity="high", title="confirmed",
+            explanation="ASan report", path="src/memory.c", line=5,
+            evidence="AddressSanitizer reported heap-buffer-overflow (WRITE).",
+            fix="", test="exercise", confidence=1.0, cwe="CWE-787", tool="asan",
+            evidence_kind="sanitizer", verification_state="confirmed", language="c",
+            symbol="report", analysis_mode="sanitizer-confirmed", diagnostics=[],
+        )
+        source_runner.return_value = LayerResult((candidate,), (), ())
+        context = BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True)
+        build_runner.return_value = LayerResult((), (), (), context)
+        sanitizer_runner.return_value = LayerResult((confirmed,), (), ({"tool": "asan-test"},))
+        settings = self._settings(test_steps=(("test",),))
+
+        result = analyzer_server.analyze_request(
+            AnalyzerServiceTests()._payload(
+                requested_layers=["source-only", "build-backed", "sanitizer-confirmed"]
+            ),
+            settings,
+        )
+
+        build_runner.assert_called_once_with(snapshot, settings, sanitizer_enabled=True)
+        sanitizer_runner.assert_called_once_with(snapshot, settings, context)
+        self.assertEqual([confirmed.to_dict()], result["findings"])
+        self.assertEqual([{"tool": "asan-test"}], result["tool_runs"])
+
+    def test_executor_rejects_request_style_environment_instead_of_inheriting_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            import_root = base / "imports"
+            repository = import_root / "team" / "project"
+            work_root = base / "snapshots"
+            repository.mkdir(parents=True)
+            work_root.mkdir()
+            (repository / "main.cpp").write_text("int main() { return 0; }\n")
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
+                with self.assertRaisesRegex(ValueError, "analyzer-owned fixed"):
+                    run_step(("tool",), snapshot, ".", 1, 128, {"TOKEN": "secret"})
+
+    def test_server_response_budgets_keep_confirmed_evidence_and_bound_all_lists(self):
+        low = NormalizedFinding.create(
+            rule_id="cxx.source.oob-write", severity="high", title="candidate",
+            explanation="candidate", path="src/memory.c", line=5, evidence="x",
+            fix="", test="test", confidence=0.5, cwe="CWE-787", tool="semgrep",
+            evidence_kind="line", verification_state="candidate", language="c",
+            symbol="report", analysis_mode="source-only", diagnostics=[],
+        )
+        high = NormalizedFinding.create(
+            rule_id="cxx.asan.oob-write", severity="high", title="confirmed",
+            explanation="confirmed", path="src/memory.c", line=5, evidence="x",
+            fix="", test="test", confidence=1.0, cwe="CWE-787", tool="asan",
+            evidence_kind="sanitizer", verification_state="confirmed", language="c",
+            symbol="report", analysis_mode="sanitizer-confirmed", diagnostics=[],
+        )
+        with patch.object(analyzer_server, "MAX_FINDINGS", 1):
+            with patch.object(analyzer_server, "MAX_DIAGNOSTICS", 1):
+                with patch.object(analyzer_server, "MAX_TOOL_RUNS", 1):
+                    findings, diagnostics, tool_runs = analyzer_server._bound_response_lists(
+                        (low, high), ["source", "asan"], [{"tool": "source"}, {"tool": "asan"}]
+                    )
+        self.assertEqual((high,), findings)
+        self.assertEqual(("analysis-budget-exhausted",), diagnostics)
+        self.assertEqual(({"tool": "source"},), tool_runs)
+
+
+class SanitizerContainerTests(unittest.TestCase):
+    def test_asan_fixture_subset_confirms_vulnerable_c_and_not_safe_c(self):
+        if sys.platform != "linux":
+            self.skipTest("ASan container regression requires Linux")
+        if shutil.which("cmake") is None or shutil.which("clang-14") is None:
+            self.skipTest("CMake and clang-14 are required for ASan fixtures")
+
+        from cxx_analyzer.build_scan import run_build_scan
+        from cxx_analyzer.sanitizer_scan import run_sanitizer_scan
+
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
+        selected = (
+            "cwe-787/vulnerable-1.c", "cwe-125/vulnerable-1.c",
+            "cwe-416/vulnerable-1.c", "cwe-415/vulnerable-1.c",
+            "cwe-787/safe-1.c", "cwe-125/safe-1.c",
+            "cwe-416/safe-1.c", "cwe-415/safe-1.c",
+        )
+        symbols = {item["path"]: item["symbol"] for item in manifest if item["path"] in selected}
+        with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
+            base = Path(temporary)
+            import_root = base / "imports"
+            repository = import_root / "team" / "project"
+            work_root = base / "snapshots"
+            repository.mkdir(parents=True)
+            work_root.mkdir()
+            targets = []
+            for index, path in enumerate(selected):
+                target = repository / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(fixture_root / path, target)
+                runner = repository / "runner" / f"runner-{index}.c"
+                runner.parent.mkdir(exist_ok=True)
+                symbol = symbols[path]
+                runner.write_text(f"void {symbol}(void); int main(void) {{ (void){symbol}(); return 0; }}\n", encoding="utf-8")
+                targets.append(f"add_executable(case_{index} \"{path}\" \"runner/runner-{index}.c\")\nadd_test(NAME case_{index} COMMAND case_{index})")
+            (repository / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.16)\nproject(asan_cases C)\nenable_testing()\n" + "\n".join(targets), encoding="utf-8"
+            )
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            settings = SanitizerScanTests._settings(test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),), total_timeout_seconds=120)
+            with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
+                build = run_build_scan(snapshot, settings, sanitizer_enabled=True)
+                result = run_sanitizer_scan(snapshot, settings, build.build_context)
+
+        found = {(item.cwe, item.path, item.symbol) for item in result.findings}
+        expected = {(item["cwe"], item["path"], item["symbol"]) for item in manifest if item["path"] in selected and item["asan_expected"]}
+        safe = {(item["cwe"], item["path"], item["symbol"]) for item in manifest if item["path"] in selected and not item["vulnerable"]}
+        print(f"uncovered ASan fixture identities: {sorted(expected - found)}")
+        self.assertFalse(expected - found, f"diagnostics: {result.diagnostics}")
+        self.assertTrue(found.isdisjoint(safe), f"safe identities reported: {found & safe}")
+        self.assertTrue(all(item.verification_state == "confirmed" and item.fix == "" for item in result.findings))
 
 
 class SourceScanContainerTests(unittest.TestCase):

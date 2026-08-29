@@ -24,6 +24,14 @@ CLEAN_ENVIRONMENT = {
     "LC_ALL": "C.UTF-8",
     "TMPDIR": "/work/tmp",
 }
+SANITIZER_ENVIRONMENT = {
+    "CC": "clang-14",
+    "CXX": "clang++-14",
+    "CFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+    "CXXFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+    "LDFLAGS": "-fsanitize=address",
+    "ASAN_OPTIONS": "abort_on_error=1:detect_leaks=0:color=never",
+}
 OUTPUT_DIGEST_DOMAIN = b"LIMA-TOOL-OUTPUT-SHA256-v1\0stdout\0"
 _STDERR_DIGEST_TAG = b"\0stderr\0"
 _READ_CHUNK_BYTES = 64 * 1024
@@ -302,6 +310,8 @@ def run_step(
         raise ValueError("tool output limit must be a positive integer")
     if env is not None and not isinstance(env, Mapping):
         raise ValueError("tool environment must be a mapping")
+    if env not in (None, {}, SANITIZER_ENVIRONMENT):
+        raise ValueError("tool environment is not an analyzer-owned fixed environment")
     sandbox.build_policy(snapshot.root)
     try:
         landlock_version = sandbox.landlock_abi()
@@ -324,7 +334,7 @@ def run_step(
             process = subprocess.Popen(  # noqa: S603 - fixed launcher, no shell
                 launcher_argv,
                 cwd=working_directory,
-                env=dict(CLEAN_ENVIRONMENT),
+                env=dict(CLEAN_ENVIRONMENT | (dict(env) if env else {})),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

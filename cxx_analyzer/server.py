@@ -14,12 +14,16 @@ from .config import AnalyzerSettings
 from .normalizers import NormalizedFinding, fuse_findings
 from .snapshot import _normalize_repository_key, prepare_snapshot
 from .source_scan import run_source_scan
+from .sanitizer_scan import run_sanitizer_scan
 
 SCHEMA_VERSION: Final = 1
 HOST: Final = "0.0.0.0"  # noqa: S104 - Reachable only on the internal Compose network.
 PORT: Final = 8090
 MAX_REQUEST_BYTES: Final = 64 * 1024
 MAX_RESPONSE_BYTES: Final = 2 * 1024 * 1024
+MAX_FINDINGS: Final = 256
+MAX_DIAGNOSTICS: Final = 256
+MAX_TOOL_RUNS: Final = 320
 IMPORT_ROOT: Final = Path("/repositories")
 WORK_ROOT: Final = Path("/work/snapshots")
 
@@ -32,6 +36,35 @@ _SUPPORTED_LAYERS: Final = frozenset(
     {"source-only", "build-backed", "sanitizer-confirmed"}
 )
 _SOURCE_SUFFIXES: Final = frozenset({".c", ".cc", ".cpp", ".cxx"})
+
+
+def _bound_response_lists(
+    findings: tuple[NormalizedFinding, ...], diagnostics: list[object],
+    tool_runs: list[dict[str, object]],
+) -> tuple[tuple[NormalizedFinding, ...], tuple[object, ...], tuple[dict[str, object], ...]]:
+    """Apply one response budget after all evidence layers, preferring ASan proof."""
+
+    ranked = sorted(
+        enumerate(findings),
+        key=lambda item: ({"source-only": 0, "build-backed": 1, "sanitizer-confirmed": 2}[item[1].analysis_mode], -item[0]),
+        reverse=True,
+    )
+    kept_indexes = {index for index, _ in ranked[:MAX_FINDINGS]}
+    bounded_findings = tuple(item for index, item in enumerate(findings) if index in kept_indexes)
+    exhausted = (
+        len(findings) > MAX_FINDINGS
+        or len(diagnostics) > MAX_DIAGNOSTICS
+        or len(tool_runs) > MAX_TOOL_RUNS
+    )
+    bounded_diagnostics = tuple(diagnostics[:MAX_DIAGNOSTICS])
+    if exhausted:
+        if MAX_DIAGNOSTICS < 1:
+            bounded_diagnostics = ()
+        elif len(bounded_diagnostics) >= MAX_DIAGNOSTICS:
+            bounded_diagnostics = (*bounded_diagnostics[:-1], "analysis-budget-exhausted")
+        elif "analysis-budget-exhausted" not in bounded_diagnostics:
+            bounded_diagnostics = (*bounded_diagnostics, "analysis-budget-exhausted")
+    return bounded_findings, bounded_diagnostics, tuple(tool_runs[:MAX_TOOL_RUNS])
 
 
 class RequestError(ValueError):
@@ -125,6 +158,7 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
 
     source_findings: tuple[NormalizedFinding, ...] = ()
     build_findings: tuple[NormalizedFinding, ...] = ()
+    sanitizer_findings: tuple[NormalizedFinding, ...] = ()
     tool_runs: list[dict[str, object]] = []
     diagnostics: list[object] = []
     with prepared as snapshot:
@@ -135,32 +169,42 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
             tool_runs.extend(result.tool_runs)
             diagnostics.extend(result.diagnostics)
         if "build-backed" in requested_layers:
-            result = run_build_scan(snapshot, settings)
+            if "sanitizer-confirmed" in requested_layers:
+                result = run_build_scan(snapshot, settings, sanitizer_enabled=True)
+            else:
+                result = run_build_scan(snapshot, settings)
             build_findings = result.findings
             tool_runs.extend(result.tool_runs)
             diagnostics.extend(result.diagnostics)
         if "sanitizer-confirmed" in requested_layers:
-            diagnostics.append("sanitizer-confirmed-not-available")
+            build_context = result.build_context if "build-backed" in requested_layers else None
+            result = run_sanitizer_scan(snapshot, settings, build_context)
+            sanitizer_findings = result.findings
+            tool_runs.extend(result.tool_runs)
+            diagnostics.extend(result.diagnostics)
         source_files = sum(
             PurePosixPath(path).suffix.lower() in _SOURCE_SUFFIXES
             for path in snapshot.files
         )
         snapshot_files = len(snapshot.files)
 
-    findings = fuse_findings(source_findings, build_findings)
+    findings, diagnostics, tool_runs = _bound_response_lists(
+        fuse_findings(source_findings, build_findings, sanitizer_findings),
+        diagnostics, tool_runs,
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": request_id,
         "status": "completed",
         "snapshot_sha256": request["snapshot_sha256"],
-        "tool_runs": tool_runs,
+        "tool_runs": list(tool_runs),
         "findings": [finding.to_dict() for finding in findings],
         "coverage": {
             "source_files": source_files,
             "snapshot_files": snapshot_files,
         },
-        "diagnostics": diagnostics,
+        "diagnostics": list(diagnostics),
     }
 
 

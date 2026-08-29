@@ -3,6 +3,8 @@ from __future__ import annotations
 from html.parser import HTMLParser
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -129,9 +131,9 @@ def _check_cxx_report_contract_exposes_layered_evidence_safely() -> None:
     ):
         assert token in script
     assert "includes(\"verified\")" not in script
-    assert "escapeHtml(finding.language" in script
-    assert "escapeHtml(finding.symbol" in script
-    assert "escapeHtml(record.snippet" in script
+    assert "escapeHtml(safeCxxText(finding.language)" in script
+    assert "escapeHtml(safeCxxText(finding.symbol)" in script
+    assert "escapeHtml(safeCxxText(record.snippet)" in script
     assert "[内部地址已隐藏]" in script
     assert "[运行路径已隐藏]" in script
     assert "[敏感参数已隐藏]" in script
@@ -147,6 +149,24 @@ def _check_cxx_report_repair_gate_uses_explicit_eligibility() -> None:
     assert "const hasRepairableFinding = findings.some(" in script
     assert "reportReady && repositoryScan && hasRepairableFinding" in script
     assert "reportReady && task.pull_request && hasRepairableFinding" in script
+
+
+def _check_frontend_script_parses_with_node() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for the frontend syntax gate"
+    completed = subprocess.run(
+        [node, "--check", str(WEB / "app.js")],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def _check_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair() -> None:
+    script = _read("app.js")
+
+    assert "const cxxAutomaticRepairNote = cxxFinding ?" in script
+    assert "filter((record) => record && typeof record === \"object\")" in script
+    assert "const safeRecords = records.filter(" in script
 
 
 class FrontendUiTests(unittest.TestCase):
@@ -176,3 +196,9 @@ class FrontendUiTests(unittest.TestCase):
 
     def test_cxx_report_repair_gate_uses_explicit_eligibility(self) -> None:
         _check_cxx_report_repair_gate_uses_explicit_eligibility()
+
+    def test_frontend_script_parses_with_node(self) -> None:
+        _check_frontend_script_parses_with_node()
+
+    def test_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair(self) -> None:
+        _check_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair()

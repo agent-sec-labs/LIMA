@@ -688,6 +688,64 @@ class CxxReportTests(unittest.TestCase):
 
         self.assertIn("不支持自动修复", markdown)
 
+    def test_markdown_never_allows_automatic_repair_for_cxx_findings(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding["automatic_repair"] = True
+        markdown = to_markdown({
+            "repository": "team/project", "summary": "malformed C/C++ finding", "risk": "high",
+            "findings": [finding],
+        })
+
+        self.assertIn("不支持自动修复", markdown)
+
+    def test_markdown_redacts_sensitive_cxx_fields_without_hiding_relative_evidence(self):
+        finding = cxx_finding("https://internal.example/?token=secret", "source-only").to_dict()
+        finding.update({
+            "path": '"C:\\Program Files\\private source\\buffer.c"',
+            "evidence": 'src/buffer.c reads "/container/private source/input.c" --token secret --password "secret pass"',
+            "evidence_records": [{
+                "source": "clang --api_key=secret",
+                "path": "'/opt/private path/trace.c'",
+                "line": 12,
+                "snippet": "--secret secret --password='secret pass' relative/trace.c",
+            }],
+        })
+
+        markdown = to_markdown({
+            "repository": "team/project", "summary": "redaction", "risk": "high",
+            "findings": [finding],
+        })
+
+        for leaked in (
+            "internal.example", "secret", "C:\\Program Files", "/container/private",
+            "/opt/private", "private source", "secret pass",
+        ):
+            self.assertNotIn(leaked, markdown)
+        self.assertIn("src/buffer.c", markdown)
+        self.assertIn("relative/trace.c", markdown)
+
+    def test_markdown_filters_malformed_evidence_records_and_falls_back_when_none_are_mappings(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding["evidence"] = "top-level fallback evidence"
+        finding["evidence_records"] = [None, 3, {}, {
+            "source": "clang", "path": "src/free.c", "line": 12,
+            "snippet": "valid trace",
+        }]
+        markdown = to_markdown({
+            "repository": "team/project", "summary": "mixed evidence", "risk": "high",
+            "findings": [finding],
+        })
+        self.assertIn("valid trace", markdown)
+        self.assertIn("`unknown` · `:0`", markdown)
+
+        finding["evidence_records"] = [None, 3]
+        fallback_markdown = to_markdown({
+            "repository": "team/project", "summary": "fallback evidence", "risk": "high",
+            "findings": [finding],
+        })
+        evidence_trace = fallback_markdown.split("**工具证据 / trace**", 1)[1]
+        self.assertIn("top-level fallback evidence", evidence_trace)
+
 
 if __name__ == "__main__":
     unittest.main()

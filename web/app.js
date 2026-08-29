@@ -734,13 +734,19 @@ function diagnosticCode(diagnostic) {
 }
 
 function safeDiagnosticMessage(value) {
+  return safeCxxText(value, 240);
+}
+
+function safeCxxText(value, maximum = 480) {
   if (typeof value !== "string") return "";
   return value.trim()
     .replace(/https?:\/\/[^\s`]+/gi, "[内部地址已隐藏]")
+    .replace(/(?:"[A-Za-z]:[\\/][^"]*"|'[A-Za-z]:[\\/][^']*')/g, "[运行路径已隐藏]")
+    .replace(/(?:"\/[^\"]*"|'\/[^']*')/g, "[运行路径已隐藏]")
     .replace(/[A-Za-z]:[\\/][^\s`]+/g, "[运行路径已隐藏]")
     .replace(/(^|[\s(])\/(?:[^\s`/]+\/)+[^\s`/]+/g, "$1[运行路径已隐藏]")
-    .replace(/(?:--)?(?:api[_-]?key|token|secret|password)\s*=\s*[^\s`]+/gi, "[敏感参数已隐藏]")
-    .slice(0, 240);
+    .replace(/(?:--)?(?:api[_-]?key|token|secret|password)(?:\s*=\s*|\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s`]+)/gi, "[敏感参数已隐藏]")
+    .slice(0, maximum);
 }
 
 function diagnosticLabel(code) {
@@ -778,10 +784,13 @@ function cxxEvidenceRecords(finding) {
   const records = Array.isArray(finding.evidence_records) && finding.evidence_records.length
     ? finding.evidence_records
     : [{ source: finding.source, path: finding.path, line: finding.line, snippet: finding.evidence }];
-  return records.map((record) => `
-    <li><code>${escapeHtml(record.source || "unknown")}</code> · <code>${escapeHtml(record.path || "未知文件")}:${escapeHtml(record.line || "?")}</code> · ${escapeHtml(record.snippet || "未提供")}</li>
+  const safeRecords = records.filter((record) => record && typeof record === "object");
+  const renderedRecords = safeRecords.length ? safeRecords : [{
+    source: finding.source, path: finding.path, line: finding.line, snippet: finding.evidence,
+  }];
+  return renderedRecords.map((record) => `
+    <li><code>${escapeHtml(safeCxxText(record.source) || "unknown")}</code> · <code>${escapeHtml(safeCxxText(record.path) || "未知文件")}:${escapeHtml(record.line || "?")}</code> · ${escapeHtml(safeCxxText(record.snippet) || "未提供")}</li>
   `).join("");
-}
 }
 
 function renderTaskReport(task) {
@@ -819,29 +828,30 @@ function renderTaskReport(task) {
   const findingRows = findings.map((finding, index) => {
     const severity = String(finding.severity || "info").toLowerCase();
     const safeSeverity = ["critical", "high", "medium", "low", "info"].includes(severity) ? severity : "info";
-    const location = `${finding.path || "未知文件"}:${finding.line || "?"}`;
     const cxxFinding = isCxxFinding(finding);
+    const location = `${cxxFinding ? safeCxxText(finding.path) : finding.path || "未知文件"}:${finding.line || "?"}`;
     const analysisMode = String(finding.analysis_mode || "").toLowerCase();
+    const cxxAutomaticRepairNote = cxxFinding ? '<p class="automatic-repair-disabled"><strong>不支持自动修复</strong></p>' : "";
     const cxxDetails = cxxFinding ? `
-      <p><strong>语言 / symbol：</strong>${escapeHtml(finding.language || "unknown")} / ${escapeHtml(finding.symbol || "unknown")}</p>
+      <p><strong>语言 / symbol：</strong>${escapeHtml(safeCxxText(finding.language) || "unknown")} / ${escapeHtml(safeCxxText(finding.symbol) || "unknown")}</p>
       <p><strong>分析模式：</strong>${escapeHtml(analysisMode || "unknown")} · ${escapeHtml(analysisModeLabel(analysisMode))}</p>
       <p><strong>验证状态：</strong>${escapeHtml(finding.verification_state || "candidate")} · ${escapeHtml(verificationLabel(finding.verification_state))}</p>
       <p><strong>工具证据 / trace：</strong></p>
       <ul class="evidence-records">${cxxEvidenceRecords(finding)}</ul>
       ${analysisMode === "source-only" ? '<p class="source-only-warning"><strong>纯源码分析，尚未经过目标项目构建验证</strong></p>' : ""}
-      ${finding.automatic_repair !== true ? '<p class="automatic-repair-disabled"><strong>不支持自动修复</strong></p>' : ""}
+      ${cxxAutomaticRepairNote}
     ` : "";
     return `
       <tr>
         <td><span class="pill ${safeSeverity === "critical" || safeSeverity === "high" ? "pill-red" : safeSeverity === "medium" ? "pill-amber" : "pill-green"}">${escapeHtml(severityLabels[safeSeverity] || safeSeverity)}</span></td>
         <td class="finding-title">
-          <b>${escapeHtml(finding.title || finding.rule_id || `问题 ${index + 1}`)}</b>
+          <b>${escapeHtml(cxxFinding ? safeCxxText(finding.title || finding.rule_id || `问题 ${index + 1}`) : finding.title || finding.rule_id || `问题 ${index + 1}`)}</b>
           <small>${escapeHtml(finding.cwe || "CWE 未分类")} · ${escapeHtml(finding.rule_id || "未命名规则")}</small>
           <details class="finding-details">
             <summary>查看证据与修复建议</summary>
             <div>
-              <p><strong>为什么是问题：</strong>${escapeHtml(finding.explanation || "当前报告没有提供进一步解释。")}</p>
-              <p><strong>关键证据：</strong>${escapeHtml(finding.evidence || "当前报告没有提供证据摘要。")}</p>
+              <p><strong>为什么是问题：</strong>${escapeHtml(cxxFinding ? safeCxxText(finding.explanation) || "当前报告没有提供进一步解释。" : finding.explanation || "当前报告没有提供进一步解释。")}</p>
+              <p><strong>关键证据：</strong>${escapeHtml(cxxFinding ? safeCxxText(finding.evidence) || "当前报告没有提供证据摘要。" : finding.evidence || "当前报告没有提供证据摘要。")}</p>
               <p><strong>建议修复：</strong>${escapeHtml(finding.fix || "建议由开发者结合业务上下文制定最小修复。")}</p>
               ${cxxDetails}
             </div>

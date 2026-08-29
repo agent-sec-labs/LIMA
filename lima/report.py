@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterable
 
 
 _MAX_CXX_DIAGNOSTICS = 8
+_MAX_CXX_RENDER_TEXT = 480
 _ANALYSIS_MODE_LABELS = {
     "source-only": "纯源码候选",
     "build-backed": "构建支持的静态验证",
@@ -53,20 +54,26 @@ def _diagnostic_code(value: Any) -> str:
     return code[:64]
 
 
-def _safe_diagnostic_message(value: Any) -> str:
-    """Keep an actionable reason without exposing runtime addresses or secrets."""
+def _safe_cxx_text(value: Any, maximum: int = _MAX_CXX_RENDER_TEXT) -> str:
+    """Render bounded C/C++ tool text without runtime addresses or credentials."""
     if not isinstance(value, str):
         return ""
     message = value.strip()
     message = re.sub(r"https?://[^\s`]+", "[内部地址已隐藏]", message, flags=re.I)
+    message = re.sub(r"(?:\"[A-Za-z]:[\\/][^\"]*\"|'[A-Za-z]:[\\/][^']*')", "[运行路径已隐藏]", message)
+    message = re.sub(r"(?:\"/[^\"]*\"|'/[^']*')", "[运行路径已隐藏]", message)
     message = re.sub(r"[A-Za-z]:[\\/][^\s`]+", "[运行路径已隐藏]", message)
     message = re.sub(r"(?<!\w)/(?:[^\s`/]+/)+[^\s`/]+", "[运行路径已隐藏]", message)
     message = re.sub(
-        r"(?i)(?:--)?(?:api[_-]?key|token|secret|password)\s*=\s*[^\s`]+",
+        r"(?i)(?:--)?(?:api[_-]?key|token|secret|password)(?:\s*=\s*|\s+)(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s`]+)",
         "[敏感参数已隐藏]",
         message,
     )
-    return message[:240]
+    return message[:maximum]
+
+
+def _safe_diagnostic_message(value: Any) -> str:
+    return _safe_cxx_text(value, 240)
 
 
 def _cxx_diagnostics(collaboration: Dict[str, Any]) -> Iterable[str]:
@@ -176,64 +183,71 @@ def to_markdown(report: Dict[str, Any]) -> str:
     icons = {"critical": "🚨", "high": "🔴", "medium": "🟠", "low": "🟡"}
     for index, item in enumerate(findings, 1):
         severity = item.get("severity", "medium")
+        is_cxx = _is_cxx_finding(item)
+        display = _safe_cxx_text if is_cxx else str
+        path = display(item.get("path", ""))
+        evidence = display(item.get("evidence", ""))
+        source = display(item.get("source", "unknown"))
         lines.extend(
             [
-                "### %d. %s %s" % (index, icons.get(severity, "•"), item.get("title", "Finding")),
+                "### %d. %s %s" % (index, icons.get(severity, "•"), display(item.get("title", "Finding"))),
                 "",
                 "`%s:%s` · **%s** · `%s` · `%s` · `%s`" % (
-                    item.get("path", ""), item.get("line", 0), severity.upper(),
-                    item.get("rule_id", ""), item.get("cwe", "unmapped") or "unmapped",
+                    path, item.get("line", 0), severity.upper(),
+                    display(item.get("rule_id", "")), display(item.get("cwe", "unmapped") or "unmapped"),
                     item.get("verification_state", "candidate")),
                 "",
-                item.get("explanation", ""),
+                display(item.get("explanation", "")),
                 "",
                 "**Evidence**",
                 "",
                 "```text",
-                item.get("evidence", ""),
+                evidence,
                 "```",
                 "",
-                "**Suggested fix:** %s" % item.get("fix", ""),
+                "**Suggested fix:** %s" % display(item.get("fix", "")),
                 "",
-                "**Suggested test:** %s" % item.get("test", ""),
+                "**Suggested test:** %s" % display(item.get("test", "")),
                 "",
-                "**Evidence sources:** `%s`" % item.get("source", "unknown"),
+                "**Evidence sources:** `%s`" % source,
                 "",
             ]
         )
-        if _is_cxx_finding(item):
+        if is_cxx:
             analysis_mode = str(item.get("analysis_mode", "")).lower()
             lines.extend([
                 "**C/C++ memory-analysis details**",
                 "",
-                "- Language: `%s`" % item.get("language", "unknown"),
-                "- Symbol: `%s`" % item.get("symbol", "unknown"),
-                "- Location: `%s:%s`" % (item.get("path", ""), item.get("line", 0)),
-                "- CWE: `%s`" % (item.get("cwe", "unmapped") or "unmapped"),
+                "- Language: `%s`" % display(item.get("language", "unknown")),
+                "- Symbol: `%s`" % display(item.get("symbol", "unknown")),
+                "- Location: `%s:%s`" % (path, item.get("line", 0)),
+                "- CWE: `%s`" % display(item.get("cwe", "unmapped") or "unmapped"),
                 "- Analysis mode: `%s` · **%s**" % (
-                    item.get("analysis_mode", "unknown"), _analysis_mode_label(analysis_mode),
+                    display(item.get("analysis_mode", "unknown")), _analysis_mode_label(analysis_mode),
                 ),
                 "- Verification state: `%s` · %s" % (
-                    item.get("verification_state", "candidate"),
+                    display(item.get("verification_state", "candidate")),
                     _verification_state_label(item.get("verification_state")),
                 ),
-                "- Tool: `%s`" % item.get("source", "unknown"),
+                "- Tool: `%s`" % source,
                 "",
                 "**工具证据 / trace**",
                 "",
             ])
-            evidence_records = item.get("evidence_records") or []
+            evidence_records = [
+                record for record in (item.get("evidence_records") or [])
+                if isinstance(record, dict)
+            ]
             for record in evidence_records:
                 if not isinstance(record, dict):
                     continue
                 lines.append("- `%s` · `%s:%s` · %s" % (
-                    record.get("source", "unknown"), record.get("path", ""),
-                    record.get("line", 0), record.get("snippet", ""),
+                    display(record.get("source", "unknown")), display(record.get("path", "")),
+                    record.get("line", 0), display(record.get("snippet", "")),
                 ))
             if not evidence_records:
                 lines.append("- `%s` · `%s:%s` · %s" % (
-                    item.get("source", "unknown"), item.get("path", ""),
-                    item.get("line", 0), item.get("evidence", ""),
+                    source, path, item.get("line", 0), evidence,
                 ))
             lines.append("")
             if analysis_mode == "source-only":
@@ -241,8 +255,7 @@ def to_markdown(report: Dict[str, Any]) -> str:
                     "> ⚠️ **纯源码分析，尚未经过目标项目构建验证**",
                     "",
                 ])
-            if item.get("automatic_repair") is not True:
-                lines.extend(["**不支持自动修复**", ""])
+            lines.extend(["**不支持自动修复**", ""])
         if item.get("verification_state") == "dataflow-verified":
             lines.extend(["**Source-to-sink path**", ""])
             for step in item.get("evidence_records") or []:

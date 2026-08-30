@@ -1,7 +1,9 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Card, Col, Row, Typography } from "antd";
+import { useSearchParams } from "react-router-dom";
+import { Alert, App as AntApp, Card, Col, Row, Typography } from "antd";
 import { api } from "@/shared/api/client";
+import { useAuth } from "@/shared/auth/AuthContext";
 
 interface RuntimePayload {
   llm: {
@@ -20,6 +22,62 @@ const PROVIDER_KEYS = [
   { label: "其他 OpenAI 兼容接口", env: "LIMA_LLM_API_KEY" },
 ];
 
+/**
+ * GitHub App 安装登记（legacy #github-install 对等）：
+ * /github/setup 回跳到 /app/#/settings?github_installation=<id>&account=<name>，
+ * 已登录则自动 POST 登记并提示；未登录先提示，登录后（token 出现）自动完成。
+ */
+function GithubInstallRegistration(): React.JSX.Element | null {
+  const { message } = AntApp.useApp();
+  const { token } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [status, setStatus] = useState<"idle" | "waiting-login" | "done">("idle");
+
+  const raw = searchParams.get("github_installation") ?? "";
+  const account = (searchParams.get("account") || "github-app").slice(0, 100);
+  const installationId = Number.parseInt(raw, 10);
+
+  // status=done 守卫防止 effect 重入（token 到达、参数清理都会触发重跑）。
+  useEffect(() => {
+    if (!raw || status === "done") return;
+    if (!Number.isInteger(installationId) || installationId <= 0) {
+      setStatus("done");
+      void message.error("GitHub 安装登记失败：回跳链接缺少有效的 installation_id。");
+      setSearchParams({}, { replace: true });
+      return;
+    }
+    if (!token) {
+      setStatus("waiting-login");
+      return;
+    }
+    setStatus("done");
+    void api
+      .registerGithubInstallation(installationId, account)
+      .then(() => {
+        void message.success(
+          `GitHub 安装已登记：installation ${installationId} 已绑定到当前租户。`,
+        );
+      })
+      .catch((error: Error) => {
+        void message.error(`GitHub 安装登记失败：${error.message}`);
+      })
+      .finally(() => {
+        setSearchParams({}, { replace: true });
+      });
+  }, [raw, installationId, account, token, status, message, setSearchParams]);
+
+  if (status !== "waiting-login") return null;
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 16 }}
+      message="请先登录"
+      description="使用管理员账号登录后将自动完成 GitHub 安装登记。"
+    />
+  );
+}
+
 export function SettingsPage(): React.JSX.Element {
   const query = useQuery({
     queryKey: ["skills"],
@@ -30,6 +88,7 @@ export function SettingsPage(): React.JSX.Element {
   return (
     <div style={{ padding: 24, maxWidth: 900 }}>
       <Typography.Title level={3}>模型设置</Typography.Title>
+      <GithubInstallRegistration />
       <Row gutter={[16, 16]}>
         <Col xs={24} md={8}>
           <Card size="small">

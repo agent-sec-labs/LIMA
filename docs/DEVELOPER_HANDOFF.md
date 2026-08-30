@@ -44,7 +44,7 @@
 LIMA/
 ├─ lima/                 Python 应用、分析器、Agent、存储和集成代码
 ├─ tests/                unittest 测试；测试文件通常与 lima/ 模块一一对应
-├─ web/                  无独立构建步骤的 HTML/CSS/JavaScript 管理台
+├─ frontend/             React 18 + TS + Vite 唯一前端（/ 重定向与 /app/ 均指向 dist）
 ├─ skills/               内置动态 Skill manifest 与隔离执行代码
 ├─ scripts/              扫描、评测、CI 和 Docker PowerShell 入口
 ├─ evaluation_data/      冻结/校准数据集；修改前必须理解指纹与 holdout 规则
@@ -164,7 +164,7 @@ candidate
 | GitHub 集成 | `lima/github.py` | Webhook 签名、API 客户端、GitHub App | `test_github.py` |
 | Skill | `lima/skills.py`, `lima/skill_runner.py`, `lima/skill_evolution.py` | manifest、签名、隔离运行、回放门禁 | `test_skills.py`, `test_skill_evolution.py` |
 | 评测/实验 | `lima/experiments.py`, `lima/real_world_evaluation.py`, `lima/evaluation_harness.py` | 冻结数据集、快照、预算、artifact 和指标 | `test_experiments.py`, `test_real_world_evaluation.py` |
-| 前端 | `web/index.html`, `web/app.js`, `web/app.css` | 管理台、任务、扫描、实验和修复预览 | `test_frontend_ui.py`, `node --check` |
+| 前端 | `frontend/src/`（React 18 + TS） | 管理台、任务、扫描、实验、修复预览和反馈 | `frontend/` Vitest 用例、`test_frontend_ui.py` 结构契约 |
 
 经验法则：从对应测试开始读，先找到成功路径和拒绝路径，再进入实现文件。安全模块的
 “为什么拒绝”往往比“如何成功”更重要。
@@ -327,7 +327,6 @@ integrity），但 `Closes` 绑定、行为式 Summary 和量化 Validation 三�
 ```powershell
 python -m compileall -q lima scripts tests
 python -m unittest discover -s tests -v
-node --check web/app.js
 git diff --check
 ```
 
@@ -391,7 +390,7 @@ GitHub Actions 的稳定 Required Check 是 `merge-gate`。它汇总：
 
 | 修改范围 | 至少运行 |
 |---|---|
-| Web | `tests.test_frontend_ui` + `node --check web/app.js` |
+| 前端 | `cd frontend && npm run typecheck && npx vitest run`（结构契约：`tests.test_frontend_ui`） |
 | API/Service/Auth/Store | `tests.test_service tests.test_production_features`，覆盖成功、拒绝、租户隔离和非法输入 |
 | 队列/实验 | `tests.test_production_features tests.test_experiments`，覆盖 ACK、重试、恢复、预算和模糊调用 |
 | 仓库来源/导入 | `tests.test_repository_source tests.test_repository_import`，覆盖恶意 URL、路径逃逸和无网络访问 |

@@ -1,4 +1,12 @@
-import type { HealthPayload, LoginResponse } from "@/shared/api/types";
+import type {
+  FeedbackCase,
+  FeedbackPayload,
+  FixResult,
+  HealthPayload,
+  LoginResponse,
+  RepairPreviewResult,
+  TaskDetail,
+} from "@/shared/api/types";
 
 /** 集中式 API 客户端：组件不得散落直接 fetch。 */
 export class ApiError extends Error {
@@ -89,4 +97,30 @@ export const api = {
       anonymous: true,
       body: { username, password, tenant_id: tenantId },
     }),
+  task: (taskId: string, signal?: AbortSignal | undefined) =>
+    request<TaskDetail>(`/v1/tasks/${encodeURIComponent(taskId)}`, { method: "GET", signal }),
+  taskFeedback: (taskId: string) =>
+    request<{ cases: FeedbackCase[] }>(`/v1/tasks/${encodeURIComponent(taskId)}/feedback`, {
+      method: "GET",
+    }),
+  submitTaskFeedback: (taskId: string, payload: FeedbackPayload) =>
+    request<{ recorded: boolean; category: string }>(
+      `/v1/tasks/${encodeURIComponent(taskId)}/feedback`,
+      { method: "POST", body: payload },
+    ),
+  createRepairPreview: (taskId: string) =>
+    request<RepairPreviewResult>(`/v1/tasks/${encodeURIComponent(taskId)}/repair-preview`, {
+      method: "POST",
+      body: {},
+    }),
+  createFix: (taskId: string) =>
+    request<FixResult>(`/v1/tasks/${encodeURIComponent(taskId)}/fix`, {
+      method: "POST",
+      body: {},
+    }),
+  registerGithubInstallation: (installationId: number, account: string) =>
+    request<{ installation_id: number; account: string; tenant_id: string }>(
+      "/v1/github/installations",
+      { method: "POST", body: { installation_id: installationId, account } },
+    ),
 };

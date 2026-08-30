@@ -78,6 +78,9 @@ export function TaskListPage(): React.JSX.Element {
             onSearch={setSearch}
             onChange={(event) => setSearch(event.target.value)}
           />
+          <Typography.Text type="secondary">
+            {tasks.length} / {query.data?.tasks?.length ?? 0} 项
+          </Typography.Text>
           {query.isError && (
             <Typography.Text type="danger">
               任务列表加载失败：{(query.error as Error)?.message}

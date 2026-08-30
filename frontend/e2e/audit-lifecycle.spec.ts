@@ -20,6 +20,7 @@ const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD ?? "e2e-local-pass";
 test("审计生命周期：登录 → 创建本地审计 → 实时进度 → 报告", async ({ page }) => {
   test.setTimeout(120_000);
 
+
   // 1) UI 登录 bootstrap admin
   await page.goto("/app/");
   await page.getByRole("button", { name: "登 录" }).click();
@@ -93,4 +94,19 @@ test("审计生命周期：登录 → 创建本地审计 → 实时进度 → �
   const row = page.locator(".ant-list-item", { hasText: "e2e/demo-repo" }).first();
   await expect(row).toBeVisible();
   await expect(row.locator(".ant-tag", { hasText: "已完成" })).toBeVisible();
+});
+
+test("T10 根路径切换：/ 重定向到 React 应用，legacy 静态路由 404", async ({ page }) => {
+  // 冻结决策 3 的正式切换：生产唯一前端是 React（/app/），根路径重定向过去。
+  await page.goto("/");
+  // 重定向后落在 /app/（hash 路由会追加默认路由，如 /app/#/audit/new）。
+  await expect(page).toHaveURL(/\/app\/(#|$)/);
+  await expect(page.getByRole("button", { name: "登 录" })).toBeVisible();
+
+  // legacy web/ 已删除：旧静态资源不得再被服务。未认证请求经认证门禁返回 401
+  // （不泄露路由存在性），认证后为 404；两者都证明内容已下线。
+  for (const asset of ["/assets/app.js", "/assets/app.css"]) {
+    const status = (await page.request.get(asset)).status();
+    expect([401, 404]).toContain(status);
+  }
 });

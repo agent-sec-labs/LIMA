@@ -270,6 +270,8 @@ class MaterializationTests(MaterializerTestCase):
         from lima.service import ReviewService
 
         with tempfile.TemporaryDirectory(suffix="-t2svc") as root:
+            # 缓存根必须钉在测试临时目录：默认值 output/repository-cache 在
+            # 只读容器（CI container-read-only）不可写（Errno 30 实证）。
             service = ReviewService(
                 Settings(
                     host="127.0.0.1", port=0, db_path=os.path.join(root, "s.db"),
@@ -277,6 +279,7 @@ class MaterializationTests(MaterializerTestCase):
                     llm_base_url="", llm_api_key="", llm_model="",
                     github_webhook_secret="", github_token=WIRED_GITHUB_TOKEN,
                     auto_post_review=False,
+                    repository_cache_root=os.path.join(root, "repo-cache"),
                 )
             )
             try:

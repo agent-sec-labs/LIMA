@@ -33,7 +33,6 @@ RUN python -m pip install -r requirements.txt
 COPY --from=frontend-build /build/dist ./frontend/dist
 
 COPY --chown=lima:lima lima ./lima
-COPY --chown=lima:lima web ./web
 COPY --chown=lima:lima skills ./skills
 COPY --chown=lima:lima scripts/scan_repository.py ./scripts/scan_repository.py
 COPY --chown=lima:lima scripts/run_repair_evaluation.py ./scripts/run_repair_evaluation.py
@@ -46,11 +45,14 @@ FROM base AS test
 COPY --chown=lima:lima tests ./tests
 COPY --chown=lima:lima Dockerfile pyproject.toml docker-compose.yml .env.example LIMA_ROADMAP.md CONTRIBUTING.md ./
 COPY --chown=lima:lima .github ./.github
-# 契约测试在镜像内校验前端 CI 门禁与产物布局（T9）：只带配置原文，
-# 不带 e2e 夹具语料（故意含漏洞的样本不进入任何镜像层）。
-COPY --chown=lima:lima frontend/vitest.config.ts frontend/playwright.config.ts ./frontend/
+# 契约测试在镜像内校验前端 CI 门禁与产物布局（T9）以及 React 唯一前端
+# 结构契约（T10）：带配置与源码原文，不带 e2e 夹具语料（不进任何镜像层）。
+COPY --chown=lima:lima frontend/package.json frontend/index.html frontend/vitest.config.ts frontend/playwright.config.ts ./frontend/
+COPY --chown=lima:lima frontend/src ./frontend/src
 COPY --chown=lima:lima frontend/e2e/audit-lifecycle.spec.ts ./frontend/e2e/
-COPY --chown=lima:lima .gitignore ./
+COPY --chown=lima:lima .gitignore README.md ./
+COPY --chown=lima:lima docs/DEVELOPER_HANDOFF.md docs/GITHUB_COLLABORATION.md ./docs/
+COPY --chown=lima:lima docs/assets ./docs/assets
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
 COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
 USER lima:lima

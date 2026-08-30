@@ -30,7 +30,7 @@
 
 ## 修改类型与最小测试
 
-- Web 交互：更新 `tests/test_frontend_ui.py`，运行 `node --check web/app.js`。
+- 前端交互：更新 `frontend/` 的 Vitest 用例并运行 `npm run typecheck`；`tests/test_frontend_ui.py` 锚定前端结构契约（T10 起 React 为唯一前端，legacy `web/` 已删除）。
 - API/Service/Store：覆盖成功、权限拒绝、租户隔离和非法输入。
 - 队列/实验：覆盖 ACK/重试边界、崩溃恢复、预算、模糊 LLM 调用和 artifact 完整性。
 - 漏洞检测：同时提供危险样本、安全近邻和不确定形态，禁止只有单个命中样本。

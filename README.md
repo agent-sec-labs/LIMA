@@ -1,6 +1,6 @@
 # 砺码 · LIMA
 
-<p align="center"><img src="web/lima-mark.svg" width="88" alt="砺码 LIMA Logo"></p>
+<p align="center"><img src="docs/assets/lima-mark.svg" width="88" alt="砺码 LIMA Logo"></p>
 
 **LIMA — LLM-powered Intelligent Mining & Auto-repair for Repositories**
 

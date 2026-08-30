@@ -44,11 +44,13 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         )
         for required in (
             "ubuntu-latest", "windows-latest", "'3.11'", "'3.12'",
-            "node --check web/app.js", "tests.test_experiments",
+            "tests.test_experiments",
             "scripts/run_ci_tests.py", "actions/upload-artifact@",
             "docker run --rm --read-only", "--min-constraint-accuracy 1.0",
         ):
             self.assertIn(required, workflow)
+        # T10：legacy 前端语法检查随 web/ 一并退役（React 有 typecheck + Vitest）。
+        self.assertNotIn("node --check", workflow)
         self.assertTrue((ROOT / "scripts" / "run_ci_tests.py").is_file())
 
     def test_frontend_quality_and_linux_only_e2e_gates_are_present(self):

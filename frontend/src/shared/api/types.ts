@@ -110,6 +110,43 @@ export interface FindingItem {
   evidence?: string;
   explanation?: string;
   fix?: string;
+  fingerprint?: string;
+}
+
+/** 仲裁决策：后端给出或由客户端按 verification_state 推导（与 legacy 语义一致）。 */
+export interface AdjudicationDecision {
+  fingerprint?: string;
+  path?: string;
+  line?: number;
+  start_line?: number;
+  symbol?: string;
+  rule_id?: string;
+  disposition: "alert" | "needs_review" | "clear";
+  reason: string;
+  decision_source?: string;
+  llm_root_cause?: string;
+  llm_mitigation_evidence?: string;
+  llm_sink_evidence?: string;
+}
+
+export interface ScanAdjudication {
+  policy?: string;
+  overall_disposition?: string;
+  overall_reason?: string;
+  auto_clear?: boolean;
+  counts?: { alert?: number; needs_review?: number; clear?: number };
+  decisions?: AdjudicationDecision[];
+}
+
+/** 语义复核状态（report.collaboration.semantic_triage）。 */
+export interface SemanticTriage {
+  status?: string;
+  mode?: string;
+  provider?: string;
+  model?: string;
+  retrieval?: { evidence_candidates?: number };
+  usage?: { total_tokens?: number };
+  latency_ms?: number;
 }
 
 export interface ScanReport {
@@ -119,18 +156,20 @@ export interface ScanReport {
   summary?: string;
   findings?: FindingItem[];
   files_reviewed?: string[] | number;
-  adjudication?: { policy?: string; overall_disposition?: string };
+  file_count?: number;
+  adjudication?: ScanAdjudication;
   collaboration?: {
     scanned_files?: number;
     scanned_bytes?: number;
     workspace_truncated?: boolean;
     skipped?: Record<string, number>;
+    semantic_triage?: SemanticTriage;
     import_policy?: {
       resolved_revision?: string;
       cache_hit?: boolean;
       repository_key?: string;
       archive_sha256?: string;
-      source?: Record<string, unknown>;
+      source?: { requested_ref?: string; [key: string]: unknown };
     };
     [key: string]: unknown;
   };
@@ -157,6 +196,52 @@ export interface HealthPayload {
   reviewer: string;
   runtime: string;
   queue: string;
+}
+
+/** POST /v1/tasks/:id/repair-preview（repair_preview.py 契约）。 */
+export interface RepairPreviewResult {
+  task_id?: string;
+  repository?: string;
+  status: "verified-preview" | "blocked" | "no-repair" | string;
+  snapshot_sha256?: string;
+  files_changed?: number;
+  changed_lines?: number;
+  rules?: string[];
+  strategies?: string[];
+  patches?: { path: string; diff: string }[];
+  blocked_findings?: unknown[];
+  verification?: { passed?: boolean; checks?: string[] };
+  publication_ready?: boolean;
+  note?: string;
+  duration_seconds?: number;
+  [key: string]: unknown;
+}
+
+/** POST /v1/tasks/:id/fix（fixer.create_fix_commits 契约）。 */
+export interface FixResult {
+  branch: string | null;
+  source_sha?: string;
+  commits?: unknown[];
+  note?: string;
+  [key: string]: unknown;
+}
+
+export type FeedbackCategory = "false_positive" | "missed_issue" | "bad_fix";
+
+export interface FeedbackPayload {
+  category: FeedbackCategory;
+  finding: FindingItem | null;
+  note: string;
+}
+
+/** GET /v1/tasks/:id/feedback → cases（store.list_task_failure_cases 行）。 */
+export interface FeedbackCase {
+  id?: number;
+  task_id?: string;
+  category: string;
+  payload?: { finding?: FindingItem | null; note?: string };
+  resolved?: boolean | number;
+  created_at?: string;
 }
 
 export interface LoginResponse {

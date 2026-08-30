@@ -33,8 +33,8 @@ SKILL_ARTIFACT_VERSIONS = re.compile(r"^/v1/skill-evolution/([a-z0-9_-]+)/versio
 SKILL_ARTIFACT_ACTIVATE = re.compile(
     r"^/v1/skill-evolution/([a-z0-9_-]+)/versions/(\d+)/activate$"
 )
-WEB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
-# React 构建产物（frontend/ npm run build）；存在时经 /app/ 前缀托管（T5）。
+# React 构建产物（frontend/ npm run build）是唯一前端表面：
+# / 与 /app/ 都指向它（T10 移除 legacy web/ 后的正式切换）。
 APP_DIST_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 )
@@ -81,23 +81,6 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _send_text(self, status: int, text: str, content_type: str = "text/plain; charset=utf-8") -> None:
         body = text.encode("utf-8")
         self._headers(status, content_type, len(body))
-        self.wfile.write(body)
-
-    def _serve_file(self, filename: str) -> None:
-        path = os.path.abspath(os.path.join(WEB_ROOT, filename))
-        if not path.startswith(WEB_ROOT + os.sep) and path != WEB_ROOT:
-            self._send_json(404, {"error": "not found"})
-            return
-        try:
-            with open(path, "rb") as handle:
-                body = handle.read()
-        except OSError:
-            self._send_json(404, {"error": "not found"})
-            return
-        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
-            content_type += "; charset=utf-8"
-        self._headers(200, content_type, len(body))
         self.wfile.write(body)
 
     def _serve_app_file(self, filename: str) -> None:
@@ -165,19 +148,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "frontend build not present"})
             return
         if path == "/":
-            self._serve_file("index.html")
-            return
-        if path == "/assets/app.css":
-            self._serve_file("app.css")
-            return
-        if path == "/assets/login.css":
-            self._serve_file("login.css")
-            return
-        if path == "/assets/app.js":
-            self._serve_file("app.js")
-            return
-        if path == "/assets/lima-mark.svg":
-            self._serve_file("lima-mark.svg")
+            # T10：React 为唯一前端。根路径重定向到 /app/（无构建产物时
+            # 与 /app/ 一致地 fail-closed 返回 404，绝不回退旧 UI）。
+            if os.path.isdir(APP_DIST_ROOT):
+                self.send_response(302)
+                self.send_header("Location", "/app/")
+                self.end_headers()
+            else:
+                self._send_json(404, {"error": "frontend build not present"})
             return
         if path == "/health":
             self._send_json(200, {"status": "ok", "version": __version__,
@@ -212,10 +190,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[A-Za-z0-9_.-]*", account):
                 account = "github-app"
             self.send_response(302)
+            # T10：登记面板位于 React 设置页（消费 github_installation 查询参数）。
             target = urllib.parse.urlencode({
-                "installation_id": installation_id, "account": account,
+                "github_installation": installation_id, "account": account,
             })
-            self.send_header("Location", "/#github-install?" + target)
+            self.send_header("Location", "/app/#/settings?" + target)
             self.end_headers()
             return
         principal = self._authenticate_or_send("read")

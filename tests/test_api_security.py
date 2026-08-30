@@ -101,10 +101,29 @@ class ApiSecurityTests(unittest.TestCase):
             "GET", "/github/setup?installation_id=42&account=octo")
         self.assertEqual(302, status)
         location = headers.get("Location", "")
-        self.assertTrue(location.startswith("/#github-install?"), location)
-        self.assertIn("installation_id=42", location)
+        # T10：回跳目标切换到 React 设置页（legacy #github-install 已退役）。
+        self.assertTrue(location.startswith("/app/#/settings?"), location)
+        self.assertIn("github_installation=42", location)
         # 未认证的浏览器回跳不得产生任何登记副作用
         self.assertIsNone(self.service.store.installation_tenant(42))
+
+    def test_root_redirects_to_react_app_and_fails_closed_without_build(self):
+        from unittest import mock
+
+        from lima import api as api_module
+
+        with tempfile.TemporaryDirectory() as dist:
+            with mock.patch.object(api_module, "APP_DIST_ROOT", dist):
+                status, headers, _ = self.request("GET", "/")
+        self.assertEqual(302, status)
+        self.assertEqual("/app/", headers.get("Location"))
+
+        with mock.patch.object(
+            api_module, "APP_DIST_ROOT", os.path.join(tempfile.gettempdir(), "lima-absent-dist")
+        ):
+            status, _, body = self.request("GET", "/")
+        self.assertEqual(404, status, body)
+        self.assertEqual("frontend build not present", body.get("error"))
 
     def test_github_setup_rejects_invalid_installation_id(self):
         for value in ("", "abc", "-3", "12;drop"):

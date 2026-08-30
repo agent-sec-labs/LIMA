@@ -60,12 +60,10 @@
       },
       "build_steps": [
         ["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug", "-DPODOFO_BUILD_LIB_ONLY=ON", "-DPODOFO_BUILD_STATIC=ON", "-DPODOFO_WANT_LCMS2=OFF", "-DCMAKE_DISABLE_FIND_PACKAGE_JPEG=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_TIFF=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_PNG=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_Fontconfig=TRUE", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
-        ["make", "-C", "build", "-f", "src/podofo/CMakeFiles/podofo_static.dir/build.make", "src/podofo/CMakeFiles/podofo_static.dir/main/PdfTokenizer.cpp.o"]
-      ],
-      "test_steps": [
         ["make", "-C", "build", "-f", "src/podofo/CMakeFiles/podofo_static.dir/build.make", "-B", "src/podofo/CMakeFiles/podofo_static.dir/main/PdfTokenizer.cpp.o"]
       ],
-      "selection_rationale": "CVE-2025-9394 and the one-parent upstream fix identify a use-after-free in PdfTokenizer::DetermineDataType; the pinned build-verification force-compiles that exact translation unit on both revisions. GitHub archives omit the test-resources submodule, and the bounded snapshot omits oversized generated utf8proc data, so this case does not claim a complete library link, a PoDoFo unit-test run, or a deterministic vulnerability trigger.",
+      "test_steps": [],
+      "selection_rationale": "CVE-2025-9394 and the one-parent upstream fix identify a use-after-free in PdfTokenizer::DetermineDataType; the pinned build-verification force-compiles that exact translation unit on both revisions. GitHub archives omit the test-resources submodule, and the bounded snapshot omits oversized generated utf8proc data, so no runtime sanitizer test is configured and this case does not claim a complete library link, a PoDoFo unit-test run, or a deterministic vulnerability trigger.",
       "license": {
         "spdx": "LGPL-2.0-or-later",
         "url": "https://raw.githubusercontent.com/podofo/podofo/22d16cb142f293bf956f66a4d399cdd65576d36c/COPYING"

@@ -44,8 +44,9 @@ The C/C++ manifest stores metadata only; upstream source is downloaded into the
 operator-selected cache and extracted into a temporary shared repository root.
 Every pair includes exact 40-hex commits, two HTTPS archive URLs and measured
 SHA-256 values, an advisory, upstream fix, affected path/symbol, argv-array
-build/test steps, selection rationale, and a pinned license URL. Build/test
-arrays are reviewed administrator configuration: scheduled CI validates the
+build/test steps, selection rationale, and a pinned license URL. Build steps
+must be non-empty; test steps may be empty when no genuine runtime test is
+available. Both arrays are reviewed administrator configuration: scheduled CI validates the
 full manifest, selects one exact committed case, and starts a fresh Sidecar
 with those arrays before evaluating both revisions. The evaluator never sends
 commands or environment variables in an analyzer request.
@@ -62,5 +63,6 @@ Every matrix leg emits its own auditable report. See
 `docs/CXX_MEMORY_ANALYSIS.md` for the shared cache mount, Sidecar isolation,
 metric definitions, and validity limits. A case may use a narrowly pinned,
 project-generated build-verification target when the upstream archive omits
-safe test resources; the manifest and report must state that boundary and must
-not describe an absent unit suite as passing.
+safe test resources. Compile-only verification stays in `build_steps`; an
+absent runtime suite uses empty `test_steps`, and the manifest and report must
+not describe it as a passing sanitizer or unit-test run.

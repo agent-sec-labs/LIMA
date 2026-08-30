@@ -98,8 +98,10 @@ def _is_https(value: object) -> bool:
     )
 
 
-def _validate_steps(label: str, value: object) -> None:
-    if not isinstance(value, list) or not value:
+def _validate_steps(label: str, value: object, *, allow_empty: bool = False) -> None:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array of argv arrays")
+    if not value and not allow_empty:
         raise ValueError(f"{label} must be a non-empty array of argv arrays")
     for step in value:
         if not isinstance(step, list) or not step:
@@ -233,7 +235,7 @@ def _validate_case(case: object) -> None:
     ):
         raise ValueError("affected path or symbol is unsafe")
     _validate_steps("build_steps", case["build_steps"])
-    _validate_steps("test_steps", case["test_steps"])
+    _validate_steps("test_steps", case["test_steps"], allow_empty=True)
     rationale = case["selection_rationale"]
     if (
         not isinstance(rationale, str)

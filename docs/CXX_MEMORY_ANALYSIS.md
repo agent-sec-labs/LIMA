@@ -144,10 +144,11 @@ free；该限制必须保留在评测解释中。
 
 CWE-416 使用 PoDoFo 的 CVE-2025-9394。上游 GitHub 归档不含 `test/resources`
 submodule，而默认有界 snapshot 不接纳超过单文件预算的生成式 `utf8proc_data.c`；因此固定
-步骤只通过 CMake 生成的 `build.make` 强制编译
-`src/podofo/main/PdfTokenizer.cpp`，不会把“没有测试”记为通过，也不声称完整库已链接或漏洞
-已确定触发。该 build-verification 在 vulnerable/fixed 两端都验证受影响翻译单元进入真实
-Linux/Clang 编译边界。
+`build_steps` 只通过 CMake 生成的 `build.make` 强制编译
+`src/podofo/main/PdfTokenizer.cpp`。该 compile-only build-verification 在 vulnerable/fixed
+两端都验证受影响翻译单元进入真实 Linux/Clang 编译边界。PoDoFo 的 `test_steps` 为空，运行时
+sanitizer 层明确记为 `sanitizer-not-configured`，不会生成 completed `asan-test` 或 sanitizer
+coverage；也不声称完整库已链接、PoDoFo 单元测试已通过或漏洞已确定触发。
 
 **合成和固定样本结果不代表真实项目完整检测能力**。这些样本参与规则和流程验证，不能用来
 宣称外部泛化、零日能力或生产召回率。

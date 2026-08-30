@@ -124,7 +124,7 @@ class PublicCaseSchemaTests(unittest.TestCase):
         )
         self.assertEqual(4, len(document["cases"]))
 
-    def test_committed_cwe416_pair_uses_the_verified_podofo_object_build(self):
+    def test_committed_cwe416_pair_keeps_compile_verification_out_of_runtime_steps(self):
         document = json.loads(CASES_PATH.read_text(encoding="utf-8"))
         case = next(item for item in document["cases"] if item["cwe"] == "CWE-416")
 
@@ -149,12 +149,31 @@ class PublicCaseSchemaTests(unittest.TestCase):
         )
         object_target = "src/podofo/CMakeFiles/podofo_static.dir/main/PdfTokenizer.cpp.o"
         self.assertEqual("make", case["build_steps"][1][0])
+        self.assertIn("-B", case["build_steps"][1])
         self.assertIn(object_target, case["build_steps"][1])
-        self.assertEqual("make", case["test_steps"][0][0])
-        self.assertIn("-B", case["test_steps"][0])
-        self.assertIn(object_target, case["test_steps"][0])
+        self.assertEqual([], case["test_steps"])
         self.assertIn("build-verification", case["selection_rationale"])
         self.assertIn("test-resources submodule", case["selection_rationale"])
+
+    def test_schema_accepts_empty_runtime_steps_but_rejects_malformed_values(self):
+        case = valid_case()
+        case["test_steps"] = []
+        self.module.validate_case_document(valid_document(case))
+
+        malformed_values = (
+            None,
+            "ctest --test-dir build",
+            ["ctest", "--test-dir", "build"],
+            [[]],
+            [["ctest", ""]],
+            [["sh", "-c", "ctest --test-dir build"]],
+        )
+        for value in malformed_values:
+            with self.subTest(value=value):
+                invalid = valid_case()
+                invalid["test_steps"] = value
+                with self.assertRaises(ValueError):
+                    self.module.validate_case_document(valid_document(invalid))
 
     def test_schema_rejects_unpinned_non_https_and_shell_shaped_values(self):
         mutations = {
@@ -311,6 +330,26 @@ class MetricTests(unittest.TestCase):
         )
         self.assertEqual(0.0, report["build_success_rate"])
         self.assertEqual(1.0, report["timeout_rate"])
+
+    def test_unconfigured_runtime_sanitizer_does_not_count_as_completed_coverage(self):
+        case = valid_case("podofo-podofo-cve-2025-9394", "CWE-416")
+        completed_compile_only_result = analysis(
+            tool_runs=[
+                tool_run("semgrep", "completed"),
+                tool_run("build-step", "completed"),
+                tool_run("clang", "completed"),
+            ]
+        )
+        completed_compile_only_result["diagnostics"] = ["sanitizer-not-configured"]
+
+        report = self.module.run_evaluation(
+            [case], lambda _case, _revision: completed_compile_only_result
+        )
+        vulnerable = report["cases"][0]["revisions"]["vulnerable"]
+
+        self.assertEqual(0.0, report["layer_coverage"]["sanitizer-confirmed"])
+        self.assertFalse(vulnerable["layer_completed"]["sanitizer-confirmed"])
+        self.assertNotIn("asan-test", {run["tool"] for run in vulnerable["tool_runs"]})
 
     def test_revision_records_recompute_every_aggregate_metric(self):
         case = valid_case("audit", "CWE-787")

@@ -300,10 +300,15 @@ class GitHubMaterializer:
             code = {
                 404: GITHUB_NOT_FOUND,
                 401: GITHUB_AUTH_REQUIRED,
-                403: GITHUB_AUTH_REQUIRED,
                 429: GITHUB_RATE_LIMITED,
                 408: GITHUB_TIMEOUT,
             }.get(exc.code)
+            if exc.code == 403:
+                # 403 双关：配额耗尽（匿名 60 次/小时共享限额）与凭据/权限被拒
+                # 都返回 403。按 X-RateLimit-Remaining 区分，避免把限流误报成
+                # 「无权限」误导排障方向（2026-08-30 实证案例）。
+                exhausted = (exc.headers or {}).get("X-RateLimit-Remaining") == "0"
+                code = GITHUB_RATE_LIMITED if exhausted else GITHUB_AUTH_REQUIRED
             if code is None and exc.code >= 500:
                 code = GITHUB_NETWORK_ERROR
             if code is None:

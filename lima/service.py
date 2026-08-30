@@ -702,7 +702,11 @@ class ReviewService:
     def _materializer(self) -> GitHubMaterializer:
         if self.repository_materializer is None:
             self.repository_materializer = GitHubMaterializer(
-                self._ensure_repository_cache()
+                self._ensure_repository_cache(),
+                # GitHub API 凭据接线：settings.github_token（LIMA_GITHUB_TOKEN）
+                # 必须随构造传入——此前漏传导致所有远程扫描匿名调用，
+                # 撞 60 次/小时的共享限额后被 GitHub 403 拒绝（2026-08-30 实证）。
+                auth_token=self.settings.github_token,
             )
         return self.repository_materializer
 

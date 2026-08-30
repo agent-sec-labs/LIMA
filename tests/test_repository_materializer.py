@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import tempfile
 import threading
 import time
@@ -32,6 +33,9 @@ def assert_typed_failure(testcase, code: str, stage: str, call):
     return failure
 
 GITHUB = RepositorySource.github("agent-sec-labs/LIMA")
+# 测试用假凭据（具名常量 + 豁免 S105；与本文件 noqa: S310 同惯例）。
+UNIT_GITHUB_TOKEN = "unit-token-value"  # noqa: S105 - fake credential for tests
+WIRED_GITHUB_TOKEN = "wired-token-value"  # noqa: S105 - fake credential for tests
 SHA = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 OTHER_SHA = "b1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b"
 
@@ -95,6 +99,7 @@ class FakeOpener:
         resolve_failures: int = 0,
         download_delay: float = 0.0,
         gate: threading.Event | None = None,
+        resolve_http_error: tuple[int, str, dict[str, str]] | None = None,
     ) -> None:
         self.commit_sha = commit_sha
         self.archive = archive
@@ -102,15 +107,23 @@ class FakeOpener:
         self.resolve_failures = resolve_failures
         self.download_delay = download_delay
         self.gate = gate
+        self.resolve_http_error = resolve_http_error
         self.urls: list[str] = []
+        self.headers: list[dict[str, str]] = []
         self.downloads = 0
         self.resolves = 0
 
     def __call__(self, request, timeout=None):
         url = request.full_url
         self.urls.append(url)
+        self.headers.append(dict(request.headers))
         if url.startswith("https://api.github.com/repos/"):
             self.resolves += 1
+            if self.resolve_http_error is not None and self.resolves == 1:
+                status, reason, error_headers = self.resolve_http_error
+                raise urllib.error.HTTPError(
+                    url, status, reason, error_headers, io.BytesIO(b"")
+                )
             if self.resolves <= self.resolve_failures:
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
             return FakeResponse(json.dumps({"sha": self.commit_sha}).encode())
@@ -216,6 +229,60 @@ class MaterializationTests(MaterializerTestCase):
         self.assertEqual(0, stats["entries"])
         self.assertEqual(0, stats["staging"])
         self.assertEqual(0, stats["locks"])
+
+    def test_auth_token_attached_as_bearer_header(self):
+        # GitHub API 凭据必须随请求头携带；未配置时不得伪造 Authorization。
+        self.make_materializer({"auth_token": f" {UNIT_GITHUB_TOKEN} "}, archive=ARCHIVE)
+        self.materializer.materialize(GITHUB, "main")
+        self.assertEqual(
+            f"Bearer {UNIT_GITHUB_TOKEN}", self.opener.headers[0].get("Authorization")
+        )
+
+        self.make_materializer(archive=ARCHIVE)
+        self.materializer.materialize(GITHUB, "main")
+        self.assertNotIn("Authorization", self.opener.headers[0])
+
+    def test_rate_limited_403_reports_rate_limit_not_auth(self):
+        # 匿名共享限额（60 次/小时）耗尽的 403 带 X-RateLimit-Remaining: 0，
+        # 必须归类为限流而非「无权限」，否则误导排障方向。
+        self.make_materializer(
+            archive=ARCHIVE,
+            resolve_http_error=(403, "Forbidden", {"X-RateLimit-Remaining": "0"}),
+        )
+        assert_typed_failure(
+            self, "GITHUB_RATE_LIMITED", "RESOLVING_REVISION",
+            lambda: self.materializer.materialize(GITHUB, "main"),
+        )
+
+    def test_plain_403_still_reports_auth_required(self):
+        self.make_materializer(
+            archive=ARCHIVE, resolve_http_error=(403, "Forbidden", {})
+        )
+        assert_typed_failure(
+            self, "GITHUB_AUTH_REQUIRED", "RESOLVING_REVISION",
+            lambda: self.materializer.materialize(GITHUB, "main"),
+        )
+
+    def test_service_wires_settings_github_token_into_materializer(self):
+        # 回归锚点：ReviewService 构造 materializer 时必须传入 settings 凭据
+        # （2026-08-30 之前漏传，导致所有远程扫描匿名调用并被 403 拒绝）。
+        from lima.config import Settings
+        from lima.service import ReviewService
+
+        with tempfile.TemporaryDirectory(suffix="-t2svc") as root:
+            service = ReviewService(
+                Settings(
+                    host="127.0.0.1", port=0, db_path=os.path.join(root, "s.db"),
+                    max_diff_bytes=100000, max_steps=8, timeout_seconds=120,
+                    llm_base_url="", llm_api_key="", llm_model="",
+                    github_webhook_secret="", github_token=WIRED_GITHUB_TOKEN,
+                    auto_post_review=False,
+                )
+            )
+            try:
+                self.assertEqual(WIRED_GITHUB_TOKEN, service._materializer()._auth_token)
+            finally:
+                service.close()
 
     def test_materialization_timeout(self):
         self.make_materializer(archive=ARCHIVE, download_delay=1.5)

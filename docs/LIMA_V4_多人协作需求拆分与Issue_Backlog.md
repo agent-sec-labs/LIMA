@@ -31,6 +31,44 @@ Integration Issues
 
 V3 继续作为信任边界和长期目标架构，V4 Issues 只实现能够证明价值的最小纵向切片。
 
+### 1.1 GitHub 实际落单索引（2026-08-31）
+
+总 Tracking Epic：[#85 `[EPIC][V4] 证据驱动三阶段安全平台 MVP 与门控扩展`](https://github.com/agent-sec-labs/LIMA/issues/85)。
+
+以下 `V4-Ixx` 是跨文档、分支和 PR 使用的稳定标识；GitHub Issue 编号因并行创建不完全按稳定标识排序，依赖和认领不得通过编号大小推断。
+
+| 稳定标识 | GitHub Issue | 阶段 | 交付主题 |
+|---|---:|---|---|
+| V4-I01 | [#57](https://github.com/agent-sec-labs/LIMA/issues/57) | Phase 0 | MVP 支持矩阵与可用性、成本、精度基线 |
+| V4-I02 | [#58](https://github.com/agent-sec-labs/LIMA/issues/58) | Phase 0 | 核心领域模型与跨阶段 Artifact 契约 |
+| V4-I03 | [#59](https://github.com/agent-sec-labs/LIMA/issues/59) | Phase 0 | 任务 SLO、资源预算与成本遥测 |
+| V4-I04 | [#60](https://github.com/agent-sec-labs/LIMA/issues/60) | Phase 1 | Repository Architecture Model 与安全语义清单 |
+| V4-I05 | [#61](https://github.com/agent-sec-labs/LIMA/issues/61) | Phase 1 | Evidence Fusion、SecurityIssue 聚类与 Hypothesis |
+| V4-I06 | [#62](https://github.com/agent-sec-labs/LIMA/issues/62) | Phase 1 | CWE-798 场景化降噪与语义证据 |
+| V4-I07 | [#64](https://github.com/agent-sec-labs/LIMA/issues/64) | Phase 1 | Fast/Deep Audit 分层执行与预算控制 |
+| V4-I08 | [#63](https://github.com/agent-sec-labs/LIMA/issues/63) | Phase 1 | 确定性 Audit Cache 与增量失效 |
+| V4-I09 | [#68](https://github.com/agent-sec-labs/LIMA/issues/68) | Phase 1 | Fast Audit 集成与 AEP 生成 |
+| V4-I10 | [#70](https://github.com/agent-sec-labs/LIMA/issues/70) | Phase 1 | Issue-Centric 渐进式审计前端 |
+| V4-I11 | [#65](https://github.com/agent-sec-labs/LIMA/issues/65) | Phase 1 | Security Case Candidate v0 |
+| V4-I12 | [#66](https://github.com/agent-sec-labs/LIMA/issues/66) | Phase 2 | Artifact Registry 与不可变对象存储 |
+| V4-I13 | [#67](https://github.com/agent-sec-labs/LIMA/issues/67) | Phase 2 | Lease、Attempt、幂等与崩溃恢复 |
+| V4-I14 | [#71](https://github.com/agent-sec-labs/LIMA/issues/71) | Phase 2 | Worker Supervisor 与三类沙箱权限模型 |
+| V4-I15 | [#73](https://github.com/agent-sec-labs/LIMA/issues/73) | Phase 2 | Tool Registry v0 与工具风险治理 |
+| V4-I16 | [#74](https://github.com/agent-sec-labs/LIMA/issues/74) | Phase 2 | Dependency Snapshot、wheelhouse 与 N0/N1 网络 |
+| V4-I17 | [#75](https://github.com/agent-sec-labs/LIMA/issues/75) | Phase 3 | CWE-22 Mining 纵切与 VEP |
+| V4-I18 | [#76](https://github.com/agent-sec-labs/LIMA/issues/76) | Phase 3 | 多候选生成式修复与最小变更约束 |
+| V4-I19 | [#77](https://github.com/agent-sec-labs/LIMA/issues/77) | Phase 3 | Repair Verification Gates 与 RVR |
+| V4-I20 | [#72](https://github.com/agent-sec-labs/LIMA/issues/72) | Phase 4 | H1 备份恢复与灾难恢复演练 |
+| V4-I21 | [#78](https://github.com/agent-sec-labs/LIMA/issues/78) | Phase 4 | 负载、压力、Soak 与故障注入 |
+| V4-I22 | [#79](https://github.com/agent-sec-labs/LIMA/issues/79) | Phase 4 | 试点验收与 MVP Go/No-Go |
+| V4-I23 | [#80](https://github.com/agent-sec-labs/LIMA/issues/80) | GATED | Security Case Library v1 与反馈闭环 |
+| V4-I24 | [#83](https://github.com/agent-sec-labs/LIMA/issues/83) | GATED | Python CWE 纵切扩展 |
+| V4-I25 | [#84](https://github.com/agent-sec-labs/LIMA/issues/84) | GATED | Beta HA、分布式队列与 Redis 评估 |
+| V4-I26 | [#81](https://github.com/agent-sec-labs/LIMA/issues/81) | GATED | pgvector/RAG 安全案例检索对照实验 |
+| V4-I27 | [#82](https://github.com/agent-sec-labs/LIMA/issues/82) | GATED | 语言、隔离后端、工具演化与 N3 网络 |
+
+落单规则：22 个 MVP Task 进入依赖排序和认领流程；5 个 `GATED` Task 在 [#79](https://github.com/agent-sec-labs/LIMA/issues/79) 给出满足各自启动条件的 Go/Conditional Go 前，不得进入实现排期。
+
 ## 2. 与已有 Issues 的去重
 
 创建 V4 Issues 前已核对仓库现有工作。以下能力直接复用，不重复立项：

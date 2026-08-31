@@ -105,7 +105,9 @@ affected path/symbol、build/test argv、选样理由和固定许可证 URL。�
 解压；解压器拒绝绝对路径、`..`、Windows 路径、符号链接、硬链接、设备/FIFO 和重复路径。
 第三方源码只存在于 cache/临时目录，不提交到 Git。
 
-评测器固定只有五个参数：
+评测器固定只有六个参数。镜像身份必须由运行评测的宿主机通过
+`docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval` 获取，不能由 Sidecar health
+响应自行声称：
 
 ```powershell
 python scripts/run_cxx_memory_evaluation.py `
@@ -113,6 +115,7 @@ python scripts/run_cxx_memory_evaluation.py `
   --cache-dir .cache/cxx-memory `
   --output output/cxx-memory-evaluation.json `
   --analyzer-url http://cxx-analyzer:8090 `
+  --analyzer-image-digest sha256:<64位小写十六进制镜像ID> `
   --fail-under-precision 0.80
 ```
 
@@ -133,8 +136,10 @@ diagnostic，绝不伪造 100%。
 每个 revision 还保存 `snapshot_sha256`、源码行数、目标身份/预测、各层 Finding 数与完成
 布尔值、构建尝试/完成、超时、耗时、严格有界的 tool-run/coverage/diagnostics。聚合混淆
 矩阵、FP/KLoC、层计数/覆盖率、构建率、超时率和总耗时都可仅从 `cases[].revisions` 独立
-重算。报告另记录 case-data SHA-256、Sidecar 报告的镜像 digest 和有效性边界；当前
-Sidecar 未提供镜像 digest 时字段为 `null` 并明确列为缺口，不能伪造身份。
+重算。报告另记录 case-data SHA-256、宿主机获得的实际 Docker image ID 和有效性边界；缺少
+或格式不合法的 image ID 会直接拒绝评测报告。基础镜像 digest、精确 Semgrep 版本、镜像内
+排序后的 Debian/Python 包清单以及实际 image ID 共同提供可审计身份。不过 apt 仓库没有按
+Debian snapshot 精确固定，因此这些证据支持审计，不构成逐字节可复现性声明。
 
 CWE-415 使用 curl/curl 的 CVE-2026-8925：固定构建显式启用 `CURL_USE_GSASL`，使
 `lib/vauth/gsasl.c::Curl_auth_gsasl_is_supported` 进入构建身份，测试以固定构建产物的

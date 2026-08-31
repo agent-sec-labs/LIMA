@@ -9,6 +9,9 @@ from .context_manager import ContextManager
 from .cxx_memory import (
     REQUESTED_LAYERS,
     SUPPORTED_CWES,
+    CxxAnalyzerHealth,
+    CxxAnalyzerProtocolError,
+    CxxAnalyzerUnavailable,
     CxxMemoryAnalyzerClient,
 )
 from .diff_parser import parse_unified_diff
@@ -372,6 +375,40 @@ class ReviewService:
 
     def repository_scan_capabilities(self) -> Dict[str, Any]:
         result = self.repository_import.capabilities()
+        health_status = "disabled"
+        health_schema_version = None
+        tool_availability = None
+        configuration = None
+        source_layer_available = False
+        build_layer_available = False
+        sanitizer_layer_available = False
+        cxx_adapter = self.repository_scanner.cxx_memory_adapter
+        if self.settings.cxx_memory_mode != "off" and cxx_adapter is not None:
+            try:
+                health = cxx_adapter.health()
+            except CxxAnalyzerUnavailable:
+                health_status = "unavailable"
+            except CxxAnalyzerProtocolError:
+                health_status = "invalid-response"
+            else:
+                if isinstance(health, CxxAnalyzerHealth):
+                    health_status = "available"
+                    health_schema_version = health.schema_version
+                    tool_availability = dict(health.tools)
+                    configuration = dict(health.configuration)
+                    source_layer_available = bool(
+                        health.tools["semgrep"] and health.configuration["source"]
+                    )
+                    build_layer_available = bool(
+                        health.tools["clang"] and health.configuration["build"]
+                    )
+                    sanitizer_layer_available = bool(
+                        health.tools["clang"]
+                        and health.configuration["build"]
+                        and health.configuration["test"]
+                    )
+                else:
+                    health_status = "invalid-response"
         result.update({
             "sast_mode": self.settings.repository_scan_sast_mode,
             "dataflow_enabled": True,
@@ -396,7 +433,15 @@ class ReviewService:
             "repair_tests_configured": bool(self.settings.repair_test_command),
             "cxx_memory": {
                 "mode": self.settings.cxx_memory_mode,
+                # Kept for v1 clients; authoritative availability is health_status below.
                 "analyzer_configured": bool(self.settings.cxx_analyzer_url),
+                "health_status": health_status,
+                "health_schema_version": health_schema_version,
+                "tool_availability": tool_availability,
+                "configuration": configuration,
+                "source_layer_available": source_layer_available,
+                "build_layer_available": build_layer_available,
+                "sanitizer_layer_available": sanitizer_layer_available,
                 "supported_extensions": sorted(CXX_SOURCE_EXTENSIONS),
                 "build_metadata_extensions": sorted(CXX_BUILD_EXTENSIONS),
                 "build_metadata_filenames": sorted(DEFAULT_FILENAMES),

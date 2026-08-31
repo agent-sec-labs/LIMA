@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 
 from .config import AnalyzerSettings
+from .deadline import AnalysisDeadline
 from .execution import ToolExecution, run_step
+from .languages import language_for_path
 from .normalizers import SUPPORTED_CWES, NormalizedFinding
+from .protocol import timed_out_tool_run, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 
 _RULE_PREFIXES = {
@@ -20,8 +24,9 @@ _RULE_PREFIXES = {
     "cxx.source.double-free": "CWE-415",
 }
 _RULE_FILE_NAME = ".lima-semgrep-rules.yml"
-RULES_TEMP_ROOT = Path("/work/tmp")
-_SOURCE_SUFFIXES = {".c": "c", ".cc": "c++", ".cpp": "c++", ".cxx": "c++"}
+RULES_TEMP_ROOT: Path | None = None
+MAX_SEMGREP_ERRORS = 64
+MAX_SEMGREP_ERROR_BYTES = 4_096
 
 
 @dataclass(frozen=True)
@@ -79,8 +84,32 @@ def parse_semgrep_json(
         document = json.loads(raw)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("Semgrep did not return valid JSON") from exc
-    if not isinstance(document, dict) or not isinstance(document.get("results"), list):
+    if (
+        not isinstance(document, dict)
+        or not isinstance(document.get("results"), list)
+        or not isinstance(document.get("errors"), list)
+    ):
         raise ValueError("Semgrep JSON lacks a results list")
+
+    errors = document["errors"]
+    if len(errors) > MAX_SEMGREP_ERRORS:
+        raise ValueError("Semgrep JSON contains too many errors")
+    for error in errors:
+        if not isinstance(error, dict):
+            raise ValueError("Semgrep error is invalid")
+        error_type = error.get("type")
+        message = error.get("message")
+        if (
+            not isinstance(error_type, str)
+            or not error_type
+            or not isinstance(message, str)
+            or not message
+            or len(error_type.encode("utf-8")) > MAX_SEMGREP_ERROR_BYTES
+            or len(message.encode("utf-8")) > MAX_SEMGREP_ERROR_BYTES
+        ):
+            raise ValueError("Semgrep error is invalid")
+    if errors:
+        return (), ["semgrep-reported-errors"]
 
     diagnostics: list[str] = []
     findings: list[NormalizedFinding] = []
@@ -95,9 +124,10 @@ def parse_semgrep_json(
         start = result.get("start")
         if not isinstance(start, dict) or type(start.get("line")) is not int or start["line"] < 1:
             raise ValueError("Semgrep result line is invalid")
-        language = _SOURCE_SUFFIXES.get(PurePosixPath(path).suffix.lower())
-        if language is None:
-            raise ValueError("Semgrep result does not identify C or C++ source")
+        try:
+            language = language_for_path(path)
+        except ValueError:
+            raise ValueError("Semgrep result does not identify C or C++ source") from None
         evidence = extra.get("lines", "")
         if not isinstance(evidence, str) or not evidence:
             raise ValueError("Semgrep result lacks bounded source evidence")
@@ -132,24 +162,27 @@ def parse_semgrep_json(
 
 
 def _tool_run(execution: ToolExecution) -> dict[str, object]:
-    return {
-        "tool": "semgrep",
-        "status": execution.status,
-        "returncode": execution.returncode,
-        "output_sha256": execution.output_sha256 if execution.digests_complete else "",
-        "output_truncated": execution.output_truncated,
-        "digests_complete": execution.digests_complete,
-    }
+    return tool_run_from_execution("semgrep", execution)
 
 
-def run_source_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> LayerResult:
+def run_source_scan(
+    snapshot: PreparedSnapshot,
+    settings: AnalyzerSettings,
+    *,
+    deadline: AnalysisDeadline | None = None,
+) -> LayerResult:
     """Run packaged narrow rules without admitting any unbounded tool output."""
 
+    active_deadline = deadline or AnalysisDeadline.start(settings.total_timeout_seconds)
+    timeout = active_deadline.step_timeout(settings.step_timeout_seconds)
+    if timeout < 1:
+        return LayerResult((), ("timed-out",), (timed_out_tool_run("semgrep"),))
     snapshot.resolve_cwd(".")
     rule_text = files("cxx_analyzer.rules").joinpath("cxx-memory.yml").read_text(encoding="utf-8")
+    stage_root = RULES_TEMP_ROOT or snapshot.scratch_root
     try:
         with tempfile.TemporaryDirectory(
-            prefix="lima-semgrep-", dir=RULES_TEMP_ROOT
+            prefix="lima-semgrep-", dir=stage_root
         ) as rule_directory:
             rule_path = Path(rule_directory) / _RULE_FILE_NAME
             rule_path.write_text(rule_text, encoding="utf-8")
@@ -157,11 +190,12 @@ def run_source_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> L
                 (
                     "semgrep", "--json", "--quiet", "--config", str(rule_path),
                     "--include", "*.c", "--include", "*.cc", "--include", "*.cpp",
-                    "--include", "*.cxx", ".",
+                    "--include", "*.cxx", "--include", "*.h", "--include", "*.hh",
+                    "--include", "*.hpp", "--include", "*.hxx", ".",
                 ),
                 snapshot,
                 ".",
-                timeout_seconds=settings.step_timeout_seconds,
+                timeout_seconds=timeout,
                 max_output_bytes=settings.max_output_bytes,
                 env={},
             )
@@ -176,4 +210,23 @@ def run_source_scan(snapshot: PreparedSnapshot, settings: AnalyzerSettings) -> L
         findings, diagnostics = parse_semgrep_json(execution.stdout, set(snapshot.files))
     except ValueError:
         return LayerResult((), ("Semgrep JSON was rejected",), tool_runs)
+    if diagnostics:
+        return LayerResult(
+            (),
+            tuple(diagnostics),
+            (tool_run_from_execution("semgrep", execution, semantic_failure=True),),
+        )
     return LayerResult(findings, tuple(diagnostics), tool_runs)
+
+
+def recognized_host_semgrep_unavailability(
+    returncode: int, stderr: str, *, platform_name: str | None = None
+) -> bool:
+    """Recognize only the documented Windows trust-store startup failure."""
+
+    platform_value = platform_name or sys.platform
+    return (
+        platform_value == "win32"
+        and returncode == 2
+        and "Failed to create system store X509 authenticator" in stderr
+    )

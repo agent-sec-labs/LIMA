@@ -6,14 +6,16 @@ import json
 import plistlib
 import re
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
 from .config import MAX_ARGUMENT_BYTES, MAX_ARGUMENTS_PER_STEP, AnalyzerSettings
+from .deadline import AnalysisDeadline
 from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
+from .languages import language_for_path
 from .normalizers import NormalizedFinding
+from .protocol import timed_out_tool_run, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 from .source_scan import LayerResult
 
@@ -41,11 +43,10 @@ _CWE_SLUG: Final = {
     "CWE-416": "use-after-free",
     "CWE-415": "double-free",
 }
-_CPP_SUFFIXES: Final = frozenset({".cc", ".cpp", ".cxx"})
 _MAX_DATABASE_BYTES: Final = 4 * 1024 * 1024
 _MAX_DATABASE_ENTRIES: Final = 2048
 _MAX_PLIST_BYTES: Final = 4 * 1024 * 1024
-_ANALYZER_TEMP_ROOT: Final = Path("/work/tmp")
+_ANALYZER_TEMP_ROOT: Path | None = None
 MAX_COMPILATION_UNITS: Final = 256
 MAX_FINDINGS: Final = 256
 MAX_DIAGNOSTICS: Final = 256
@@ -132,7 +133,7 @@ class BuildContext:
     snapshot_root: Path
     snapshot_files: tuple[str, ...]
     sanitizer_enabled: bool = False
-    deadline: float = 0.0
+    deadline: AnalysisDeadline | None = None
 
 
 class AnalysisBudgetExceeded(ValueError):
@@ -443,7 +444,7 @@ def parse_clang_plist(
             continue
         if not trace:
             trace.append({"kind": "event", "path": path, "line": line, "column": 1})
-        language = "c++" if PurePosixPath(path).suffix.lower() in _CPP_SUFFIXES else "c"
+        language = language_for_path(path)
         findings.append(
             NormalizedFinding.create(
                 rule_id=f"cxx.clang.{_CWE_SLUG[cwe]}",
@@ -473,33 +474,11 @@ def parse_clang_plist(
 def _tool_run(
     tool: str, execution: ToolExecution, *, build_step: bool = False
 ) -> dict[str, object]:
-    status = execution.status
-    if build_step and status not in {"completed", "timed-out"}:
-        status = "build_failed"
-    return {
-        "tool": tool,
-        "status": status,
-        "returncode": execution.returncode,
-        "output_sha256": execution.output_sha256 if execution.digests_complete else "",
-        "output_truncated": execution.output_truncated,
-        "digests_complete": execution.digests_complete,
-    }
+    return tool_run_from_execution(tool, execution, build_step=build_step)
 
 
 def _deadline_run(tool: str) -> dict[str, object]:
-    return {
-        "tool": tool,
-        "status": "timed-out",
-        "returncode": None,
-        "output_sha256": "",
-        "output_truncated": False,
-        "digests_complete": False,
-    }
-
-
-def _remaining_timeout(deadline: float, step_timeout: int) -> int:
-    remaining = int(deadline - time.monotonic())
-    return min(step_timeout, remaining) if remaining > 0 else 0
+    return timed_out_tool_run(tool)
 
 
 def _mark_budget_exhausted(diagnostics: list[str]) -> None:
@@ -542,7 +521,7 @@ def _find_database(snapshot: PreparedSnapshot) -> Path | None:
 
 def _analyzer_argv(unit: CompilationUnit, output: Path) -> tuple[str, ...]:
     compiler = (
-        "clang++-14" if PurePosixPath(unit.file).suffix.lower() in _CPP_SUFFIXES else "clang-14"
+        "clang++-14" if language_for_path(unit.file) == "c++" else "clang-14"
     )
     original = list(unit.arguments[1:])
     filtered: list[str] = []
@@ -575,7 +554,11 @@ def _analyzer_argv(unit: CompilationUnit, output: Path) -> tuple[str, ...]:
 
 
 def run_build_scan(
-    snapshot: PreparedSnapshot, settings: AnalyzerSettings, *, sanitizer_enabled: bool = False
+    snapshot: PreparedSnapshot,
+    settings: AnalyzerSettings,
+    *,
+    sanitizer_enabled: bool = False,
+    deadline: AnalysisDeadline | None = None,
 ) -> LayerResult:
     """Build a trusted context and run Clang without turning target failures into HTTP errors."""
 
@@ -583,12 +566,12 @@ def run_build_scan(
     if not steps:
         return LayerResult((), ("build-not-configured",), ())
 
-    deadline = time.monotonic() + settings.total_timeout_seconds
+    active_deadline = deadline or AnalysisDeadline.start(settings.total_timeout_seconds)
     tool_runs: list[dict[str, object]] = []
     for step in steps:
         if len(tool_runs) >= MAX_TOOL_RUNS:
             return LayerResult((), (_BUDGET_DIAGNOSTIC,), tuple(tool_runs))
-        remaining = _remaining_timeout(deadline, settings.step_timeout_seconds)
+        remaining = active_deadline.step_timeout(settings.step_timeout_seconds)
         if remaining <= 0:
             tool_runs.append(_deadline_run("build-step"))
             return LayerResult((), ("timed-out",), tuple(tool_runs))
@@ -623,7 +606,7 @@ def run_build_scan(
     aggregate_plist_bytes = 0
     try:
         with tempfile.TemporaryDirectory(
-            prefix="lima-clang-", dir=_ANALYZER_TEMP_ROOT
+            prefix="lima-clang-", dir=_ANALYZER_TEMP_ROOT or snapshot.scratch_root
         ) as temporary:
             output_root = Path(temporary)
             for index, unit in enumerate(units):
@@ -643,7 +626,7 @@ def run_build_scan(
                 except ValueError:
                     diagnostics.append("compile-commands-rejected")
                     continue
-                remaining = _remaining_timeout(deadline, settings.step_timeout_seconds)
+                remaining = active_deadline.step_timeout(settings.step_timeout_seconds)
                 if remaining <= 0:
                     tool_runs.append(_deadline_run("clang"))
                     diagnostics.append("timed-out")
@@ -698,6 +681,6 @@ def run_build_scan(
             Path(snapshot.root).resolve(),
             tuple(snapshot.files),
             sanitizer_enabled,
-            deadline,
+            active_deadline,
         ),
     )

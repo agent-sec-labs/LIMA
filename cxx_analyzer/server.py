@@ -11,10 +11,12 @@ from typing import Any, Final
 
 from .build_scan import run_build_scan
 from .config import AnalyzerSettings
+from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
+from .languages import CXX_SOURCE_SUFFIXES
 from .normalizers import NormalizedFinding, fuse_findings
+from .sanitizer_scan import run_sanitizer_scan
 from .snapshot import _normalize_repository_key, prepare_snapshot
 from .source_scan import run_source_scan
-from .sanitizer_scan import run_sanitizer_scan
 
 SCHEMA_VERSION: Final = 1
 HOST: Final = "0.0.0.0"  # noqa: S104 - Reachable only on the internal Compose network.
@@ -35,36 +37,79 @@ _REQUEST_FIELDS: Final = frozenset(
 _SUPPORTED_LAYERS: Final = frozenset(
     {"source-only", "build-backed", "sanitizer-confirmed"}
 )
-_SOURCE_SUFFIXES: Final = frozenset({".c", ".cc", ".cpp", ".cxx"})
+
+_FINDING_TOOL_RUN = {
+    "semgrep": ("semgrep", frozenset({"completed"})),
+    "clang": ("clang", frozenset({"completed"})),
+    "asan": ("asan-test", frozenset({"completed", "failed"})),
+}
 
 
 def _bound_response_lists(
     findings: tuple[NormalizedFinding, ...], diagnostics: list[object],
     tool_runs: list[dict[str, object]],
 ) -> tuple[tuple[NormalizedFinding, ...], tuple[object, ...], tuple[dict[str, object], ...]]:
-    """Apply one response budget after all evidence layers, preferring ASan proof."""
+    """Apply one evidence-aware response budget, preferring stronger proof."""
 
     ranked = sorted(
         enumerate(findings),
-        key=lambda item: ({"source-only": 0, "build-backed": 1, "sanitizer-confirmed": 2}[item[1].analysis_mode], -item[0]),
+        key=lambda item: (
+            {"source-only": 0, "build-backed": 1, "sanitizer-confirmed": 2}[
+                item[1].analysis_mode
+            ],
+            -item[0],
+        ),
         reverse=True,
     )
-    kept_indexes = {index for index, _ in ranked[:MAX_FINDINGS]}
-    bounded_findings = tuple(item for index, item in enumerate(findings) if index in kept_indexes)
+    kept_indexes: set[int] = set()
+    mandatory_run_indexes: set[int] = set()
+    missing_evidence = False
+    for finding_index, finding in ranked:
+        if len(kept_indexes) >= MAX_FINDINGS:
+            break
+        required = _FINDING_TOOL_RUN.get(finding.tool)
+        if required is None:
+            missing_evidence = True
+            continue
+        tool, statuses = required
+        matching = [
+            index
+            for index, run in enumerate(tool_runs)
+            if run.get("tool") == tool and run.get("status") in statuses
+        ]
+        if not matching:
+            missing_evidence = True
+            continue
+        kept_indexes.add(finding_index)
+        mandatory_run_indexes.add(matching[-1])
+    bounded_findings = tuple(
+        item for index, item in enumerate(findings) if index in kept_indexes
+    )
+    selected_run_indexes = set(mandatory_run_indexes)
+    for index in range(len(tool_runs)):
+        if len(selected_run_indexes) >= MAX_TOOL_RUNS:
+            break
+        selected_run_indexes.add(index)
+    bounded_tool_runs = tuple(
+        run for index, run in enumerate(tool_runs) if index in selected_run_indexes
+    )
     exhausted = (
         len(findings) > MAX_FINDINGS
         or len(diagnostics) > MAX_DIAGNOSTICS
         or len(tool_runs) > MAX_TOOL_RUNS
     )
-    bounded_diagnostics = tuple(diagnostics[:MAX_DIAGNOSTICS])
-    if exhausted:
+    diagnostic_values = list(diagnostics)
+    if missing_evidence and "finding-without-tool-evidence" not in diagnostic_values:
+        diagnostic_values.append("finding-without-tool-evidence")
+    bounded_diagnostics = tuple(diagnostic_values[:MAX_DIAGNOSTICS])
+    if exhausted or len(diagnostic_values) > MAX_DIAGNOSTICS:
         if MAX_DIAGNOSTICS < 1:
             bounded_diagnostics = ()
         elif len(bounded_diagnostics) >= MAX_DIAGNOSTICS:
             bounded_diagnostics = (*bounded_diagnostics[:-1], "analysis-budget-exhausted")
         elif "analysis-budget-exhausted" not in bounded_diagnostics:
             bounded_diagnostics = (*bounded_diagnostics, "analysis-budget-exhausted")
-    return bounded_findings, bounded_diagnostics, tuple(tool_runs[:MAX_TOOL_RUNS])
+    return bounded_findings, bounded_diagnostics, bounded_tool_runs
 
 
 class RequestError(ValueError):
@@ -142,6 +187,7 @@ def _validate_payload(payload: object) -> dict[str, object]:
 def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, object]:
     """Validate a complete request before preparing and analyzing its snapshot."""
 
+    deadline = AnalysisDeadline.start(settings.total_timeout_seconds)
     request = _validate_payload(payload)
     request_id = request["request_id"]
     try:
@@ -150,7 +196,12 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
             request["repository_key"],  # type: ignore[arg-type]
             request["snapshot_sha256"],  # type: ignore[arg-type]
             WORK_ROOT,
+            deadline=deadline,
         )
+    except AnalysisDeadlineExceeded as exc:
+        raise RequestError(
+            "analysis_timed_out", status=504, request_id=request_id  # type: ignore[arg-type]
+        ) from exc
     except (OSError, ValueError) as exc:
         raise RequestError(
             "snapshot_rejected", request_id=request_id  # type: ignore[arg-type]
@@ -161,32 +212,63 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
     sanitizer_findings: tuple[NormalizedFinding, ...] = ()
     tool_runs: list[dict[str, object]] = []
     diagnostics: list[object] = []
-    with prepared as snapshot:
+    build_context: object | None = None
+    snapshot = prepared.__enter__()
+    try:
+        snapshot.verify_inventory(deadline)
         requested_layers = request["requested_layers"]
         if "source-only" in requested_layers:
-            result = run_source_scan(snapshot, settings)
+            result = run_source_scan(snapshot, settings, deadline=deadline)
             source_findings = result.findings
             tool_runs.extend(result.tool_runs)
             diagnostics.extend(result.diagnostics)
+            snapshot.verify_inventory(deadline)
         if "build-backed" in requested_layers:
             if "sanitizer-confirmed" in requested_layers:
-                result = run_build_scan(snapshot, settings, sanitizer_enabled=True)
+                result = run_build_scan(
+                    snapshot,
+                    settings,
+                    sanitizer_enabled=True,
+                    deadline=deadline,
+                )
             else:
-                result = run_build_scan(snapshot, settings)
+                result = run_build_scan(snapshot, settings, deadline=deadline)
             build_findings = result.findings
+            build_context = result.build_context
             tool_runs.extend(result.tool_runs)
             diagnostics.extend(result.diagnostics)
+            snapshot.verify_inventory(deadline)
         if "sanitizer-confirmed" in requested_layers:
-            build_context = result.build_context if "build-backed" in requested_layers else None
-            result = run_sanitizer_scan(snapshot, settings, build_context)
+            result = run_sanitizer_scan(
+                snapshot,
+                settings,
+                build_context,
+                deadline=deadline,
+            )
             sanitizer_findings = result.findings
             tool_runs.extend(result.tool_runs)
             diagnostics.extend(result.diagnostics)
+            snapshot.verify_inventory(deadline)
         source_files = sum(
-            PurePosixPath(path).suffix.lower() in _SOURCE_SUFFIXES
+            PurePosixPath(path).suffix.lower() in CXX_SOURCE_SUFFIXES
             for path in snapshot.files
         )
         snapshot_files = len(snapshot.files)
+    except AnalysisDeadlineExceeded as exc:
+        raise RequestError(
+            "analysis_timed_out", status=504, request_id=request_id  # type: ignore[arg-type]
+        ) from exc
+    except ValueError as exc:
+        raise RequestError(
+            "snapshot_rejected", request_id=request_id  # type: ignore[arg-type]
+        ) from exc
+    finally:
+        try:
+            prepared.cleanup(deadline=deadline)
+        except AnalysisDeadlineExceeded as exc:
+            raise RequestError(
+                "analysis_timed_out", status=504, request_id=request_id  # type: ignore[arg-type]
+            ) from exc
 
     findings, diagnostics, tool_runs = _bound_response_lists(
         fuse_findings(source_findings, build_findings, sanitizer_findings),
@@ -246,18 +328,24 @@ def _encode_payload(payload: dict[str, object]) -> bytes:
     return _json_encoder().encode(payload).encode("utf-8")
 
 
-def health_payload() -> dict[str, object]:
+def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
     """Return no process detail beyond versioned tool availability booleans."""
 
+    clang_pair = (
+        shutil.which("clang-14") is not None
+        and shutil.which("clang++-14") is not None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "tools": {
             "semgrep": shutil.which("semgrep") is not None,
             "cmake": shutil.which("cmake") is not None,
-            "clang": any(
-                shutil.which(executable) is not None
-                for executable in ("clang-14", "clang")
-            ),
+            "clang": clang_pair,
+        },
+        "configuration": {
+            "source": True,
+            "build": bool(settings.auto_cmake or settings.build_steps),
+            "test": bool(settings.test_steps),
         },
     }
 
@@ -276,7 +364,7 @@ def dispatch_request(
     if path == _HEALTH_PATH:
         if method != "GET":
             return 405, _error_payload("method_not_allowed")
-        return 200, health_payload()
+        return 200, health_payload(settings)
     if method != "POST":
         return 405, _error_payload("method_not_allowed")
     if content_type.split(";", 1)[0].strip().lower() != "application/json":
@@ -385,7 +473,6 @@ def serve() -> None:
 
     settings = AnalyzerSettings.from_env()
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
-    Path("/work/tmp").mkdir(parents=True, exist_ok=True)
 
     class ConfiguredHandler(AnalyzerRequestHandler):
         analyzer_settings = settings

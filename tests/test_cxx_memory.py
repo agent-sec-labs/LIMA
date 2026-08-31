@@ -18,17 +18,28 @@ from lima.fixer import SafeFixer
 from lima.models import Finding, Severity
 from lima.report import to_markdown
 from lima.repository_scanner import VERIFICATION_RANK, RepositoryScanner
-from lima.workspace import RepositoryWorkspace
+from lima.workspace import (
+    RepositoryWorkspace,
+    WorkspaceFile,
+    WorkspaceInventory,
+)
 
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
-SNAPSHOT_SHA256 = "a" * 64
+CLIENT_INVENTORY = WorkspaceInventory(
+    root="/repositories/team/project",
+    files=[
+        WorkspaceFile("src/free.c", 1, "c" * 64, 12),
+        WorkspaceFile("config.json", 1, "d" * 64, 1),
+    ],
+)
+SNAPSHOT_SHA256 = CLIENT_INVENTORY.fingerprint()
 
 
 def valid_tool_run(tool="semgrep", status="completed"):
     return {
         "tool": tool,
         "status": status,
-        "returncode": 0,
+        "returncode": 0 if status == "completed" else None if status == "timed-out" else 1,
         "output_sha256": "b" * 64,
         "output_truncated": False,
         "digests_complete": True,
@@ -112,8 +123,8 @@ class FakeCxxAdapter:
         self.result = result
         self.error = error
 
-    def analyze(self, repository_key, snapshot_sha256, requested_layers):
-        self.calls.append((repository_key, snapshot_sha256, requested_layers))
+    def analyze(self, repository_key, snapshot_sha256, requested_layers, *, inventory):
+        self.calls.append((repository_key, snapshot_sha256, requested_layers, inventory))
         if self.error:
             raise self.error
         return self.result
@@ -249,7 +260,15 @@ class CxxRepositoryScannerTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                [("team/project", result.inventory.fingerprint(), REQUESTED_LAYERS)], adapter.calls
+                [
+                    (
+                        "team/project",
+                        result.inventory.fingerprint(),
+                        REQUESTED_LAYERS,
+                        result.inventory,
+                    )
+                ],
+                adapter.calls,
             )
             self.assertEqual("completed", result.report.collaboration["cxx_memory"]["status"])
 
@@ -372,6 +391,9 @@ class CxxRepositoryScannerTests(unittest.TestCase):
                 workspace = RepositoryWorkspace(root)
                 payload = valid_response_payload()
                 payload["snapshot_sha256"] = workspace.inventory().fingerprint()
+                payload["findings"][0].update(
+                    {"path": "main.cpp", "line": 1, "language": "c++"}
+                )
                 payload["tool_runs"] = [
                     valid_tool_run(),
                     valid_tool_run("build-step", "build_failed"),
@@ -440,6 +462,7 @@ class CxxMemoryClientTests(unittest.TestCase):
             "team/project",
             SNAPSHOT_SHA256,
             ("source-only", "build-backed"),
+            inventory=CLIENT_INVENTORY,
         )
 
         self.assertEqual("http://cxx-analyzer:8090/v1/analyze", opener.request.full_url)
@@ -536,7 +559,12 @@ class CxxMemoryClientTests(unittest.TestCase):
                 )
 
                 with self.assertRaises(CxxAnalyzerProtocolError):
-                    client.analyze("team/project", SNAPSHOT_SHA256, ("source-only",))
+                    client.analyze(
+                        "team/project",
+                        SNAPSHOT_SHA256,
+                        ("source-only",),
+                        inventory=CLIENT_INVENTORY,
+                    )
 
                 self.assertEqual([], client.converted_findings)
 
@@ -571,6 +599,7 @@ class CxxMemoryClientTests(unittest.TestCase):
                         "team/project",
                         SNAPSHOT_SHA256,
                         ("source-only", "build-backed"),
+                        inventory=CLIENT_INVENTORY,
                     )
 
                 self.assertEqual([], client.converted_findings)
@@ -599,6 +628,7 @@ class CxxMemoryClientTests(unittest.TestCase):
                         "team/project",
                         SNAPSHOT_SHA256,
                         requested_layers,
+                        inventory=CLIENT_INVENTORY,
                     )
 
                 self.assertIsNone(opener.request)
@@ -620,6 +650,7 @@ class CxxMemoryClientTests(unittest.TestCase):
             "snapshot digest",
             lambda value: value.update({"snapshot_sha256": "b" * 64}),
         )
+        changed("non-object finding", lambda value: value.update({"findings": [None]}))
         changed("unknown CWE", lambda value: value["findings"][0].update({"cwe": "CWE-119"}))
         changed("absolute path", lambda value: value["findings"][0].update({"path": "/etc/passwd"}))
         changed("parent path", lambda value: value["findings"][0].update({"path": "../escape.c"}))
@@ -669,6 +700,7 @@ class CxxMemoryClientTests(unittest.TestCase):
                         "team/project",
                         SNAPSHOT_SHA256,
                         ("source-only", "build-backed"),
+                        inventory=CLIENT_INVENTORY,
                     )
 
                 self.assertEqual([], client.converted_findings)

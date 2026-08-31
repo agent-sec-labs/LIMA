@@ -47,6 +47,7 @@ class WorkspaceFile:
     path: str
     size: int
     sha256: str
+    line_count: int
 
 
 @dataclass
@@ -82,7 +83,12 @@ class WorkspaceInventory:
         return {
             "root": self.root,
             "files": [
-                {"path": item.path, "size": item.size, "sha256": item.sha256}
+                {
+                    "path": item.path,
+                    "size": item.size,
+                    "sha256": item.sha256,
+                    "line_count": item.line_count,
+                }
                 for item in self.files
             ],
             "skipped": dict(sorted(self.skipped.items())),
@@ -217,13 +223,18 @@ class RepositoryWorkspace:
                 self._record_skip(result, "binary")
                 continue
             try:
-                data.decode("utf-8")
+                decoded = data.decode("utf-8")
             except UnicodeDecodeError:
                 self._record_skip(result, "non-utf8")
                 continue
             relative = path.relative_to(self.root).as_posix()
             result.files.append(
-                WorkspaceFile(relative, size, hashlib.sha256(data).hexdigest())
+                WorkspaceFile(
+                    relative,
+                    size,
+                    hashlib.sha256(data).hexdigest(),
+                    len(decoded.splitlines()),
+                )
             )
             result.total_bytes += size
         return result

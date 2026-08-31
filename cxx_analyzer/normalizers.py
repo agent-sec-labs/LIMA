@@ -146,11 +146,18 @@ def fuse_findings(
     build_findings: tuple[NormalizedFinding, ...],
     sanitizer_findings: tuple[NormalizedFinding, ...] = (),
 ) -> tuple[NormalizedFinding, ...]:
-    """Replace only exact conservative identities with higher-evidence layers."""
+    """Preserve every evidence layer; main-boundary fusion owns presentation merge."""
 
     fused: list[NormalizedFinding] = []
+    seen: set[tuple[str, str, str, int, str, str]] = set()
     for layer in (source_findings, build_findings, sanitizer_findings):
-        incoming = {conservative_identity(item) for item in layer}
-        fused = [item for item in fused if conservative_identity(item) not in incoming]
-        fused.extend(layer)
+        for item in layer:
+            identity = (
+                *conservative_identity(item),
+                item.tool,
+                item.rule_id,
+            )
+            if identity not in seen:
+                seen.add(identity)
+                fused.append(item)
     return tuple(fused)

@@ -13,11 +13,12 @@ import time
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import cxx_analyzer.server as analyzer_server
 import cxx_analyzer.source_scan as source_scan
 from cxx_analyzer.config import AnalyzerSettings, parse_steps_json
+from cxx_analyzer.deadline import AnalysisDeadline
 from cxx_analyzer.execution import (
     CLEAN_ENVIRONMENT,
     StreamCapture,
@@ -293,7 +294,8 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             self.addCleanup(snapshot.cleanup)
 
             self.assertEqual(expected, snapshot.sha256)
-            self.assertEqual(work_root.resolve(), snapshot.root.parent)
+            self.assertEqual(work_root.resolve(), snapshot.root.parent.parent)
+            self.assertEqual("source", snapshot.root.name)
             self.assertEqual(
                 [
                     "CMakeLists.txt",
@@ -430,8 +432,11 @@ class AnalyzerBoundaryTests(unittest.TestCase):
 
     @patch("cxx_analyzer.execution._stream_process")
     @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.process_isolation_available", return_value=True)
     @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=3)
-    def test_run_step_uses_launcher_snapshot_cwd_and_clean_env(self, _abi, popen, stream):
+    def test_run_step_uses_launcher_snapshot_cwd_and_clean_env(
+        self, _abi, _process_isolation, popen, stream
+    ):
         process = Mock()
         process.pid = 1234
         popen.return_value = process
@@ -478,7 +483,14 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         self.assertEqual("sandbox.py", Path(called_argv[1]).name)
         self.assertFalse(called_options["shell"])
         self.assertEqual(snapshot.root / "src", Path(called_options["cwd"]))
-        self.assertEqual(CLEAN_ENVIRONMENT, called_options["env"])
+        self.assertEqual(
+            {
+                **CLEAN_ENVIRONMENT,
+                "HOME": str(snapshot.scratch_root / "home"),
+                "TMPDIR": str(snapshot.scratch_root / "tmp"),
+            },
+            called_options["env"],
+        )
         self.assertEqual(subprocess.DEVNULL, called_options["stdin"])
         self.assertEqual(subprocess.PIPE, called_options["stdout"])
         self.assertEqual(subprocess.PIPE, called_options["stderr"])
@@ -622,8 +634,11 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             )
 
     @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.process_isolation_available", return_value=True)
     @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=0)
-    def test_run_step_fails_closed_without_landlock(self, _abi, popen):
+    def test_run_step_fails_closed_without_landlock(
+        self, _abi, _process_isolation, popen
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             import_root, repository, work_root = self._repository(temporary)
             (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
@@ -638,11 +653,14 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         popen.assert_not_called()
 
     @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.process_isolation_available", return_value=True)
     @patch(
         "cxx_analyzer.execution.sandbox.landlock_abi",
         side_effect=PermissionError("seccomp denied Landlock query"),
     )
-    def test_run_step_fails_closed_when_landlock_query_is_denied(self, _abi, popen):
+    def test_run_step_fails_closed_when_landlock_query_is_denied(
+        self, _abi, _process_isolation, popen
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             import_root, repository, work_root = self._repository(temporary)
             (repository / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
@@ -676,8 +694,11 @@ class AnalyzerBoundaryTests(unittest.TestCase):
 
     @patch("cxx_analyzer.execution._stream_process")
     @patch("cxx_analyzer.execution.subprocess.Popen")
+    @patch("cxx_analyzer.execution.sandbox.process_isolation_available", return_value=True)
     @patch("cxx_analyzer.execution.sandbox.landlock_abi", return_value=3)
-    def test_run_step_fails_closed_when_launcher_never_reports_ready(self, _abi, popen, stream):
+    def test_run_step_fails_closed_when_launcher_never_reports_ready(
+        self, _abi, _process_isolation, popen, stream
+    ):
         popen.return_value = Mock(pid=1234)
         empty_sha256 = hashlib.sha256(b"").hexdigest()
         stream.return_value = StreamCapture(
@@ -889,14 +910,17 @@ class AnalyzerServiceTests(unittest.TestCase):
         self.assertEqual([{"tool": "semgrep", "status": "failed"}], result["tool_runs"])
         self.assertEqual([], result["findings"])
         self.assertEqual(["Semgrep source scan did not complete"], result["diagnostics"])
-        self.assertEqual({"source_files": 1, "snapshot_files": 2}, result["coverage"])
+        self.assertEqual({"source_files": 2, "snapshot_files": 2}, result["coverage"])
         prepare.assert_called_once_with(
             analyzer_server.IMPORT_ROOT,
             "team/project",
             self.SNAPSHOT_SHA256,
             analyzer_server.WORK_ROOT,
+            deadline=ANY,
         )
-        source_scan_runner.assert_called_once_with(snapshot, self._settings())
+        source_scan_runner.assert_called_once_with(
+            snapshot, self._settings(), deadline=ANY
+        )
 
     def test_dispatch_rejects_http_boundary_errors_with_sanitized_payloads(self):
         valid_body = json.dumps(self._payload()).encode("utf-8")
@@ -965,6 +989,7 @@ class AnalyzerServiceTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "tools": {"semgrep": True, "cmake": True, "clang": True},
+                "configuration": {"source": True, "build": True, "test": False},
             },
             payload,
         )
@@ -997,7 +1022,9 @@ class AnalyzerServiceTests(unittest.TestCase):
             analysis_mode="source-only",
             diagnostics=[],
         )
-        source_scan_runner.return_value = LayerResult((candidate,), (), ())
+        source_scan_runner.return_value = LayerResult(
+            (candidate,), (), ({"tool": "semgrep", "status": "completed"},)
+        )
         for tool, tool_status, diagnostic in (
             ("cmake", "build_failed", "build_failed"),
             ("clang", "failed", "clang_failed"),
@@ -1018,8 +1045,16 @@ class AnalyzerServiceTests(unittest.TestCase):
                 self.assertEqual("completed", result["status"])
                 self.assertEqual([candidate.to_dict()], result["findings"])
                 self.assertEqual([diagnostic], result["diagnostics"])
-                self.assertEqual([{"tool": tool, "status": tool_status}], result["tool_runs"])
-                build_scan_runner.assert_called_once_with(snapshot, self._settings())
+                self.assertEqual(
+                    [
+                        {"tool": "semgrep", "status": "completed"},
+                        {"tool": tool, "status": tool_status},
+                    ],
+                    result["tool_runs"],
+                )
+                build_scan_runner.assert_called_once_with(
+                    snapshot, self._settings(), deadline=ANY
+                )
 
     def test_http_handler_reads_exactly_the_declared_content_length(self):
         class ExactBody:
@@ -1325,6 +1360,14 @@ class SourceScanTests(unittest.TestCase):
                         "*.cpp",
                         "--include",
                         "*.cxx",
+                        "--include",
+                        "*.h",
+                        "--include",
+                        "*.hh",
+                        "--include",
+                        "*.hpp",
+                        "--include",
+                        "*.hxx",
                         ".",
                     ),
                     call.args[0],
@@ -1388,7 +1431,12 @@ class SourceScanTests(unittest.TestCase):
                         self.assertEqual((), result.findings)
                         self.assertEqual((diagnostic,), result.diagnostics)
                         self.assertEqual(1, len(result.tool_runs))
-                        self.assertEqual(execution.status, result.tool_runs[0]["status"])
+                        expected_status = (
+                            "failed"
+                            if not execution.digests_complete
+                            else execution.status
+                        )
+                        self.assertEqual(expected_status, result.tool_runs[0]["status"])
                         self.assertEqual(
                             execution.digests_complete,
                             result.tool_runs[0]["digests_complete"],
@@ -1656,7 +1704,7 @@ class BuildScanTests(unittest.TestCase):
         self.assertEqual(("build_failed",), result.diagnostics)
         self.assertEqual(SANITIZER_ENVIRONMENT, run_tool.call_args.kwargs["env"])
 
-    @patch("cxx_analyzer.build_scan.time.monotonic")
+    @patch("cxx_analyzer.deadline.time.monotonic")
     @patch("cxx_analyzer.build_scan.run_step")
     def test_total_deadline_stops_later_build_steps(self, run_tool, monotonic):
         from cxx_analyzer.build_scan import run_build_scan
@@ -1681,7 +1729,7 @@ class BuildScanTests(unittest.TestCase):
         )
         self.assertEqual("build-step", result.tool_runs[-1]["tool"])
 
-    @patch("cxx_analyzer.build_scan.time.monotonic")
+    @patch("cxx_analyzer.deadline.time.monotonic")
     @patch("cxx_analyzer.build_scan.run_step")
     def test_total_deadline_stops_later_clang_units(self, run_tool, monotonic):
         import cxx_analyzer.build_scan as build_scan
@@ -2134,10 +2182,10 @@ class BuildScanTests(unittest.TestCase):
 
         fused = fuse_findings((candidate, different_line), (build,))
 
-        self.assertEqual(2, len(fused))
+        self.assertEqual(3, len(fused))
         self.assertIn(build, fused)
         self.assertIn(different_line, fused)
-        self.assertNotIn(candidate, fused)
+        self.assertIn(candidate, fused)
 
     @patch("cxx_analyzer.build_scan.run_step")
     def test_clang_runs_only_after_successful_build_and_valid_database(self, run_tool):
@@ -2462,7 +2510,7 @@ class SanitizerScanTests(unittest.TestCase):
         finally:
             temporary.cleanup()
 
-    @patch("cxx_analyzer.sanitizer_scan.time.monotonic")
+    @patch("cxx_analyzer.deadline.time.monotonic")
     @patch("cxx_analyzer.sanitizer_scan.run_step")
     def test_shared_build_deadline_blocks_expired_and_later_test_steps(self, run_tool, monotonic):
         from cxx_analyzer.build_scan import BuildContext
@@ -2474,7 +2522,12 @@ class SanitizerScanTests(unittest.TestCase):
             expired = run_sanitizer_scan(
                 snapshot,
                 self._settings(test_steps=(("first",),)),
-                BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=4.0),
+                BuildContext(
+                    snapshot.root,
+                    snapshot.files,
+                    sanitizer_enabled=True,
+                    deadline=AnalysisDeadline(4.0),
+                ),
             )
             self.assertEqual(("timed-out",), expired.diagnostics)
             run_tool.assert_not_called()
@@ -2483,7 +2536,12 @@ class SanitizerScanTests(unittest.TestCase):
             later = run_sanitizer_scan(
                 snapshot,
                 self._settings(test_steps=(("first",), ("second",))),
-                BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True, deadline=1.0),
+                BuildContext(
+                    snapshot.root,
+                    snapshot.files,
+                    sanitizer_enabled=True,
+                    deadline=AnalysisDeadline(1.0),
+                ),
             )
             self.assertEqual(1, run_tool.call_count)
             self.assertEqual(("needs-human-review", "timed-out"), later.diagnostics)
@@ -2506,7 +2564,7 @@ class SanitizerScanTests(unittest.TestCase):
                     snapshot.root,
                     snapshot.files,
                     sanitizer_enabled=True,
-                    deadline=time.monotonic() + 90,
+                    deadline=AnalysisDeadline.start(90),
                 ),
             )
             self.assertEqual((), result.findings)
@@ -2542,7 +2600,7 @@ class SanitizerScanTests(unittest.TestCase):
                             snapshot.root,
                             snapshot.files,
                             sanitizer_enabled=True,
-                            deadline=time.monotonic() + 90,
+                            deadline=AnalysisDeadline.start(90),
                         ),
                     )
                     self.assertEqual((), result.findings)
@@ -2602,10 +2660,14 @@ class SanitizerScanTests(unittest.TestCase):
             analysis_mode="sanitizer-confirmed",
             diagnostics=[],
         )
-        source_runner.return_value = LayerResult((candidate,), (), ())
+        source_runner.return_value = LayerResult(
+            (candidate,), (), ({"tool": "semgrep", "status": "completed"},)
+        )
         context = BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True)
         build_runner.return_value = LayerResult((), (), (), context)
-        sanitizer_runner.return_value = LayerResult((confirmed,), (), ({"tool": "asan-test"},))
+        sanitizer_runner.return_value = LayerResult(
+            (confirmed,), (), ({"tool": "asan-test", "status": "completed"},)
+        )
         settings = self._settings(test_steps=(("test",),))
 
         result = analyzer_server.analyze_request(
@@ -2615,10 +2677,20 @@ class SanitizerScanTests(unittest.TestCase):
             settings,
         )
 
-        build_runner.assert_called_once_with(snapshot, settings, sanitizer_enabled=True)
-        sanitizer_runner.assert_called_once_with(snapshot, settings, context)
-        self.assertEqual([confirmed.to_dict()], result["findings"])
-        self.assertEqual([{"tool": "asan-test"}], result["tool_runs"])
+        build_runner.assert_called_once_with(
+            snapshot, settings, sanitizer_enabled=True, deadline=ANY
+        )
+        sanitizer_runner.assert_called_once_with(
+            snapshot, settings, context, deadline=ANY
+        )
+        self.assertEqual([candidate.to_dict(), confirmed.to_dict()], result["findings"])
+        self.assertEqual(
+            [
+                {"tool": "semgrep", "status": "completed"},
+                {"tool": "asan-test", "status": "completed"},
+            ],
+            result["tool_runs"],
+        )
 
     def test_executor_rejects_request_style_environment_instead_of_inheriting_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2679,11 +2751,16 @@ class SanitizerScanTests(unittest.TestCase):
             with patch.object(analyzer_server, "MAX_DIAGNOSTICS", 1):
                 with patch.object(analyzer_server, "MAX_TOOL_RUNS", 1):
                     findings, diagnostics, tool_runs = analyzer_server._bound_response_lists(
-                        (low, high), ["source", "asan"], [{"tool": "source"}, {"tool": "asan"}]
+                        (low, high),
+                        ["source", "asan"],
+                        [
+                            {"tool": "semgrep", "status": "completed"},
+                            {"tool": "asan-test", "status": "completed"},
+                        ],
                     )
         self.assertEqual((high,), findings)
         self.assertEqual(("analysis-budget-exhausted",), diagnostics)
-        self.assertEqual(({"tool": "source"},), tool_runs)
+        self.assertEqual(({"tool": "asan-test", "status": "completed"},), tool_runs)
 
 
 class SanitizerContainerTests(unittest.TestCase):
@@ -2813,7 +2890,9 @@ class SourceScanContainerTests(unittest.TestCase):
             text=True,
             timeout=30,
         )
-        if completed.returncode == 2 and "Fatal error:" in completed.stderr:
+        if source_scan.recognized_host_semgrep_unavailability(
+            completed.returncode, completed.stderr
+        ):
             self.skipTest("Semgrep is installed but unavailable on this host")
         self.assertEqual(0, completed.returncode, completed.stderr)
         findings, _ = parse_semgrep_json(

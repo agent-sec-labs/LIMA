@@ -1,3 +1,4 @@
+import html
 import re
 from collections.abc import Mapping
 from typing import Any, Dict, Iterable
@@ -77,6 +78,41 @@ def _safe_diagnostic_message(value: Any) -> str:
     return _safe_cxx_text(value, 240)
 
 
+def _cxx_markdown_prose(value: Any, maximum: int = _MAX_CXX_RENDER_TEXT) -> str:
+    """Encode bounded tool text for a single Markdown prose or heading line."""
+
+    text = " ".join(_safe_cxx_text(value, maximum).splitlines())
+    text = html.escape(text, quote=False)
+    if re.match(r"^(?:#{1,6}(?:\s|$)|[-+*]\s|\d+[.)]\s|`{3,}|~{3,})", text):
+        text = "&#8203;" + text
+    return text
+
+
+def _cxx_inline_code(value: Any) -> str:
+    """Return one safe CommonMark code span for untrusted tool text."""
+
+    text = _cxx_markdown_prose(value)
+    runs = [len(match.group(0)) for match in re.finditer(r"`+", text)]
+    if not runs:
+        return f"`{text}`"
+    delimiter = "`" * (max(runs) + 1)
+    return f"{delimiter} {text} {delimiter}"
+
+
+def _cxx_evidence_block(value: Any) -> tuple[str, str, str]:
+    """Return an adaptive fenced block that untrusted evidence cannot close."""
+
+    text = html.escape(_safe_cxx_text(value), quote=False)
+    runs = [len(match.group(0)) for match in re.finditer(r"`+", text)]
+    fence = "`" * max(3, (max(runs) + 1) if runs else 3)
+    protected_lines = []
+    for line in text.splitlines() or [""]:
+        if re.match(r"^(?:```|#{1,6}(?:\s|$))", line):
+            line = " " + line
+        protected_lines.append(line)
+    return f"{fence}text", "\n".join(protected_lines), fence
+
+
 def _cxx_diagnostics(collaboration: Dict[str, Any]) -> Iterable[str]:
     cxx_memory = collaboration.get("cxx_memory")
     if not isinstance(cxx_memory, dict):
@@ -87,7 +123,9 @@ def _cxx_diagnostics(collaboration: Dict[str, Any]) -> Iterable[str]:
     lines = []
     for item in diagnostics[:_MAX_CXX_DIAGNOSTICS]:
         code = _diagnostic_code(item)
-        message = _safe_diagnostic_message(item.get("message") if isinstance(item, dict) else "")
+        message = _cxx_markdown_prose(
+            item.get("message") if isinstance(item, dict) else "", 240
+        )
         label = _DIAGNOSTIC_LABELS.get(code, "分析层未完成，结果需要人工复核")
         if message:
             label = "%s：%s" % (label, message)
@@ -185,32 +223,41 @@ def to_markdown(report: Dict[str, Any]) -> str:
     for index, item in enumerate(findings, 1):
         severity = item.get("severity", "medium")
         is_cxx = _is_cxx_finding(item)
-        display = _safe_cxx_text if is_cxx else str
+        display = _cxx_markdown_prose if is_cxx else str
+        inline_code = (
+            _cxx_inline_code if is_cxx else lambda value: "`%s`" % str(value)
+        )
         path = display(item.get("path", ""))
         evidence = display(item.get("evidence", ""))
         source = display(item.get("source", "unknown"))
+        evidence_block = (
+            _cxx_evidence_block(item.get("evidence", ""))
+            if is_cxx
+            else ("```text", evidence, "```")
+        )
         lines.extend(
             [
                 "### %d. %s %s" % (index, icons.get(severity, "•"), display(item.get("title", "Finding"))),
                 "",
-                "`%s:%s` · **%s** · `%s` · `%s` · `%s`" % (
-                    path, item.get("line", 0), severity.upper(),
-                    display(item.get("rule_id", "")), display(item.get("cwe", "unmapped") or "unmapped"),
-                    item.get("verification_state", "candidate")),
+                "%s · **%s** · %s · %s · %s" % (
+                    inline_code(f"{path}:{item.get('line', 0)}"),
+                    severity.upper(),
+                    inline_code(item.get("rule_id", "")),
+                    inline_code(item.get("cwe", "unmapped") or "unmapped"),
+                    inline_code(item.get("verification_state", "candidate")),
+                ),
                 "",
                 display(item.get("explanation", "")),
                 "",
                 "**Evidence**",
                 "",
-                "```text",
-                evidence,
-                "```",
+                *evidence_block,
                 "",
                 "**Suggested fix:** %s" % display(item.get("fix", "")),
                 "",
                 "**Suggested test:** %s" % display(item.get("test", "")),
                 "",
-                "**Evidence sources:** `%s`" % source,
+                "**Evidence sources:** %s" % inline_code(source),
                 "",
             ]
         )
@@ -219,18 +266,19 @@ def to_markdown(report: Dict[str, Any]) -> str:
             lines.extend([
                 "**C/C++ memory-analysis details**",
                 "",
-                "- Language: `%s`" % display(item.get("language", "unknown")),
-                "- Symbol: `%s`" % display(item.get("symbol", "unknown")),
-                "- Location: `%s:%s`" % (path, item.get("line", 0)),
-                "- CWE: `%s`" % display(item.get("cwe", "unmapped") or "unmapped"),
-                "- Analysis mode: `%s` · **%s**" % (
-                    display(item.get("analysis_mode", "unknown")), _analysis_mode_label(analysis_mode),
+                "- Language: %s" % inline_code(item.get("language", "unknown")),
+                "- Symbol: %s" % inline_code(item.get("symbol", "unknown")),
+                "- Location: %s" % inline_code(f"{path}:{item.get('line', 0)}"),
+                "- CWE: %s" % inline_code(item.get("cwe", "unmapped") or "unmapped"),
+                "- Analysis mode: %s · **%s**" % (
+                    inline_code(item.get("analysis_mode", "unknown")),
+                    _analysis_mode_label(analysis_mode),
                 ),
-                "- Verification state: `%s` · %s" % (
-                    display(item.get("verification_state", "candidate")),
+                "- Verification state: %s · %s" % (
+                    inline_code(item.get("verification_state", "candidate")),
                     _verification_state_label(item.get("verification_state")),
                 ),
-                "- Tool: `%s`" % source,
+                "- Tool: %s" % inline_code(source),
                 "",
                 "**工具证据 / trace**",
                 "",
@@ -241,13 +289,17 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 if isinstance(record, Mapping) and record
             ] if isinstance(raw_evidence_records, (list, tuple)) else []
             for record in evidence_records:
-                lines.append("- `%s` · `%s:%s` · %s" % (
-                    display(record.get("source", "unknown")), display(record.get("path", "")),
-                    record.get("line", 0), display(record.get("snippet", "")),
+                record_path = display(record.get("path", ""))
+                lines.append("- %s · %s · %s" % (
+                    inline_code(record.get("source", "unknown")),
+                    inline_code(f"{record_path}:{record.get('line', 0)}"),
+                    display(record.get("snippet", "")),
                 ))
             if not evidence_records:
-                lines.append("- `%s` · `%s:%s` · %s" % (
-                    source, path, item.get("line", 0), evidence,
+                lines.append("- %s · %s · %s" % (
+                    inline_code(source),
+                    inline_code(f"{path}:{item.get('line', 0)}"),
+                    evidence,
                 ))
             lines.append("")
             if analysis_mode == "source-only":

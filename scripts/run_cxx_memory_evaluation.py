@@ -610,8 +610,21 @@ def download_verified_archive(url: str, expected_sha256: str, destination: Path)
             if not _is_https(response.geturl()):
                 raise ValueError("archive redirect must remain HTTPS")
             while True:
-                remaining_seconds()
-                block = response.read(1024 * 1024)
+                try:
+                    response_socket = response.fp.raw._sock
+                    set_timeout = response_socket.settimeout
+                except AttributeError as exc:
+                    raise RuntimeError(
+                        "archive response socket cannot enforce the total deadline"
+                    ) from exc
+                if not callable(set_timeout):
+                    raise RuntimeError(
+                        "archive response socket cannot enforce the total deadline"
+                    )
+                set_timeout(
+                    min(_DOWNLOAD_SOCKET_TIMEOUT_SECONDS, remaining_seconds())
+                )
+                block = response.read(64 * 1024)
                 remaining_seconds()
                 if not block:
                     break
@@ -650,7 +663,8 @@ def _source_line_count(workspace: RepositoryWorkspace) -> int:
 
 def _sidecar_result(base_url: str, repository_key: str, source_root: Path) -> dict[str, Any]:
     workspace = RepositoryWorkspace(source_root)
-    fingerprint = workspace.inventory().fingerprint()
+    inventory = workspace.inventory()
+    fingerprint = inventory.fingerprint()
     client = CxxMemoryAnalyzerClient(
         base_url, timeout_seconds=300, max_response_bytes=2 * 1024 * 1024
     )
@@ -659,6 +673,7 @@ def _sidecar_result(base_url: str, repository_key: str, source_root: Path) -> di
         repository_key,
         fingerprint,
         ("source-only", "build-backed", "sanitizer-confirmed"),
+        inventory=inventory,
     )
     elapsed = time.monotonic() - started
     findings = [
@@ -682,36 +697,19 @@ def _sidecar_result(base_url: str, repository_key: str, source_root: Path) -> di
     }
 
 
-def _analyzer_image_digest(base_url: str) -> str | None:
-    # Internal Compose deployments intentionally use HTTP on an isolated network.
-    request = urllib.request.Request(  # noqa: S310
-        base_url.rstrip("/") + "/health", method="GET"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
-            raw = response.read(64 * 1024 + 1)
-            header = response.headers.get("X-LIMA-Analyzer-Image-Digest")
-        if len(raw) > 64 * 1024:
-            return None
-        payload = json.loads(raw.decode("utf-8"))
-        value = header or (payload.get("image_digest") if isinstance(payload, dict) else None)
-        return value if isinstance(value, str) and _IMAGE_DIGEST.fullmatch(value) else None
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-
-
 def add_report_metadata(
     report: dict[str, Any],
     raw_case_data: bytes,
     *,
     analyzer_image_digest: str | None,
 ) -> dict[str, Any]:
+    if (
+        not isinstance(analyzer_image_digest, str)
+        or not _IMAGE_DIGEST.fullmatch(analyzer_image_digest)
+    ):
+        raise ValueError("analyzer image digest must be an exact Docker image ID")
     result = dict(report)
     diagnostics = list(result.get("diagnostics", []))
-    if analyzer_image_digest is None:
-        diagnostics.append(
-            "analyzer image digest was not reported; image identity is an evaluation validity gap"
-        )
     result["diagnostics"] = diagnostics
     result["analyzer_image_digest"] = analyzer_image_digest
     result["case_data_sha256"] = hashlib.sha256(raw_case_data).hexdigest()
@@ -720,8 +718,20 @@ def add_report_metadata(
         "Only the pinned affected path and symbol are labelled; other findings are not scored.",
         "A null metric means its denominator was zero, not a perfect score.",
         "Build and test argv are provenance metadata and are never sent in analyzer requests.",
+        (
+            "The base image digest, exact Semgrep version, package manifests, and actual "
+            "image ID are auditable; Debian apt repositories are not snapshot-pinned."
+        ),
     ]
     return result
+
+
+def _image_digest_argument(value: str) -> str:
+    if not _IMAGE_DIGEST.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "must be a Docker image ID in sha256:<64 lowercase hex> form"
+        )
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -730,6 +740,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--analyzer-url", required=True)
+    parser.add_argument(
+        "--analyzer-image-digest",
+        type=_image_digest_argument,
+        required=True,
+    )
     parser.add_argument("--fail-under-precision", type=float, required=True)
     return parser
 
@@ -776,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
     report = add_report_metadata(
         report,
         raw_case_data,
-        analyzer_image_digest=_analyzer_image_digest(args.analyzer_url),
+        analyzer_image_digest=args.analyzer_image_digest,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

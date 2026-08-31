@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
 
 from .config import AnalyzerSettings
+from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
 
 # These constants deliberately mirror lima.workspace without importing the application.
 DEFAULT_EXTENSIONS = frozenset(
@@ -47,6 +48,7 @@ class _InventoryFile:
     path: str
     size: int
     sha256: str
+    mode: int = 0
 
 
 @dataclass
@@ -54,15 +56,84 @@ class PreparedSnapshot:
     """A verified temporary tree containing only bounded inventory files."""
 
     root: Path
+    scratch_root: Path
+    build_root: Path
     sha256: str
     files: tuple[str, ...]
     _temporary_directory: tempfile.TemporaryDirectory[str]
     _root_identity: tuple[int, int]
+    _inventory: tuple[_InventoryFile, ...]
     _closed: bool = field(default=False, init=False, repr=False)
 
-    def cleanup(self) -> None:
+    @property
+    def writable_roots(self) -> tuple[Path, ...]:
+        """Return the only trees repository-provided processes may modify."""
+
+        return self.build_root, self.scratch_root
+
+    def verify_inventory(self, deadline: AnalysisDeadline | None = None) -> None:
+        """Re-verify every declared source byte without trusting generated output."""
+
+        if self._closed:
+            raise ValueError("prepared snapshot is no longer live")
+        if deadline is not None:
+            deadline.check("snapshot identity verification")
+        try:
+            root_metadata = self.root.lstat()
+        except OSError as exc:
+            raise ValueError("prepared snapshot is no longer live") from exc
+        if (
+            _is_symlink_or_reparse(self.root, root_metadata)
+            or not stat.S_ISDIR(root_metadata.st_mode)
+            or (root_metadata.st_dev, root_metadata.st_ino) != self._root_identity
+        ):
+            raise ValueError("prepared snapshot is no longer live")
+
+        verified: list[_InventoryFile] = []
+        for item in self._inventory:
+            if deadline is not None:
+                deadline.check("snapshot identity verification")
+            path = self.root.joinpath(*PurePosixPath(item.path).parts)
+            try:
+                metadata = path.lstat()
+                if _is_symlink_or_reparse(path, metadata) or not stat.S_ISREG(
+                    metadata.st_mode
+                ):
+                    raise ValueError("snapshot inventory file changed type")
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                descriptor = os.open(path, flags)
+                with os.fdopen(descriptor, "rb") as handle:
+                    opened = os.fstat(handle.fileno())
+                    if (opened.st_dev, opened.st_ino) != (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ):
+                        raise ValueError("snapshot inventory file changed identity")
+                    data = handle.read(item.size + 1)
+            except ValueError:
+                raise
+            except OSError as exc:
+                raise ValueError("snapshot inventory file is unreadable") from exc
+            digest = hashlib.sha256(data).hexdigest()
+            if len(data) != item.size or digest != item.sha256:
+                raise ValueError("snapshot inventory bytes changed after verification")
+            verified.append(_InventoryFile(item.path, len(data), digest, item.mode))
+        if _fingerprint(verified) != self.sha256:
+            raise ValueError("snapshot inventory fingerprint changed after verification")
+
+    def cleanup(self, *, deadline: AnalysisDeadline | None = None) -> None:
+        if self._closed:
+            return
+        expired = deadline is not None and deadline.remaining() <= 0
         self._closed = True
+        _make_tree_owner_writable(Path(self._temporary_directory.name))
         self._temporary_directory.cleanup()
+        if deadline is not None and (expired or deadline.remaining() <= 0):
+            raise AnalysisDeadlineExceeded("snapshot cleanup exceeded the request deadline")
 
     def resolve_cwd(self, relative_cwd: str | os.PathLike[str]) -> Path:
         """Resolve a real directory below this live snapshot without following links."""
@@ -110,6 +181,46 @@ class PreparedSnapshot:
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.cleanup()
+
+
+def _make_tree_owner_writable(root: Path) -> None:
+    """Restore owner permissions so read-only source files can be removed safely."""
+
+    if not root.exists():
+        return
+    for current_root, directory_names, file_names in os.walk(root, topdown=False):
+        current = Path(current_root)
+        for name in file_names:
+            try:
+                (current / name).chmod(0o600)
+            except OSError:
+                pass
+        for name in directory_names:
+            try:
+                (current / name).chmod(0o700)
+            except OSError:
+                pass
+    try:
+        root.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _freeze_source_tree(root: Path, inventory: tuple[_InventoryFile, ...]) -> None:
+    """Make declared source immutable by mode as defense behind Landlock."""
+
+    for item in inventory:
+        path = root.joinpath(*PurePosixPath(item.path).parts)
+        path.chmod(0o555 if item.mode & 0o111 else 0o444)
+    directories = sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        if directory.name != "build":
+            directory.chmod(0o555)
+    root.chmod(0o555)
 
 
 def _is_symlink_or_reparse(path: Path, metadata: os.stat_result | None = None) -> bool:
@@ -192,7 +303,14 @@ def _path_within(root: Path, path: Path) -> None:
         raise ValueError("repository file escapes repository root") from exc
 
 
-def _read_regular_file(root: Path, path: Path, max_file_bytes: int) -> bytes:
+def _read_regular_file(
+    root: Path,
+    path: Path,
+    max_file_bytes: int,
+    deadline: AnalysisDeadline | None = None,
+) -> bytes:
+    if deadline is not None:
+        deadline.check("repository inventory read")
     _path_within(root, path)
     try:
         before = path.lstat()
@@ -235,14 +353,22 @@ def _read_regular_file(root: Path, path: Path, max_file_bytes: int) -> bytes:
     ):
         raise ValueError("repository file changed while reading")
     _path_within(root, path)
+    if deadline is not None:
+        deadline.check("repository inventory read")
     return data
 
 
-def _inventory(repository: Path, settings: AnalyzerSettings) -> tuple[_InventoryFile, ...]:
+def _inventory(
+    repository: Path,
+    settings: AnalyzerSettings,
+    deadline: AnalysisDeadline | None = None,
+) -> tuple[_InventoryFile, ...]:
     candidates: list[Path] = []
     for current_root, directory_names, file_names in os.walk(
         repository, topdown=True, followlinks=False
     ):
+        if deadline is not None:
+            deadline.check("repository inventory discovery")
         current = Path(current_root)
         kept_directories: list[str] = []
         for name in sorted(directory_names):
@@ -273,6 +399,8 @@ def _inventory(repository: Path, settings: AnalyzerSettings) -> tuple[_Inventory
     files: list[_InventoryFile] = []
     total_bytes = 0
     for path in candidates:
+        if deadline is not None:
+            deadline.check("repository inventory hashing")
         try:
             metadata = path.lstat()
         except OSError:
@@ -285,7 +413,10 @@ def _inventory(repository: Path, settings: AnalyzerSettings) -> tuple[_Inventory
             continue
         try:
             data = _read_regular_file(
-                repository, path, settings.repository_scan_max_file_bytes
+                repository,
+                path,
+                settings.repository_scan_max_file_bytes,
+                deadline,
             )
         except ValueError as exc:
             if "unreadable" in str(exc):
@@ -298,7 +429,14 @@ def _inventory(repository: Path, settings: AnalyzerSettings) -> tuple[_Inventory
         except UnicodeDecodeError:
             continue
         relative = path.relative_to(repository).as_posix()
-        files.append(_InventoryFile(relative, len(data), hashlib.sha256(data).hexdigest()))
+        files.append(
+            _InventoryFile(
+                relative,
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+                metadata.st_mode,
+            )
+        )
         total_bytes += len(data)
     return tuple(files)
 
@@ -320,9 +458,12 @@ def _copy_inventory_file(
     destination_root: Path,
     item: _InventoryFile,
     max_file_bytes: int,
+    deadline: AnalysisDeadline | None = None,
 ) -> _InventoryFile:
+    if deadline is not None:
+        deadline.check("snapshot copy")
     source = repository.joinpath(*PurePosixPath(item.path).parts)
-    data = _read_regular_file(repository, source, max_file_bytes)
+    data = _read_regular_file(repository, source, max_file_bytes, deadline)
     if len(data) != item.size or hashlib.sha256(data).hexdigest() != item.sha256:
         raise ValueError("repository file changed after inventory verification")
 
@@ -341,7 +482,9 @@ def _copy_inventory_file(
     copied_sha256 = hashlib.sha256(copied).hexdigest()
     if len(copied) != item.size or copied_sha256 != item.sha256:
         raise ValueError("snapshot file hash does not match inventory")
-    return _InventoryFile(item.path, len(copied), copied_sha256)
+    if deadline is not None:
+        deadline.check("snapshot copy")
+    return _InventoryFile(item.path, len(copied), copied_sha256, item.mode)
 
 
 def prepare_snapshot(
@@ -349,9 +492,13 @@ def prepare_snapshot(
     repository_key: str,
     expected_sha256: str,
     work_root: str | os.PathLike[str],
+    *,
+    deadline: AnalysisDeadline | None = None,
 ) -> PreparedSnapshot:
     """Verify repository identity and copy its bounded inventory to isolated storage."""
 
+    if deadline is not None:
+        deadline.check("snapshot preparation")
     if (
         not isinstance(expected_sha256, str)
         or len(expected_sha256) != 64
@@ -360,7 +507,7 @@ def prepare_snapshot(
         raise ValueError("expected snapshot fingerprint must be lowercase SHA-256")
     repository = _resolve_repository(import_root, repository_key)
     settings = AnalyzerSettings.from_env()
-    inventory = _inventory(repository, settings)
+    inventory = _inventory(repository, settings, deadline)
     if _fingerprint(inventory) != expected_sha256:
         raise ValueError("repository fingerprint does not match expected snapshot")
 
@@ -373,7 +520,11 @@ def prepare_snapshot(
         raise ValueError("snapshot work root must be a real directory")
 
     temporary_directory = tempfile.TemporaryDirectory(prefix="lima-cxx-", dir=work)
-    snapshot_root = Path(temporary_directory.name).resolve(strict=True)
+    request_root = Path(temporary_directory.name).resolve(strict=True)
+    snapshot_root = request_root / "source"
+    scratch_root = request_root / "scratch"
+    snapshot_root.mkdir(mode=0o700)
+    scratch_root.mkdir(mode=0o700)
     snapshot_metadata = snapshot_root.lstat()
     try:
         copied = [
@@ -382,18 +533,30 @@ def prepare_snapshot(
                 snapshot_root,
                 item,
                 settings.repository_scan_max_file_bytes,
+                deadline,
             )
             for item in inventory
         ]
         if _fingerprint(copied) != expected_sha256:
             raise ValueError("copied snapshot fingerprint does not match expected snapshot")
+        build_root = snapshot_root / "build"
+        build_root.mkdir(mode=0o700)
+        (scratch_root / "home").mkdir(mode=0o700)
+        (scratch_root / "tmp").mkdir(mode=0o700)
+        _freeze_source_tree(snapshot_root, tuple(copied))
     except Exception:
+        _make_tree_owner_writable(request_root)
         temporary_directory.cleanup()
         raise
-    return PreparedSnapshot(
+    prepared = PreparedSnapshot(
         root=snapshot_root,
+        scratch_root=scratch_root,
+        build_root=build_root,
         sha256=expected_sha256,
         files=tuple(item.path for item in copied),
         _temporary_directory=temporary_directory,
         _root_identity=(snapshot_metadata.st_dev, snapshot_metadata.st_ino),
+        _inventory=tuple(copied),
     )
+    prepared.verify_inventory(deadline)
+    return prepared

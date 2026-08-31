@@ -25,9 +25,14 @@ RUN apt-get update \
         pkg-config \
         zlib1g-dev \
     && cmake --version | grep --quiet "^cmake version 3\." \
+    && mkdir --parents /usr/local/share/lima \
+    && dpkg-query --show --showformat='${binary:Package}\t${Version}\n' \
+        | LC_ALL=C sort > /usr/local/share/lima/analyzer-toolchain-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install "semgrep==1.130.0"
+RUN python -m pip install "semgrep==1.130.0" \
+    && python -m pip freeze --all \
+        | LC_ALL=C sort > /usr/local/share/lima/analyzer-python-packages.txt
 
 RUN groupadd --gid 10002 analyzer \
     && useradd --uid 10002 --gid 10002 \

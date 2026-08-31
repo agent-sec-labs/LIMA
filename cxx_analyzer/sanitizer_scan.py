@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Final
 
 from .build_scan import BuildContext
 from .config import AnalyzerSettings
+from .deadline import AnalysisDeadline
 from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
+from .languages import language_for_path
 from .normalizers import NormalizedFinding
+from .protocol import tool_run_from_execution
 from .snapshot import PreparedSnapshot
 from .source_scan import LayerResult
 
@@ -113,7 +115,7 @@ def parse_asan_log(
         if cwe is None or frame is None:
             return _review()
         path, line, symbol = frame
-        language = "c++" if PurePosixPath(path).suffix.lower() in {".cc", ".cpp", ".cxx"} else "c"
+        language = language_for_path(path)
         access_text = access if access is not None else "FREE"
         trace = json.dumps(
             [{"kind": "asan-frame", "path": path, "line": line}],
@@ -134,33 +136,38 @@ def parse_asan_log(
 
 
 def _tool_run(execution: ToolExecution) -> dict[str, object]:
-    return {
-        "tool": "asan-test", "status": execution.status,
-        "returncode": execution.returncode,
-        "output_sha256": execution.output_sha256 if execution.digests_complete else "",
-        "output_truncated": execution.output_truncated,
-        "digests_complete": execution.digests_complete,
-    }
+    return tool_run_from_execution("asan-test", execution)
 
 
-def _valid_context(snapshot: PreparedSnapshot, context: object) -> bool:
+def _valid_context(
+    snapshot: PreparedSnapshot,
+    context: object,
+    deadline: AnalysisDeadline | None,
+) -> bool:
     return (
         isinstance(context, BuildContext)
         and context.sanitizer_enabled
         and context.snapshot_root == Path(snapshot.root).resolve()
         and context.snapshot_files == tuple(snapshot.files)
+        and isinstance(context.deadline, AnalysisDeadline)
+        and (deadline is None or context.deadline is deadline)
     )
 
 
 def run_sanitizer_scan(
-    snapshot: PreparedSnapshot, settings: AnalyzerSettings, build_context: object
+    snapshot: PreparedSnapshot,
+    settings: AnalyzerSettings,
+    build_context: object,
+    *,
+    deadline: AnalysisDeadline | None = None,
 ) -> LayerResult:
     """Run administrator test argv only after a matching successful build."""
 
     if not settings.test_steps:
         return LayerResult((), ("sanitizer-not-configured",), ())
-    if not _valid_context(snapshot, build_context):
+    if not _valid_context(snapshot, build_context, deadline):
         return LayerResult((), ("sanitizer-build-context-unavailable",), ())
+    active_deadline = build_context.deadline
     snapshot.resolve_cwd(".")
     findings: list[NormalizedFinding] = []
     diagnostics: list[str] = []
@@ -169,10 +176,7 @@ def run_sanitizer_scan(
         if len(tool_runs) >= MAX_TOOL_RUNS:
             diagnostics.append("analysis-budget-exhausted")
             break
-        remaining = min(
-            settings.step_timeout_seconds,
-            int(build_context.deadline - time.monotonic()),
-        )
+        remaining = active_deadline.step_timeout(settings.step_timeout_seconds)
         if remaining < 1:
             diagnostics.append("timed-out")
             break
@@ -181,14 +185,27 @@ def run_sanitizer_scan(
             env=SANITIZER_ENVIRONMENT,
         )
         tool_runs.append(_tool_run(execution))
-        if execution.status == "timed-out" or execution.output_truncated or not execution.digests_complete:
+        if (
+            execution.status == "timed-out"
+            or execution.output_truncated
+            or not execution.digests_complete
+        ):
             diagnostics.append("needs-human-review")
             continue
-        parsed, parsed_diagnostics = parse_asan_log(execution.stdout + "\n" + execution.stderr, snapshot)
+        combined_output = execution.stdout + "\n" + execution.stderr
+        parsed, parsed_diagnostics = parse_asan_log(combined_output, snapshot)
         if parsed:
             findings.extend(parsed[: MAX_FINDINGS - len(findings)])
         elif execution.status == "failed":
-            diagnostics.append("test-failed-without-sanitizer-evidence" if parsed_diagnostics == ["needs-human-review"] and "AddressSanitizer" not in (execution.stdout + execution.stderr) else "needs-human-review")
+            no_sanitizer_evidence = (
+                parsed_diagnostics == ["needs-human-review"]
+                and "AddressSanitizer" not in combined_output
+            )
+            diagnostics.append(
+                "test-failed-without-sanitizer-evidence"
+                if no_sanitizer_evidence
+                else "needs-human-review"
+            )
         else:
             diagnostics.extend(parsed_diagnostics)
         if len(findings) >= MAX_FINDINGS or len(diagnostics) >= MAX_DIAGNOSTICS:

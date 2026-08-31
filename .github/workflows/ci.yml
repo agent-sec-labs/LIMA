@@ -105,7 +105,7 @@ jobs:
             if [ "$attempt" = 30 ]; then exit 1; fi
             sleep 2
           done
-          docker exec lima-cxx-app python -c "import json; from pathlib import Path; from lima.cxx_memory import CxxMemoryAnalyzerClient; from lima.workspace import RepositoryWorkspace; root=Path('/repositories/fixtures'); assert len(json.loads((root/'manifest.json').read_text())) == 24; snapshot=RepositoryWorkspace(root).inventory().fingerprint(); result=CxxMemoryAnalyzerClient('http://lima-cxx-analyzer:8090',300,2097152).analyze('fixtures',snapshot,('source-only',)); assert result.status == 'completed'"
+          docker exec lima-cxx-app python -c "import json; from pathlib import Path; from lima.cxx_memory import CxxMemoryAnalyzerClient; from lima.workspace import RepositoryWorkspace; root=Path('/repositories/fixtures'); assert len(json.loads((root/'manifest.json').read_text())) == 24; inventory=RepositoryWorkspace(root).inventory(); snapshot=inventory.fingerprint(); result=CxxMemoryAnalyzerClient('http://lima-cxx-analyzer:8090',300,2097152).analyze('fixtures',snapshot,('source-only',),inventory=inventory); assert result.status == 'completed'"
       - name: Stop isolated integration containers
         if: always()
         run: |
@@ -145,6 +145,8 @@ jobs:
         run: |
           mkdir -p .cache/cxx-memory/repositories output
           docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:eval .
+          ANALYZER_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval)"
+          printf 'ANALYZER_IMAGE_DIGEST=%s\n' "$ANALYZER_IMAGE_DIGEST" >> "$GITHUB_ENV"
           docker network create --internal lima-cxx-public
           docker run --detach --name lima-cxx-public-analyzer --network lima-cxx-public \
             --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
@@ -175,7 +177,9 @@ jobs:
             python scripts/run_cxx_memory_evaluation.py \
             --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
             --output /output/cxx-memory-evaluation.json \
-            --analyzer-url http://lima-cxx-public-analyzer:8090 --fail-under-precision 0.0
+            --analyzer-url http://lima-cxx-public-analyzer:8090 \
+            --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
+            --fail-under-precision 0.0
           docker network connect lima-cxx-public lima-cxx-evaluator
           docker start --attach lima-cxx-evaluator
       - uses: actions/upload-artifact@v4

@@ -19,10 +19,8 @@ from .snapshot import PreparedSnapshot
 
 CLEAN_ENVIRONMENT = {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
-    "HOME": "/tmp/analyzer-home",  # noqa: S108 - fixed container-only path
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
-    "TMPDIR": "/work/tmp",
 }
 SANITIZER_ENVIRONMENT = {
     "CC": "clang-14",
@@ -143,20 +141,21 @@ def _linux_group_exists(process_group: int) -> bool:
         return True
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def _signal_process_group(process_group: int, signal_number: int) -> None:
+    try:
+        os.killpg(process_group, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[bytes], *, leader_exited: bool = False
+) -> None:
     if sys.platform == "linux":
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        term_deadline = time.monotonic() + 0.5
-        while _linux_group_exists(process.pid) and time.monotonic() < term_deadline:
-            time.sleep(0.01)
-        if _linux_group_exists(process.pid):
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        if not leader_exited:
+            _signal_process_group(process.pid, signal.SIGTERM)
+            time.sleep(0.1)
+        _signal_process_group(process.pid, signal.SIGKILL)
     elif process.poll() is None:
         try:
             process.terminate()
@@ -170,6 +169,25 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=0.5)
     except subprocess.TimeoutExpired:
         pass
+
+
+def _wait_linux_leader_without_reaping(
+    process: subprocess.Popen[bytes], deadline: float
+) -> bool:
+    """Keep the leader PID reserved until its whole process group is killed."""
+
+    wait_flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+    while True:
+        try:
+            status = os.waitid(os.P_PID, process.pid, wait_flags)
+        except ChildProcessError as exc:
+            raise RuntimeError("tool leader was reaped outside its supervisor") from exc
+        if status is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
 
 
 def _join_drains_until(threads: tuple[threading.Thread, ...], deadline: float) -> bool:
@@ -211,17 +229,18 @@ def _stream_process(
         thread.start()
 
     deadline = time.monotonic() + timeout_seconds
-    timed_out = False
-    try:
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    drains_complete = _join_drains_until(threads, deadline)
-    if not drains_complete:
-        timed_out = True
-    if timed_out:
-        _terminate_process_group(process)
-        drains_complete = _join_drains_until(threads, time.monotonic() + 2.0)
+    if sys.platform == "linux":
+        leader_exited = _wait_linux_leader_without_reaping(process, deadline)
+        timed_out = not leader_exited
+        _terminate_process_group(process, leader_exited=leader_exited)
+    else:
+        timed_out = False
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        _terminate_process_group(process, leader_exited=not timed_out)
+    drains_complete = _join_drains_until(threads, time.monotonic() + 2.0)
 
     stdout, stdout_sha256, stdout_bytes = stdout_state.snapshot()
     stderr, stderr_sha256, stderr_bytes = stderr_state.snapshot()
@@ -290,6 +309,27 @@ def _empty_execution(status: str, diagnostic: str) -> ToolExecution:
     )
 
 
+def clean_environment(snapshot: PreparedSnapshot) -> dict[str, str]:
+    """Build a request-private environment without inheriting server secrets."""
+
+    if not isinstance(snapshot, PreparedSnapshot):
+        raise ValueError("tool environment requires a prepared snapshot")
+    snapshot.resolve_cwd(".")
+    home = snapshot.scratch_root / "home"
+    temporary = snapshot.scratch_root / "tmp"
+    for path in (home, temporary):
+        metadata = path.lstat()
+        if not path.is_dir() or path.is_symlink():
+            raise ValueError("request-private tool directory is unavailable")
+        if metadata.st_uid != snapshot.scratch_root.lstat().st_uid:
+            raise ValueError("request-private tool directory changed ownership")
+    return {
+        **CLEAN_ENVIRONMENT,
+        "HOME": str(home),
+        "TMPDIR": str(temporary),
+    }
+
+
 def run_step(
     argv: Sequence[str],
     snapshot: PreparedSnapshot,
@@ -312,7 +352,11 @@ def run_step(
         raise ValueError("tool environment must be a mapping")
     if env not in (None, {}, SANITIZER_ENVIRONMENT):
         raise ValueError("tool environment is not an analyzer-owned fixed environment")
-    sandbox.build_policy(snapshot.root)
+    sandbox.build_policy(snapshot.root, snapshot.writable_roots)
+    if not sandbox.process_isolation_available():
+        return _empty_execution(
+            "sandbox-unavailable", "process sandbox unavailable"
+        )
     try:
         landlock_version = sandbox.landlock_abi()
     except OSError:
@@ -327,14 +371,17 @@ def run_step(
     status_read_fd, status_write_fd = os.pipe()
     os.set_inheritable(status_write_fd, True)
     launcher_argv = sandbox.build_launcher_argv(
-        arguments, snapshot.root, status_write_fd
+        arguments,
+        snapshot.root,
+        status_write_fd,
+        snapshot.writable_roots,
     )
     try:
         try:
             process = subprocess.Popen(  # noqa: S603 - fixed launcher, no shell
                 launcher_argv,
                 cwd=working_directory,
-                env=dict(CLEAN_ENVIRONMENT | (dict(env) if env else {})),
+                env=dict(clean_environment(snapshot) | (dict(env) if env else {})),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

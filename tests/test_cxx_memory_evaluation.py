@@ -484,8 +484,15 @@ class MetricTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 pass
 
-            def analyze(self, repository_key, snapshot_sha256, requested_layers):
-                self.request = (repository_key, snapshot_sha256, requested_layers)
+            def analyze(
+                self, repository_key, snapshot_sha256, requested_layers, *, inventory
+            ):
+                self.request = (
+                    repository_key,
+                    snapshot_sha256,
+                    requested_layers,
+                    inventory,
+                )
                 return Result()
 
         with (
@@ -634,7 +641,23 @@ class ArchiveSafetyTests(unittest.TestCase):
             self.assertFalse(destination.exists())
 
     def test_download_enforces_total_wall_clock_deadline_and_cleans_partial(self):
+        class Socket:
+            def settimeout(self, value):
+                self.value = value
+
+        class Raw:
+            def __init__(self):
+                self._sock = Socket()
+
+        class Fp:
+            def __init__(self):
+                self.raw = Raw()
+
         class SlowResponse(io.BytesIO):
+            def __init__(self, raw):
+                super().__init__(raw)
+                self.fp = Fp()
+
             def geturl(self):
                 return "https://example.test/archive.tar.gz"
 
@@ -682,7 +705,7 @@ class CliAndCiContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_evaluation_module()
 
-    def test_cli_exposes_only_the_five_fixed_parameters(self):
+    def test_cli_exposes_only_the_six_fixed_parameters(self):
         parser = self.module.build_parser()
         options = {
             option
@@ -696,6 +719,7 @@ class CliAndCiContractTests(unittest.TestCase):
                 "--cache-dir",
                 "--output",
                 "--analyzer-url",
+                "--analyzer-image-digest",
                 "--fail-under-precision",
             },
             options,
@@ -703,14 +727,16 @@ class CliAndCiContractTests(unittest.TestCase):
 
     def test_report_metadata_records_digest_hash_and_required_validity_boundary(self):
         raw = b'{"schema_version":1,"cases":[]}'
+        digest = "sha256:" + "a" * 64
         report = self.module.add_report_metadata(
-            {"precision": None}, raw, analyzer_image_digest=None
+            {"precision": None}, raw, analyzer_image_digest=digest
         )
         self.assertEqual(hashlib.sha256(raw).hexdigest(), report["case_data_sha256"])
-        self.assertIsNone(report["analyzer_image_digest"])
-        self.assertTrue(
-            any("analyzer image digest was not reported" in item for item in report["diagnostics"])
-        )
+        self.assertEqual(digest, report["analyzer_image_digest"])
+        with self.assertRaises(ValueError):
+            self.module.add_report_metadata(
+                {"precision": None}, raw, analyzer_image_digest=None
+            )
         self.assertIn(
             "合成和固定样本结果不代表真实项目完整检测能力",
             report["validity_boundaries"],

@@ -283,6 +283,7 @@ class RepositoryScanner:
                     repository_key,
                     inventory.fingerprint(),
                     self.cxx_requested_layers,
+                    inventory=inventory,
                 )
             except CxxAnalyzerUnavailable as exc:
                 if self.cxx_memory_mode == "required":

@@ -11,6 +11,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from .models import Finding, Severity
+from .workspace import WorkspaceInventory
 
 SUPPORTED_CWES = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
 REQUESTED_LAYERS = ("source-only", "build-backed", "sanitizer-confirmed")
@@ -87,11 +88,26 @@ _TOOL_RUN_STATUSES = {
     "asan-test": frozenset({"completed", "failed", "timed-out"}),
 }
 _COVERAGE_KEYS = {"source_files", "snapshot_files"}
+_HEALTH_KEYS = {"schema_version", "tools", "configuration"}
+_HEALTH_TOOL_KEYS = {"semgrep", "cmake", "clang"}
+_HEALTH_CONFIGURATION_KEYS = {"source", "build", "test"}
 _HEX64 = frozenset("0123456789abcdef")
+_CXX_LANGUAGE_BY_SUFFIX = {
+    ".c": "c",
+    ".h": "c",
+    ".cc": "c++",
+    ".cpp": "c++",
+    ".cxx": "c++",
+    ".hh": "c++",
+    ".hpp": "c++",
+    ".hxx": "c++",
+}
 MAX_TOOL_RUNS = 320
 MAX_DIAGNOSTICS = 256
 MAX_DIAGNOSTIC_BYTES = 2_048
 MAX_COVERAGE_FILES = 1_000_000
+MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
+HEALTH_TIMEOUT_SECONDS = 2.0
 
 
 class CxxAnalyzerUnavailable(RuntimeError):
@@ -111,12 +127,21 @@ class CxxAnalysisResult:
     diagnostics: list[str]
 
 
+@dataclass(frozen=True)
+class CxxAnalyzerHealth:
+    schema_version: int
+    tools: dict[str, bool]
+    configuration: dict[str, bool]
+
+
 class CxxMemoryAdapter(Protocol):
     def analyze(
         self,
         repository_key: str,
         snapshot_sha256: str,
         requested_layers: tuple[str, ...],
+        *,
+        inventory: WorkspaceInventory,
     ) -> CxxAnalysisResult: ...
 
 
@@ -166,6 +191,16 @@ def validate_response_metadata(
             or any(character not in _HEX64 for character in output_sha256)
         ):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer output digest")
+        if status == "completed" and (
+            returncode != 0 or not run["digests_complete"]
+        ):
+            raise CxxAnalyzerProtocolError("inconsistent completed C/C++ tool run")
+        if status in {"failed", "build_failed"} and returncode == 0:
+            raise CxxAnalyzerProtocolError("inconsistent failed C/C++ tool run")
+        if status == "timed-out" and returncode is not None:
+            raise CxxAnalyzerProtocolError("inconsistent timed-out C/C++ tool run")
+        if not run["digests_complete"] and not run["output_truncated"]:
+            raise CxxAnalyzerProtocolError("incomplete C/C++ tool output is not truncated")
 
     if type(coverage) is not dict or set(coverage) != _COVERAGE_KEYS:
         raise CxxAnalyzerProtocolError("invalid C/C++ analyzer coverage fields")
@@ -211,12 +246,72 @@ class CxxMemoryAnalyzerClient:
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.opener = opener
+        self._health_cache: CxxAnalyzerHealth | None = None
+
+    def health(self) -> CxxAnalyzerHealth:
+        """Return one strictly validated, cached Sidecar v1 capability snapshot."""
+
+        if self._health_cache is not None:
+            return self._health_cache
+        request = urllib.request.Request(  # noqa: S310 - Settings permits only HTTP(S).
+            self.base_url + "/health",
+            method="GET",
+        )
+        try:
+            with self.opener(
+                request,
+                timeout=min(float(self.timeout_seconds), HEALTH_TIMEOUT_SECONDS),
+            ) as response:
+                if getattr(response, "status", 200) != 200:
+                    raise CxxAnalyzerUnavailable("C/C++ analyzer health probe failed")
+                raw_response = response.read(MAX_HEALTH_RESPONSE_BYTES + 1)
+        except CxxAnalyzerUnavailable:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise CxxAnalyzerUnavailable("C/C++ analyzer is unavailable") from exc
+        if len(raw_response) > MAX_HEALTH_RESPONSE_BYTES:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer health response exceeds size limit")
+        try:
+            payload = json.loads(
+                raw_response.decode("utf-8"),
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=_reject_non_json_number,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer returned invalid health JSON") from exc
+        if type(payload) is not dict or set(payload) != _HEALTH_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health fields")
+        if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+            raise CxxAnalyzerProtocolError("unsupported C/C++ analyzer health schema")
+        tools = payload["tools"]
+        configuration = payload["configuration"]
+        if (
+            type(tools) is not dict
+            or set(tools) != _HEALTH_TOOL_KEYS
+            or any(type(value) is not bool for value in tools.values())
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health tools")
+        if (
+            type(configuration) is not dict
+            or set(configuration) != _HEALTH_CONFIGURATION_KEYS
+            or any(type(value) is not bool for value in configuration.values())
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health configuration")
+        health = CxxAnalyzerHealth(
+            schema_version=1,
+            tools=dict(tools),
+            configuration=dict(configuration),
+        )
+        self._health_cache = health
+        return health
 
     def analyze(
         self,
         repository_key: str,
         snapshot_sha256: str,
         requested_layers: tuple[str, ...],
+        *,
+        inventory: WorkspaceInventory,
     ) -> CxxAnalysisResult:
         if (
             type(requested_layers) is not tuple
@@ -226,6 +321,10 @@ class CxxMemoryAnalyzerClient:
             or any(layer not in REQUESTED_LAYERS for layer in requested_layers)
         ):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer requested layers")
+        if not isinstance(inventory, WorkspaceInventory):
+            raise CxxAnalyzerProtocolError("invalid local C/C++ analyzer inventory")
+        if snapshot_sha256 != inventory.fingerprint():
+            raise CxxAnalyzerProtocolError("local C/C++ analyzer snapshot identity mismatch")
         request_id = str(uuid.uuid4())
         body = json.dumps(
             {
@@ -258,7 +357,7 @@ class CxxMemoryAnalyzerClient:
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise CxxAnalyzerProtocolError("C/C++ analyzer returned invalid JSON") from exc
 
-        self._validate_payload(payload, request_id, snapshot_sha256)
+        self._validate_payload(payload, request_id, snapshot_sha256, inventory)
         findings = [self._convert_finding(item) for item in payload["findings"]]
         return CxxAnalysisResult(
             status=payload["status"],
@@ -274,6 +373,7 @@ class CxxMemoryAnalyzerClient:
         payload: Any,
         request_id: str,
         snapshot_sha256: str,
+        inventory: WorkspaceInventory,
     ) -> None:
         if not isinstance(payload, dict) or set(payload) != _TOP_LEVEL_KEYS:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer response fields")
@@ -292,6 +392,46 @@ class CxxMemoryAnalyzerClient:
         )
         for item in payload["findings"]:
             cls._validate_finding(item)
+        cls._validate_inventory_binding(payload, inventory)
+
+    @classmethod
+    def _validate_inventory_binding(
+        cls,
+        payload: dict[str, Any],
+        inventory: WorkspaceInventory,
+    ) -> None:
+        inventory_by_path = {item.path: item for item in inventory.files}
+        if len(inventory_by_path) != len(inventory.files) or any(
+            type(item.line_count) is not int or item.line_count < 0
+            for item in inventory.files
+        ):
+            raise CxxAnalyzerProtocolError("invalid local C/C++ analyzer inventory")
+        expected_coverage = {
+            "source_files": sum(
+                PurePosixPath(item.path).suffix.lower() in _CXX_LANGUAGE_BY_SUFFIX
+                for item in inventory.files
+            ),
+            "snapshot_files": len(inventory.files),
+        }
+        if payload["coverage"] != expected_coverage:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer coverage mismatch")
+        for finding in payload["findings"]:
+            local_file = inventory_by_path.get(finding["path"])
+            if local_file is None:
+                raise CxxAnalyzerProtocolError(
+                    "C/C++ analyzer finding is outside the local inventory"
+                )
+            expected_language = _CXX_LANGUAGE_BY_SUFFIX.get(
+                PurePosixPath(finding["path"]).suffix.lower()
+            )
+            if expected_language is None or finding["language"] != expected_language:
+                raise CxxAnalyzerProtocolError(
+                    "C/C++ analyzer finding language does not match its path"
+                )
+            if not 1 <= finding["line"] <= local_file.line_count:
+                raise CxxAnalyzerProtocolError(
+                    "C/C++ analyzer finding line is outside the local file"
+                )
 
     @staticmethod
     def _validate_finding(item: Any) -> None:

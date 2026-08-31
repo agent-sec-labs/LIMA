@@ -17,6 +17,14 @@ MIN_LANDLOCK_ABI: Final = 3
 LANDLOCK_CREATE_RULESET_VERSION: Final = 1
 LANDLOCK_RULE_PATH_BENEATH: Final = 1
 PR_SET_NO_NEW_PRIVS: Final = 38
+PR_SET_SECCOMP: Final = 22
+SECCOMP_MODE_FILTER: Final = 2
+SECCOMP_RET_KILL_PROCESS: Final = 0x80000000
+SECCOMP_RET_ALLOW: Final = 0x7FFF0000
+SECCOMP_RET_ERRNO: Final = 0x00050000
+BPF_LD_W_ABS: Final = 0x20
+BPF_JMP_JEQ_K: Final = 0x15
+BPF_RET_K: Final = 0x06
 
 ACCESS_EXECUTE: Final = 1 << 0
 ACCESS_WRITE_FILE: Final = 1 << 1
@@ -55,10 +63,6 @@ READ_WRITE_TREE = (
 HANDLED_ACCESS = READ_WRITE_TREE
 
 _RUNTIME_TREES = ("/usr", "/usr/local", "/bin", "/lib", "/lib64")
-_WRITABLE_TREES = (
-    "/tmp/analyzer-home",  # noqa: S108 - fixed container-only path
-    "/work/tmp",
-)
 _ETC_FILES = (
     "/etc/ld.so.cache",
     "/etc/nsswitch.conf",
@@ -75,6 +79,61 @@ _SYSCALLS = {
     "arm64": (444, 445, 446),
     "riscv64": (444, 445, 446),
 }
+_SECCOMP_ARCH = {
+    "x86_64": 0xC000003E,
+    "amd64": 0xC000003E,
+    "aarch64": 0xC00000B7,
+    "arm64": 0xC00000B7,
+    "riscv64": 0xC00000F3,
+}
+_BLOCKED_PROCESS_SYSCALLS = {
+    "x86_64": frozenset(
+        {
+            62,  # kill
+            101,  # ptrace
+            109,  # setpgid
+            112,  # setsid
+            129,  # rt_sigqueueinfo
+            200,  # tkill
+            234,  # tgkill
+            272,  # unshare
+            297,  # rt_tgsigqueueinfo
+            308,  # setns
+            310,  # process_vm_readv
+            311,  # process_vm_writev
+            312,  # kcmp
+            424,  # pidfd_send_signal
+            438,  # pidfd_getfd
+            440,  # process_madvise
+        }
+    ),
+    "aarch64": frozenset(
+        {
+            97,  # unshare
+            117,  # ptrace
+            129,  # kill
+            130,  # tkill
+            131,  # tgkill
+            138,  # rt_sigqueueinfo
+            154,  # setpgid
+            157,  # setsid
+            240,  # rt_tgsigqueueinfo
+            268,  # setns
+            270,  # process_vm_readv
+            271,  # process_vm_writev
+            272,  # kcmp
+            424,  # pidfd_send_signal
+            438,  # pidfd_getfd
+            440,  # process_madvise
+        }
+    ),
+    "riscv64": frozenset(
+        {
+            97, 117, 129, 130, 131, 138, 154, 157, 240, 268, 270, 271,
+            272, 424, 438, 440,
+        }
+    ),
+}
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -85,6 +144,22 @@ class _PathBeneathAttr(ctypes.Structure):
     _fields_ = [
         ("allowed_access", ctypes.c_uint64),
         ("parent_fd", ctypes.c_int32),
+    ]
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_ushort),
+        ("jt", ctypes.c_ubyte),
+        ("jf", ctypes.c_ubyte),
+        ("k", ctypes.c_uint32),
+    ]
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_ushort),
+        ("filter", ctypes.POINTER(_SockFilter)),
     ]
 
 
@@ -131,6 +206,21 @@ def landlock_abi() -> int:
         raise
 
 
+def process_isolation_available() -> bool:
+    """Return whether this architecture has the audited seccomp denylist."""
+
+    machine = platform.machine().lower()
+    if machine == "amd64":
+        machine = "x86_64"
+    elif machine == "arm64":
+        machine = "aarch64"
+    return (
+        sys.platform == "linux"
+        and machine in _SECCOMP_ARCH
+        and machine in _BLOCKED_PROCESS_SYSCALLS
+    )
+
+
 def _existing_rule(path: str | os.PathLike[str], access: int) -> SandboxRule | None:
     try:
         resolved = Path(path).resolve(strict=True)
@@ -144,10 +234,13 @@ def _existing_rule(path: str | os.PathLike[str], access: int) -> SandboxRule | N
     return SandboxRule(resolved, access)
 
 
-def build_policy(snapshot_root: str | os.PathLike[str]) -> SandboxPolicy:
+def build_policy(
+    snapshot_root: str | os.PathLike[str],
+    writable_roots: tuple[str | os.PathLike[str], ...] = (),
+) -> SandboxPolicy:
     """Build the fixed filesystem allowlist; the import mount is never admitted."""
 
-    snapshot_rule = _existing_rule(snapshot_root, READ_WRITE_TREE)
+    snapshot_rule = _existing_rule(snapshot_root, READ_ONLY)
     if snapshot_rule is None or not snapshot_rule.path.is_dir():
         raise ValueError("sandbox snapshot root must be a real directory")
     candidates: list[SandboxRule] = [snapshot_rule]
@@ -155,10 +248,14 @@ def build_policy(snapshot_root: str | os.PathLike[str]) -> SandboxPolicy:
         rule = _existing_rule(path, READ_ONLY)
         if rule is not None:
             candidates.append(rule)
-    for path in _WRITABLE_TREES:
+    snapshot_path = snapshot_rule.path
+    for path in writable_roots:
         rule = _existing_rule(path, READ_WRITE_TREE)
-        if rule is not None:
-            candidates.append(rule)
+        if rule is None or not rule.path.is_dir():
+            raise ValueError("sandbox writable root must be a real directory")
+        if rule.path == snapshot_path:
+            raise ValueError("verified source root must never be writable")
+        candidates.append(rule)
     for path in _ETC_FILES:
         rule = _existing_rule(path, READ_FILE_ONLY)
         if rule is not None:
@@ -183,20 +280,25 @@ def build_policy(snapshot_root: str | os.PathLike[str]) -> SandboxPolicy:
 
 
 def build_launcher_argv(
-    argv: list[str], snapshot_root: str | os.PathLike[str], status_fd: int
+    argv: list[str],
+    snapshot_root: str | os.PathLike[str],
+    status_fd: int,
+    writable_roots: tuple[str | os.PathLike[str], ...] = (),
 ) -> list[str]:
     """Construct the internal launcher argv without accepting shell syntax."""
 
-    return [
+    result = [
         sys.executable,
         str(Path(__file__).resolve()),
         "--status-fd",
         str(status_fd),
         "--snapshot-root",
         os.fspath(snapshot_root),
-        "--",
-        *argv,
     ]
+    for root in writable_roots:
+        result.extend(("--writable-root", os.fspath(root)))
+    result.extend(("--", *argv))
+    return result
 
 
 def apply_landlock(policy: SandboxPolicy) -> None:
@@ -237,26 +339,77 @@ def apply_landlock(policy: SandboxPolicy) -> None:
         os.close(ruleset_fd)
 
 
-def _parse_launcher_args(arguments: list[str]) -> tuple[int, Path, list[str]]:
+def apply_process_isolation() -> None:
+    """Deny process-group escape and same-UID peer process control."""
+
+    machine = platform.machine().lower()
+    if machine == "amd64":
+        machine = "x86_64"
+    elif machine == "arm64":
+        machine = "aarch64"
+    audit_arch = _SECCOMP_ARCH.get(machine)
+    blocked = _BLOCKED_PROCESS_SYSCALLS.get(machine)
+    if sys.platform != "linux" or audit_arch is None or blocked is None:
+        raise OSError(errno.EOPNOTSUPP, "required process isolation is unavailable")
+
+    instructions: list[_SockFilter] = [
+        _SockFilter(BPF_LD_W_ABS, 0, 0, 4),
+        _SockFilter(BPF_JMP_JEQ_K, 1, 0, audit_arch),
+        _SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        _SockFilter(BPF_LD_W_ABS, 0, 0, 0),
+    ]
+    for syscall_number in sorted(blocked):
+        instructions.extend(
+            (
+                _SockFilter(BPF_JMP_JEQ_K, 0, 1, syscall_number),
+                _SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+            )
+        )
+    instructions.append(_SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW))
+    program_array = (_SockFilter * len(instructions))(*instructions)
+    program = _SockFprog(len(instructions), program_array)
+    libc = _libc()
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(program)) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _parse_launcher_args(
+    arguments: list[str],
+) -> tuple[int, Path, tuple[Path, ...], list[str]]:
     if len(arguments) < 6 or arguments[0] != "--status-fd":
         raise ValueError("invalid sandbox launcher arguments")
     status_fd = int(arguments[1])
     if arguments[2] != "--snapshot-root" or "--" not in arguments[4:]:
         raise ValueError("invalid sandbox launcher arguments")
     separator = arguments.index("--", 4)
-    command = arguments[separator + 1 :]
-    if separator != 4 or not command:
+    writable_arguments = arguments[4:separator]
+    if len(writable_arguments) % 2 or any(
+        writable_arguments[index] != "--writable-root"
+        for index in range(0, len(writable_arguments), 2)
+    ):
         raise ValueError("invalid sandbox launcher arguments")
-    return status_fd, Path(arguments[3]), command
+    writable_roots = tuple(
+        Path(writable_arguments[index])
+        for index in range(1, len(writable_arguments), 2)
+    )
+    command = arguments[separator + 1 :]
+    if not command:
+        raise ValueError("invalid sandbox launcher arguments")
+    return status_fd, Path(arguments[3]), writable_roots, command
 
 
 def _main(arguments: list[str]) -> int:
     status_fd = -1
     try:
-        status_fd, snapshot_root, command = _parse_launcher_args(arguments)
+        status_fd, snapshot_root, writable_roots, command = _parse_launcher_args(arguments)
         os.set_inheritable(status_fd, False)
+        apply_landlock(build_policy(snapshot_root, writable_roots))
+        apply_process_isolation()
         os.write(status_fd, b"R")
-        apply_landlock(build_policy(snapshot_root))
         os.execvpe(command[0], command, dict(os.environ))  # noqa: S606
     except BaseException:  # noqa: BLE001 - child must fail closed without a traceback
         if status_fd >= 0:

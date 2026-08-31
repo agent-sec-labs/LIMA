@@ -1,0 +1,114 @@
+name: V4 implementation contract
+description: Create an implementation-ready V4 task with explicit code ownership, contracts, and tests
+title: "[V4-Ixx][Px][Phase x] "
+labels:
+  - security
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is a development contract. Vague goals, directory-only ownership,
+        and “tests pass” without a boundary matrix are not sufficient for implementation.
+
+  - type: input
+    id: stable_id
+    attributes:
+      label: Stable ID / phase / size
+      description: "Example: V4-I09 / Phase 1 / Size L / status:blocked"
+      placeholder: V4-Ixx / Phase x / Size S|M|L / status:...
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Problem and observable outcome
+      description: State the current failure, the smallest user-visible outcome, and explicit non-goals.
+    validations:
+      required: true
+
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Current code baseline
+      description: List existing files, classes, functions, routes, tables, and tests that must be reused.
+      placeholder: |
+        - lima/service.py: ReviewService._execute_repository_scan
+        - tests/test_repository_scan_integration.py: existing scan lifecycle coverage
+    validations:
+      required: true
+
+  - type: textarea
+    id: ownership
+    attributes:
+      label: File ownership and collision boundary
+      description: Separate files allowed to modify, files allowed to add, read-only references, and forbidden/high-conflict files.
+      placeholder: |
+        Modify: ...
+        Add: ...
+        Read-only: ...
+        Must not modify: ...
+        Integration owner / merge order: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: contract
+    attributes:
+      label: Inputs, outputs, errors, and security invariants
+      description: Reference versioned schemas and define fail-closed behavior. Do not use implicit Agent memory as a contract.
+      placeholder: |
+        Inputs: ...
+        Outputs: ...
+        Typed failures: ...
+        Security invariants: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: slices
+    attributes:
+      label: Implementation slices / PR plan
+      description: Provide 3-7 independently reviewable checkpoints and state which one owns integration changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tests
+    attributes:
+      label: Required tests and boundary matrix
+      description: Map every acceptance criterion to concrete test files, commands, fixtures, and negative/failure/concurrency/security cases.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies, parallel work, and merge order
+      description: Use stable V4 IDs plus actual issue links. Identify contracts that must merge first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollout
+    attributes:
+      label: Compatibility, migration, rollback, and evidence
+      description: Define flags/defaults, data migration, rollback limits, artifacts/logs/metrics required in the PR, and the Definition of Done.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: author_checks
+    attributes:
+      label: Author checks
+      options:
+        - label: I verified every listed path and symbol against the current main branch.
+          required: true
+        - label: I mapped every acceptance criterion to at least one executable test or reproducible drill.
+          required: true
+        - label: I identified high-conflict files and the single integration owner.
+          required: true
+        - label: I documented typed failure behavior; infrastructure failure is never treated as a security verdict.
+          required: true
+        - label: I documented backward compatibility and rollback behavior.
+          required: true

@@ -1,9 +1,11 @@
 # LIMA V4 多人协作需求拆分与 GitHub Issue Backlog
 
-> 规划基线：`main@bf7d79d`（2026-08-31）
+> 规划基线：`main@379e832`（2026-08-31）
 > 上游规划：`LIMA_三沙箱通信与依赖网络治理_迭代规划_v3.md`、`LIMA_可用性性能与安全知识库_迭代规划_v4.md`
 > 目标：把 V4 从路线图拆成可认领、可并行、可测试、可关闭的 GitHub Issues
 > 约束：一个 Issue 一个主要责任域、一个逻辑 PR；高冲突文件只有 Integration Issue 可以修改
+
+代码级实施以 `LIMA_V4_Issue代码级实施约束与测试矩阵.md` 为准。该文档逐 Issue 冻结当前代码符号、文件 allowlist、跨模块契约、PR 切片、边界测试、迁移与回滚；本 Backlog 只负责组合关系、优先级和依赖拓扑。新建同类任务必须使用 `.github/ISSUE_TEMPLATE/v4-implementation.yml`。
 
 ## 1. 拆分结论
 

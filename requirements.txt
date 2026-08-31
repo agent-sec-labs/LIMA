@@ -1,5 +1,5 @@
 psycopg[binary]>=3.3.4,<4
-redis>=5,<7
+redis>=8.1.0,<9
 PyJWT[crypto]>=2.13.0,<3
 opentelemetry-sdk>=1.44.0,<2
 opentelemetry-exporter-otlp-proto-http>=1.44.0,<2

@@ -69,6 +69,22 @@ V3 继续作为信任边界和长期目标架构，V4 Issues 只实现能够证�
 
 落单规则：22 个 MVP Task 进入依赖排序和认领流程；5 个 `GATED` Task 在 [#79](https://github.com/agent-sec-labs/LIMA/issues/79) 给出满足各自启动条件的 Go/Conditional Go 前，不得进入实现排期。
 
+### 1.2 GitHub 原生跟踪与 Label 约定
+
+[#85](https://github.com/agent-sec-labs/LIMA/issues/85) 已将上述 27 个 Task 全部登记为 GitHub 原生 Sub-issues；Epic 顶部和 Sub-issues 区域以子 Issue 的真实 Open/Closed 状态自动聚合进度。正文中的阶段 Checklist 只保留为阅读导航，不能替代原生父子关系。
+
+Labels 沿用仓库已有 Issues 的分类体系，并补充 V4 必需的 `priority:low` 与 `status:gated`：
+
+| 维度 | Labels | 使用规则 |
+|---|---|---|
+| 类型 | `feature`、`infra`、`refactor`、`epic` | 每个 Task 至少一个主要类型；Epic 使用 `epic` |
+| 安全属性 | `security` | V4 三阶段平台和全部子任务均涉及安全证据或信任边界 |
+| 责任域 | `area:backend`、`area:frontend`、`area:storage`、`area:repair`、`area:deployment` | 按主要文件所有权选择；跨域 Epic 可使用多个 area |
+| 优先级 | `priority:high`、`priority:medium`、`priority:low` | 分别对应标题中的 P0、P1、P2 |
+| 状态 | `status:ready`、`status:blocked`、`status:in-progress`、`status:gated` | 状态必须互斥；认领后由贡献者把 ready 改为 in-progress |
+
+初始状态：V4-I01/I02 为 `status:ready`；其余 MVP Tasks 在前置依赖合并前为 `status:blocked`；V4-I23–I27 为 `status:gated`。关闭或解锁 Issue 时必须同步更新 Label，确保 Epic 进度和 Issue 列表筛选语义一致。
+
 ## 2. 与已有 Issues 的去重
 
 创建 V4 Issues 前已核对仓库现有工作。以下能力直接复用，不重复立项：

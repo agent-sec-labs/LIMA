@@ -4,18 +4,20 @@
 
 **LIMA — LLM-powered Intelligent Mining & Auto-repair for Repositories**
 
-砺码 LIMA 是面向研发团队、安全工程师与应用安全研究者的仓库级安全 Agent。项目按 **工程 70% / 科研 30%** 推进，主链路是：
+砺码 LIMA 面向研发团队、安全工程师与应用安全研究者，长期定位为一个**以可复现证据驱动的 Repository Security Analysis、Vulnerability Mining 与 Verified Repair Agent Platform**。项目按 **工程 70% / 科研 30%** 推进，目标主链路是：
 
-> 代码/PR 获取 → 静态分析候选 → 数据流/多工具证据确认 → 结构化审计报告 → 最小修复 → 隔离验证 → 人工审批
+> Repository Snapshot → Audit Evidence Package → Mining 动态验证 → Vulnerability Evidence Package → 独立 Repair 验证 → Verified Patch
 
-首个可交付版本聚焦 Python 仓库和命令注入、路径遍历、SQL 注入、危险反序列化、认证/授权误用、敏感信息泄漏等常见高风险问题。默认本地模式不调用任何远程模型；LLM 是可选的语义增强层，不是事实来源。证据不足的结果会降级为人工复核，不追求“全语言、全 CWE、零误报、自动发现通用零日”等当前不可信的目标。
+Audit、Mining、Repair 具有独立信任边界，只通过版本化 Artifact 交换事实；LLM 参与语义剪枝、规划、验证方案和候选修复，但不能单独决定漏洞成立或补丁通过。当前 `1.6.0` 仍是“已有仓库审计/报告能力 + 早期修复能力”的过渡基线，尚未实现完整三阶段闭环。当前开发聚焦 Python Golden Path，并优先复用成熟静态分析、动态验证与代码变换工具，不追求“全语言、全 CWE、零误报、自动发现通用零日”等不可信目标。
 
-完整定位、论文证据和实施阶段见 [LIMA_ROADMAP.md](LIMA_ROADMAP.md)。从旧版本升级时，
+历史产品路线、论文证据和早期实施阶段见 [LIMA_ROADMAP.md](LIMA_ROADMAP.md)；当前开发定位与交接规则以 [Coding Agent 开发交接标准](docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md) 为准。从旧版本升级时，
 请同时阅读 [品牌与配置迁移说明](docs/LIMA_BRAND_MIGRATION.md)。
 Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_BRAND_ASSETS.md)。
-首次接手项目开发时，请从 [开发者交接与上手指南](docs/DEVELOPER_HANDOFF.md) 开始。
+首次接手项目开发时，请先阅读 [项目定位与 Coding Agent 开发交接标准](docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md)；旧入口 [DEVELOPER_HANDOFF.md](docs/DEVELOPER_HANDOFF.md) 仅保留兼容跳转。
 
 > 以证据审代码，以闭环修漏洞。Audit with evidence. Repair with confidence.
+
+以下功能清单描述当前版本能力，不代表目标三阶段平台已经完成：
 
 - 审查统一 diff，输出结构化问题、修复建议和测试建议
 - GitHub `pull_request` webhook（`opened`、`reopened`、`synchronize`）

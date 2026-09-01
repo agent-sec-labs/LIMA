@@ -43,12 +43,16 @@ Python backend serving the built SPA under `/app/`.
 
 ## Workflow
 
-1. Create or claim an issue for non-trivial work.
-2. Branch from an up-to-date `main` using `feat/`, `fix/`, `docs/`, or `test/`.
-3. Keep one logical change per pull request.
-4. Add or update tests for changed behavior.
-5. Run host tests and the relevant Docker/security checks.
-6. Open a pull request and resolve all review comments and required checks.
+1. A maintainer records non-trivial demand in an Issue/Finding and selects at most one current blocker.
+2. Do not code directly from an Issue or `status:ready`; implementation starts only from the active, reviewed Implementation Packet named by `PROGRESS.md`.
+3. Branch from an up-to-date `main` using `feat/`, `fix/`, `docs/`, `test/`, or an approved automation prefix such as `codex/`.
+4. Keep one Implementation Packet and one logical change per pull request; modify only the Packet allowlist.
+5. Add or update the tests and evidence required by the Packet, then run its host, Docker, and security gates as applicable.
+6. Open a pull request and resolve all review comments and required checks. Reference the Source Issue, but do not use `Closes #...` when the Packet implements only one slice of that Issue.
+
+The stable project positioning, Ready-for-Code gate, Decision Request protocol,
+and Coding Agent handoff contract are defined in
+[`docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md`](docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md).
 
 Repository administrators should configure `main` to require a pull request,
 one approving review, Code Owner review, resolved conversations, and the

@@ -119,6 +119,12 @@ semgrep 对 git linked worktree 的目录枚举有缺陷（扫描目标为目录
 Task 0 | 复审通过 | commits 08c9a2a..（见 git log） | RED: 基线 test_fixture_manifest... 失败（rule id outside narrow set / 路径反斜杠拒绝） | GREEN: 镜像中 python -m unittest discover -s tests → Ran 328 tests, OK (skipped=11) | reviewer: 通过（修复一处 Important 陈旧索引 [4]→[5] 后；.semgrepignore 需随提交）
 ```
 
+```text
+Task 1 | 复审通过 | commits b54c051..(见 git log) | RED: 容器 python -m unittest tests.test_cxx_final_fixes.ProcessIsolationTests -v → 3 failures（不可信工具经 prlimit64 成功修改父进程 RLIMIT_NOFILE；并发现基线 Linux 既有失败 test_stream_timeout_kills_group_after_leader_exits_and_hashes_to_eof：leader 提前退出时立即杀组会截断后代输出，属 Docker/Linux 从未运行过的既有缺陷，一并修复） | GREEN: 容器 tests.test_cxx_final_fixes+test_cxx_analyzer 91 OK (3 skip)；容器全量 329 OK (3 skip)；宿主全量 329 OK (12 skip)；ruff 通过 | reviewer: 修复后通过（C1 aarch64 clone3 436→435 修正为 asm-generic 编号；I1 clone3 返回 ENOSYS 供 glibc≥2.34 回退 clone；I2 增加 self-prlimit64 放行与 clone3=ENOSYS 正向断言；M1 组 SIGKILL 提前到收割 leader 之前消除 PID 复用窗口；M4 删除死代码 _linux_group_exists；M5 guarded None 检查）
+```
+
+Task 1 补充记录：`cxx_analyzer/Dockerfile` 未改动——Compose 已配置 `init: true`（tini 作为 PID 1），且本修复在分析器进程内安装 `PR_SET_CHILD_SUBREAPER` 并由 `terminate_execution_boundary` 用 `waitpid(-pgid)` 精确回收，镜像层无需变更。leader 提前退出但后代仍持有管道的工具现在会等待管道 EOF 至 step deadline 并如实报告 `timed-out`（旧行为为 `completed`），该语义变化已由基线既有测试固化并由 reviewer 确认为良性。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -158,7 +164,7 @@ git diff --check
 - Consumes: `run_step(...)`、Landlock/seccomp launcher、Compose `init: true`。
 - Produces: `terminate_execution_boundary(process, *, deadline) -> CleanupResult`；成功、失败、超时都保证边界内无存活后代，并处理 PID 1 收养的孤儿。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 新增 Linux 子进程用例：leader 依次尝试 `setsid`、`prlimit64` 操作父进程并派生会退出的孙进程；分别覆盖 leader 返回 0、返回 1、超时。断言父服务限制未改变、所有后代消失且无 zombie。
 
@@ -171,21 +177,21 @@ def test_success_failure_timeout_cannot_escape_or_leave_zombies():
         assert result.zombie_descendants == []
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ProcessIsolationTests -v`
 Expected: FAIL，至少证明 `prlimit64` 或 orphan/zombie 场景未被当前实现阻止。
 
-- [ ] **Step 3: 实现可证明的执行边界**
+- [x] **Step 3: 实现可证明的执行边界**
 
 使用容器内可用的 PID namespace/init 监督方式或严格 cgroup/supervisor；若运行环境缺少所需内核能力则 fail closed。seccomp 同时拒绝逃逸进程组和同 UID 进程控制系统调用。所有 leader 退出路径进入同一清理函数，不能只等待 leader PID。
 
-- [ ] **Step 4: 运行 GREEN 与回归**
+- [x] **Step 4: 运行 GREEN 与回归**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ProcessIsolationTests tests.test_cxx_analyzer -v`
 Expected: PASS；Windows 上 Linux-only 用例只允许以明确平台原因 skip。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add cxx_analyzer/sandbox.py cxx_analyzer/execution.py cxx_analyzer/Dockerfile tests/test_cxx_final_fixes.py

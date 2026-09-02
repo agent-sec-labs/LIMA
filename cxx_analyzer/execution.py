@@ -131,16 +131,6 @@ def _drain(stream: BinaryIO, state: _StreamState) -> None:
         stream.close()
 
 
-def _linux_group_exists(process_group: int) -> bool:
-    try:
-        os.killpg(process_group, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 def _signal_process_group(process_group: int, signal_number: int) -> None:
     try:
         os.killpg(process_group, signal_number)
@@ -148,27 +138,94 @@ def _signal_process_group(process_group: int, signal_number: int) -> None:
         pass
 
 
-def _terminate_process_group(
-    process: subprocess.Popen[bytes], *, leader_exited: bool = False
-) -> None:
+_CLEANUP_GRACE_SECONDS = 2.0
+_SUBREAPER_INSTALLED = False
+
+
+def _install_subreaper_once() -> None:
+    """Adopt orphaned descendants once so teardown can always reap them."""
+
+    global _SUBREAPER_INSTALLED
+    if _SUBREAPER_INSTALLED or sys.platform != "linux":
+        return
+    sandbox.install_subreaper()
+    _SUBREAPER_INSTALLED = True
+
+
+def _reap_process_group(process_group: int, *, deadline: float) -> tuple[int, ...]:
+    """Reap dead members of one process group without stealing other children.
+
+    Each request's leader owns a session (start_new_session), so the pgid is
+    exclusive to this boundary; only sub-second PID-reuse after a reaped
+    leader could ever route another request's child here.
+    """
+
+    reaped: list[int] = []
+    while True:
+        try:
+            pid, _ = os.waitpid(-process_group, os.WNOHANG)
+        except ChildProcessError:
+            return tuple(reaped)
+        except InterruptedError:
+            continue
+        if pid == 0:
+            if time.monotonic() >= deadline:
+                return tuple(reaped)
+            time.sleep(0.005)
+            continue
+        reaped.append(pid)
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    """Leader outcome plus the descendants one teardown could verify as gone."""
+
+    leader_returncode: int | None
+    reaped_pids: tuple[int, ...]
+    deadline_exceeded: bool
+
+
+def terminate_execution_boundary(
+    process: subprocess.Popen[bytes], *, deadline: float | None = None
+) -> CleanupResult:
+    """Tear one tool session down: signal the group, reap leader and orphans."""
+
+    limit = deadline if deadline is not None else time.monotonic() + _CLEANUP_GRACE_SECONDS
     if sys.platform == "linux":
+        leader_exited = process.poll() is not None
         if not leader_exited:
             _signal_process_group(process.pid, signal.SIGTERM)
-            time.sleep(0.1)
-        _signal_process_group(process.pid, signal.SIGKILL)
-    elif process.poll() is None:
-        try:
-            process.terminate()
-            process.wait(timeout=0.5)
-        except (OSError, subprocess.TimeoutExpired):
             try:
-                process.kill()
-            except OSError:
-                pass
-    try:
-        process.wait(timeout=0.5)
-    except subprocess.TimeoutExpired:
-        pass
+                # Wait without reaping: the leader PID stays reserved while
+                # the group is signaled, leaving no PID-reuse misfire window.
+                leader_exited = _wait_linux_leader_without_reaping(
+                    process, time.monotonic() + 0.1
+                )
+            except RuntimeError:
+                leader_exited = True
+        # Descendants may outlive the leader: always hard-kill the group.
+        _signal_process_group(process.pid, signal.SIGKILL)
+        try:
+            process.wait(timeout=max(0.0, min(0.5, limit - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+        reaped = _reap_process_group(process.pid, deadline=limit)
+    else:
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        reaped = ()
+    return CleanupResult(process.poll(), tuple(reaped), time.monotonic() > limit)
 
 
 def _wait_linux_leader_without_reaping(
@@ -231,22 +288,27 @@ def _stream_process(
     deadline = time.monotonic() + timeout_seconds
     if sys.platform == "linux":
         leader_exited = _wait_linux_leader_without_reaping(process, deadline)
+        if leader_exited:
+            # Descendants may still hold the pipe write ends and stream
+            # output after the leader exits; drain to EOF or the deadline
+            # instead of truncating their pending bytes.
+            leader_exited = _join_drains_until(threads, deadline)
         timed_out = not leader_exited
-        _terminate_process_group(process, leader_exited=leader_exited)
+        terminate_execution_boundary(process)
     else:
         timed_out = False
         try:
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             timed_out = True
-        _terminate_process_group(process, leader_exited=not timed_out)
+        terminate_execution_boundary(process)
     drains_complete = _join_drains_until(threads, time.monotonic() + 2.0)
 
     stdout, stdout_sha256, stdout_bytes = stdout_state.snapshot()
     stderr, stderr_sha256, stderr_bytes = stderr_state.snapshot()
     returncode = process.poll()
     if returncode is None:
-        _terminate_process_group(process)
+        terminate_execution_boundary(process)
         returncode = process.poll()
     if not drains_complete:
         stdout_sha256 = ""
@@ -366,6 +428,12 @@ def run_step(
     if landlock_version < sandbox.MIN_LANDLOCK_ABI:
         return _empty_execution(
             "sandbox-unavailable", "filesystem sandbox unavailable"
+        )
+    try:
+        _install_subreaper_once()
+    except OSError:
+        return _empty_execution(
+            "sandbox-unavailable", "process supervisor unavailable"
         )
 
     status_read_fd, status_write_fd = os.pipe()

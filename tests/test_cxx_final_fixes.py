@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import importlib
 import io
@@ -14,6 +15,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+try:
+    import resource
+except ImportError:  # Windows hosts have no resource module.
+    resource = None
 
 from cxx_analyzer import sandbox
 from cxx_analyzer.config import AnalyzerSettings
@@ -30,6 +36,22 @@ from lima.report import to_markdown
 from lima.workspace import RepositoryWorkspace
 
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def prepared_snapshot(temporary: str):
+    """Prepare one bounded snapshot for sandbox-exercising tests."""
+
+    base = Path(temporary)
+    repository = base / "imports" / "team" / "project"
+    repository.mkdir(parents=True)
+    (repository / "src").mkdir()
+    (repository / "src" / "main.cpp").write_text(
+        "int main() { return 0; }\n", encoding="utf-8"
+    )
+    work = base / "work"
+    work.mkdir()
+    fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+    return prepare_snapshot(base / "imports", "team/project", fingerprint, work)
 
 
 def analyzer_settings(**changes: object) -> AnalyzerSettings:
@@ -133,17 +155,7 @@ class FakeResponse(io.BytesIO):
 
 class FinalSnapshotSecurityTests(unittest.TestCase):
     def _snapshot(self, temporary: str):
-        base = Path(temporary)
-        repository = base / "imports" / "team" / "project"
-        repository.mkdir(parents=True)
-        (repository / "src").mkdir()
-        (repository / "src" / "main.cpp").write_text(
-            "int main() { return 0; }\n", encoding="utf-8"
-        )
-        work = base / "work"
-        work.mkdir()
-        fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
-        return prepare_snapshot(base / "imports", "team/project", fingerprint, work)
+        return prepared_snapshot(temporary)
 
     def test_verified_source_is_read_only_and_only_request_owned_roots_are_writable(self):
         """C1: mutating declared source must not be authorized by the OS policy."""
@@ -245,6 +257,154 @@ class FinalSnapshotSecurityTests(unittest.TestCase):
                         self.assertEqual("failed", result.status)
                     time.sleep(1.8)
                     self.assertFalse(marker.exists(), name)
+
+
+def _proc_state(pid: int) -> str | None:
+    """Return the scheduler state of a live pid, or None once it is gone."""
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    tail = stat.rsplit(")", 1)
+    if len(tail) != 2:
+        return None
+    fields = tail[1].split()
+    return fields[0] if fields else None
+
+
+@unittest.skipUnless(sys.platform == "linux", "process isolation boundary requires Linux")
+class ProcessIsolationTests(unittest.TestCase):
+    """Residual 1: same-UID process control and orphan/zombie reaping."""
+
+    _ESCAPE_TOOL = '''
+import ctypes, os, resource, sys, time
+from pathlib import Path
+
+mode = sys.argv[1]
+grand_marker = Path(sys.argv[2])
+result_marker = Path(sys.argv[3])
+
+pid = os.fork()
+if pid == 0:
+    staged = grand_marker.with_suffix(".staged")
+    staged.write_text(str(os.getpid()), encoding="utf-8")
+    staged.rename(grand_marker)
+    for descriptor in (0, 1, 2):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    time.sleep(30)
+    os._exit(0)
+
+while not grand_marker.exists():
+    time.sleep(0.05)
+
+escape = {}
+try:
+    os.setsid()
+    escape["setsid"] = "granted"
+except OSError as exc:
+    escape["setsid"] = "errno:%d" % (exc.errno or -1)
+
+class RLimit(ctypes.Structure):
+    _fields_ = [("cur", ctypes.c_long), ("max", ctypes.c_long)]
+
+libc = ctypes.CDLL(None, use_errno=True)
+old = RLimit()
+ctypes.set_errno(0)
+prc = libc.prlimit64(os.getppid(), 7, None, ctypes.byref(old))
+if prc == 0:
+    target = 64 if (old.cur == -1 or old.cur > 64) else 1
+    new = RLimit(target, old.max)
+    ctypes.set_errno(0)
+    prc = libc.prlimit64(os.getppid(), 7, ctypes.byref(new), None)
+    escape["prlimit64"] = "granted" if prc == 0 else "errno:%d" % ctypes.get_errno()
+else:
+    escape["prlimit64"] = "errno:%d" % ctypes.get_errno()
+
+# Self-targeted limits must stay usable: CPython setrlimit uses prlimit64(0).
+try:
+    current = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, current)
+    escape["self_prlimit64"] = "granted"
+except OSError as exc:
+    escape["self_prlimit64"] = "errno:%d" % (exc.errno or -1)
+
+# clone3 must fail with ENOSYS so glibc falls back to plain clone.
+ctypes.set_errno(0)
+crc = libc.syscall(435, 0, 0)
+escape["clone3"] = "errno:%d" % (ctypes.get_errno() if crc == -1 else 0)
+
+result_marker.write_text(repr(escape), encoding="utf-8")
+if mode == "timeout":
+    time.sleep(30)
+os._exit({"success": 0, "failure": 7}[mode])
+'''
+
+    def _run_untrusted_process_tree(self, mode: str) -> SimpleNamespace:
+        if sandbox.landlock_abi() < sandbox.MIN_LANDLOCK_ABI:
+            self.skipTest("required Landlock ABI is unavailable")
+        before = resource.getrlimit(resource.RLIMIT_NOFILE)
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                with prepared_snapshot(temporary) as snapshot:
+                    grand_marker = snapshot.scratch_root / f"grandchild-{mode}.txt"
+                    result_marker = snapshot.scratch_root / f"escape-{mode}.txt"
+                    result = run_step(
+                        [
+                            sys.executable, "-c", self._ESCAPE_TOOL,
+                            mode, str(grand_marker), str(result_marker),
+                        ],
+                        snapshot,
+                        ".",
+                        3 if mode == "timeout" else 10,
+                        1024,
+                        {},
+                    )
+                    expected = {
+                        "success": "completed",
+                        "failure": "failed",
+                        "timeout": "timed-out",
+                    }[mode]
+                    self.assertEqual(expected, result.status)
+                    grandchild_pid = int(grand_marker.read_text(encoding="utf-8"))
+                    settle = time.monotonic() + 5.0
+                    state = _proc_state(grandchild_pid)
+                    while time.monotonic() < settle and state not in (None, "Z"):
+                        time.sleep(0.1)
+                        state = _proc_state(grandchild_pid)
+                    after = resource.getrlimit(resource.RLIMIT_NOFILE)
+                    return SimpleNamespace(
+                        parent_limits_unchanged=before == after,
+                        live_descendants=(
+                            [] if state in (None, "Z") else [grandchild_pid]
+                        ),
+                        zombie_descendants=[grandchild_pid] if state == "Z" else [],
+                        escape_report=(
+                            result_marker.read_text(encoding="utf-8")
+                            if result_marker.exists()
+                            else ""
+                        ),
+                    )
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, before)
+
+    def test_success_failure_timeout_cannot_escape_or_leave_zombies(self):
+        for mode in ("success", "failure", "timeout"):
+            with self.subTest(mode=mode):
+                result = self._run_untrusted_process_tree(mode)
+                self.assertTrue(result.parent_limits_unchanged)
+                self.assertEqual([], result.live_descendants)
+                self.assertEqual([], result.zombie_descendants)
+                if mode != "timeout":
+                    self.assertIn("'setsid': 'errno:", result.escape_report)
+                    self.assertIn("'prlimit64': 'errno:", result.escape_report)
+                    self.assertIn("'self_prlimit64': 'granted'", result.escape_report)
+                    self.assertIn(
+                        f"'clone3': 'errno:{errno.ENOSYS}'", result.escape_report
+                    )
 
 
 class FinalDeadlineAndLanguageTests(unittest.TestCase):

@@ -10,7 +10,7 @@ from lima.contracts.codec import (
 )
 from lima.contracts.common import SchemaVersion
 from lima.contracts.errors import ContractError, ContractErrorCode
-from lima.contracts.evidence import SourceLocation
+from lima.contracts.evidence import EvidenceRecord, SourceLocation
 from lima.contracts.vep import (
     AepReference,
     ClaimKind,
@@ -299,6 +299,16 @@ class VulnerabilityEvidencePackageTests(VepContractTestCase):
             target_location=_target_location(),
             impact=None,
             refutation_scope=None,
+            path_locations=[_target_location()],
+            reproduction_runs=(
+                ReproductionRun(
+                    run_artifact_id="run-0001",
+                    outcome=ReproductionOutcome.BLOCKED,
+                    detail="Run run-0001 detail.",
+                ),
+            ),
+            trigger_conditions=("attacker controls the CLI argument",),
+            cwe_ids=("CWE-78",),
         )
         self.assertEqual(rebuilt.to_dict(), payload)
 
@@ -708,11 +718,14 @@ class VulnerabilityEvidencePackageTests(VepContractTestCase):
 
     def test_defensive_copy_prevents_post_construction_mutation(self):
         evidence = [
-            _evidence(
-                "evidence-impact-0001",
-                "D4",
-                deps=["evidence-run-0001"],
-                sources=("oracle-0001", "run-0001"),
+            EvidenceRecord.from_dict(
+                _evidence(
+                    "evidence-impact-0001",
+                    "D4",
+                    deps=["evidence-run-0001"],
+                    sources=("oracle-0001", "run-0001"),
+                ),
+                schema_version=VERSION_4_2,
             )
         ]
         runs = [ReproductionRun(
@@ -730,7 +743,11 @@ class VulnerabilityEvidencePackageTests(VepContractTestCase):
             source_aep_revision=1,
             oracle=_oracle_ref(),
             evidence=evidence
-            + [_evidence("evidence-run-0001", "D3")],
+            + [
+                EvidenceRecord.from_dict(
+                    _evidence("evidence-run-0001", "D3"), schema_version=VERSION_4_2
+                )
+            ],
             target_location=_target_location(),
             impact="Arbitrary command execution.",
             refutation_scope=None,

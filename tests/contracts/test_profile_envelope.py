@@ -127,6 +127,7 @@ class ProfileEnvelopeTests(unittest.TestCase):
         profile = _golden_profile()
         blob_envelope = _envelope(
             payload=None,
+            content_digest="4" * 64,
             blob_ref=ArtifactBlobReference(
                 blob_id="blob-1",
                 content_digest="4" * 64,

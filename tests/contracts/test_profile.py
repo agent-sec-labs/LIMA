@@ -554,7 +554,7 @@ class RepositoryProfileTests(ProfileContractTestCase):
         rebuilt = RepositoryProfile(
             schema_version=VERSION_4_0,
             repository_kinds=(RepositoryKind.DOCS_CONTENT,),
-            execution_capability=_capability(),
+            execution_capability=_capability(buildable=False, testable=False),
             support_level=SupportLevel.PARTIAL,
             component_path=None,
             file_count=0,

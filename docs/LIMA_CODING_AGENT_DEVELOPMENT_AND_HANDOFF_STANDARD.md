@@ -2,7 +2,7 @@
 
 > 文档类型：稳定工程规范（Stable Policy）
 >
-> 本文回答“LIMA 是什么、如何把工作变成 Coding Agent 可执行任务、如何开发、验证和交接”。当前分支、NOW/NEXT、未提交文件和最近测试结果不写在本文，统一记录在本机 `PROGRESS.md`。具体实现细节只写在活动 Implementation Packet。
+> 本文回答“LIMA 是什么、如何把工作变成 Coding Agent 可执行任务、如何开发、验证和交接”。跨 Agent 的 NOW/NEXT、Owner 和交付状态写入 Source Issue Delivery Ledger 与 Coordinator Assignment；本机分支、worktree、未提交文件和临时验证可缓存到被忽略的 `PROGRESS.md`。具体实现细节只写在活动 Implementation Packet。
 
 ## 1. 项目定位
 
@@ -100,17 +100,21 @@ Golden Path 稳定前，Java、多语言全面覆盖、更多 CWE、RAG、Tool E
 8. 安全失败默认 fail closed，不把 blocked/inconclusive/failed 伪装成 safe；
 9. 保留现有可用功能，通过兼容 Adapter 渐进迁移，不进行大爆炸重写。
 
-## 4. 三种文档的职责边界
+## 4. 工程 Artifact 的职责边界
 
 | Artifact | 回答的问题 | 是否可直接指导编码 | 更新者 |
 |---|---|---:|---|
 | GitHub Epic/Issue/Roadmap | 为什么做、最终范围、依赖和需求库存是什么 | 否 | Maintainer |
 | 本文 | 项目定位、稳定流程、安全边界和交接标准是什么 | 否 | Maintainer |
-| `PROGRESS.md` | 当前代码/工作树/队列/验证的真实状态是什么 | 否 | Session Coordinator |
+| Issue Delivery Ledger | 跨 Agent 的 Requirement/IP/PR/Evidence、Owner、队列和关闭状态是什么 | 否 | Coordinator Agent |
+| Coordinator Assignment | 当前唯一任务的 Packet、基线、Frozen Test、分支、Owner 和边界是什么 | 是，作为开工授权 | Coordinator Agent |
+| `PROGRESS.md` | 本机 worktree、临时分支、未提交文件和最近验证缓存是什么 | 否；可选且可重建 | Coordinator Agent |
 | Implementation Packet | 这一个切片改哪些文件、Symbols、Contract、Tests、Commands | 是 | Maintainer/Designer |
 | Completion Summary | Agent 实际做了什么、验证了什么、还缺什么 | 作为复核证据 | Coding Agent |
+| 三类 Agent 责任书 | Coordinator、P&V、Implementation 分别能做和不能做什么 | 是，约束角色行为 | Maintainer |
+| Issue→IP→PR→Closure 生命周期 | 多个 IP 如何累计满足 Issue，以及何时允许合并/关闭 | 是，约束状态转换 | Coordinator/Maintainer |
 
-禁止把 `PROGRESS.md` 写成长期 Roadmap，也禁止把长期架构讨论塞进 Implementation Packet。
+禁止把 `PROGRESS.md` 写成长期 Roadmap或跨 Agent 唯一真值，也禁止把长期架构讨论塞进 Implementation Packet。新 clone 缺少 `PROGRESS.md` 不构成阻塞；可从 `PROGRESS.example.md` 和远端事实重建。
 
 ## 5. 真值与冲突处理
 
@@ -119,7 +123,8 @@ Golden Path 稳定前，Java、多语言全面覆盖、更多 CWE、RAG、Tool E
 | 问题 | 第一事实源 | 次级参考 |
 |---|---|---|
 | 当前代码真实行为 | 最新 `main` 的代码和可重复测试 | README/历史文档 |
-| 当前工作树、Owner、NOW/NEXT、最近测试 | `PROGRESS.md` | GitHub 状态 |
+| 跨 Agent Owner、NOW/NEXT、Requirement/IP 状态 | Issue Delivery Ledger + Coordinator Assignment | 可验证 Git/GitHub 状态 |
+| 本机 worktree、dirty files、临时验证 | 当前 Git 状态 + 可选 `PROGRESS.md` | Coordinator Assignment |
 | 活动切片的目标行为 | 活动 Implementation Packet + 已批准 Decision Record | Source Issue |
 | 长期平台方向 | 本文“项目定位” + 最新批准的架构规划 | Epic/研究材料 |
 | 安全与权限边界 | 当前代码安全测试 + 本文冻结不变量 + Packet | 普通需求描述 |
@@ -129,7 +134,7 @@ Golden Path 稳定前，Java、多语言全面覆盖、更多 CWE、RAG、Tool E
 - 代码与文档冲突时，代码说明“当前是什么”，但不能自动推翻 Packet 的“本次要变成什么”；
 - Packet 与 Source Issue 冲突时，本切片以 Packet 为准，并把冲突报告给 Maintainer；Coding Agent 不改 Issue；
 - Packet 要求削弱本文安全不变量时必须停止，不能执行；
-- `PROGRESS.md` 只记录事实，不能创造架构规则；
+- `PROGRESS.md` 只缓存可重建的本机事实，不能创造架构规则、激活 IP 或覆盖 Delivery Ledger；
 - 任何关键冲突都通过 Decision Request 处理，不由 Agent 猜测。
 
 ## 6. Backlog 与执行状态
@@ -192,12 +197,28 @@ LATER = 其余
 
 多人协作规则：
 
-- 一个 Coding Agent = 一个 Implementation Packet = 一个逻辑 PR；
+- 一个 IP = 一个 P&V Owner + 一个 Implementation Agent + 一个逻辑 Implementation PR；
 - 一个高冲突文件区域同一时间只有一个 Owner；
 - 未列入 Packet allowlist 的文件全部只读；
-- Review Agent 与 Implementation Agent 角色分离；Reviewer 提意见，不在同一轮越权改实现；
+- P&V Agent 与 Implementation Agent 角色分离；P&V 负责冻结测试和独立验证，不在同一轮越权修改产品实现；
 - 并行仅允许在文件集合不相交且公共 Contract 已冻结时发生；
 - Agent 不认领完整 Epic，也不同时处理 NOW 和 NEXT。
+
+### 8.1 三类 Agent 的强制分工
+
+规模化 Packet-first 交付使用三个职责分离的 Agent：
+
+- **Coordinator Agent**：维护 NOW/NEXT、Issue Delivery Ledger、Owner、状态转换、合并决策、post-merge 调度和 Issue Closure Audit；不编写产品代码或冻结测试；
+- **Packet & Verification Agent**：制作 Packet/交接书、编写并冻结 acceptance tests、证明 RED、独立验证实现、形成和推送 PR；不编写产品代码、不合并 PR、不关闭 Issue；
+- **Implementation Agent**：从 Frozen Test Commit 派生，只修改 product-code allowlist，交付实现 commit 和 Completion Summary；不修改 Packet/测试/Issue/PR/PROGRESS。
+
+三类角色的规范性边界见：
+
+- `docs/LIMA_COORDINATOR_AGENT_RESPONSIBILITY_CHARTER.md`；
+- `docs/LIMA_PACKET_AND_VERIFICATION_AGENT_RESPONSIBILITY_CHARTER.md`；
+- `docs/LIMA_IMPLEMENTATION_AGENT_RESPONSIBILITY_CHARTER.md`。
+
+完整状态转换、Issue Delivery Ledger 和关闭 Gate 见 `docs/LIMA_ISSUE_TO_IP_TO_PR_TO_CLOSURE_LIFECYCLE.md`。旧文档中的泛称 “Coding Agent” 在没有进一步限定时仅指 Implementation Agent；Packet 制作、独立验证、PR 推送和 Issue 关闭不得再隐含地交给它。
 
 ## 9. Coding Agent 启动协议
 
@@ -206,10 +227,11 @@ Coding Agent 开始编码前必须执行以下步骤。
 ### 9.1 读取顺序
 
 1. 完整阅读本文；
-2. 完整阅读本机 `PROGRESS.md`；
-3. 完整阅读唯一活动 Implementation Packet；
-4. 阅读 `CONTRIBUTING.md` 和 Packet 引用的代码/测试；
-5. Source Issue 只用于背景，不从中扩展 Packet 范围。
+2. 完整阅读 Coordinator Assignment 和其中引用的 Source Issue Delivery Ledger；
+3. 完整阅读唯一活动 Implementation Packet、正式交接书和 Frozen Test Commit；
+4. 阅读自己的角色责任书、`CONTRIBUTING.md` 和 Packet 引用的代码/测试；
+5. 若本机存在 `PROGRESS.md`，将其作为缓存核验；缺失或过期时不阻塞，并由 Coordinator 重建；
+6. Source Issue 只用于背景，不从中扩展 Packet 范围。
 
 ### 9.2 工作树审计
 
@@ -352,7 +374,9 @@ Reviewer 依次检查：
 6. Completion Summary 是否可复现；
 7. `merge-gate` 是否通过。
 
-一个 Packet 只是 Source Issue 的切片时，PR 不得 `Closes #<source-issue>`。只有 Issue 的全部 Packet、集成和 Completion Summary 完成后才允许关闭 Issue。
+所有 Packet docs PR、Implementation PR 和 Recovery PR 均不得使用自动关闭 Source Issue 的关键字，包括最后一个 `CLOSURE-CANDIDATE` IP。PR 合并后必须先在最新 `main` 上完成 post-merge verification；随后由 Coordinator 依据 Issue Delivery Ledger 执行 Issue Closure Audit。只有全部 mandatory FR/AC/NFR、跨 IP 集成、真实运行、迁移/运维和未决风险均有证据时，Coordinator 才可形成 Closure Record，并在获得远端授权后手工关闭 Issue。
+
+`merge-gate` 只回答“当前 PR 是否允许进入 `main`”，不回答“当前 IP 是否已经 post-merge 验证”，更不回答“Source Issue 是否满足全部需求”。
 
 ## 14. 无缝交接协议
 
@@ -378,19 +402,17 @@ Untracked files：
 禁止下一位 Agent 做的事：
 ```
 
-### 14.2 Session Coordinator 更新 `PROGRESS.md`
+### 14.2 Coordinator 更新共享状态与可选本机缓存
 
-Coordinator 根据可验证结果更新：
+Coordinator 必须先把跨 Agent 状态更新到 Source Issue Delivery Ledger、PR 或已合并文档，包括：
 
-- snapshot 时间和最新 main；
 - NOW/NEXT/LATER；
 - active owner、branch、HEAD；
-- dirty/untracked 文件；
-- baseline/最新验证；
+- Packet/PR/merge/post-merge 状态；
 - Decision 和 blocker；
 - 最小下一步。
 
-Coding Agent 默认不修改 `PROGRESS.md`，因为它是本机忽略的运行台账，不应混入实现 PR。
+Coordinator 可以把本机 worktree、dirty/untracked 文件、临时命令和最近验证镜像到 `PROGRESS.md`。该文件从 `PROGRESS.example.md` 创建、被 Git 忽略、可随时重建，不得成为其他 Agent 开工的唯一依据。P&V 和 Implementation Agent 默认不修改它。
 
 ### 14.3 下一位 Agent 恢复
 
@@ -477,21 +499,22 @@ Coding Agent 默认不修改 `PROGRESS.md`，因为它是本机忽略的运行�
 - Ruff/Bandit 只对本次改动负责，业务 PR 不批量清理历史债务；
 - 用户未明确授权时，不创建/关闭/修改 GitHub Issue、PR、Label 或远端分支。
 
-## 19. 标准 Coding Agent 任务前缀
+## 19. 标准 Implementation Agent 任务前缀
 
 维护者交付 Packet 时使用：
 
 ```text
-你正在实现一个已经冻结的 LIMA Implementation Packet。
+你是 LIMA Implementation Agent，正在实现一个已经合并并冻结测试的 Implementation Packet。
 
 必须：
-1. 完整阅读 LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD、PROGRESS 和活动 Packet。
+1. 完整阅读稳定标准、Implementation Agent 责任书、Coordinator Assignment 和活动 Packet。
 2. 只修改 Packet allowlist。
 3. 不重新设计 public contract，不添加未批准依赖或权限。
-4. 先运行 baseline，再按指定测试顺序实现。
-5. Contract 不足或需要越界时立即停止并提交 Decision Request。
-6. 不修改 GitHub Issues，不关闭 Source Issue。
-7. 完成后输出 Packet 要求的 Completion Summary 和真实测试证据。
+4. 核对 Frozen Test Commit；测试、fixture、oracle 和 Packet 全部只读。
+5. 先运行 baseline 和预期 RED，再按指定测试顺序实现。
+6. Contract 不足或需要越界时立即停止并提交 Decision Request。
+7. 不修改 GitHub Issues、Delivery Ledger、本机 PROGRESS 或 PR，不关闭 Source Issue。
+8. 完成后把 final commit、Completion Summary 和真实测试证据交给 P&V Agent。
 ```
 
 ## 20. 本文维护规则
@@ -503,7 +526,7 @@ Coding Agent 默认不修改 `PROGRESS.md`，因为它是本机忽略的运行�
 - 稳定安全不变量或通用验证规则发生变化；
 - 代码目录职责发生长期变化。
 
-不要在本文记录：当前 Agent、临时分支、单次测试结果、某个 Issue 的实时状态、历史排障流水或短期 TODO；这些内容属于 `PROGRESS.md`、Implementation Packet、Completion Summary 或 Findings Ledger。
+不要在本文记录：当前 Agent、临时分支、单次测试结果、某个 Issue 的实时状态、历史排障流水或短期 TODO。跨 Agent 实时状态属于 Delivery Ledger/Assignment/PR；本机瞬时信息属于可选 `PROGRESS.md`；实现与验证事实属于 Packet、Completion Summary、Verification Report 或 Findings Ledger。
 
 最终纪律：
 

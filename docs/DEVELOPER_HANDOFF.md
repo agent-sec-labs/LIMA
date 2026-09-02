@@ -1,32 +1,64 @@
-# LIMA 开发者交接入口
+# LIMA 多 Agent 开发交接入口
 
-> 本路径保留为兼容入口。原文中的历史 Epic/Issue 状态、Issue-first 开工流程和旧代码基线已于 2026-09-01 废止，禁止继续作为开发依据。
+> 本文件是角色路由入口，不记录临时 NOW/NEXT。跨 Agent 状态以 Source Issue Delivery Ledger、Coordinator Assignment 和可验证的 Git/GitHub 状态为准；本机 `PROGRESS.md` 只是可选缓存。
 
-Coding Agent 必须按顺序完整阅读：
+## 1. 所有 Agent 共同必读
 
-1. [LIMA 项目定位与 Coding Agent 开发交接标准](LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md)
-2. 仓库根目录的 `PROGRESS.md`
-3. `PROGRESS.md` 指定的唯一活动 Implementation Packet
-4. `CONTRIBUTING.md` 以及 Packet 明确引用的代码与测试
+1. [LIMA 项目定位与开发交接标准](LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md)
+2. [Issue → IP → PR → Issue Closure 完整生命周期](LIMA_ISSUE_TO_IP_TO_PR_TO_CLOSURE_LIFECYCLE.md)
+3. 与自己身份对应的角色责任书
+4. `CONTRIBUTING.md`
+5. Coordinator Assignment 与 Source Issue Delivery Ledger
 
-关键规则：
+若本机存在 `PROGRESS.md`，Agent 可以把它作为恢复线索，但必须对照远端事实核验；新 clone 不要求存在该文件。Coordinator 可从根目录 `PROGRESS.example.md` 创建本机副本。
 
-- GitHub Issue 及 `status:ready` 标签不等于 Ready-for-Code。
-- 只有完整并被激活的 Implementation Packet 可以直接指导编码。
-- 全项目同时最多允许 1 个 NOW、2 个 NEXT。
-- 一个 Coding Agent 只消费一个 Packet，并只产出一个独立 PR。
-- Coding Agent 不修改 GitHub Issue，也不得关闭仅完成了一个实现切片的 Source Issue。
-- 工作树状态、执行队列、当前基线与下一步以本机 `PROGRESS.md` 的当前快照为准。
+## 2. 按角色读取
 
-已完成 Packet：
+### Coordinator Agent
 
-- [IP-0001：Contract Foundation](LIMA_Implementation_Packet_IP-0001_Contract_Foundation.md)
+必读：
 
-当前活动 Packet：
+- [Coordinator Agent 责任书](LIMA_COORDINATOR_AGENT_RESPONSIBILITY_CHARTER.md)
+- 当前 Source Issue、Delivery Ledger、依赖 Issue 和所有上游 PR/evidence
+- 当前活动/候选 Packet，只用于分配和状态控制
+- 可选的本机 `PROGRESS.md`；缺失时从 Delivery Ledger 和 Git/GitHub 重建
 
-- [IP-0002：Evidence Domain](LIMA_Implementation_Packet_IP-0002_Evidence_Domain.md)
-- [IP-0002：Coding Agent 正式开发任务交接](LIMA_Coding_Agent_IP-0002_正式开发任务交接.md)
+Coordinator 不编写产品代码或冻结测试。它负责 Issue 分解、队列、Owner、合并决策、post-merge 调度和最终 Issue Closure Audit。
 
-IP-0002 两份文档合并到 `main` 前状态为 `DESIGN-FROZEN / PENDING-DOC-MERGE`，只允许 Review；合并后才满足 Coding Agent 开工的文档可见性 Gate。具体状态仍以本机 `PROGRESS.md` 为准。
+### Packet & Verification Agent
 
-若长期标准、`PROGRESS.md`、Packet、代码事实或 Issue 之间发生冲突，必须按长期标准中的真值优先级和 Decision Request 规则暂停并报告，不得自行猜测。
+必读：
+
+- [Packet & Verification Agent 责任书](LIMA_PACKET_AND_VERIFICATION_AGENT_RESPONSIBILITY_CHARTER.md)
+- Coordinator Assignment 指定的 Issue requirement、架构/Decision、上游 IP 和真实 main 代码/测试
+- 当前 IP 的 Packet 和正式交接书（制作阶段为自己维护的草案；合并后以 main 版本为准）
+
+P&V Agent 制作 Packet、冻结测试、证明 RED、独立验证 Implementation commit，并形成/推送 PR。它不写产品代码、不合并 PR、不关闭 Issue。
+
+### Implementation Agent
+
+必读：
+
+- [Implementation Agent 责任书](LIMA_IMPLEMENTATION_AGENT_RESPONSIBILITY_CHARTER.md)
+- Coordinator Assignment 指定的唯一活动 Packet 与 Frozen Test Commit
+- 当前 IP 正式交接书
+- Frozen tests/fixture、RED Evidence Record 和 Packet 引用的代码/测试
+
+Implementation Agent 只修改 product-code allowlist，交付 final commit 和 Completion Summary 给 P&V Agent。它不修改 Packet、测试、Issue、PR 或 `PROGRESS.md`。
+
+## 3. 已完成的基础 Packet
+
+- [IP-0001：Contract Foundation](LIMA_Implementation_Packet_IP-0001_Contract_Foundation.md) — PR #98 已合并
+- [IP-0002：Evidence Domain](LIMA_Implementation_Packet_IP-0002_Evidence_Domain.md) — Packet PR #99、Implementation PR #100 已合并
+- [IP-0002：正式开发任务交接](LIMA_Coding_Agent_IP-0002_正式开发任务交接.md) — 历史执行输入，只读保留
+
+IP-0001 和 IP-0002 完成不等于 Source Issue #58 完成。#58 只有在 Delivery Ledger 的全部 mandatory requirements、集成/真实运行和 Issue Closure Audit 均通过后才可手工关闭。
+
+## 4. 不可混淆的四个 Gate
+
+- `Packet merged`：规范可被实现 Agent 消费；
+- `merge-gate passed`：一个 PR 可以进入 `main`；
+- `post-merge verification passed`：一个 IP 可以标记 Done；
+- `Issue Closure Audit passed`：整个 Source Issue 才可形成 Closure Record 并手工关闭。
+
+所有 IP PR 一律只关联 Source Issue，不自动关闭。若长期标准、角色责任书、Coordinator Assignment、Delivery Ledger、Packet、代码事实或 Issue 发生冲突，按稳定标准和生命周期的真值优先级停止并提交 Decision Request，不得自行猜测。本机 `PROGRESS.md` 与远端事实冲突时必须重建，不能覆盖远端真值。

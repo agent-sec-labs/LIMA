@@ -5,7 +5,6 @@ import json
 import unittest
 
 from lima.contracts.codec import DEFAULT_LIMITS, ContractLimits
-
 from lima.contracts.errors import ContractError, ContractErrorCode
 
 EXPECTED_MESSAGES = {

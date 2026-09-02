@@ -654,7 +654,7 @@ class AuditEvidencePackageTests(AepContractTestCase):
             package_status=AuditPackageStatus.SEALED,
             revision=1,
             audit_depth=AuditDepth.DEEP,
-            audit_outcome=AuditOutcome.INCOMPLETE,
+            audit_outcome=AuditOutcome.COMPLETED,
             evidence=decode_evidence_payload(_supported_bundle(), schema_version=VERSION_4_0),
             coverage=_coverage(),
             budget=_budget(),

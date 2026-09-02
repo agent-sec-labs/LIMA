@@ -582,6 +582,7 @@ def run_build_scan(
             timeout_seconds=remaining,
             max_output_bytes=settings.max_output_bytes,
             env=SANITIZER_ENVIRONMENT if sanitizer_enabled else {},
+            deadline=active_deadline,
         )
         run = _tool_run("build-step", execution, build_step=True)
         tool_runs.append(run)
@@ -638,6 +639,7 @@ def run_build_scan(
                     timeout_seconds=remaining,
                     max_output_bytes=settings.max_output_bytes,
                     env={},
+                    deadline=active_deadline,
                 )
                 tool_runs.append(_tool_run("clang", execution))
                 if execution.status != "completed":

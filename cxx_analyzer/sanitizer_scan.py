@@ -182,7 +182,7 @@ def run_sanitizer_scan(
             break
         execution = run_step(
             step, snapshot, ".", remaining, settings.max_output_bytes,
-            env=SANITIZER_ENVIRONMENT,
+            env=SANITIZER_ENVIRONMENT, deadline=active_deadline,
         )
         tool_runs.append(_tool_run(execution))
         if (

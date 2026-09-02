@@ -8,8 +8,10 @@ import hashlib
 import importlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -405,6 +407,142 @@ os._exit({"success": 0, "failure": 7}[mode])
                     self.assertIn(
                         f"'clone3': 'errno:{errno.ENOSYS}'", result.escape_report
                     )
+
+
+class _FakeClock:
+    """Deterministic monotonic clock whose sleeps advance simulated time."""
+
+    def __init__(self) -> None:
+        self._now = 1000.0
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self._now += max(0.0, seconds)
+
+
+class _HungProcess:
+    """Popen stand-in whose waits consume their full budget and never exit."""
+
+    pid = 424242
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self._clock = clock
+        self.stdout: object | None = None
+        self.stderr: object | None = None
+
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is not None and timeout > 0:
+            self._clock.sleep(timeout)
+        raise subprocess.TimeoutExpired("hung-tool", timeout)
+
+
+class _NeverEofStream:
+    """Pipe stand-in whose reader blocks until released, like a held pipe."""
+
+    def __init__(self) -> None:
+        self._release = threading.Event()
+
+    def read(self, size: int = -1) -> bytes:  # noqa: ARG002 - pipe protocol
+        self._release.wait()
+        return b""
+
+    def close(self) -> None:
+        self._release.set()
+
+
+class RequestDeadlineTests(unittest.TestCase):
+    """Residual 2: termination, drain and cleanup consume the request deadline."""
+
+    TEST_SCHEDULER_TOLERANCE = 0.5
+
+    def _consume_until_leader_timeout(self, clock: _FakeClock):
+        def _wait(process, deadline):  # noqa: ANN001, ARG001 - mock signature
+            clock.sleep(max(0.0, deadline - clock.monotonic()))
+            return False
+
+        return _wait
+
+    def test_request_deadline_includes_termination_drain_and_cleanup(self):
+        execution = importlib.import_module("cxx_analyzer.execution")
+        deadline_module = importlib.import_module("cxx_analyzer.deadline")
+        clock = _FakeClock()
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary) / "lima-cxx-fake"
+            (tree / "source").mkdir(parents=True)
+            (tree / "source" / "main.cpp").write_text(
+                "int main() {}\n", encoding="utf-8"
+            )
+            streams = [_NeverEofStream(), _NeverEofStream()]
+            process = _HungProcess(clock)
+            process.stdout, process.stderr = streams
+            with (
+                mock.patch.object(execution.time, "monotonic", clock.monotonic),
+                mock.patch.object(execution.time, "sleep", clock.sleep),
+                mock.patch.object(
+                    execution,
+                    "_wait_linux_leader_without_reaping",
+                    side_effect=self._consume_until_leader_timeout(clock),
+                ),
+            ):
+                result = self._analyze_with_slow_process_and_cleanup(
+                    clock,
+                    deadline_module,
+                    execution,
+                    importlib.import_module("cxx_analyzer.snapshot"),
+                    process,
+                    tree,
+                    total=5.0,
+                )
+                for stream in streams:
+                    stream.close()
+        self.assertLessEqual(
+            result.elapsed, 5.0 + self.TEST_SCHEDULER_TOLERANCE, result.elapsed
+        )
+        self.assertEqual("request-deadline-exceeded", result.diagnostic)
+        self.assertFalse(result.cleanup_completed)
+        self.assertTrue(result.tree_left_to_isolation_boundary)
+
+    @staticmethod
+    def _analyze_with_slow_process_and_cleanup(
+        clock,
+        deadline_module,
+        execution,
+        snapshot_module,
+        process,
+        tree,
+        *,
+        total: float,
+    ):
+        deadline = deadline_module.AnalysisDeadline(clock.monotonic() + total)
+        started = clock.monotonic()
+        capture = execution._stream_process(  # noqa: SLF001 - deadline contract probe
+            process,
+            deadline.step_timeout(30),
+            1024,
+            absolute_deadline=deadline.expires_at,
+        )
+        diagnostic = execution.final_diagnostic(deadline, capture.digests_complete)
+        cleanup_completed = snapshot_module._bounded_tree_delete(  # noqa: SLF001
+            tree, deadline
+        )
+        return SimpleNamespace(
+            elapsed=clock.monotonic() - started,
+            timed_out=capture.timed_out,
+            diagnostic=diagnostic,
+            cleanup_completed=cleanup_completed,
+            tree_left_to_isolation_boundary=tree.exists(),
+        )
 
 
 class FinalDeadlineAndLanguageTests(unittest.TestCase):

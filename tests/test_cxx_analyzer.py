@@ -463,6 +463,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                     "cxx_analyzer.execution.os.pipe",
                     return_value=(status_read, status_write),
                 ):
+                    request_deadline = AnalysisDeadline.start(30)
                     result = run_step(
                         ("cmake", "--version"),
                         snapshot,
@@ -470,6 +471,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                         timeout_seconds=17,
                         max_output_bytes=1024,
                         env={},
+                        deadline=request_deadline,
                     )
 
         self.assertEqual("completed", result.status)
@@ -497,7 +499,12 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         self.assertTrue(called_options["close_fds"])
         self.assertTrue(called_options["start_new_session"])
         self.assertEqual(1, len(called_options["pass_fds"]))
-        stream.assert_called_once_with(process, 17, 1024)
+        stream.assert_called_once_with(
+            process,
+            17,
+            1024,
+            absolute_deadline=request_deadline.expires_at,
+        )
 
     def test_stream_process_bounds_high_throughput_output_and_hashes_all_bytes(self):
         stdout = b"A" * (2 * 1024 * 1024 + 17)

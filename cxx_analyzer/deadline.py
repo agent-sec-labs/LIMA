@@ -25,9 +25,16 @@ class AnalysisDeadline:
     def remaining(self) -> float:
         return self.expires_at - time.monotonic()
 
-    def check(self, stage: str = "analysis") -> None:
-        if self.remaining() <= 0:
+    def remaining_seconds(self, stage: str = "analysis") -> float:
+        """Return the positive remaining budget or fail the stage loudly."""
+
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
             raise AnalysisDeadlineExceeded(f"{stage} exceeded the request deadline")
+        return remaining
+
+    def check(self, stage: str = "analysis") -> None:
+        self.remaining_seconds(stage)
 
     def step_timeout(self, maximum: int) -> int:
         if not isinstance(maximum, int) or maximum < 1:

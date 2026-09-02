@@ -15,6 +15,7 @@ from typing import BinaryIO
 
 from . import sandbox
 from .config import MAX_ARGUMENT_BYTES, MAX_ARGUMENTS_PER_STEP
+from .deadline import AnalysisDeadline
 from .snapshot import PreparedSnapshot
 
 CLEAN_ENVIRONMENT = {
@@ -139,6 +140,7 @@ def _signal_process_group(process_group: int, signal_number: int) -> None:
 
 
 _CLEANUP_GRACE_SECONDS = 2.0
+_DRAIN_GRACE_SECONDS = 2.0
 _SUBREAPER_INSTALLED = False
 
 
@@ -157,20 +159,28 @@ def _reap_process_group(process_group: int, *, deadline: float) -> tuple[int, ..
 
     Each request's leader owns a session (start_new_session), so the pgid is
     exclusive to this boundary; only sub-second PID-reuse after a reaped
-    leader could ever route another request's child here.
+    leader could ever route another request's child here. A killed descendant
+    can reparent to this subreaper microseconds after its leader was reaped,
+    so ECHILD is only trusted after bounded retries.
     """
 
     reaped: list[int] = []
+    echild_retries = 0
     while True:
         try:
             pid, _ = os.waitpid(-process_group, os.WNOHANG)
         except ChildProcessError:
+            if echild_retries < 3 and time.monotonic() < deadline:
+                echild_retries += 1
+                time.sleep(0.01)
+                continue
             return tuple(reaped)
         except InterruptedError:
             continue
         if pid == 0:
             if time.monotonic() >= deadline:
                 return tuple(reaped)
+            echild_retries = 0
             time.sleep(0.005)
             continue
         reaped.append(pid)
@@ -195,11 +205,14 @@ def terminate_execution_boundary(
         leader_exited = process.poll() is not None
         if not leader_exited:
             _signal_process_group(process.pid, signal.SIGTERM)
+            term_budget = time.monotonic() + 0.1
+            if term_budget > limit:
+                term_budget = limit
             try:
                 # Wait without reaping: the leader PID stays reserved while
                 # the group is signaled, leaving no PID-reuse misfire window.
                 leader_exited = _wait_linux_leader_without_reaping(
-                    process, time.monotonic() + 0.1
+                    process, term_budget
                 )
             except RuntimeError:
                 leader_exited = True
@@ -214,14 +227,16 @@ def terminate_execution_boundary(
         if process.poll() is None:
             try:
                 process.terminate()
-                process.wait(timeout=0.5)
+                process.wait(
+                    timeout=max(0.0, min(0.5, limit - time.monotonic()))
+                )
             except (OSError, subprocess.TimeoutExpired):
                 try:
                     process.kill()
                 except OSError:
                     pass
         try:
-            process.wait(timeout=0.5)
+            process.wait(timeout=max(0.0, min(0.5, limit - time.monotonic())))
         except subprocess.TimeoutExpired:
             pass
         reaped = ()
@@ -258,8 +273,23 @@ def _join_drains_until(threads: tuple[threading.Thread, ...], deadline: float) -
     return True
 
 
+def _teardown_limit(
+    absolute_deadline: float | None, grace_seconds: float
+) -> float:
+    """One teardown budget clamped by the request deadline when present."""
+
+    budget = time.monotonic() + grace_seconds
+    if absolute_deadline is not None:
+        budget = min(budget, absolute_deadline)
+    return budget
+
+
 def _stream_process(
-    process: subprocess.Popen[bytes], timeout_seconds: int, max_output_bytes: int
+    process: subprocess.Popen[bytes],
+    timeout_seconds: int,
+    max_output_bytes: int,
+    *,
+    absolute_deadline: float | None = None,
 ) -> StreamCapture:
     """Drain both pipes concurrently while retaining one shared bounded prefix."""
 
@@ -294,21 +324,32 @@ def _stream_process(
             # instead of truncating their pending bytes.
             leader_exited = _join_drains_until(threads, deadline)
         timed_out = not leader_exited
-        terminate_execution_boundary(process)
+        terminate_execution_boundary(
+            process,
+            deadline=_teardown_limit(absolute_deadline, _CLEANUP_GRACE_SECONDS),
+        )
     else:
         timed_out = False
         try:
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             timed_out = True
-        terminate_execution_boundary(process)
-    drains_complete = _join_drains_until(threads, time.monotonic() + 2.0)
+        terminate_execution_boundary(
+            process,
+            deadline=_teardown_limit(absolute_deadline, _CLEANUP_GRACE_SECONDS),
+        )
+    drains_complete = _join_drains_until(
+        threads, _teardown_limit(absolute_deadline, _DRAIN_GRACE_SECONDS)
+    )
 
     stdout, stdout_sha256, stdout_bytes = stdout_state.snapshot()
     stderr, stderr_sha256, stderr_bytes = stderr_state.snapshot()
     returncode = process.poll()
     if returncode is None:
-        terminate_execution_boundary(process)
+        terminate_execution_boundary(
+            process,
+            deadline=_teardown_limit(absolute_deadline, _CLEANUP_GRACE_SECONDS),
+        )
         returncode = process.poll()
     if not drains_complete:
         stdout_sha256 = ""
@@ -392,6 +433,16 @@ def clean_environment(snapshot: PreparedSnapshot) -> dict[str, str]:
     }
 
 
+def final_diagnostic(
+    deadline: AnalysisDeadline | None, digests_complete: bool
+) -> str:
+    """Map one step outcome to its stable diagnostic identifier."""
+
+    if deadline is not None and deadline.remaining() <= 0:
+        return "request-deadline-exceeded"
+    return "" if digests_complete else "tool output drain incomplete"
+
+
 def run_step(
     argv: Sequence[str],
     snapshot: PreparedSnapshot,
@@ -399,8 +450,14 @@ def run_step(
     timeout_seconds: int,
     max_output_bytes: int,
     env: Mapping[str, str] | None,
+    *,
+    deadline: AnalysisDeadline | None = None,
 ) -> ToolExecution:
-    """Run one argv step inside a live snapshot and a fail-closed Landlock policy."""
+    """Run one argv step inside a live snapshot and a fail-closed Landlock policy.
+
+    Teardown and drain budgets are clamped by the caller's request deadline;
+    they never open a second full budget.
+    """
 
     arguments = _validate_argv(argv)
     if not isinstance(snapshot, PreparedSnapshot):
@@ -414,6 +471,8 @@ def run_step(
         raise ValueError("tool environment must be a mapping")
     if env not in (None, {}, SANITIZER_ENVIRONMENT):
         raise ValueError("tool environment is not an analyzer-owned fixed environment")
+    if deadline is not None and not isinstance(deadline, AnalysisDeadline):
+        raise ValueError("tool deadline must be an AnalysisDeadline")
     sandbox.build_policy(snapshot.root, snapshot.writable_roots)
     if not sandbox.process_isolation_available():
         return _empty_execution(
@@ -464,7 +523,14 @@ def run_step(
             )
         finally:
             os.close(status_write_fd)
-        captured = _stream_process(process, timeout_seconds, max_output_bytes)
+        captured = _stream_process(
+            process,
+            timeout_seconds,
+            max_output_bytes,
+            absolute_deadline=(
+                deadline.expires_at if deadline is not None else None
+            ),
+        )
         setup_report = os.read(status_read_fd, 2)
     finally:
         os.close(status_read_fd)
@@ -497,7 +563,5 @@ def run_step(
         output_sha256=captured.output_sha256,
         output_truncated=captured.output_truncated,
         digests_complete=captured.digests_complete,
-        diagnostic=(
-            "" if captured.digests_complete else "tool output drain incomplete"
-        ),
+        diagnostic=final_diagnostic(deadline, captured.digests_complete),
     )

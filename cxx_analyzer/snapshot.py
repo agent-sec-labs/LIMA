@@ -33,6 +33,10 @@ DEFAULT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 DEFAULT_IGNORED_FILES = frozenset({".env", ".env.local", ".env.production"})
+# Cleanup budgets: the walk stops after this many entries or once the request
+# deadline passes; the remainder is reclaimed by the isolation boundary.
+MAX_CLEANUP_ENTRIES = 50_000
+_CLEANUP_BATCH_ENTRIES = 256
 LOW_PRIORITY_DIRECTORIES = frozenset(
     {
         "benchmark", "benchmarks", "demo", "demos", "doc", "docs", "example",
@@ -126,14 +130,37 @@ class PreparedSnapshot:
             raise ValueError("snapshot inventory fingerprint changed after verification")
 
     def cleanup(self, *, deadline: AnalysisDeadline | None = None) -> None:
+        """Delete the request-private tree within entry and deadline budgets.
+
+        When the budget is exhausted the remainder is left to the verified
+        isolation boundary (the request-private tmpfs work root) instead of
+        recursing without bound; the TemporaryDirectory finalizer is detached
+        so garbage collection cannot re-run an unbounded recursive delete.
+        """
+
         if self._closed:
             return
-        expired = deadline is not None and deadline.remaining() <= 0
         self._closed = True
-        _make_tree_owner_writable(Path(self._temporary_directory.name))
-        self._temporary_directory.cleanup()
-        if deadline is not None and (expired or deadline.remaining() <= 0):
-            raise AnalysisDeadlineExceeded("snapshot cleanup exceeded the request deadline")
+        completed = (
+            deadline is None or deadline.remaining() > 0
+        ) and _bounded_tree_delete(Path(self._temporary_directory.name), deadline)
+        if completed:
+            # Unload the weakref finalizer through the public API; the tree
+            # is already gone so this is a cheap no-op.
+            try:
+                self._temporary_directory.cleanup()
+            except OSError:
+                pass
+        else:
+            # stdlib-private but stable: detach so the finalizer never runs
+            # its unbounded rmtree over the remains outside the deadline.
+            finalizer = getattr(self._temporary_directory, "_finalizer", None)
+            if finalizer is not None:
+                finalizer.detach()
+        if deadline is not None and (not completed or deadline.remaining() <= 0):
+            raise AnalysisDeadlineExceeded(
+                "snapshot cleanup exceeded its bounded budget"
+            )
 
     def resolve_cwd(self, relative_cwd: str | os.PathLike[str]) -> Path:
         """Resolve a real directory below this live snapshot without following links."""
@@ -204,6 +231,66 @@ def _make_tree_owner_writable(root: Path) -> None:
         root.chmod(0o700)
     except OSError:
         pass
+
+
+def _bounded_tree_delete(
+    root: Path, deadline: AnalysisDeadline | None
+) -> bool:
+    """Delete one request-private tree within entry and deadline budgets.
+
+    Returns True only when the tree is fully gone. Budget exhaustion leaves
+    the remainder to the isolation boundary instead of walking further.
+    """
+
+    if not root.exists():
+        return True
+    removed = 0
+    try:
+        for current_root, directory_names, file_names in os.walk(
+            root, topdown=False, followlinks=False
+        ):
+            current = Path(current_root)
+            try:
+                current.chmod(0o700)
+            except OSError:
+                pass
+            for name in file_names:
+                # Both budgets bind per entry: one directory can legitimately
+                # hold hundreds of thousands of generated build files.
+                if removed >= MAX_CLEANUP_ENTRIES:
+                    return False
+                if (
+                    deadline is not None
+                    and removed % _CLEANUP_BATCH_ENTRIES == 0
+                    and deadline.remaining() <= 0
+                ):
+                    return False
+                target = current / name
+                try:
+                    target.chmod(0o600)
+                except OSError:
+                    pass
+                try:
+                    target.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+            for name in directory_names:
+                if removed >= MAX_CLEANUP_ENTRIES:
+                    return False
+                try:
+                    (current / name).rmdir()
+                    removed += 1
+                except OSError:
+                    pass
+        try:
+            root.rmdir()
+            removed += 1
+        except OSError:
+            pass
+    except OSError:
+        return False
+    return not root.exists()
 
 
 def _freeze_source_tree(root: Path, inventory: tuple[_InventoryFile, ...]) -> None:

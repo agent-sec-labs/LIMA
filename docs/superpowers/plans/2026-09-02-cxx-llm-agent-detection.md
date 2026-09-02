@@ -125,6 +125,12 @@ Task 1 | 复审通过 | commits b54c051..(见 git log) | RED: 容器 python -m u
 
 Task 1 补充记录：`cxx_analyzer/Dockerfile` 未改动——Compose 已配置 `init: true`（tini 作为 PID 1），且本修复在分析器进程内安装 `PR_SET_CHILD_SUBREAPER` 并由 `terminate_execution_boundary` 用 `waitpid(-pgid)` 精确回收，镜像层无需变更。leader 提前退出但后代仍持有管道的工具现在会等待管道 EOF 至 step deadline 并如实报告 `timed-out`（旧行为为 `completed`），该语义变化已由基线既有测试固化并由 reviewer 确认为良性。
 
+```text
+Task 2 | 复审通过 | commits a980a71..(见 git log) | RED: python -m unittest tests.test_cxx_final_fixes.RequestDeadlineTests → TypeError: run_step() got an unexpected keyword argument 'deadline'（接口缺失；初版真实进程测试另证 step_timeout int() 截断后 SIGKILL 可即时回收、真实时钟无法构造越界场景，改按计划本意用 FakeClock+挂起进程替身确定性复现） | GREEN: 宿主全量 330 OK (12 skip)；Linux 容器全量 330 OK (3 skip)；容器 final_fixes+analyzer 三连跑均 OK；ruff 全过 | reviewer: 修复后通过（I1 cleanup 预算放弃路径 detach TemporaryDirectory finalizer 防 GC 无界 rmtree、成功路径显式 cleanup 卸载；I2 条目/时间预算移入文件内层循环防单目录海量生成文件绕过；M1 check 复用 remaining_seconds；M3 报错文案；M5 run_step→_stream_process 的 expires_at 传递断言）
+```
+
+Task 2 补充记录：`cxx_analyzer/server.py` 未改动——deadline 已在 analyze_request 入口创建并贯穿 prepare/三层/verify/cleanup，既有测试固化；文件清单中的 server.py 属保守列举。source_scan/build_scan/sanitizer_scan 的 4 个 run_step 调用点按计划规则 4 作为接口同步在同一提交传入 `deadline=active_deadline`。"request-deadline-exceeded" 诊断标识当前仅在 ToolExecution.diagnostic 可见（v1 tool-run schema 有意不透传），外部超时一致性由 504 analysis_timed_out 兜底；prepare 失败路径的清理不受 deadline 约束但受 inventory 上限间接约束（≤5000 文件/20MB），均已在代码注释/台账注明。实现过程中自纠两个缺陷：teardown 预算曾误在 stream 开始时预计算（被 step 消耗）改为使用点计算；孤儿重挂靠竞态致 timeout 模式残留僵尸，ECHILD 增加 3×10ms 有界重试。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -211,7 +217,7 @@ git commit -s -m "fix: contain C++ analyzer process trees"
 - Consumes: `RequestDeadline`。
 - Produces: `remaining_seconds(stage: str) -> float` 和 deadline-aware、受条目/字节/时间限制的清理；超过预算后以隔离边界销毁请求资源，不进行无限递归遍历。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 ```python
 def test_request_deadline_includes_termination_drain_and_cleanup():
@@ -221,21 +227,21 @@ def test_request_deadline_includes_termination_drain_and_cleanup():
     assert result.diagnostic == "request-deadline-exceeded"
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.RequestDeadlineTests -v`
 Expected: FAIL，当前 grace/drain/cleanup 越过 deadline。
 
-- [ ] **Step 3: 贯通单一 deadline**
+- [x] **Step 3: 贯通单一 deadline**
 
 从 HTTP handler 接收请求时创建唯一绝对 deadline，snapshot/source/build/ASan/termination/drain/cleanup 只消费该对象。不得创建新的完整总预算。清理采用请求私有根和有界删除；无法在 deadline 内完成时由已验证的隔离容器边界回收。
 
-- [ ] **Step 4: 运行 GREEN**
+- [x] **Step 4: 运行 GREEN**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.RequestDeadlineTests tests.test_cxx_analyzer -v`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add cxx_analyzer/deadline.py cxx_analyzer/execution.py cxx_analyzer/snapshot.py cxx_analyzer/server.py tests/test_cxx_final_fixes.py

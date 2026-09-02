@@ -199,6 +199,7 @@ def run_source_scan(
                 timeout_seconds=timeout,
                 max_output_bytes=settings.max_output_bytes,
                 env={},
+                deadline=active_deadline,
             )
     except OSError:
         return LayerResult((), ("Semgrep rule staging was unavailable",), ())

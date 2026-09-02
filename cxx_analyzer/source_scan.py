@@ -188,7 +188,8 @@ def run_source_scan(
             rule_path.write_text(rule_text, encoding="utf-8")
             execution = run_step(
                 (
-                    "semgrep", "--json", "--quiet", "--config", str(rule_path),
+                    "semgrep", "--json", "--quiet", "--no-rewrite-rule-ids",
+                    "--config", str(rule_path),
                     "--include", "*.c", "--include", "*.cc", "--include", "*.cpp",
                     "--include", "*.cxx", "--include", "*.h", "--include", "*.hh",
                     "--include", "*.hpp", "--include", "*.hxx", ".",

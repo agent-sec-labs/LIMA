@@ -82,13 +82,42 @@
 | 项目 | 当前状态 | 证据或下一步 |
 |---|---|---|
 | 既有 C/C++ Sidecar 实现 | 已完成并推送，但复审未通过 | `codex/cxx-memory-detection-impl`，`2e69f3ce56f80b91e4b180ab0556100d3e173e4f` |
-| 本设计文档 | 已完成，待本次文档提交 | `docs/superpowers/specs/2026-09-02-cxx-llm-agent-detection-design.md` |
-| 本实施计划 | 已完成，待本次文档提交 | 当前文件 |
-| 阶段 A：Sidecar 七项复审问题 | 未开始 | 从 Task 1 开始；Task 1–7 全部复审通过后才能进入阶段 B |
+| 本设计文档 | 已提交 | 提交 `08c9a2a docs: specify C++ LLM agent detection`（位于 `codex/cxx-memory-detection-impl` 本地，未推送） |
+| 本实施计划 | 已提交 | 同上；分支 `codex/cxx-llm-agent-detection` 自 `08c9a2a` 创建（即 `2e69f3c` + 文档提交，偏差已在此记录） |
+| 阶段 A：Sidecar 七项复审问题 | 未开始（Task 0 基线修复已完成） | 从 Task 1 开始；Task 1–7 全部复审通过后才能进入阶段 B |
 | 阶段 B：大模型多 Agent 检测 | 未开始 | Task 8–21；依赖阶段 A 门禁 |
 | Docker/Linux 安全验证 | 未验证 | Docker Desktop Linux daemon 可用后执行 Task 21 |
 | 真实 Clang/ASan 验证 | 未验证 | 依赖 Sidecar 容器环境 |
 | 真实外部模型验收 | 未验证 | 依赖用户提供/允许使用的现有 LIMA Provider 配置 |
+
+### 基线调查记录（2026-09-02，Task 0 之前）
+
+基线全量宿主测试（`python -m unittest discover -s tests`）在 `08c9a2a` 上失败 1 项：
+`test_cxx_analyzer.SourceScanContainerTests.test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates`。
+根因调查结论（两项 semgrep 行为，均有实测证据）：
+
+1. **生产级缺陷（Task 0 修复）**：`run_source_scan` 把规则文件暂存在快照 scratch（绝对路径、不在
+   cwd 下），semgrep（含 Docker 固定的 1.130.0）默认给 `check_id` 加 config 路径前缀（如
+   `work.snapshots...cxx.source.oob-write.constant-index`），`parse_semgrep_json._rule_cwe` 只接受
+   裸 `cxx.source.*` → 必然拒绝 → **source-only 层在 semgrep 1.130 下永远产不出 Finding**。此前未暴露
+   的原因：Docker/Linux 端到端从未实际运行（台账本就记为“未验证”）。
+   修复：semgrep 调用加 `--no-rewrite-rule-ids`；同步更新宿主回归测试调用、argv 合同测试与索引。
+2. **宿主环境问题**：semgrep 在仓库无 `.semgrepignore` 时套用内置默认忽略表（含 `tests/` 等模式），
+   静默排除 `tests/fixtures/cxx_memory` 全部文件。修复：提交根 `.semgrepignore`（内容仅
+   `.git/ node_modules/ vendor/ .venv/ __pycache__/`）。该文件不在快照清单扩展名集合内，不会进入
+   sidecar 快照，对生产行为无影响（reviewer 已验证）。
+3. **观察项（未修复，留给阶段 A 复审裁决）**：生产快照内没有 `.semgrepignore`，semgrep 默认忽略表
+   会在真实扫描中静默跳过名为 `tests/`、`test/`、`doc/` 等目录的 C/C++ 文件，而 coverage 仍按清单
+   计数——覆盖声称与实际扫描存在偏差的可能。是否在 Task 7 工具链审计中处理待复审裁决。
+
+宿主环境备注：测试 venv 需 `semgrep==1.130.0` + `setuptools<81`（Python 3.13 无 pkg_resources）；
+semgrep 对 git linked worktree 的目录枚举有缺陷（扫描目标为目录时恒 0 文件），因此宿主全量测试在
+`D:\Projects\LIMA-test-mirror`（同分支独立 clone）中执行，开发提交仍在
+`D:\Projects\LIMA\.worktrees\cxx-llm-agent-detection`。
+
+```text
+Task 0 | 复审通过 | commits 08c9a2a..（见 git log） | RED: 基线 test_fixture_manifest... 失败（rule id outside narrow set / 路径反斜杠拒绝） | GREEN: 镜像中 python -m unittest discover -s tests → Ran 328 tests, OK (skipped=11) | reviewer: 通过（修复一处 Important 陈旧索引 [4]→[5] 后；.semgrepignore 需随提交）
+```
 
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：

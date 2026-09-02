@@ -1350,8 +1350,9 @@ class SourceScanTests(unittest.TestCase):
                         "semgrep",
                         "--json",
                         "--quiet",
+                        "--no-rewrite-rule-ids",
                         "--config",
-                        call.args[0][4],
+                        call.args[0][5],
                         "--include",
                         "*.c",
                         "--include",
@@ -1377,7 +1378,7 @@ class SourceScanTests(unittest.TestCase):
                 self.assertEqual(17, call.kwargs["timeout_seconds"])
                 self.assertEqual(8192, call.kwargs["max_output_bytes"])
                 self.assertEqual({}, call.kwargs["env"])
-                self.assertFalse(Path(call.args[0][4]).resolve().is_relative_to(snapshot.root))
+                self.assertFalse(Path(call.args[0][5]).resolve().is_relative_to(snapshot.root))
                 self.assertEqual(1, len(result.findings))
                 self.assertEqual([], list(stage_root.iterdir()))
 
@@ -2880,6 +2881,7 @@ class SourceScanContainerTests(unittest.TestCase):
                 semgrep_path,
                 "--json",
                 "--quiet",
+                "--no-rewrite-rule-ids",
                 "--config",
                 str(Path("cxx_analyzer/rules/cxx-memory.yml").resolve()),
                 ".",
@@ -2895,8 +2897,13 @@ class SourceScanContainerTests(unittest.TestCase):
         ):
             self.skipTest("Semgrep is installed but unavailable on this host")
         self.assertEqual(0, completed.returncode, completed.stderr)
+        # Windows host Semgrep emits OS separators in result paths while the
+        # analyzer contract (and the Linux Sidecar) only accepts posix paths.
+        document = json.loads(completed.stdout)
+        for result in document["results"]:
+            result["path"] = result["path"].replace("\\", "/")
         findings, _ = parse_semgrep_json(
-            completed.stdout,
+            json.dumps(document),
             {item["path"] for item in manifest},
         )
         self.assertTrue(all(item.verification_state == "candidate" for item in findings))

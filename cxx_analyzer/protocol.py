@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Final
 
 PROTOCOL_TOOL_STATUSES: Final = {
@@ -10,12 +11,32 @@ PROTOCOL_TOOL_STATUSES: Final = {
     "clang": frozenset({"completed", "failed", "timed-out"}),
     "asan-test": frozenset({"completed", "failed", "timed-out"}),
 }
+MAX_RUN_ID_BYTES: Final = 64
+
+
+def new_run_id() -> str:
+    """Return one analyzer-generated, request-unique tool-run identifier."""
+
+    return uuid.uuid4().hex
+
+
+def _validated_run_id(run_id: str | None) -> str:
+    if run_id is None:
+        return new_run_id()
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or len(run_id.encode("utf-8")) > MAX_RUN_ID_BYTES
+    ):
+        raise ValueError("tool run id must be bounded non-empty text")
+    return run_id
 
 
 def tool_run_from_execution(
     tool: str,
     execution: object,
     *,
+    run_id: str | None = None,
     build_step: bool = False,
     semantic_failure: bool = False,
 ) -> dict[str, object]:
@@ -23,6 +44,7 @@ def tool_run_from_execution(
 
     if tool not in PROTOCOL_TOOL_STATUSES:
         raise ValueError("tool is outside the v1 protocol")
+    identifier = _validated_run_id(run_id)
     internal_status = getattr(execution, "status", None)
     returncode = getattr(execution, "returncode", None)
     complete = getattr(execution, "digests_complete", None)
@@ -55,6 +77,7 @@ def tool_run_from_execution(
         returncode = None
     digest = output_sha256 if complete else ""
     return {
+        "run_id": identifier,
         "tool": tool,
         "status": status,
         "returncode": returncode,
@@ -64,12 +87,13 @@ def tool_run_from_execution(
     }
 
 
-def timed_out_tool_run(tool: str) -> dict[str, object]:
+def timed_out_tool_run(tool: str, *, run_id: str | None = None) -> dict[str, object]:
     """Return a synthetic no-launch record without claiming an output digest."""
 
     if tool not in PROTOCOL_TOOL_STATUSES:
         raise ValueError("tool is outside the v1 protocol")
     return {
+        "run_id": _validated_run_id(run_id),
         "tool": tool,
         "status": "timed-out",
         "returncode": None,

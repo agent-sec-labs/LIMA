@@ -15,7 +15,7 @@ from .deadline import AnalysisDeadline
 from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
 from .languages import language_for_path
 from .normalizers import NormalizedFinding
-from .protocol import timed_out_tool_run, tool_run_from_execution
+from .protocol import new_run_id, timed_out_tool_run, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 from .source_scan import LayerResult
 
@@ -472,9 +472,15 @@ def parse_clang_plist(
 
 
 def _tool_run(
-    tool: str, execution: ToolExecution, *, build_step: bool = False
+    tool: str,
+    execution: ToolExecution,
+    run_id: str | None = None,
+    *,
+    build_step: bool = False,
 ) -> dict[str, object]:
-    return tool_run_from_execution(tool, execution, build_step=build_step)
+    return tool_run_from_execution(
+        tool, execution, run_id=run_id, build_step=build_step
+    )
 
 
 def _deadline_run(tool: str) -> dict[str, object]:
@@ -641,7 +647,8 @@ def run_build_scan(
                     env={},
                     deadline=active_deadline,
                 )
-                tool_runs.append(_tool_run("clang", execution))
+                clang_run_id = new_run_id()
+                tool_runs.append(_tool_run("clang", execution, clang_run_id))
                 if execution.status != "completed":
                     diagnostics.append(
                         "timed-out" if execution.status == "timed-out" else "clang_failed"
@@ -671,7 +678,12 @@ def run_build_scan(
                         break
                     diagnostics.append("clang-output-rejected")
                     continue
-                if not _extend_parsed_results(findings, diagnostics, parsed, parser_diagnostics):
+                if not _extend_parsed_results(
+                    findings,
+                    diagnostics,
+                    tuple(item.bind_producer(clang_run_id) for item in parsed),
+                    parser_diagnostics,
+                ):
                     break
     except OSError:
         return LayerResult((), ("clang-output-unavailable",), tuple(tool_runs))

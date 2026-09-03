@@ -13,7 +13,7 @@ from .deadline import AnalysisDeadline
 from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
 from .languages import language_for_path
 from .normalizers import NormalizedFinding
-from .protocol import tool_run_from_execution
+from .protocol import new_run_id, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 from .source_scan import LayerResult
 
@@ -135,8 +135,8 @@ def parse_asan_log(
     return (findings, []) if findings else _review()
 
 
-def _tool_run(execution: ToolExecution) -> dict[str, object]:
-    return tool_run_from_execution("asan-test", execution)
+def _tool_run(execution: ToolExecution, run_id: str) -> dict[str, object]:
+    return tool_run_from_execution("asan-test", execution, run_id=run_id)
 
 
 def _valid_context(
@@ -184,7 +184,8 @@ def run_sanitizer_scan(
             step, snapshot, ".", remaining, settings.max_output_bytes,
             env=SANITIZER_ENVIRONMENT, deadline=active_deadline,
         )
-        tool_runs.append(_tool_run(execution))
+        step_run_id = new_run_id()
+        tool_runs.append(_tool_run(execution, step_run_id))
         if (
             execution.status == "timed-out"
             or execution.output_truncated
@@ -195,7 +196,10 @@ def run_sanitizer_scan(
         combined_output = execution.stdout + "\n" + execution.stderr
         parsed, parsed_diagnostics = parse_asan_log(combined_output, snapshot)
         if parsed:
-            findings.extend(parsed[: MAX_FINDINGS - len(findings)])
+            findings.extend(
+                item.bind_producer(step_run_id)
+                for item in parsed[: MAX_FINDINGS - len(findings)]
+            )
         elif execution.status == "failed":
             no_sanitizer_evidence = (
                 parsed_diagnostics == ["needs-human-review"]

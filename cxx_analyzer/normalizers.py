@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import MutableSequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Final
+
+from .protocol import MAX_RUN_ID_BYTES
 
 SUPPORTED_CWES: Final = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
 SUPPORTED_SEVERITIES: Final = frozenset({"low", "medium", "high", "critical"})
@@ -62,6 +64,7 @@ class NormalizedFinding:
     symbol: str
     analysis_mode: str
     trace: str = ""
+    producer_run_ids: tuple[str, ...] = ()
 
     @classmethod
     def create(
@@ -69,11 +72,24 @@ class NormalizedFinding:
         *,
         diagnostics: MutableSequence[str],
         trace: str = "",
+        producer_run_ids: object = (),
         **values: object,
     ) -> NormalizedFinding:
         expected = set(_OUTPUT_FIELDS)
         if set(values) != expected:
             raise ValueError("finding fields do not match the response schema")
+        if isinstance(producer_run_ids, str) or not isinstance(
+            producer_run_ids, (list, tuple)
+        ):
+            raise ValueError("producer run ids must be a sequence")
+        producers = tuple(producer_run_ids)
+        if any(
+            not isinstance(item, str)
+            or not item
+            or len(item.encode("utf-8")) > MAX_RUN_ID_BYTES
+            for item in producers
+        ) or len(set(producers)) != len(producers):
+            raise ValueError("producer run ids must be bounded, unique text")
         strings = set(_OUTPUT_FIELDS) - {"line", "confidence"}
         for field in strings:
             if not isinstance(values[field], str):
@@ -129,12 +145,27 @@ class NormalizedFinding:
         return cls(
             **bounded,  # type: ignore[arg-type]
             trace=_truncate(trace, MAX_TRACE_BYTES, "trace", diagnostics),
+            producer_run_ids=producers,
         )
+
+    def bind_producer(self, run_id: str) -> NormalizedFinding:
+        """Return a copy bound to the exact tool run that produced it."""
+
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or len(run_id.encode("utf-8")) > MAX_RUN_ID_BYTES
+            or run_id in self.producer_run_ids
+        ):
+            raise ValueError("producer run id must be bounded and unique")
+        return replace(self, producer_run_ids=(*self.producer_run_ids, run_id))
 
     def to_dict(self) -> dict[str, object]:
         """Return only the exact client-contract fields in a stable order."""
 
-        return {field: getattr(self, field) for field in _OUTPUT_FIELDS}
+        payload = {field: getattr(self, field) for field in _OUTPUT_FIELDS}
+        payload["producer_run_ids"] = list(self.producer_run_ids)
+        return payload
 
 
 def conservative_identity(finding: NormalizedFinding) -> tuple[str, str, str, int]:

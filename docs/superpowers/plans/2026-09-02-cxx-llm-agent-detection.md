@@ -131,6 +131,11 @@ Task 2 | 复审通过 | commits a980a71..(见 git log) | RED: python -m unittest
 
 Task 2 补充记录：`cxx_analyzer/server.py` 未改动——deadline 已在 analyze_request 入口创建并贯穿 prepare/三层/verify/cleanup，既有测试固化；文件清单中的 server.py 属保守列举。source_scan/build_scan/sanitizer_scan 的 4 个 run_step 调用点按计划规则 4 作为接口同步在同一提交传入 `deadline=active_deadline`。"request-deadline-exceeded" 诊断标识当前仅在 ToolExecution.diagnostic 可见（v1 tool-run schema 有意不透传），外部超时一致性由 504 analysis_timed_out 兜底；prepare 失败路径的清理不受 deadline 约束但受 inventory 上限间接约束（≤5000 文件/20MB），均已在代码注释/台账注明。实现过程中自纠两个缺陷：teardown 预算曾误在 stream 开始时预计算（被 step 消耗）改为使用点计算；孤儿重挂靠竞态致 timeout 模式残留僵尸，ECHILD 增加 3×10ms 有界重试。
 
+```text
+Task 3 | 复审通过 | commits 99bf8dc..(见 git log) | RED: python -m unittest tests.test_cxx_final_fixes.ToolRunBindingTests → AttributeError: 'NormalizedFinding' object has no attribute 'bind_producer'（3 用例失败，接口缺失） | GREEN: 宿主全量 333 OK (12 skip)；Linux 容器全量 333 OK (3 skip)；ruff 全过 | reviewer: 通过（Important-1 已补——客户端 4 组新校验分支的 6 组负向变异入矩阵；Minor-3 已补——producer run status 契约恢复（semgrep/clang 须 completed、asan-test 须 completed/failed）；Minor-4 受控查找；Minor-5 复用 protocol.MAX_RUN_ID_BYTES）
+
+Task 3 补充记录：schema 为破坏性变更（v1 客户端与服务端必须同镜像原子发布，设计文档已接受）。Minor 遗留（记入台账跟进）：budget_blocked 与无证据共用 finding-without-tool-evidence 诊断串（客户端靠 analysis-budget-exhausted 同场区分）；服务端 create/bind_producer 无 MAX_PRODUCER_RUNS=16 上限（当前各层恰 1 个 producer，不可达）；tests/test_workspace.py:211 假 CxxAnalysisResult 的 run 无 run_id（绕过校验直填 dataclass，透传无害）。实现期间发现 patch("lima.cxx_memory.uuid.uuid4") 会污染全局 uuid 模块，测试 run_id 改用进程内计数器。含暂停/恢复：2026-09-03 依 handoff.md 暂停后恢复续作。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -264,7 +269,7 @@ git commit -s -m "fix: enforce one C++ request deadline"
 **Interfaces:**
 - Produces: 每个 tool-run 有不可重复 `run_id`；每个 Finding 有非空 `producer_run_ids: list[str]`；客户端验证引用存在、tool/layer 匹配且被保留。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 构造两个 `clang` 和两个 `asan-test` run，只有第二个产生 Finding，随后触发响应预算截断。断言不得保留错误 run，也不得留下无 producer 的 Finding。
 
@@ -277,21 +282,21 @@ def test_budget_preserves_exact_producer_runs():
         }
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ToolRunBindingTests tests.test_cxx_memory -v`
 Expected: FAIL，当前按 tool/status 猜测 producing run。
 
-- [ ] **Step 3: 实现 ID 和共同预算**
+- [x] **Step 3: 实现 ID 和共同预算**
 
 run ID 由 analyzer 生成并在单请求内唯一，不接受仓库输入。normalizer 保留各层 finding 和精确 producer。预算算法以 Finding 及其所有 producer 为不可拆分单元；无法一起保留时删除或降级 Finding。
 
-- [ ] **Step 4: 运行 GREEN 并检查 Schema**
+- [x] **Step 4: 运行 GREEN 并检查 Schema**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ToolRunBindingTests tests.test_cxx_memory tests.test_cxx_analyzer -v`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add cxx_analyzer lima/cxx_memory.py tests/test_cxx_final_fixes.py tests/test_cxx_memory.py

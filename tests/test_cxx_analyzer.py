@@ -1028,9 +1028,12 @@ class AnalyzerServiceTests(unittest.TestCase):
             symbol="write_value",
             analysis_mode="source-only",
             diagnostics=[],
+            producer_run_ids=("run-semgrep-1",),
         )
         source_scan_runner.return_value = LayerResult(
-            (candidate,), (), ({"tool": "semgrep", "status": "completed"},)
+            (candidate,),
+            (),
+            ({"run_id": "run-semgrep-1", "tool": "semgrep", "status": "completed"},),
         )
         for tool, tool_status, diagnostic in (
             ("cmake", "build_failed", "build_failed"),
@@ -1041,7 +1044,7 @@ class AnalyzerServiceTests(unittest.TestCase):
                 build_scan_runner.return_value = LayerResult(
                     (),
                     (diagnostic,),
-                    ({"tool": tool, "status": tool_status},),
+                    ({"run_id": f"run-{tool}", "tool": tool, "status": tool_status},),
                 )
 
                 result = analyzer_server.analyze_request(
@@ -1054,8 +1057,8 @@ class AnalyzerServiceTests(unittest.TestCase):
                 self.assertEqual([diagnostic], result["diagnostics"])
                 self.assertEqual(
                     [
-                        {"tool": "semgrep", "status": "completed"},
-                        {"tool": tool, "status": tool_status},
+                        {"run_id": "run-semgrep-1", "tool": "semgrep", "status": "completed"},
+                        {"run_id": f"run-{tool}", "tool": tool, "status": tool_status},
                     ],
                     result["tool_runs"],
                 )
@@ -1494,6 +1497,7 @@ class SourceScanTests(unittest.TestCase):
                 "language",
                 "symbol",
                 "analysis_mode",
+                "producer_run_ids",
             ),
             tuple(finding.to_dict()),
         )
@@ -2668,13 +2672,19 @@ class SanitizerScanTests(unittest.TestCase):
             analysis_mode="sanitizer-confirmed",
             diagnostics=[],
         )
+        candidate = candidate.bind_producer("run-semgrep")
+        confirmed = confirmed.bind_producer("run-asan")
         source_runner.return_value = LayerResult(
-            (candidate,), (), ({"tool": "semgrep", "status": "completed"},)
+            (candidate,),
+            (),
+            ({"run_id": "run-semgrep", "tool": "semgrep", "status": "completed"},),
         )
         context = BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True)
         build_runner.return_value = LayerResult((), (), (), context)
         sanitizer_runner.return_value = LayerResult(
-            (confirmed,), (), ({"tool": "asan-test", "status": "completed"},)
+            (confirmed,),
+            (),
+            ({"run_id": "run-asan", "tool": "asan-test", "status": "completed"},),
         )
         settings = self._settings(test_steps=(("test",),))
 
@@ -2694,8 +2704,8 @@ class SanitizerScanTests(unittest.TestCase):
         self.assertEqual([candidate.to_dict(), confirmed.to_dict()], result["findings"])
         self.assertEqual(
             [
-                {"tool": "semgrep", "status": "completed"},
-                {"tool": "asan-test", "status": "completed"},
+                {"run_id": "run-semgrep", "tool": "semgrep", "status": "completed"},
+                {"run_id": "run-asan", "tool": "asan-test", "status": "completed"},
             ],
             result["tool_runs"],
         )
@@ -2754,6 +2764,7 @@ class SanitizerScanTests(unittest.TestCase):
             symbol="report",
             analysis_mode="sanitizer-confirmed",
             diagnostics=[],
+            producer_run_ids=("run-asan",),
         )
         with patch.object(analyzer_server, "MAX_FINDINGS", 1):
             with patch.object(analyzer_server, "MAX_DIAGNOSTICS", 1):
@@ -2762,13 +2773,16 @@ class SanitizerScanTests(unittest.TestCase):
                         (low, high),
                         ["source", "asan"],
                         [
-                            {"tool": "semgrep", "status": "completed"},
-                            {"tool": "asan-test", "status": "completed"},
+                            {"run_id": "run-semgrep", "tool": "semgrep", "status": "completed"},
+                            {"run_id": "run-asan", "tool": "asan-test", "status": "completed"},
                         ],
                     )
         self.assertEqual((high,), findings)
         self.assertEqual(("analysis-budget-exhausted",), diagnostics)
-        self.assertEqual(({"tool": "asan-test", "status": "completed"},), tool_runs)
+        self.assertEqual(
+            ({"run_id": "run-asan", "tool": "asan-test", "status": "completed"},),
+            tool_runs,
+        )
 
 
 class SanitizerContainerTests(unittest.TestCase):

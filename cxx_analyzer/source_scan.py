@@ -14,7 +14,7 @@ from .deadline import AnalysisDeadline
 from .execution import ToolExecution, run_step
 from .languages import language_for_path
 from .normalizers import SUPPORTED_CWES, NormalizedFinding
-from .protocol import timed_out_tool_run, tool_run_from_execution
+from .protocol import new_run_id, timed_out_tool_run, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 
 _RULE_PREFIXES = {
@@ -161,8 +161,8 @@ def parse_semgrep_json(
     return tuple(findings), diagnostics
 
 
-def _tool_run(execution: ToolExecution) -> dict[str, object]:
-    return tool_run_from_execution("semgrep", execution)
+def _tool_run(execution: ToolExecution, run_id: str) -> dict[str, object]:
+    return tool_run_from_execution("semgrep", execution, run_id=run_id)
 
 
 def run_source_scan(
@@ -203,7 +203,8 @@ def run_source_scan(
             )
     except OSError:
         return LayerResult((), ("Semgrep rule staging was unavailable",), ())
-    tool_runs = (_tool_run(execution),)
+    run_id = new_run_id()
+    tool_runs = (_tool_run(execution, run_id),)
     if execution.status != "completed":
         return LayerResult((), ("Semgrep source scan did not complete",), tool_runs)
     if not execution.digests_complete or execution.output_truncated:
@@ -218,7 +219,11 @@ def run_source_scan(
             tuple(diagnostics),
             (tool_run_from_execution("semgrep", execution, semantic_failure=True),),
         )
-    return LayerResult(findings, tuple(diagnostics), tool_runs)
+    return LayerResult(
+        tuple(item.bind_producer(run_id) for item in findings),
+        tuple(diagnostics),
+        tool_runs,
+    )
 
 
 def recognized_host_semgrep_unavailability(

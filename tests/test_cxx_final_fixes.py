@@ -7,6 +7,7 @@ import errno
 import hashlib
 import importlib
 import io
+import itertools
 import json
 import subprocess
 import sys
@@ -132,8 +133,12 @@ def normalized_finding(
     )
 
 
+_RUN_ID_COUNTER = itertools.count(1)
+
+
 def valid_tool_run(tool: str = "semgrep", status: str = "completed") -> dict[str, object]:
     return {
+        "run_id": f"run-{next(_RUN_ID_COUNTER)}",
         "tool": tool,
         "status": status,
         "returncode": 0,
@@ -545,6 +550,91 @@ class RequestDeadlineTests(unittest.TestCase):
         )
 
 
+class ToolRunBindingTests(unittest.TestCase):
+    """Residual 3: findings reference the exact tool runs that produced them."""
+
+    def test_budget_preserves_exact_producer_runs(self):
+        server = importlib.import_module("cxx_analyzer.server")
+        clang_runs = [valid_tool_run("clang") for _ in range(2)]
+        asan_runs = [valid_tool_run("asan-test") for _ in range(2)]
+        # The FIRST clang run produced the clang finding; the old budget code
+        # kept the LAST tool/status match instead of the real producer.
+        clang_finding = normalized_finding("build-backed").bind_producer(
+            clang_runs[0]["run_id"]
+        )
+        asan_finding = normalized_finding("sanitizer-confirmed").bind_producer(
+            asan_runs[0]["run_id"]
+        )
+        filler = [valid_tool_run("clang") for _ in range(server.MAX_TOOL_RUNS)]
+        runs = [*clang_runs, *asan_runs, *filler]
+
+        findings, diagnostics, bounded_runs = server._bound_response_lists(
+            (clang_finding, asan_finding), [], runs
+        )
+
+        self.assertEqual(2, len(findings))
+        kept_ids = {run["run_id"] for run in bounded_runs}
+        for finding in findings:
+            self.assertTrue(set(finding.producer_run_ids) <= kept_ids)
+        self.assertIn(clang_runs[0]["run_id"], kept_ids)
+        self.assertIn(asan_runs[0]["run_id"], kept_ids)
+        self.assertLessEqual(len(bounded_runs), server.MAX_TOOL_RUNS)
+        self.assertIn("analysis-budget-exhausted", diagnostics)
+
+    def test_unbound_findings_are_dropped_instead_of_guessing_evidence(self):
+        server = importlib.import_module("cxx_analyzer.server")
+        run = valid_tool_run("semgrep")
+        orphan = normalized_finding("source-only")
+        bound = normalized_finding("source-only").bind_producer(run["run_id"])
+
+        findings, diagnostics, bounded_runs = server._bound_response_lists(
+            (orphan, bound), [], [run]
+        )
+
+        self.assertEqual((bound,), findings)
+        self.assertEqual(1, len(bounded_runs))
+        self.assertEqual(run["run_id"], bounded_runs[0]["run_id"])
+        self.assertIn("finding-without-tool-evidence", diagnostics)
+
+    def test_client_rejects_run_ids_that_are_duplicated(self):
+        payload_run = {**valid_tool_run(), "run_id": "a" * 32}
+        duplicate = {**valid_tool_run(), "run_id": "a" * 32}
+        finding = normalized_finding("source-only").bind_producer("a" * 32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src" / "main.cpp").write_text(
+                "int main() {}\n", encoding="utf-8"
+            )
+            workspace = RepositoryWorkspace(root)
+            inventory = workspace.inventory()
+            fingerprint = inventory.fingerprint()
+            document = {
+                "schema_version": 1,
+                "request_id": REQUEST_ID,
+                "status": "completed",
+                "snapshot_sha256": fingerprint,
+                "tool_runs": [payload_run, duplicate],
+                "findings": [finding.to_dict()],
+                "coverage": {"source_files": 1, "snapshot_files": 1},
+                "diagnostics": [],
+            }
+            with mock.patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID):
+                client = CxxMemoryAnalyzerClient(
+                    "http://analyzer",
+                    3,
+                    1_000_000,
+                    mock.Mock(return_value=FakeResponse(document)),
+                )
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    client.analyze(
+                        "team/project",
+                        fingerprint,
+                        ("source-only",),
+                        inventory=inventory,
+                    )
+
+
 class FinalDeadlineAndLanguageTests(unittest.TestCase):
     def test_one_entry_deadline_is_passed_to_snapshot_and_every_requested_layer(self):
         """I1: source/build/ASan cannot each renew the total request budget."""
@@ -723,7 +813,7 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         source_scan = importlib.import_module("cxx_analyzer.source_scan")
         for internal_status in ("sandbox-unavailable", "sandbox-failed"):
             run = source_scan._tool_run(
-                tool_execution(internal_status, returncode=None)
+                tool_execution(internal_status, returncode=None), "run-x"
             )
             self.assertEqual("failed", run["status"])
             validate_response_metadata(
@@ -744,14 +834,17 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         """I6: a retained ASan finding cannot outlive its asan-test run record."""
 
         server = importlib.import_module("cxx_analyzer.server")
-        asan = normalized_finding("sanitizer-confirmed")
+        producer = {**valid_tool_run("asan-test", "failed"), "returncode": 1}
+        asan = normalized_finding("sanitizer-confirmed").bind_producer(
+            producer["run_id"]
+        )
         runs = [valid_tool_run() for _ in range(server.MAX_TOOL_RUNS + 3)]
-        runs.append({**valid_tool_run("asan-test", "failed"), "returncode": 1})
+        runs.append(producer)
         findings, diagnostics, bounded_runs = server._bound_response_lists(
             (asan,), [], runs
         )
         self.assertEqual((asan,), findings)
-        self.assertTrue(any(run["tool"] == "asan-test" for run in bounded_runs))
+        self.assertTrue(any(run["run_id"] == producer["run_id"] for run in bounded_runs))
         self.assertLessEqual(len(bounded_runs), server.MAX_TOOL_RUNS)
         self.assertIn("analysis-budget-exhausted", diagnostics)
 

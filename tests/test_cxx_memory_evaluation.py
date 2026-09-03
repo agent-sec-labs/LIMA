@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import subprocess
 import sys
@@ -78,8 +79,12 @@ def valid_document(target):
     return {"schema_version": 1, "cases": cases}
 
 
+_RUN_ID_COUNTER = itertools.count(1)
+
+
 def tool_run(tool="semgrep", status="completed"):
     return {
+        "run_id": f"run-{next(_RUN_ID_COUNTER)}",
         "tool": tool,
         "status": status,
         "returncode": 0 if status == "completed" else None,

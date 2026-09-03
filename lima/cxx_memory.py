@@ -55,6 +55,7 @@ _FINDING_KEYS = {
     "language",
     "symbol",
     "analysis_mode",
+    "producer_run_ids",
 }
 _FINDING_STRING_KEYS = {
     "rule_id",
@@ -74,12 +75,25 @@ _FINDING_STRING_KEYS = {
     "analysis_mode",
 }
 _TOOL_RUN_KEYS = {
+    "run_id",
     "tool",
     "status",
     "returncode",
     "output_sha256",
     "output_truncated",
     "digests_complete",
+}
+MAX_RUN_ID_BYTES = 64
+MAX_PRODUCER_RUNS = 16
+_FINDING_TOOL_TO_RUN_TOOL = {
+    "semgrep": "semgrep",
+    "clang": "clang",
+    "asan": "asan-test",
+}
+_FINDING_TOOL_TO_RUN_STATUS = {
+    "semgrep": frozenset({"completed"}),
+    "clang": frozenset({"completed"}),
+    "asan": frozenset({"completed", "failed"}),
 }
 _TOOL_RUN_STATUSES = {
     "semgrep": frozenset({"completed", "failed", "timed-out"}),
@@ -167,9 +181,19 @@ def validate_response_metadata(
 
     if type(tool_runs) is not list or len(tool_runs) > MAX_TOOL_RUNS:
         raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool runs")
+    seen_run_ids: set[str] = set()
     for run in tool_runs:
         if type(run) is not dict or set(run) != _TOOL_RUN_KEYS:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool run fields")
+        run_id = run["run_id"]
+        if (
+            type(run_id) is not str
+            or not run_id
+            or len(run_id.encode("utf-8")) > MAX_RUN_ID_BYTES
+            or run_id in seen_run_ids
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer run identity")
+        seen_run_ids.add(run_id)
         tool = run["tool"]
         status = run["status"]
         if type(tool) is not str or tool not in _TOOL_RUN_STATUSES:
@@ -392,7 +416,36 @@ class CxxMemoryAnalyzerClient:
         )
         for item in payload["findings"]:
             cls._validate_finding(item)
+        cls._validate_producer_binding(payload)
         cls._validate_inventory_binding(payload, inventory)
+
+    @staticmethod
+    def _validate_producer_binding(payload: dict[str, Any]) -> None:
+        """Every producer reference must name an exact, layer-matched run."""
+
+        run_by_id = {run["run_id"]: run for run in payload["tool_runs"]}
+        for finding in payload["findings"]:
+            # _validate_finding has already constrained the finding tool.
+            expected_tool = _FINDING_TOOL_TO_RUN_TOOL.get(finding["tool"])
+            allowed_statuses = _FINDING_TOOL_TO_RUN_STATUS.get(finding["tool"])
+            if expected_tool is None or allowed_statuses is None:
+                raise CxxAnalyzerProtocolError(
+                    "invalid C/C++ analyzer finding tool binding"
+                )
+            for identifier in finding["producer_run_ids"]:
+                run = run_by_id.get(identifier)
+                if run is None:
+                    raise CxxAnalyzerProtocolError(
+                        "C/C++ analyzer finding cites an unknown tool run"
+                    )
+                if run["tool"] != expected_tool:
+                    raise CxxAnalyzerProtocolError(
+                        "C/C++ analyzer finding cites a mismatched tool run"
+                    )
+                if run["status"] not in allowed_statuses:
+                    raise CxxAnalyzerProtocolError(
+                        "C/C++ analyzer finding cites an unusable tool run"
+                    )
 
     @classmethod
     def _validate_inventory_binding(
@@ -437,6 +490,20 @@ class CxxMemoryAnalyzerClient:
     def _validate_finding(item: Any) -> None:
         if not isinstance(item, dict) or set(item) != _FINDING_KEYS:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer finding fields")
+        producers = item["producer_run_ids"]
+        if (
+            type(producers) is not list
+            or not producers
+            or len(producers) > MAX_PRODUCER_RUNS
+            or any(
+                type(identifier) is not str
+                or not identifier
+                or len(identifier.encode("utf-8")) > MAX_RUN_ID_BYTES
+                for identifier in producers
+            )
+            or len(set(producers)) != len(producers)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer producer runs")
         if any(not isinstance(item[key], str) for key in _FINDING_STRING_KEYS):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer finding text")
         if any(not item[key] for key in _FINDING_STRING_KEYS - {"fix"}):

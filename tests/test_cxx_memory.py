@@ -1,5 +1,6 @@
 import copy
 import io
+import itertools
 import json
 import tempfile
 import unittest
@@ -35,8 +36,12 @@ CLIENT_INVENTORY = WorkspaceInventory(
 SNAPSHOT_SHA256 = CLIENT_INVENTORY.fingerprint()
 
 
-def valid_tool_run(tool="semgrep", status="completed"):
+_RUN_ID_COUNTER = itertools.count(1)
+
+
+def valid_tool_run(tool="semgrep", status="completed", run_id=None):
     return {
+        "run_id": run_id if run_id is not None else f"run-{next(_RUN_ID_COUNTER)}",
         "tool": tool,
         "status": status,
         "returncode": 0 if status == "completed" else None if status == "timed-out" else 1,
@@ -47,12 +52,13 @@ def valid_tool_run(tool="semgrep", status="completed"):
 
 
 def valid_response_payload():
+    semgrep_run = valid_tool_run("semgrep")
     return {
         "schema_version": 1,
         "request_id": REQUEST_ID,
         "status": "completed",
         "snapshot_sha256": SNAPSHOT_SHA256,
-        "tool_runs": [],
+        "tool_runs": [semgrep_run, valid_tool_run("asan-test", "failed")],
         "findings": [
             {
                 "rule_id": "cxx.double-free",
@@ -72,6 +78,7 @@ def valid_response_payload():
                 "language": "c",
                 "symbol": "release",
                 "analysis_mode": "source-only",
+                "producer_run_ids": [semgrep_run["run_id"]],
             }
         ],
         "coverage": {"source_files": 1, "snapshot_files": 2},
@@ -398,6 +405,9 @@ class CxxRepositoryScannerTests(unittest.TestCase):
                     valid_tool_run(),
                     valid_tool_run("build-step", "build_failed"),
                 ]
+                payload["findings"][0]["producer_run_ids"] = [
+                    payload["tool_runs"][0]["run_id"]
+                ]
                 payload["tool_runs"][1]["returncode"] = 1
                 payload["coverage"] = {"source_files": 1, "snapshot_files": 1}
                 payload["diagnostics"] = ["build_failed"]
@@ -450,7 +460,8 @@ class CxxRepositoryScannerTests(unittest.TestCase):
 class CxxMemoryClientTests(unittest.TestCase):
     @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
     def test_valid_response_is_converted_to_findings(self, _uuid4):
-        opener = RecordingOpener(valid_response_payload())
+        payload = valid_response_payload()
+        opener = RecordingOpener(payload)
         client = CxxMemoryAnalyzerClient(
             "http://cxx-analyzer:8090",
             timeout_seconds=8,
@@ -479,7 +490,7 @@ class CxxMemoryClientTests(unittest.TestCase):
             json.loads(opener.request.data.decode("utf-8")),
         )
         self.assertEqual("completed", result.status)
-        self.assertEqual([], result.tool_runs)
+        self.assertEqual(payload["tool_runs"], result.tool_runs)
         self.assertEqual({"source_files": 1, "snapshot_files": 2}, result.coverage)
         self.assertEqual([], result.diagnostics)
         self.assertEqual(1, len(result.findings))
@@ -666,6 +677,41 @@ class CxxMemoryClientTests(unittest.TestCase):
         changed(
             "mode and state mismatch",
             lambda value: value["findings"][0].update({"verification_state": "confirmed"}),
+        )
+        changed(
+            "producer cites unknown run",
+            lambda value: value["findings"][0].update({"producer_run_ids": ["run-missing"]}),
+        )
+        changed(
+            "producer cites mismatched tool run",
+            lambda value: value["findings"][0].update(
+                {"producer_run_ids": [value["tool_runs"][1]["run_id"]]}
+            ),
+        )
+        changed(
+            "producer cites unusable run status",
+            lambda value: (
+                value["tool_runs"][0].update({"status": "timed-out", "returncode": None}),
+                value["findings"][0].update(
+                    {"producer_run_ids": [value["tool_runs"][0]["run_id"]]}
+                ),
+            ),
+        )
+        changed(
+            "empty producer list",
+            lambda value: value["findings"][0].update({"producer_run_ids": []}),
+        )
+        changed(
+            "too many producers",
+            lambda value: value["findings"][0].update(
+                {"producer_run_ids": [value["tool_runs"][0]["run_id"]] * 17}
+            ),
+        )
+        changed(
+            "duplicate producers",
+            lambda value: value["findings"][0].update(
+                {"producer_run_ids": [value["tool_runs"][0]["run_id"]] * 2}
+            ),
         )
 
         valid_body = json.dumps(valid_response_payload()).encode("utf-8")

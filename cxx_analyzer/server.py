@@ -38,18 +38,16 @@ _SUPPORTED_LAYERS: Final = frozenset(
     {"source-only", "build-backed", "sanitizer-confirmed"}
 )
 
-_FINDING_TOOL_RUN = {
-    "semgrep": ("semgrep", frozenset({"completed"})),
-    "clang": ("clang", frozenset({"completed"})),
-    "asan": ("asan-test", frozenset({"completed", "failed"})),
-}
-
-
 def _bound_response_lists(
     findings: tuple[NormalizedFinding, ...], diagnostics: list[object],
     tool_runs: list[dict[str, object]],
 ) -> tuple[tuple[NormalizedFinding, ...], tuple[object, ...], tuple[dict[str, object], ...]]:
-    """Apply one evidence-aware response budget, preferring stronger proof."""
+    """Apply one evidence-aware response budget, preferring stronger proof.
+
+    A finding and every run it names as its producer form one inseparable
+    unit: runs are selected by exact producer reference, never by guessing
+    from tool and status alone.
+    """
 
     ranked = sorted(
         enumerate(findings),
@@ -61,35 +59,41 @@ def _bound_response_lists(
         ),
         reverse=True,
     )
+    run_by_id: dict[object, int] = {}
+    for index, run in enumerate(tool_runs):
+        identifier = run.get("run_id")
+        if isinstance(identifier, str) and identifier:
+            run_by_id.setdefault(identifier, index)
     kept_indexes: set[int] = set()
-    mandatory_run_indexes: set[int] = set()
+    producer_indexes: set[int] = set()
     missing_evidence = False
+    budget_blocked = False
     for finding_index, finding in ranked:
         if len(kept_indexes) >= MAX_FINDINGS:
             break
-        required = _FINDING_TOOL_RUN.get(finding.tool)
-        if required is None:
+        producers: set[int] = set()
+        for identifier in finding.producer_run_ids:
+            producer_index = run_by_id.get(identifier)
+            if producer_index is None:
+                producers = set()
+                break
+            producers.add(producer_index)
+        if not producers:
             missing_evidence = True
             continue
-        tool, statuses = required
-        matching = [
-            index
-            for index, run in enumerate(tool_runs)
-            if run.get("tool") == tool and run.get("status") in statuses
-        ]
-        if not matching:
-            missing_evidence = True
+        if len(producer_indexes | producers) > MAX_TOOL_RUNS:
+            budget_blocked = True
             continue
         kept_indexes.add(finding_index)
-        mandatory_run_indexes.add(matching[-1])
-    bounded_findings = tuple(
-        item for index, item in enumerate(findings) if index in kept_indexes
-    )
-    selected_run_indexes = set(mandatory_run_indexes)
+        producer_indexes |= producers
+    selected_run_indexes = set(producer_indexes)
     for index in range(len(tool_runs)):
         if len(selected_run_indexes) >= MAX_TOOL_RUNS:
             break
         selected_run_indexes.add(index)
+    bounded_findings = tuple(
+        item for index, item in enumerate(findings) if index in kept_indexes
+    )
     bounded_tool_runs = tuple(
         run for index, run in enumerate(tool_runs) if index in selected_run_indexes
     )
@@ -97,9 +101,12 @@ def _bound_response_lists(
         len(findings) > MAX_FINDINGS
         or len(diagnostics) > MAX_DIAGNOSTICS
         or len(tool_runs) > MAX_TOOL_RUNS
+        or budget_blocked
     )
     diagnostic_values = list(diagnostics)
-    if missing_evidence and "finding-without-tool-evidence" not in diagnostic_values:
+    if (missing_evidence or budget_blocked) and (
+        "finding-without-tool-evidence" not in diagnostic_values
+    ):
         diagnostic_values.append("finding-without-tool-evidence")
     bounded_diagnostics = tuple(diagnostic_values[:MAX_DIAGNOSTICS])
     if exhausted or len(diagnostic_values) > MAX_DIAGNOSTICS:

@@ -513,6 +513,91 @@ class MetricTests(unittest.TestCase):
 
 
 class ArchiveSafetyTests(unittest.TestCase):
+    def test_slow_trickle_cannot_extend_absolute_download_deadline(self):
+        """One greedy read can outlive the deadline; every read must re-bind it."""
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 500.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += max(0.0, seconds)
+
+        class TrickleSocket:
+            def __init__(self, clock):
+                self._clock = clock
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        class TrickleResponse(io.BytesIO):
+            def __init__(self, clock):
+                super().__init__(b"x" * (1024 * 1024))
+                self._clock = clock
+                self.fp = type(
+                    "Fp",
+                    (),
+                    {"raw": type("Raw", (), {"_sock": TrickleSocket(clock)})()},
+                )()
+
+            def geturl(self):
+                return "https://example.test/archive.tar.gz"
+
+            def read(self, size=-1):
+                # Greedy HTTPResponse semantics: loop until size is filled,
+                # one byte per simulated second regardless of socket timeouts.
+                data = bytearray()
+                while len(data) < size:
+                    self._clock.sleep(1.0)
+                    data.extend(b"x")
+                return bytes(data)
+
+            def read1(self, size=-1):
+                # Bounded semantics: one underlying read, one byte, one second.
+                self._clock.sleep(1.0)
+                return b"x"
+
+        clock = FakeClock()
+        response = TrickleResponse(clock)
+
+        class TrickleOpener:
+            def open(self, request, timeout):
+                return response
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "case.tar.gz"
+            with (
+                mock.patch.object(
+                    self.module.urllib.request,
+                    "build_opener",
+                    return_value=TrickleOpener(),
+                ),
+                mock.patch.object(self.module.time, "monotonic", clock.monotonic),
+                mock.patch.object(self.module, "_DOWNLOAD_DEADLINE_SECONDS", 3.0),
+            ):
+                started = clock.monotonic()
+                with self.assertRaises(TimeoutError):
+                    self.module.download_verified_archive(
+                        "https://example.test/archive.tar.gz",
+                        "0" * 64,
+                        destination,
+                    )
+                elapsed = clock.monotonic() - started
+                self.assertLessEqual(elapsed, 3.0 + 0.5, elapsed)
+                self.assertFalse(destination.exists())
+                self.assertFalse(destination.with_suffix(".gz.part").exists())
+            socket = response.fp.raw._sock
+            self.assertTrue(socket.timeouts)
+            self.assertTrue(
+                all(value <= 3.0 for value in socket.timeouts), socket.timeouts
+            )
+            self.assertLessEqual(min(socket.timeouts), 1.0)
+
+
     @classmethod
     def setUpClass(cls):
         cls.module = load_evaluation_module()

@@ -148,6 +148,12 @@ Task 5 | 复审通过 | commits 5fd704d..(见 git log) | RED: python -m unittest
 
 Task 5 补充记录：编码策略——prose 单次编码（HTML 实体 + [ ] * 实体化 + 结构前缀零宽防护含 thematic break）；行内代码为字面上下文（仅反引号自适应定界，不实体化，渲染器自行转义）；fence 自适应长度不变。有意接受的取舍（docstring 已注明）：词界 `_` 强调与 GFM `~~` 删除线等装饰性格式化不阻断（无结构注入面）；setext `===` 依赖发射结构（空行隔断）而非编码器。非 C/C++ finding 分支维持原状（范围外，其 evidence 围栏问题为既存）。
 
+```text
+Task 6 | 复审通过 | commits 1e4d833..(见 git log) | RED: python -m unittest tests.test_cxx_memory_evaluation.ArchiveSafetyTests.test_slow_trickle_cannot_extend_absolute_download_deadline → 模拟 elapsed=65536.0（一次贪婪 read(64K) 以每秒 1 字节滴流吞掉全部预算，远超 3.0 秒 deadline） | GREEN: 宿主全量 348 OK (12 skip)；Linux 容器全量 348 OK (3 skip)；ruff 两文件通过 | reviewer: 修复后通过（I-1 测试 partial 断言路径错误且置于临时目录外恒真——已修并补 socket timeout 重绑契约断言；I-2 注释过度承诺——chunked 帧/响应头阶段仍依赖 per-recv socket timeout，措辞已修正；M-4 read1 探测移出循环）
+```
+
+Task 6 补充记录：硬 deadline 的准确边界（reviewer 核对 CPython 源码确认）——Content-Length/连接关闭型响应（GitHub codeload 实际形态）下绝对 deadline 成立；Transfer-Encoding: chunked 的 chunk-size 行解析与响应头阶段内部 readline 循环仅有 per-recv ≤60s 兜底，恶意镜像可拖慢但不可无限挂死；彻底封死需 per-recv deadline 执行（http.client 不暴露）或看门狗，记为已知边界留待后续 residual。Minor 遗留：read1 阻塞至 OS socket timeout 的真实滴流路径无测试覆盖（依赖 OS 行为）。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -404,7 +410,7 @@ git commit -s -m "fix: encode C++ report markdown contexts"
 **Interfaces:**
 - Produces: 小块/非阻塞或 `read1` 循环，每次底层 read 前按绝对剩余预算设置 socket timeout；slow trickle 不能延长总 deadline。
 
-- [ ] **Step 1: RED slow-trickle 测试**
+- [x] **Step 1: RED slow-trickle 测试**
 
 ```python
 def test_slow_trickle_cannot_extend_absolute_download_deadline():
@@ -412,16 +418,16 @@ def test_slow_trickle_cannot_extend_absolute_download_deadline():
         download_with_fake_clock(bytes_per_tick=1, tick_seconds=1, deadline_seconds=3)
 ```
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_memory_evaluation.ArchiveSafetyTests -v`
 Expected: FAIL 或观察一次 read 越过绝对 deadline。
 
-- [ ] **Step 3: 实现可抢占读取**
+- [x] **Step 3: 实现可抢占读取**
 
 将单次 read 控制到有界小块，底层 socket 每轮设置 `min(per_operation_timeout, remaining)`；零剩余立即失败并删除 partial。保持逐跳 HTTPS、hash、大小和 archive 安全边界。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_memory_evaluation -v`
 

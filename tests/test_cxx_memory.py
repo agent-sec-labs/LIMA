@@ -773,6 +773,73 @@ class CxxMemoryClientTests(unittest.TestCase):
 
 
 class CxxReportTests(unittest.TestCase):
+    def test_cxx_markdown_cannot_inject_structure_or_double_escape_paths(self):
+        finding = cxx_finding("semgrep", "source-only").to_dict()
+        finding.update({
+            "path": "src/a&b.cpp",
+            "explanation": (
+                "---\n"
+                "[label](https://evil.example) <script>alert(1)</script>\n"
+                "***\n"
+                "> quoted \n"
+                "```cpp\n"
+                "int x;\n"
+                "```"
+            ),
+            "evidence": "before\n```\ninjected fence\nafter",
+            "symbol": "weird`s`ymbol",
+            "title": "t`itle",
+        })
+        report = {
+            "repository": "team/project",
+            "summary": "s",
+            "risk": "high",
+            "reviewer": "local-rules",
+            "findings": [finding],
+            "collaboration": {},
+        }
+
+        rendered = to_markdown(report)
+
+        # Inline spans carry the path verbatim, encoded exactly once.
+        self.assertIn("`src/a&b.cpp:12`", rendered)
+        self.assertNotIn("a&amp;b.cpp", rendered)
+        self.assertNotIn("a&amp;amp;b.cpp", rendered)
+        # Link, HTML and separator syntax never survives as structure: the
+        # bracket mechanism itself is pinned, not only the URL redaction.
+        self.assertIn("&#91;label&#93;(", rendered)
+        self.assertNotIn("[label](https://evil.example)", rendered)
+        self.assertNotIn("<script>", rendered)
+        self.assertNotIn("***", rendered)
+        stripped_lines = [line.strip() for line in rendered.splitlines()]
+        self.assertNotIn("---", stripped_lines)
+        self.assertNotIn("> quoted", stripped_lines)
+        # Exactly one fenced evidence block per finding remains openable.
+        fence_lines = [line for line in rendered.splitlines() if line.startswith("```")]
+        self.assertEqual(2, len(fence_lines))
+        # The hostile backtick inside the symbol cannot close the inline span.
+        self.assertIn("`` weird`s`ymbol ``", rendered)
+
+    def test_cxx_markdown_keeps_source_single_encoded_and_covers_fallback(self):
+        finding = cxx_finding("tool&tag<x>*[y]", "source-only").to_dict()
+        finding["evidence_records"] = []
+        report = {
+            "repository": "team/project",
+            "summary": "s",
+            "risk": "high",
+            "reviewer": "local-rules",
+            "findings": [finding],
+            "collaboration": {},
+        }
+
+        rendered = to_markdown(report)
+
+        # The evidence source is inline-code encoded exactly once, verbatim.
+        self.assertIn("`tool&tag<x>*[y]`", rendered)
+        self.assertNotIn("&amp;amp;", rendered)
+        # The fallback record line reproduces the finding location verbatim.
+        self.assertIn("`src/free.c:12`", rendered)
+
     def test_markdown_explains_source_only_evidence_and_degraded_layers(self):
         finding = cxx_finding("semgrep", "source-only")
         report = {

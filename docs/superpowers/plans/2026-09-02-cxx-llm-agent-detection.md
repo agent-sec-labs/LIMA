@@ -142,6 +142,12 @@ Task 4 | 复审通过 | commits 6d1146c..(见 git log) | RED: python -m unittest
 
 Task 4 补充记录：health 为破坏性 schema 变更（tools/configuration 三键 → 8 个能力布尔 + capabilities 单键），schema_version 保持 1——两侧严格键集校验使版本错配降级为 invalid-response/unavailable，无虚假可用（reviewer 裁决 Minor）。Minor 遗留（记台账）：health 未探测 subreaper/fork 失败窗口（运行时 fail-closed 兜底）；静态 health 与逐快照构建选择的固有偏差（auto_cmake+显式 steps+CMakeLists 快照等组合可能运行时降级为诊断，docstring 已注明配置级语义）；双 clang 驱动齐备要求对纯 C 仓库保守低报；客户端 health 缓存无过期（计划"未过期"措辞未实现，运行时逐请求 fail-closed 兜底）；invalid-response 服务分支无测试覆盖；docs/CXX_MEMORY_ANALYSIS.md 的"核对 URL"表述失真（既有，留待文档任务）。tests/test_service.py 按计划约束未修改（其断言不引用旧字段，全量绿证明兼容）。
 
+```text
+Task 5 | 复审通过 | commits 5fd704d..(见 git log) | RED: python -m unittest tests.test_cxx_memory.CxxReportTests.test_cxx_markdown_cannot_inject_structure_or_double_escape_paths → a&amp;amp;b.cpp 双重转义实际出现于渲染输出 | GREEN: 宿主全量 347 OK (12 skip)；Linux 容器全量 347 OK (3 skip)；ruff lima/report.py 41 错误与 HEAD 相同（零新增） | reviewer: 修复后通过（I-1 source 字段双重编码同修；I-2 行内代码改字面上下文+自适应定界，不再实体化——markdown-it 实渲染验证；M-1 死分支删除；M-2 主题分隔前缀加 '='；M-3 www. 裸链接触发清洗；M-5 path None 健壮化；M-6 测试按机制断言并补 fallback 分支覆盖）
+```
+
+Task 5 补充记录：编码策略——prose 单次编码（HTML 实体 + [ ] * 实体化 + 结构前缀零宽防护含 thematic break）；行内代码为字面上下文（仅反引号自适应定界，不实体化，渲染器自行转义）；fence 自适应长度不变。有意接受的取舍（docstring 已注明）：词界 `_` 强调与 GFM `~~` 删除线等装饰性格式化不阻断（无结构注入面）；setext `===` 依赖发射结构（空行隔断）而非编码器。非 C/C++ finding 分支维持原状（范围外，其 evidence 围栏问题为既存）。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -360,7 +366,7 @@ git commit -s -m "fix: report executable C++ analyzer capabilities"
 **Interfaces:**
 - Produces: 分离的 heading/prose/inline-code/fenced-evidence 编码函数；输入只编码一次。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 覆盖 `---`、`***`、`[label](target)`、`<script>`、反引号、`&` 路径和多行 fence，解析结果不得产生额外 heading/link/HTML，显示路径仍为原字符。
 
@@ -371,16 +377,16 @@ def test_cxx_markdown_cannot_inject_structure_or_double_escape_paths():
     assert "[label](x)" not in rendered
 ```
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_memory.CxxMarkdownSafetyTests -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现按上下文编码**
+- [x] **Step 3: 实现按上下文编码**
 
 prose 转义 Markdown 标记和 HTML；inline-code 自适应 delimiter 且不重复 HTML encode；evidence 使用自适应 fence 或缩进块。调用者保存原始 path，只有最终输出点编码。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_memory -v`
 

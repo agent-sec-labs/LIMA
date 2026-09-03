@@ -61,7 +61,7 @@ def _safe_cxx_text(value: Any, maximum: int = _MAX_CXX_RENDER_TEXT) -> str:
     if not isinstance(value, str):
         return ""
     message = value.strip()
-    message = re.sub(r"https?://[^\s`]+", "[内部地址已隐藏]", message, flags=re.I)
+    message = re.sub(r"(?:https?://|www\.)[^\s`]+", "[内部地址已隐藏]", message, flags=re.I)
     message = re.sub(r"(?:\"[A-Za-z]:[\\/][^\"]*\"|'[A-Za-z]:[\\/][^']*')", "[运行路径已隐藏]", message)
     message = re.sub(r"(?:\"/[^\"]*\"|'/[^']*')", "[运行路径已隐藏]", message)
     message = re.sub(r"[A-Za-z]:[\\/][^\s`]+", "[运行路径已隐藏]", message)
@@ -79,19 +79,36 @@ def _safe_diagnostic_message(value: Any) -> str:
 
 
 def _cxx_markdown_prose(value: Any, maximum: int = _MAX_CXX_RENDER_TEXT) -> str:
-    """Encode bounded tool text for a single Markdown prose or heading line."""
+    """Encode bounded tool text for a single Markdown prose or heading line.
+
+    One pass only: HTML entities, link syntax and every structural prefix
+    (headings, lists, blockquotes, code fences, thematic breaks) are broken
+    so untrusted text can never introduce document structure. Decorative
+    emphasis from word-boundary underscores or GFM strikethrough tildes is
+    accepted on purpose; it cannot change document structure.
+    """
 
     text = " ".join(_safe_cxx_text(value, maximum).splitlines())
     text = html.escape(text, quote=False)
-    if re.match(r"^(?:#{1,6}(?:\s|$)|[-+*]\s|\d+[.)]\s|`{3,}|~{3,})", text):
+    text = text.replace("[", "&#91;").replace("]", "&#93;")
+    text = text.replace("*", "&#42;")
+    if re.match(
+        r"^(?:#{1,6}(?:\s|$)|[-+*]\s|\d+[.)]\s|`{3,}|~{3,}|[-*_ =]{3,})",
+        text,
+    ):
         text = "&#8203;" + text
     return text
 
 
 def _cxx_inline_code(value: Any) -> str:
-    """Return one safe CommonMark code span for untrusted tool text."""
+    """Return one safe CommonMark code span for untrusted tool text.
 
-    text = _cxx_markdown_prose(value)
+    Code-span content is a literal context: entities would display as
+    text, so the span keeps the redacted source verbatim and only the
+    adaptive delimiter stops hostile backticks from closing it early.
+    """
+
+    text = " ".join(_safe_cxx_text(value).splitlines())
     runs = [len(match.group(0)) for match in re.finditer(r"`+", text)]
     if not runs:
         return f"`{text}`"
@@ -227,9 +244,10 @@ def to_markdown(report: Dict[str, Any]) -> str:
         inline_code = (
             _cxx_inline_code if is_cxx else lambda value: "`%s`" % str(value)
         )
-        path = display(item.get("path", ""))
+        # Raw values are kept for inline spans: they encode exactly once at
+        # the output point instead of being pre-escaped into a second pass.
+        raw_path = str(item.get("path") or "")
         evidence = display(item.get("evidence", ""))
-        source = display(item.get("source", "unknown"))
         evidence_block = (
             _cxx_evidence_block(item.get("evidence", ""))
             if is_cxx
@@ -240,7 +258,7 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 "### %d. %s %s" % (index, icons.get(severity, "•"), display(item.get("title", "Finding"))),
                 "",
                 "%s · **%s** · %s · %s · %s" % (
-                    inline_code(f"{path}:{item.get('line', 0)}"),
+                    inline_code(f"{raw_path}:{item.get('line', 0)}"),
                     severity.upper(),
                     inline_code(item.get("rule_id", "")),
                     inline_code(item.get("cwe", "unmapped") or "unmapped"),
@@ -257,7 +275,7 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 "",
                 "**Suggested test:** %s" % display(item.get("test", "")),
                 "",
-                "**Evidence sources:** %s" % inline_code(source),
+                "**Evidence sources:** %s" % inline_code(item.get("source", "unknown")),
                 "",
             ]
         )
@@ -268,7 +286,7 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 "",
                 "- Language: %s" % inline_code(item.get("language", "unknown")),
                 "- Symbol: %s" % inline_code(item.get("symbol", "unknown")),
-                "- Location: %s" % inline_code(f"{path}:{item.get('line', 0)}"),
+                "- Location: %s" % inline_code(f"{raw_path}:{item.get('line', 0)}"),
                 "- CWE: %s" % inline_code(item.get("cwe", "unmapped") or "unmapped"),
                 "- Analysis mode: %s · **%s**" % (
                     inline_code(item.get("analysis_mode", "unknown")),
@@ -278,7 +296,7 @@ def to_markdown(report: Dict[str, Any]) -> str:
                     inline_code(item.get("verification_state", "candidate")),
                     _verification_state_label(item.get("verification_state")),
                 ),
-                "- Tool: %s" % inline_code(source),
+                "- Tool: %s" % inline_code(item.get("source", "unknown")),
                 "",
                 "**工具证据 / trace**",
                 "",
@@ -289,16 +307,15 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 if isinstance(record, Mapping) and record
             ] if isinstance(raw_evidence_records, (list, tuple)) else []
             for record in evidence_records:
-                record_path = display(record.get("path", ""))
                 lines.append("- %s · %s · %s" % (
                     inline_code(record.get("source", "unknown")),
-                    inline_code(f"{record_path}:{record.get('line', 0)}"),
+                    inline_code(f"{record.get('path', '')}:{record.get('line', 0)}"),
                     display(record.get("snippet", "")),
                 ))
             if not evidence_records:
                 lines.append("- %s · %s · %s" % (
-                    inline_code(source),
-                    inline_code(f"{path}:{item.get('line', 0)}"),
+                    inline_code(item.get("source", "unknown")),
+                    inline_code(f"{raw_path}:{item.get('line', 0)}"),
                     evidence,
                 ))
             lines.append("")

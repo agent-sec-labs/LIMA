@@ -983,9 +983,13 @@ class AnalyzerServiceTests(unittest.TestCase):
         )
         self.assertLess(len(json.dumps(response).encode("utf-8")), 1024)
 
+    @patch("cxx_analyzer.server.sandbox.process_isolation_available", return_value=True)
+    @patch("cxx_analyzer.server.sandbox.landlock_abi", return_value=4)
     @patch("cxx_analyzer.server.shutil.which")
-    def test_health_discloses_only_schema_and_tool_availability(self, which):
-        which.side_effect = lambda tool: ("/usr/bin/" + tool if tool != "clang" else None)
+    def test_health_discloses_only_probed_executability(
+        self, which, _landlock, _isolation
+    ):
+        which.side_effect = lambda tool: "/usr/bin/" + tool
 
         status, payload = analyzer_server.dispatch_request(
             "GET", "/health", "", b"", self._settings()
@@ -995,8 +999,14 @@ class AnalyzerServiceTests(unittest.TestCase):
         self.assertEqual(
             {
                 "schema_version": 1,
-                "tools": {"semgrep": True, "cmake": True, "clang": True},
-                "configuration": {"source": True, "build": True, "test": False},
+                "source_available": True,
+                "build_available": True,
+                "test_configured": False,
+                "clang_c_available": True,
+                "clang_cxx_available": True,
+                "cmake_available": True,
+                "landlock_available": True,
+                "process_isolation_available": True,
             },
             payload,
         )
@@ -1134,8 +1144,11 @@ class AnalyzerServiceTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(200, response.status)
             self.assertEqual(1, health["schema_version"])
-            self.assertEqual({"semgrep", "cmake", "clang"}, set(health["tools"]))
-            self.assertTrue(all(type(value) is bool for value in health["tools"].values()))
+            capability_fields = set(health) - {"schema_version"}
+            self.assertEqual(8, len(capability_fields))
+            self.assertTrue(
+                all(type(health[field]) is bool for field in capability_fields)
+            )
         finally:
             server.shutdown()
             server.server_close()

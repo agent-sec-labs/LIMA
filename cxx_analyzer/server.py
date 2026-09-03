@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
+from . import sandbox
 from .build_scan import run_build_scan
 from .config import AnalyzerSettings
 from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
@@ -336,24 +337,43 @@ def _encode_payload(payload: dict[str, object]) -> bytes:
 
 
 def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
-    """Return no process detail beyond versioned tool availability booleans."""
+    """Report only probed executability, never URL or configuration presence.
 
-    clang_pair = (
-        shutil.which("clang-14") is not None
-        and shutil.which("clang++-14") is not None
+    Every layer runs through the fail-closed sandbox launcher, so no layer
+    is available without Landlock and process isolation; the build layer
+    additionally needs both Clang drivers plus either auto-CMake's cmake or
+    administrator-provided build steps. build_available is configuration
+    level: per-snapshot step selection (auto-CMake versus explicit steps,
+    CMakeLists presence) can still degrade individual runs to diagnostics,
+    and rare subreaper or fork failures stay fail-closed at run time.
+    """
+
+    try:
+        landlock_available = sandbox.landlock_abi() >= sandbox.MIN_LANDLOCK_ABI
+    except OSError:
+        landlock_available = False
+    process_isolation_available = sandbox.process_isolation_available()
+    sandbox_ready = landlock_available and process_isolation_available
+    clang_c_available = shutil.which("clang-14") is not None
+    clang_cxx_available = shutil.which("clang++-14") is not None
+    cmake_available = shutil.which("cmake") is not None
+    build_configured = bool(
+        (settings.auto_cmake and cmake_available) or settings.build_steps
     )
     return {
         "schema_version": SCHEMA_VERSION,
-        "tools": {
-            "semgrep": shutil.which("semgrep") is not None,
-            "cmake": shutil.which("cmake") is not None,
-            "clang": clang_pair,
-        },
-        "configuration": {
-            "source": True,
-            "build": bool(settings.auto_cmake or settings.build_steps),
-            "test": bool(settings.test_steps),
-        },
+        "source_available": bool(
+            sandbox_ready and shutil.which("semgrep") is not None
+        ),
+        "build_available": bool(
+            sandbox_ready and clang_c_available and clang_cxx_available and build_configured
+        ),
+        "test_configured": bool(settings.test_steps),
+        "clang_c_available": clang_c_available,
+        "clang_cxx_available": clang_cxx_available,
+        "cmake_available": cmake_available,
+        "landlock_available": landlock_available,
+        "process_isolation_available": process_isolation_available,
     }
 
 

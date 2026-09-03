@@ -102,9 +102,18 @@ _TOOL_RUN_STATUSES = {
     "asan-test": frozenset({"completed", "failed", "timed-out"}),
 }
 _COVERAGE_KEYS = {"source_files", "snapshot_files"}
-_HEALTH_KEYS = {"schema_version", "tools", "configuration"}
-_HEALTH_TOOL_KEYS = {"semgrep", "cmake", "clang"}
-_HEALTH_CONFIGURATION_KEYS = {"source", "build", "test"}
+_HEALTH_KEYS = {
+    "schema_version",
+    "source_available",
+    "build_available",
+    "test_configured",
+    "clang_c_available",
+    "clang_cxx_available",
+    "cmake_available",
+    "landlock_available",
+    "process_isolation_available",
+}
+_HEALTH_CAPABILITY_KEYS = frozenset(_HEALTH_KEYS - {"schema_version"})
 _HEX64 = frozenset("0123456789abcdef")
 _CXX_LANGUAGE_BY_SUFFIX = {
     ".c": "c",
@@ -143,9 +152,29 @@ class CxxAnalysisResult:
 
 @dataclass(frozen=True)
 class CxxAnalyzerHealth:
+    """Probed executability of every analyzer layer and prerequisite."""
+
     schema_version: int
-    tools: dict[str, bool]
-    configuration: dict[str, bool]
+    source_available: bool
+    build_available: bool
+    test_configured: bool
+    clang_c_available: bool
+    clang_cxx_available: bool
+    cmake_available: bool
+    landlock_available: bool
+    process_isolation_available: bool
+
+    def capabilities(self) -> dict[str, bool]:
+        return {
+            "source_available": self.source_available,
+            "build_available": self.build_available,
+            "test_configured": self.test_configured,
+            "clang_c_available": self.clang_c_available,
+            "clang_cxx_available": self.clang_cxx_available,
+            "cmake_available": self.cmake_available,
+            "landlock_available": self.landlock_available,
+            "process_isolation_available": self.process_isolation_available,
+        }
 
 
 class CxxMemoryAdapter(Protocol):
@@ -307,24 +336,20 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health fields")
         if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
             raise CxxAnalyzerProtocolError("unsupported C/C++ analyzer health schema")
-        tools = payload["tools"]
-        configuration = payload["configuration"]
-        if (
-            type(tools) is not dict
-            or set(tools) != _HEALTH_TOOL_KEYS
-            or any(type(value) is not bool for value in tools.values())
+        if any(
+            type(payload[field]) is not bool for field in _HEALTH_CAPABILITY_KEYS
         ):
-            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health tools")
-        if (
-            type(configuration) is not dict
-            or set(configuration) != _HEALTH_CONFIGURATION_KEYS
-            or any(type(value) is not bool for value in configuration.values())
-        ):
-            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health configuration")
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health capabilities")
         health = CxxAnalyzerHealth(
             schema_version=1,
-            tools=dict(tools),
-            configuration=dict(configuration),
+            source_available=payload["source_available"],
+            build_available=payload["build_available"],
+            test_configured=payload["test_configured"],
+            clang_c_available=payload["clang_c_available"],
+            clang_cxx_available=payload["clang_cxx_available"],
+            cmake_available=payload["cmake_available"],
+            landlock_available=payload["landlock_available"],
+            process_isolation_available=payload["process_isolation_available"],
         )
         self._health_cache = health
         return health

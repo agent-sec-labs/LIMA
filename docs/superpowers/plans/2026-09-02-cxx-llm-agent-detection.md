@@ -136,6 +136,12 @@ Task 3 | 复审通过 | commits 99bf8dc..(见 git log) | RED: python -m unittest
 
 Task 3 补充记录：schema 为破坏性变更（v1 客户端与服务端必须同镜像原子发布，设计文档已接受）。Minor 遗留（记入台账跟进）：budget_blocked 与无证据共用 finding-without-tool-evidence 诊断串（客户端靠 analysis-budget-exhausted 同场区分）；服务端 create/bind_producer 无 MAX_PRODUCER_RUNS=16 上限（当前各层恰 1 个 producer，不可达）；tests/test_workspace.py:211 假 CxxAnalysisResult 的 run 无 run_id（绕过校验直填 dataclass，透传无害）。实现期间发现 patch("lima.cxx_memory.uuid.uuid4") 会污染全局 uuid 模块，测试 run_id 改用进程内计数器。含暂停/恢复：2026-09-03 依 handoff.md 暂停后恢复续作。
 
+```text
+Task 4 | 复审通过 | commits 6d1146c..(见 git log) | RED: python -m unittest tests.test_cxx_capabilities → 12 用例 13 errors（server.sandbox 不存在/旧 health schema/客户端拒绝逻辑缺失） | GREEN: 宿主全量 345 OK (12 skip)；Linux 容器全量 345 OK (3 skip)；ruff 变更文件全过（lima/service.py 36 个错误与 HEAD 逐数相同，零新增，既有风格债不动） | reviewer: 通过（无 Critical/Important；Minor 已修 2 项——未用常量与用例名、health docstring 澄清配置级语义）
+```
+
+Task 4 补充记录：health 为破坏性 schema 变更（tools/configuration 三键 → 8 个能力布尔 + capabilities 单键），schema_version 保持 1——两侧严格键集校验使版本错配降级为 invalid-response/unavailable，无虚假可用（reviewer 裁决 Minor）。Minor 遗留（记台账）：health 未探测 subreaper/fork 失败窗口（运行时 fail-closed 兜底）；静态 health 与逐快照构建选择的固有偏差（auto_cmake+显式 steps+CMakeLists 快照等组合可能运行时降级为诊断，docstring 已注明配置级语义）；双 clang 驱动齐备要求对纯 C 仓库保守低报；客户端 health 缓存无过期（计划"未过期"措辞未实现，运行时逐请求 fail-closed 兜底）；invalid-response 服务分支无测试覆盖；docs/CXX_MEMORY_ANALYSIS.md 的"核对 URL"表述失真（既有，留待文档任务）。tests/test_service.py 按计划约束未修改（其断言不引用旧字段，全量绿证明兼容）。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -317,7 +323,7 @@ git commit -s -m "fix: bind C++ findings to exact tool runs"
 **Interfaces:**
 - Produces: versioned health object with `source_available`、`build_available`、`test_configured`、`clang_c_available`、`clang_cxx_available`、`cmake_available`、`landlock_available`、`process_isolation_available`。
 
-- [ ] **Step 1: 写 RED 合同测试**
+- [x] **Step 1: 写 RED 合同测试**
 
 ```python
 def test_auto_cmake_requires_cmake_and_both_clang_drivers():
@@ -327,16 +333,16 @@ def test_auto_cmake_requires_cmake_and_both_clang_drivers():
 
 同时覆盖 Landlock/进程隔离不可用时 build/test 不得显示 available。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_analyzer tests.test_cxx_memory tests.test_cxx_capabilities -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现精确探测和安全缓存**
+- [x] **Step 3: 实现精确探测和安全缓存**
 
 Sidecar health 使用执行时相同的 binary 和 kernel probe；主服务只展示已成功解析且未过期的版本化 health。连接失败时状态为 unavailable，不以 URL 非空代替健康。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_analyzer tests.test_cxx_memory tests.test_cxx_capabilities -v`
 

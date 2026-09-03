@@ -377,8 +377,7 @@ class ReviewService:
         result = self.repository_import.capabilities()
         health_status = "disabled"
         health_schema_version = None
-        tool_availability = None
-        configuration = None
+        capabilities = None
         source_layer_available = False
         build_layer_available = False
         sanitizer_layer_available = False
@@ -394,18 +393,11 @@ class ReviewService:
                 if isinstance(health, CxxAnalyzerHealth):
                     health_status = "available"
                     health_schema_version = health.schema_version
-                    tool_availability = dict(health.tools)
-                    configuration = dict(health.configuration)
-                    source_layer_available = bool(
-                        health.tools["semgrep"] and health.configuration["source"]
-                    )
-                    build_layer_available = bool(
-                        health.tools["clang"] and health.configuration["build"]
-                    )
+                    capabilities = health.capabilities()
+                    source_layer_available = health.source_available
+                    build_layer_available = health.build_available
                     sanitizer_layer_available = bool(
-                        health.tools["clang"]
-                        and health.configuration["build"]
-                        and health.configuration["test"]
+                        health.build_available and health.test_configured
                     )
                 else:
                     health_status = "invalid-response"
@@ -437,8 +429,7 @@ class ReviewService:
                 "analyzer_configured": bool(self.settings.cxx_analyzer_url),
                 "health_status": health_status,
                 "health_schema_version": health_schema_version,
-                "tool_availability": tool_availability,
-                "configuration": configuration,
+                "capabilities": capabilities,
                 "source_layer_available": source_layer_available,
                 "build_layer_available": build_layer_available,
                 "sanitizer_layer_available": sanitizer_layer_available,

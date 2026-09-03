@@ -853,7 +853,7 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         self.assertIn("finding-without-tool-evidence", diagnostics)
 
     def test_health_requires_exact_clang_driver_pair_and_reports_safe_configuration(self):
-        """I7: availability and administrator configuration are explicit and versioned."""
+        """I7: probed executability and administrator configuration are explicit."""
 
         server = importlib.import_module("cxx_analyzer.server")
         settings = analyzer_settings(
@@ -867,14 +867,20 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             "clang-14": "/usr/bin/clang-14",
             "clang++-14": None,
         }
-        with mock.patch.object(server.shutil, "which", side_effect=paths.get):
+        with (
+            mock.patch.object(server.shutil, "which", side_effect=paths.get),
+            mock.patch.object(server.sandbox, "landlock_abi", return_value=4),
+            mock.patch.object(
+                server.sandbox, "process_isolation_available", return_value=True
+            ),
+        ):
             payload = server.health_payload(settings)
         self.assertEqual(1, payload["schema_version"])
-        self.assertFalse(payload["tools"]["clang"])
-        self.assertEqual(
-            {"source": True, "build": True, "test": False},
-            payload["configuration"],
-        )
+        self.assertTrue(payload["clang_c_available"])
+        self.assertFalse(payload["clang_cxx_available"])
+        self.assertFalse(payload["build_available"])
+        self.assertTrue(payload["source_available"])
+        self.assertFalse(payload["test_configured"])
 
     def test_semgrep_errors_are_bounded_and_make_the_source_layer_incomplete(self):
         """I8: JSON errors cannot coexist with accepted findings."""
@@ -935,16 +941,23 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
 
         payload = {
             "schema_version": 1,
-            "tools": {"semgrep": True, "cmake": False, "clang": True},
-            "configuration": {"source": True, "build": True, "test": False},
+            "source_available": True,
+            "build_available": True,
+            "test_configured": False,
+            "clang_c_available": True,
+            "clang_cxx_available": True,
+            "cmake_available": False,
+            "landlock_available": True,
+            "process_isolation_available": True,
         }
         opener = mock.Mock(return_value=FakeResponse(payload))
         client = CxxMemoryAnalyzerClient("http://analyzer", 30, 1_000_000, opener)
         first = client.health()
         second = client.health()
         self.assertIs(first, second)
-        self.assertEqual(payload["tools"], first.tools)
-        self.assertEqual(payload["configuration"], first.configuration)
+        self.assertTrue(first.source_available)
+        self.assertTrue(first.build_available)
+        self.assertFalse(first.cmake_available)
         self.assertEqual(1, opener.call_count)
         request = opener.call_args.args[0]
         self.assertEqual("GET", request.method)
@@ -978,8 +991,11 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         )
         cxx = service.repository_scan_capabilities()["cxx_memory"]
         self.assertEqual("available", cxx["health_status"])
-        self.assertEqual(payload["tools"], cxx["tool_availability"])
-        self.assertEqual(payload["configuration"], cxx["configuration"])
+        self.assertEqual(
+            {field: value for field, value in payload.items()
+             if field != "schema_version"},
+            cxx["capabilities"],
+        )
         self.assertTrue(cxx["source_layer_available"])
         self.assertTrue(cxx["build_layer_available"])
         self.assertFalse(cxx["sanitizer_layer_available"])
@@ -989,8 +1005,14 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
 
         payload = {
             "schema_version": 1,
-            "tools": {"semgrep": True, "cmake": True, "clang": True},
-            "configuration": {"source": True, "build": False, "test": True},
+            "source_available": True,
+            "build_available": False,
+            "test_configured": True,
+            "clang_c_available": True,
+            "clang_cxx_available": True,
+            "cmake_available": True,
+            "landlock_available": True,
+            "process_isolation_available": True,
         }
         client = CxxMemoryAnalyzerClient(
             "http://analyzer",

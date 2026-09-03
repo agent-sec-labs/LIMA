@@ -51,12 +51,16 @@ def _ref(schema_name, artifact_id, content_digest, **overrides):
 
 
 def _vep_reference(**overrides):
-    return _ref(
-        "lima.vulnerability-evidence-package",
-        "vep-0001",
-        "cd76622b48d11c0300e63d7489701479c75dc2f4b06cc6c4e88af1f453061d01",
-        **overrides,
-    )
+    kwargs = {
+        "schema_name": "lima.vulnerability-evidence-package",
+        "schema_version": VERSION_4_0,
+        "artifact_id": "vep-0001",
+        "tenant_id": "tenant-1",
+        "repository_snapshot_digest": "3" * 64,
+        "content_digest": "cd76622b48d11c0300e63d7489701479c75dc2f4b06cc6c4e88af1f453061d01",
+    }
+    kwargs.update(overrides)
+    return ArtifactReference(**kwargs)
 
 
 def _golden_payload():

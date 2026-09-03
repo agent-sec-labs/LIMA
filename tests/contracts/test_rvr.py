@@ -249,7 +249,9 @@ class GateResultTests(RvrContractTestCase):
             ContractErrorCode.INVALID_FIELD_VALUE,
             "$.evidence_artifact_ids",
         )
-        unsorted_evidence = _gate_wire(evidence=("test-run-0001", "diff-0001"))
+        unsorted_evidence = dict(
+            _gate_wire(), evidence_artifact_ids=["test-run-0001", "diff-0001"]
+        )
         self.assert_rejected(
             lambda: GateResult.from_dict(unsorted_evidence, schema_version=VERSION_4_0),
             ContractErrorCode.INVALID_FIELD_VALUE,
@@ -281,7 +283,12 @@ class CandidateVerificationTests(RvrContractTestCase):
                 ContractErrorCode.INVALID_FIELD_VALUE,
             )
         unsorted = _report_wire(
-            candidates=[_candidate_wire(files=("src/example.py", "src/cli.py"))]
+            candidates=[
+                dict(
+                    _candidate_wire(),
+                    changed_files=["src/example.py", "src/cli.py"],
+                )
+            ]
         )
         self.assert_rejected(
             lambda: decode_rvr_payload(unsorted, schema_version=VERSION_4_0),

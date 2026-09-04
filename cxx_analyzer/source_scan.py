@@ -14,7 +14,7 @@ from .deadline import AnalysisDeadline
 from .execution import ToolExecution, run_step
 from .languages import language_for_path
 from .normalizers import SUPPORTED_CWES, NormalizedFinding
-from .protocol import timed_out_tool_run, tool_run_from_execution
+from .protocol import new_run_id, timed_out_tool_run, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 
 _RULE_PREFIXES = {
@@ -97,7 +97,16 @@ def parse_semgrep_json(
     for error in errors:
         if not isinstance(error, dict):
             raise ValueError("Semgrep error is invalid")
-        error_type = error.get("type")
+        # Real Semgrep emits structured types (for example a
+        # ["PartialParsing", [...]] pair); only their boundedness matters
+        # because the error path never yields findings.
+        raw_type = error.get("type")
+        if isinstance(raw_type, str):
+            error_type = raw_type
+        elif isinstance(raw_type, list) and raw_type and isinstance(raw_type[0], str):
+            error_type = raw_type[0]
+        else:
+            error_type = json.dumps(raw_type, sort_keys=True, default=str)
         message = error.get("message")
         if (
             not isinstance(error_type, str)
@@ -161,8 +170,8 @@ def parse_semgrep_json(
     return tuple(findings), diagnostics
 
 
-def _tool_run(execution: ToolExecution) -> dict[str, object]:
-    return tool_run_from_execution("semgrep", execution)
+def _tool_run(execution: ToolExecution, run_id: str) -> dict[str, object]:
+    return tool_run_from_execution("semgrep", execution, run_id=run_id)
 
 
 def run_source_scan(
@@ -188,7 +197,8 @@ def run_source_scan(
             rule_path.write_text(rule_text, encoding="utf-8")
             execution = run_step(
                 (
-                    "semgrep", "--json", "--quiet", "--config", str(rule_path),
+                    "semgrep", "--json", "--quiet", "--no-rewrite-rule-ids",
+                    "--config", str(rule_path),
                     "--include", "*.c", "--include", "*.cc", "--include", "*.cpp",
                     "--include", "*.cxx", "--include", "*.h", "--include", "*.hh",
                     "--include", "*.hpp", "--include", "*.hxx", ".",
@@ -198,10 +208,12 @@ def run_source_scan(
                 timeout_seconds=timeout,
                 max_output_bytes=settings.max_output_bytes,
                 env={},
+                deadline=active_deadline,
             )
     except OSError:
         return LayerResult((), ("Semgrep rule staging was unavailable",), ())
-    tool_runs = (_tool_run(execution),)
+    run_id = new_run_id()
+    tool_runs = (_tool_run(execution, run_id),)
     if execution.status != "completed":
         return LayerResult((), ("Semgrep source scan did not complete",), tool_runs)
     if not execution.digests_complete or execution.output_truncated:
@@ -216,7 +228,11 @@ def run_source_scan(
             tuple(diagnostics),
             (tool_run_from_execution("semgrep", execution, semantic_failure=True),),
         )
-    return LayerResult(findings, tuple(diagnostics), tool_runs)
+    return LayerResult(
+        tuple(item.bind_producer(run_id) for item in findings),
+        tuple(diagnostics),
+        tool_runs,
+    )
 
 
 def recognized_host_semgrep_unavailability(

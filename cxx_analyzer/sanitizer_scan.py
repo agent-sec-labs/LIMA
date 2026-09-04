@@ -13,7 +13,7 @@ from .deadline import AnalysisDeadline
 from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
 from .languages import language_for_path
 from .normalizers import NormalizedFinding
-from .protocol import tool_run_from_execution
+from .protocol import new_run_id, tool_run_from_execution
 from .snapshot import PreparedSnapshot
 from .source_scan import LayerResult
 
@@ -93,16 +93,21 @@ def parse_asan_log(
         return _review()
     clean = _ANSI.sub("", text)
     findings: list[NormalizedFinding] = []
+    diagnostics: list[str] = []
     for match in _ERROR.finditer(clean):
         if len(findings) >= MAX_FINDINGS:
-            return _review()
+            diagnostics.append("needs-human-review")
+            return (findings, diagnostics)
         next_error = _ERROR.search(clean, match.end())
         block = clean[match.start(): next_error.start() if next_error else len(clean)]
         error_type = match.group(1)
         summary = _SUMMARY.search(block)
         summary_type = "double-free" if error_type == "attempting double-free" else error_type
         if summary is None or summary.group(1) != summary_type:
-            return _review()
+            # One corrupted report invalidates the rest of the stream, not
+            # the fully validated findings before it.
+            diagnostics.append("needs-human-review")
+            return (findings, diagnostics)
         auxiliary = _AUXILIARY_STACK.search(block)
         primary_end = min(
             summary.start(), auxiliary.start() if auxiliary is not None else len(block)
@@ -113,7 +118,8 @@ def parse_asan_log(
         cwe = _map(error_type, access)
         frame = _safe_frame(primary, snapshot)
         if cwe is None or frame is None:
-            return _review()
+            diagnostics.append("needs-human-review")
+            return (findings, diagnostics)
         path, line, symbol = frame
         language = language_for_path(path)
         access_text = access if access is not None else "FREE"
@@ -135,8 +141,8 @@ def parse_asan_log(
     return (findings, []) if findings else _review()
 
 
-def _tool_run(execution: ToolExecution) -> dict[str, object]:
-    return tool_run_from_execution("asan-test", execution)
+def _tool_run(execution: ToolExecution, run_id: str) -> dict[str, object]:
+    return tool_run_from_execution("asan-test", execution, run_id=run_id)
 
 
 def _valid_context(
@@ -182,9 +188,10 @@ def run_sanitizer_scan(
             break
         execution = run_step(
             step, snapshot, ".", remaining, settings.max_output_bytes,
-            env=SANITIZER_ENVIRONMENT,
+            env=SANITIZER_ENVIRONMENT, deadline=active_deadline,
         )
-        tool_runs.append(_tool_run(execution))
+        step_run_id = new_run_id()
+        tool_runs.append(_tool_run(execution, step_run_id))
         if (
             execution.status == "timed-out"
             or execution.output_truncated
@@ -195,7 +202,13 @@ def run_sanitizer_scan(
         combined_output = execution.stdout + "\n" + execution.stderr
         parsed, parsed_diagnostics = parse_asan_log(combined_output, snapshot)
         if parsed:
-            findings.extend(parsed[: MAX_FINDINGS - len(findings)])
+            findings.extend(
+                item.bind_producer(step_run_id)
+                for item in parsed[: MAX_FINDINGS - len(findings)]
+            )
+            for diagnostic in parsed_diagnostics:
+                if diagnostic not in diagnostics:
+                    diagnostics.append(diagnostic)
         elif execution.status == "failed":
             no_sanitizer_evidence = (
                 parsed_diagnostics == ["needs-human-review"]

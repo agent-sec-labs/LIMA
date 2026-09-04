@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
+from . import sandbox
 from .build_scan import run_build_scan
 from .config import AnalyzerSettings
 from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
@@ -38,18 +39,16 @@ _SUPPORTED_LAYERS: Final = frozenset(
     {"source-only", "build-backed", "sanitizer-confirmed"}
 )
 
-_FINDING_TOOL_RUN = {
-    "semgrep": ("semgrep", frozenset({"completed"})),
-    "clang": ("clang", frozenset({"completed"})),
-    "asan": ("asan-test", frozenset({"completed", "failed"})),
-}
-
-
 def _bound_response_lists(
     findings: tuple[NormalizedFinding, ...], diagnostics: list[object],
     tool_runs: list[dict[str, object]],
 ) -> tuple[tuple[NormalizedFinding, ...], tuple[object, ...], tuple[dict[str, object], ...]]:
-    """Apply one evidence-aware response budget, preferring stronger proof."""
+    """Apply one evidence-aware response budget, preferring stronger proof.
+
+    A finding and every run it names as its producer form one inseparable
+    unit: runs are selected by exact producer reference, never by guessing
+    from tool and status alone.
+    """
 
     ranked = sorted(
         enumerate(findings),
@@ -61,35 +60,41 @@ def _bound_response_lists(
         ),
         reverse=True,
     )
+    run_by_id: dict[object, int] = {}
+    for index, run in enumerate(tool_runs):
+        identifier = run.get("run_id")
+        if isinstance(identifier, str) and identifier:
+            run_by_id.setdefault(identifier, index)
     kept_indexes: set[int] = set()
-    mandatory_run_indexes: set[int] = set()
+    producer_indexes: set[int] = set()
     missing_evidence = False
+    budget_blocked = False
     for finding_index, finding in ranked:
         if len(kept_indexes) >= MAX_FINDINGS:
             break
-        required = _FINDING_TOOL_RUN.get(finding.tool)
-        if required is None:
+        producers: set[int] = set()
+        for identifier in finding.producer_run_ids:
+            producer_index = run_by_id.get(identifier)
+            if producer_index is None:
+                producers = set()
+                break
+            producers.add(producer_index)
+        if not producers:
             missing_evidence = True
             continue
-        tool, statuses = required
-        matching = [
-            index
-            for index, run in enumerate(tool_runs)
-            if run.get("tool") == tool and run.get("status") in statuses
-        ]
-        if not matching:
-            missing_evidence = True
+        if len(producer_indexes | producers) > MAX_TOOL_RUNS:
+            budget_blocked = True
             continue
         kept_indexes.add(finding_index)
-        mandatory_run_indexes.add(matching[-1])
-    bounded_findings = tuple(
-        item for index, item in enumerate(findings) if index in kept_indexes
-    )
-    selected_run_indexes = set(mandatory_run_indexes)
+        producer_indexes |= producers
+    selected_run_indexes = set(producer_indexes)
     for index in range(len(tool_runs)):
         if len(selected_run_indexes) >= MAX_TOOL_RUNS:
             break
         selected_run_indexes.add(index)
+    bounded_findings = tuple(
+        item for index, item in enumerate(findings) if index in kept_indexes
+    )
     bounded_tool_runs = tuple(
         run for index, run in enumerate(tool_runs) if index in selected_run_indexes
     )
@@ -97,9 +102,12 @@ def _bound_response_lists(
         len(findings) > MAX_FINDINGS
         or len(diagnostics) > MAX_DIAGNOSTICS
         or len(tool_runs) > MAX_TOOL_RUNS
+        or budget_blocked
     )
     diagnostic_values = list(diagnostics)
-    if missing_evidence and "finding-without-tool-evidence" not in diagnostic_values:
+    if (missing_evidence or budget_blocked) and (
+        "finding-without-tool-evidence" not in diagnostic_values
+    ):
         diagnostic_values.append("finding-without-tool-evidence")
     bounded_diagnostics = tuple(diagnostic_values[:MAX_DIAGNOSTICS])
     if exhausted or len(diagnostic_values) > MAX_DIAGNOSTICS:
@@ -329,24 +337,43 @@ def _encode_payload(payload: dict[str, object]) -> bytes:
 
 
 def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
-    """Return no process detail beyond versioned tool availability booleans."""
+    """Report only probed executability, never URL or configuration presence.
 
-    clang_pair = (
-        shutil.which("clang-14") is not None
-        and shutil.which("clang++-14") is not None
+    Every layer runs through the fail-closed sandbox launcher, so no layer
+    is available without Landlock and process isolation; the build layer
+    additionally needs both Clang drivers plus either auto-CMake's cmake or
+    administrator-provided build steps. build_available is configuration
+    level: per-snapshot step selection (auto-CMake versus explicit steps,
+    CMakeLists presence) can still degrade individual runs to diagnostics,
+    and rare subreaper or fork failures stay fail-closed at run time.
+    """
+
+    try:
+        landlock_available = sandbox.landlock_abi() >= sandbox.MIN_LANDLOCK_ABI
+    except OSError:
+        landlock_available = False
+    process_isolation_available = sandbox.process_isolation_available()
+    sandbox_ready = landlock_available and process_isolation_available
+    clang_c_available = shutil.which("clang-14") is not None
+    clang_cxx_available = shutil.which("clang++-14") is not None
+    cmake_available = shutil.which("cmake") is not None
+    build_configured = bool(
+        (settings.auto_cmake and cmake_available) or settings.build_steps
     )
     return {
         "schema_version": SCHEMA_VERSION,
-        "tools": {
-            "semgrep": shutil.which("semgrep") is not None,
-            "cmake": shutil.which("cmake") is not None,
-            "clang": clang_pair,
-        },
-        "configuration": {
-            "source": True,
-            "build": bool(settings.auto_cmake or settings.build_steps),
-            "test": bool(settings.test_steps),
-        },
+        "source_available": bool(
+            sandbox_ready and shutil.which("semgrep") is not None
+        ),
+        "build_available": bool(
+            sandbox_ready and clang_c_available and clang_cxx_available and build_configured
+        ),
+        "test_configured": bool(settings.test_steps),
+        "clang_c_available": clang_c_available,
+        "clang_cxx_available": clang_cxx_available,
+        "cmake_available": cmake_available,
+        "landlock_available": landlock_available,
+        "process_isolation_available": process_isolation_available,
     }
 
 

@@ -99,15 +99,20 @@ docker compose exec lima python -c "import urllib.request; print(urllib.request.
 
 ## 固定公开版本对与评测
 
+分析镜像在 Debian bookworm 基础上安装 clang-14/llvm-14/clang-tools-14、
+`libclang-rt-14-dev`（AddressSanitizer 链接期运行库，缺它 sanitizer 层无法产出测试
+二进制）、cmake 与精确锁定的 `semgrep==1.130.0`。
 `evaluation_data/cxx_memory_cases.json` 为每个 CWE 固定一个公开漏洞/修复对。每项必须包含
 两个不同的 40 位提交、两个提交归档 HTTPS URL 和实际 SHA-256、CVE/GHSA、上游修复 URL、
 affected path/symbol、build/test argv、选样理由和固定许可证 URL。归档先校验 SHA-256 再
 解压；解压器拒绝绝对路径、`..`、Windows 路径、符号链接、硬链接、设备/FIFO 和重复路径。
 第三方源码只存在于 cache/临时目录，不提交到 Git。
 
-评测器固定只有六个参数。镜像身份必须由运行评测的宿主机通过
+评测器固定只有七个参数。镜像身份必须由运行评测的宿主机通过
 `docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval` 获取，不能由 Sidecar health
-响应自行声称：
+响应自行声称；基础镜像身份同样由宿主机以
+`docker image inspect --format '{{.Id}}' <digest 锁定的基础镜像引用>` 读取（BuildKit
+不维护 Parent 链，`{{.Parent}}` 会取到空值）：
 
 ```powershell
 python scripts/run_cxx_memory_evaluation.py `
@@ -116,6 +121,7 @@ python scripts/run_cxx_memory_evaluation.py `
   --output output/cxx-memory-evaluation.json `
   --analyzer-url http://cxx-analyzer:8090 `
   --analyzer-image-digest sha256:<64位小写十六进制镜像ID> `
+  --analyzer-base-image-digest sha256:<64位小写十六进制基础镜像ID> `
   --fail-under-precision 0.80
 ```
 
@@ -140,6 +146,13 @@ diagnostic，绝不伪造 100%。
 或格式不合法的 image ID 会直接拒绝评测报告。基础镜像 digest、精确 Semgrep 版本、镜像内
 排序后的 Debian/Python 包清单以及实际 image ID 共同提供可审计身份。不过 apt 仓库没有按
 Debian snapshot 精确固定，因此这些证据支持审计，不构成逐字节可复现性声明。
+
+定时/手动 CI 在每次公开评测后把完整工具链身份与 JSON 报告一起归档为四个 artifact：
+`evaluation-report`（评测 JSON，内含实际与基础镜像 ID）、`debian-packages`
+（`/usr/local/share/lima/analyzer-toolchain-packages.txt` 导出）、`python-packages`
+（`analyzer-python-packages.txt` 导出）和 `image-inspect`（宿主机 `docker image inspect`
+的完整 JSON，含 Id、Parent 与 RepoDigests）。本地复跑评测时建议导出相同清单以保持证据
+一致。
 
 CWE-415 使用 curl/curl 的 CVE-2026-8925：固定构建显式启用 `CURL_USE_GSASL`，使
 `lib/vauth/gsasl.c::Curl_auth_gsasl_is_supported` 进入构建身份，测试以固定构建产物的

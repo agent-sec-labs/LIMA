@@ -17,6 +17,7 @@ MIN_LANDLOCK_ABI: Final = 3
 LANDLOCK_CREATE_RULESET_VERSION: Final = 1
 LANDLOCK_RULE_PATH_BENEATH: Final = 1
 PR_SET_NO_NEW_PRIVS: Final = 38
+PR_SET_CHILD_SUBREAPER: Final = 36
 PR_SET_SECCOMP: Final = 22
 SECCOMP_MODE_FILTER: Final = 2
 SECCOMP_RET_KILL_PROCESS: Final = 0x80000000
@@ -25,6 +26,8 @@ SECCOMP_RET_ERRNO: Final = 0x00050000
 BPF_LD_W_ABS: Final = 0x20
 BPF_JMP_JEQ_K: Final = 0x15
 BPF_RET_K: Final = 0x06
+# seccomp_data argument words start after nr, arch and the instruction pointer.
+SECCOMP_ARG_OFFSET: Final = 16
 
 ACCESS_EXECUTE: Final = 1 << 0
 ACCESS_WRITE_FILE: Final = 1 << 1
@@ -70,7 +73,9 @@ _ETC_FILES = (
     "/etc/group",
     "/etc/localtime",
 )
-_READABLE_TREES = ("/proc",)
+# /etc/ssl/certs: semgrep's networking stack resolves CA trust anchors at
+# startup even for fully offline local-config runs.
+_READABLE_TREES = ("/proc", "/etc/ssl/certs")
 _READ_WRITE_FILES = ("/dev/null",)
 _SYSCALLS = {
     "x86_64": (444, 445, 446),
@@ -103,6 +108,7 @@ _BLOCKED_PROCESS_SYSCALLS = {
             311,  # process_vm_writev
             312,  # kcmp
             424,  # pidfd_send_signal
+            435,  # clone3
             438,  # pidfd_getfd
             440,  # process_madvise
         }
@@ -123,6 +129,7 @@ _BLOCKED_PROCESS_SYSCALLS = {
             271,  # process_vm_writev
             272,  # kcmp
             424,  # pidfd_send_signal
+            435,  # clone3 (asm-generic numbering, like riscv64)
             438,  # pidfd_getfd
             440,  # process_madvise
         }
@@ -130,9 +137,21 @@ _BLOCKED_PROCESS_SYSCALLS = {
     "riscv64": frozenset(
         {
             97, 117, 129, 130, 131, 138, 154, 157, 240, 268, 270, 271,
-            272, 424, 438, 440,
+            272, 424, 435, 438, 440,
         }
     ),
+}
+# Same-UID process control syscalls that stay usable for the caller itself:
+# prlimit64 is allowed only while the target pid argument is zero (self).
+_ARG_GUARDED_SYSCALLS = {
+    "x86_64": {302: 0},
+    "aarch64": {261: 0},
+    "riscv64": {261: 0},
+}
+# clone3 reports ENOSYS instead of EPERM so glibc >= 2.34 falls back to
+# plain clone for pthread_create instead of failing thread creation.
+_BLOCKED_SYSCALL_ERRNOS = {
+    435: errno.ENOSYS,  # clone3 on every supported architecture
 }
 
 
@@ -229,7 +248,12 @@ def _existing_rule(path: str | os.PathLike[str], access: int) -> SandboxRule | N
         return None
     if stat.S_ISLNK(metadata.st_mode):
         return None
-    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+    if not (
+        stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISREG(metadata.st_mode)
+        # Character devices admit the whitelisted /dev/null read-write rule.
+        or stat.S_ISCHR(metadata.st_mode)
+    ):
         return None
     return SandboxRule(resolved, access)
 
@@ -339,6 +363,17 @@ def apply_landlock(policy: SandboxPolicy) -> None:
         os.close(ruleset_fd)
 
 
+def install_subreaper() -> bool:
+    """Adopt orphaned tool descendants so the boundary can reap them."""
+
+    if sys.platform != "linux":
+        return False
+    if _libc().prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    return True
+
+
 def apply_process_isolation() -> None:
     """Deny process-group escape and same-UID peer process control."""
 
@@ -349,7 +384,13 @@ def apply_process_isolation() -> None:
         machine = "aarch64"
     audit_arch = _SECCOMP_ARCH.get(machine)
     blocked = _BLOCKED_PROCESS_SYSCALLS.get(machine)
-    if sys.platform != "linux" or audit_arch is None or blocked is None:
+    guarded = _ARG_GUARDED_SYSCALLS.get(machine)
+    if (
+        sys.platform != "linux"
+        or audit_arch is None
+        or blocked is None
+        or guarded is None
+    ):
         raise OSError(errno.EOPNOTSUPP, "required process isolation is unavailable")
 
     instructions: list[_SockFilter] = [
@@ -359,11 +400,35 @@ def apply_process_isolation() -> None:
         _SockFilter(BPF_LD_W_ABS, 0, 0, 0),
     ]
     for syscall_number in sorted(blocked):
+        error_number = _BLOCKED_SYSCALL_ERRNOS.get(syscall_number, errno.EPERM)
         instructions.extend(
             (
                 _SockFilter(BPF_JMP_JEQ_K, 0, 1, syscall_number),
-                _SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+                _SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | error_number),
             )
+        )
+    for syscall_number, argument_index in sorted(guarded.items()):
+        # Allow the syscall only when the target pid word is exactly zero.
+        low_offset = SECCOMP_ARG_OFFSET + 8 * argument_index
+        match = len(instructions)
+        instructions.append(_SockFilter(BPF_JMP_JEQ_K, 0, 0, syscall_number))
+        guard_start = len(instructions)
+        instructions.extend(
+            (
+                _SockFilter(BPF_LD_W_ABS, 0, 0, low_offset),
+                _SockFilter(BPF_JMP_JEQ_K, 0, 2, 0),
+                _SockFilter(BPF_LD_W_ABS, 0, 0, low_offset + 4),
+                _SockFilter(BPF_JMP_JEQ_K, 1, 0, 0),
+                _SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+                _SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
+            )
+        )
+        guard_end = len(instructions)
+        instructions[match] = _SockFilter(
+            BPF_JMP_JEQ_K,
+            guard_start - (match + 1),
+            guard_end - (match + 1),
+            syscall_number,
         )
     instructions.append(_SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW))
     program_array = (_SockFilter * len(instructions))(*instructions)

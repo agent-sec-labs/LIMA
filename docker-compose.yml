@@ -119,7 +119,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=0700,uid=10002,gid=10002
-      - /work:size=512m,mode=0700,uid=10002,gid=10002
+      - /work:exec,size=512m,mode=0700,uid=10002,gid=10002
     volumes:
       - ${LIMA_REPOSITORY_IMPORT_PATH:-./repositories}:/repositories:ro
     cap_drop:

@@ -1,26 +1,314 @@
 [
-  {"id":"cwe-787-vulnerable-1","cwe":"CWE-787","path":"cwe-787/vulnerable-1.c","symbol":"oob_write_array","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-787-vulnerable-2","cwe":"CWE-787","path":"cwe-787/vulnerable-2.c","symbol":"oob_write_allocation","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-787-vulnerable-3","cwe":"CWE-787","path":"cwe-787/vulnerable-3.cpp","symbol":"oob_write_container","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-787-safe-1","cwe":"CWE-787","path":"cwe-787/safe-1.c","symbol":"bounded_write_array","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-787-safe-2","cwe":"CWE-787","path":"cwe-787/safe-2.c","symbol":"bounded_write_allocation","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-787-safe-3","cwe":"CWE-787","path":"cwe-787/safe-3.cpp","symbol":"bounded_write_container","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-125-vulnerable-1","cwe":"CWE-125","path":"cwe-125/vulnerable-1.c","symbol":"oob_read_array","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-125-vulnerable-2","cwe":"CWE-125","path":"cwe-125/vulnerable-2.cpp","symbol":"oob_read_allocation","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-125-vulnerable-3","cwe":"CWE-125","path":"cwe-125/vulnerable-3.cpp","symbol":"oob_read_container","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-125-safe-1","cwe":"CWE-125","path":"cwe-125/safe-1.c","symbol":"bounded_read_array","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-125-safe-2","cwe":"CWE-125","path":"cwe-125/safe-2.cpp","symbol":"bounded_read_allocation","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-125-safe-3","cwe":"CWE-125","path":"cwe-125/safe-3.cpp","symbol":"bounded_read_container","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-416-vulnerable-1","cwe":"CWE-416","path":"cwe-416/vulnerable-1.c","symbol":"use_after_free_read","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-416-vulnerable-2","cwe":"CWE-416","path":"cwe-416/vulnerable-2.cpp","symbol":"use_after_delete_read","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-416-vulnerable-3","cwe":"CWE-416","path":"cwe-416/vulnerable-3.cpp","symbol":"use_after_free_write","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-416-safe-1","cwe":"CWE-416","path":"cwe-416/safe-1.c","symbol":"release_rebind_read","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-416-safe-2","cwe":"CWE-416","path":"cwe-416/safe-2.cpp","symbol":"delete_rebind_read","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-416-safe-3","cwe":"CWE-416","path":"cwe-416/safe-3.cpp","symbol":"release_rebind_write","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-415-vulnerable-1","cwe":"CWE-415","path":"cwe-415/vulnerable-1.c","symbol":"double_free_c","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-415-vulnerable-2","cwe":"CWE-415","path":"cwe-415/vulnerable-2.cpp","symbol":"double_delete_cpp","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-415-vulnerable-3","cwe":"CWE-415","path":"cwe-415/vulnerable-3.cpp","symbol":"double_free_std","vulnerable":true,"allowed_layers":["source-only","build-backed","sanitizer-confirmed"],"asan_expected":true,"clang_expected":true},
-  {"id":"cwe-415-safe-1","cwe":"CWE-415","path":"cwe-415/safe-1.c","symbol":"free_rebind_free_c","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-415-safe-2","cwe":"CWE-415","path":"cwe-415/safe-2.cpp","symbol":"delete_rebind_delete_cpp","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false},
-  {"id":"cwe-415-safe-3","cwe":"CWE-415","path":"cwe-415/safe-3.cpp","symbol":"free_rebind_free_std","vulnerable":false,"allowed_layers":["source-only"],"asan_expected":false,"clang_expected":false}
+  {
+    "id": "cwe-787-vulnerable-1",
+    "cwe": "CWE-787",
+    "path": "cwe-787/vulnerable-1.c",
+    "symbol": "oob_write_array",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-787-vulnerable-2",
+    "cwe": "CWE-787",
+    "path": "cwe-787/vulnerable-2.c",
+    "symbol": "oob_write_allocation",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-787-vulnerable-3",
+    "cwe": "CWE-787",
+    "path": "cwe-787/vulnerable-3.cpp",
+    "symbol": "oob_write_container",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-787-safe-1",
+    "cwe": "CWE-787",
+    "path": "cwe-787/safe-1.c",
+    "symbol": "bounded_write_array",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-787-safe-2",
+    "cwe": "CWE-787",
+    "path": "cwe-787/safe-2.c",
+    "symbol": "bounded_write_allocation",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-787-safe-3",
+    "cwe": "CWE-787",
+    "path": "cwe-787/safe-3.cpp",
+    "symbol": "bounded_write_container",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-125-vulnerable-1",
+    "cwe": "CWE-125",
+    "path": "cwe-125/vulnerable-1.c",
+    "symbol": "oob_read_array",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-125-vulnerable-2",
+    "cwe": "CWE-125",
+    "path": "cwe-125/vulnerable-2.cpp",
+    "symbol": "oob_read_allocation",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-125-vulnerable-3",
+    "cwe": "CWE-125",
+    "path": "cwe-125/vulnerable-3.cpp",
+    "symbol": "oob_read_container",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-125-safe-1",
+    "cwe": "CWE-125",
+    "path": "cwe-125/safe-1.c",
+    "symbol": "bounded_read_array",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-125-safe-2",
+    "cwe": "CWE-125",
+    "path": "cwe-125/safe-2.cpp",
+    "symbol": "bounded_read_allocation",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-125-safe-3",
+    "cwe": "CWE-125",
+    "path": "cwe-125/safe-3.cpp",
+    "symbol": "bounded_read_container",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-416-vulnerable-1",
+    "cwe": "CWE-416",
+    "path": "cwe-416/vulnerable-1.c",
+    "symbol": "use_after_free_read",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-416-vulnerable-2",
+    "cwe": "CWE-416",
+    "path": "cwe-416/vulnerable-2.cpp",
+    "symbol": "use_after_delete_read",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-416-vulnerable-3",
+    "cwe": "CWE-416",
+    "path": "cwe-416/vulnerable-3.cpp",
+    "symbol": "use_after_free_write",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-416-safe-1",
+    "cwe": "CWE-416",
+    "path": "cwe-416/safe-1.c",
+    "symbol": "release_rebind_read",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-416-safe-2",
+    "cwe": "CWE-416",
+    "path": "cwe-416/safe-2.cpp",
+    "symbol": "delete_rebind_read",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-416-safe-3",
+    "cwe": "CWE-416",
+    "path": "cwe-416/safe-3.cpp",
+    "symbol": "release_rebind_write",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-415-vulnerable-1",
+    "cwe": "CWE-415",
+    "path": "cwe-415/vulnerable-1.c",
+    "symbol": "double_free_c",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-415-vulnerable-2",
+    "cwe": "CWE-415",
+    "path": "cwe-415/vulnerable-2.cpp",
+    "symbol": "double_delete_cpp",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-415-vulnerable-3",
+    "cwe": "CWE-415",
+    "path": "cwe-415/vulnerable-3.cpp",
+    "symbol": "double_free_std",
+    "vulnerable": true,
+    "allowed_layers": [
+      "source-only",
+      "build-backed",
+      "sanitizer-confirmed"
+    ],
+    "asan_expected": true,
+    "clang_expected": true
+  },
+  {
+    "id": "cwe-415-safe-1",
+    "cwe": "CWE-415",
+    "path": "cwe-415/safe-1.c",
+    "symbol": "free_rebind_free_c",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-415-safe-2",
+    "cwe": "CWE-415",
+    "path": "cwe-415/safe-2.cpp",
+    "symbol": "delete_rebind_delete_cpp",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  },
+  {
+    "id": "cwe-415-safe-3",
+    "cwe": "CWE-415",
+    "path": "cwe-415/safe-3.cpp",
+    "symbol": "free_rebind_free_std",
+    "vulnerable": false,
+    "allowed_layers": [
+      "source-only"
+    ],
+    "asan_expected": false,
+    "clang_expected": false
+  }
 ]

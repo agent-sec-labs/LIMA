@@ -343,3 +343,82 @@ jobs:
           LIMA_CXX_BUILD_STEPS_JSON: ${{ steps.case.outputs.build_steps_json }}
           LIMA_CXX_TEST_STEPS_JSON: ${{ steps.case.outputs.test_steps_json }}
         run: |
+          mkdir -p .cache/cxx-memory/repositories output
+          docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:eval .
+          ANALYZER_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval)"
+          printf 'ANALYZER_IMAGE_DIGEST=%s\n' "$ANALYZER_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          ANALYZER_BASE_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250)"
+          printf 'ANALYZER_BASE_IMAGE_DIGEST=%s\n' "$ANALYZER_BASE_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          docker image inspect lima-cxx-analyzer:eval > output/image-inspect.json
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-toolchain-packages.txt > output/debian-packages.txt
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-python-packages.txt > output/python-packages.txt
+          docker network create --internal lima-cxx-public
+          docker run --detach --name lima-cxx-public-analyzer --network lima-cxx-public \
+            --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
+            --env LIMA_CXX_AUTO_CMAKE=false \
+            --env LIMA_CXX_BUILD_STEPS_JSON \
+            --env LIMA_CXX_TEST_STEPS_JSON \
+            --mount type=bind,source="${PWD}/.cache/cxx-memory/repositories",target=/repositories,readonly \
+            lima-cxx-analyzer:eval
+      - name: Run pinned public pairs from a separate evaluator
+        env:
+          LIMA_CXX_EVALUATION_CASE_ID: ${{ matrix.case-id }}
+        run: |
+          for attempt in $(seq 1 30); do
+            docker exec lima-cxx-public-analyzer python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()" && break
+            if [ "$attempt" = 30 ]; then exit 1; fi
+            sleep 2
+          done
+          docker create --name lima-cxx-evaluator \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env LIMA_CXX_EVALUATION_CASE_ID \
+            --mount type=bind,source="${PWD}",target=/workspace,readonly \
+            --mount type=bind,source="${PWD}/.cache/cxx-memory",target=/cache \
+            --mount type=bind,source="${PWD}/output",target=/output \
+            --workdir /workspace \
+            public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250 \
+            python scripts/run_cxx_memory_evaluation.py \
+              --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
+              --output /output/cxx-memory-evaluation.json \
+              --analyzer-url http://lima-cxx-public-analyzer:8090 \
+              --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
+              --analyzer-base-image-digest "$ANALYZER_BASE_IMAGE_DIGEST" \
+              --fail-under-precision 0.0
+          docker network connect lima-cxx-public lima-cxx-evaluator
+          docker start --attach lima-cxx-evaluator
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: evaluation-report-${{ matrix.case-id }}
+          path: output/cxx-memory-evaluation.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: debian-packages-${{ matrix.case-id }}
+          path: output/debian-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: python-packages-${{ matrix.case-id }}
+          path: output/python-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: image-inspect-${{ matrix.case-id }}
+          path: output/image-inspect.json
+          if-no-files-found: warn
+      - name: Stop public evaluation containers
+        if: always()
+        run: |
+          docker rm --force lima-cxx-evaluator lima-cxx-public-analyzer 2>/dev/null || true
+          docker network rm lima-cxx-public 2>/dev/null || true
+

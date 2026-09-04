@@ -65,6 +65,9 @@ class Finding:
     symbol: str = ""
     analysis_mode: str = ""
     automatic_repair: Optional[bool] = None
+    candidate_id: str = ""
+    agent_role: str = ""
+    trigger_path: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.cwe = self.cwe.upper().strip()

@@ -157,6 +157,21 @@ class Settings:
     cxx_analyzer_url: str = "http://cxx-analyzer:8090"
     cxx_analysis_timeout_seconds: int = 300
     cxx_max_response_bytes: int = 2 * 1024 * 1024
+    cxx_agent_mode: str = "off"
+    cxx_agent_model: str = ""
+    cxx_agent_max_candidates: int = 100
+    cxx_agent_max_calls: int = 40
+    cxx_agent_max_context_files: int = 12
+    cxx_agent_max_context_lines: int = 1200
+    cxx_agent_max_output_bytes: int = 1048576
+    cxx_agent_timeout_seconds: int = 600
+    cxx_agent_parallelism: int = 3
+    cxx_agent_dialogue_rounds: int = 2
+
+    def effective_cxx_agent_model(self) -> str:
+        """The C/C++ agent model, falling back to the shared LLM model."""
+
+        return self.cxx_agent_model.strip() or self.llm_model.strip()
 
     def resolved_llm(self) -> Dict[str, object]:
         """Resolve a named provider to the existing OpenAI-compatible transport."""
@@ -291,6 +306,24 @@ class Settings:
             raise ValueError(
                 "LIMA_CXX_ANALYZER_URL must be an HTTP(S) URL without user info, query or fragment"
             )
+        if self.cxx_agent_mode not in {"off", "auto", "required"}:
+            raise ValueError("LIMA_CXX_AGENT_MODE must be off, auto or required")
+        if self.cxx_agent_mode == "required" and not self.effective_cxx_agent_model():
+            raise ValueError(
+                "LIMA_CXX_AGENT_MODEL (or LIMA_LLM_MODEL) is required when "
+                "LIMA_CXX_AGENT_MODE is required"
+            )
+        if min(
+            self.cxx_agent_max_candidates,
+            self.cxx_agent_max_calls,
+            self.cxx_agent_max_context_files,
+            self.cxx_agent_max_context_lines,
+            self.cxx_agent_max_output_bytes,
+            self.cxx_agent_timeout_seconds,
+            self.cxx_agent_parallelism,
+            self.cxx_agent_dialogue_rounds,
+        ) < 1:
+            raise ValueError("C/C++ agent budgets must be positive")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -389,4 +422,16 @@ class Settings:
                 "LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS", 300
             ),
             cxx_max_response_bytes=_int("LIMA_CXX_MAX_RESPONSE_BYTES", 2 * 1024 * 1024),
+            cxx_agent_mode=os.getenv("LIMA_CXX_AGENT_MODE", "off").strip().lower(),
+            cxx_agent_model=os.getenv("LIMA_CXX_AGENT_MODEL", "").strip(),
+            cxx_agent_max_candidates=_int("LIMA_CXX_AGENT_MAX_CANDIDATES", 100),
+            cxx_agent_max_calls=_int("LIMA_CXX_AGENT_MAX_CALLS", 40),
+            cxx_agent_max_context_files=_int("LIMA_CXX_AGENT_MAX_CONTEXT_FILES", 12),
+            cxx_agent_max_context_lines=_int("LIMA_CXX_AGENT_MAX_CONTEXT_LINES", 1200),
+            cxx_agent_max_output_bytes=_int(
+                "LIMA_CXX_AGENT_MAX_OUTPUT_BYTES", 1048576
+            ),
+            cxx_agent_timeout_seconds=_int("LIMA_CXX_AGENT_TIMEOUT_SECONDS", 600),
+            cxx_agent_parallelism=_int("LIMA_CXX_AGENT_PARALLELISM", 3),
+            cxx_agent_dialogue_rounds=_int("LIMA_CXX_AGENT_DIALOGUE_ROUNDS", 2),
         )

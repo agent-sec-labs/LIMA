@@ -58,6 +58,79 @@ class DotenvTests(unittest.TestCase):
             self.assertEqual("deepseek", resolved["provider"])
             self.assertEqual("legacy-real-key", resolved["api_key"])
 
+    def test_cxx_agent_settings_parse_mode_model_and_total_budgets(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "required",
+                "LIMA_CXX_AGENT_MODEL": "gpt-test",
+                "LIMA_CXX_AGENT_MAX_CANDIDATES": "50",
+                "LIMA_CXX_AGENT_MAX_CALLS": "20",
+                "LIMA_CXX_AGENT_MAX_CONTEXT_FILES": "6",
+                "LIMA_CXX_AGENT_MAX_CONTEXT_LINES": "600",
+                "LIMA_CXX_AGENT_MAX_OUTPUT_BYTES": "524288",
+                "LIMA_CXX_AGENT_TIMEOUT_SECONDS": "300",
+                "LIMA_CXX_AGENT_PARALLELISM": "2",
+                "LIMA_CXX_AGENT_DIALOGUE_ROUNDS": "1",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual("required", settings.cxx_agent_mode)
+        self.assertEqual("gpt-test", settings.cxx_agent_model)
+        self.assertEqual(50, settings.cxx_agent_max_candidates)
+        self.assertEqual(20, settings.cxx_agent_max_calls)
+        self.assertEqual(6, settings.cxx_agent_max_context_files)
+        self.assertEqual(600, settings.cxx_agent_max_context_lines)
+        self.assertEqual(524288, settings.cxx_agent_max_output_bytes)
+        self.assertEqual(300, settings.cxx_agent_timeout_seconds)
+        self.assertEqual(2, settings.cxx_agent_parallelism)
+        self.assertEqual(1, settings.cxx_agent_dialogue_rounds)
+
+    def test_cxx_agent_defaults_and_strict_mode(self):
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual("off", settings.cxx_agent_mode)
+        self.assertEqual("", settings.cxx_agent_model)
+        self.assertEqual(100, settings.cxx_agent_max_candidates)
+        self.assertEqual(40, settings.cxx_agent_max_calls)
+        self.assertEqual(12, settings.cxx_agent_max_context_files)
+        self.assertEqual(1200, settings.cxx_agent_max_context_lines)
+        self.assertEqual(1048576, settings.cxx_agent_max_output_bytes)
+        self.assertEqual(600, settings.cxx_agent_timeout_seconds)
+        self.assertEqual(3, settings.cxx_agent_parallelism)
+        self.assertEqual(2, settings.cxx_agent_dialogue_rounds)
+        for mode in ("maybe", "on"):
+            with patch.dict(
+                os.environ, {"LIMA_CXX_AGENT_MODE": mode}, clear=True
+            ):
+                with self.subTest(mode=mode), self.assertRaisesRegex(
+                    ValueError, "LIMA_CXX_AGENT_MODE"
+                ):
+                    Settings.from_env().validate_evolution()
+        with patch.dict(
+            os.environ,
+            {"LIMA_CXX_AGENT_MODE": "required"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "LIMA_CXX_AGENT_MODEL"):
+                Settings.from_env().validate_evolution()
+        for name in (
+            "LIMA_CXX_AGENT_MAX_CANDIDATES",
+            "LIMA_CXX_AGENT_MAX_CALLS",
+            "LIMA_CXX_AGENT_MAX_CONTEXT_FILES",
+            "LIMA_CXX_AGENT_MAX_CONTEXT_LINES",
+            "LIMA_CXX_AGENT_MAX_OUTPUT_BYTES",
+            "LIMA_CXX_AGENT_TIMEOUT_SECONDS",
+            "LIMA_CXX_AGENT_PARALLELISM",
+            "LIMA_CXX_AGENT_DIALOGUE_ROUNDS",
+        ):
+            with patch.dict(os.environ, {name: "0"}, clear=True):
+                with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, name
+                ):
+                    Settings.from_env().validate_evolution()
+
     def test_cxx_memory_settings_are_parsed_and_validated(self):
         values = {
             "LIMA_CXX_MEMORY_MODE": "required",

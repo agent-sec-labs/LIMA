@@ -8,14 +8,22 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Iterable, Iterator, Optional
 
-
 DEFAULT_EXTENSIONS = frozenset(
     {
-        ".c", ".cc", ".cpp", ".go", ".h", ".hpp", ".java", ".js", ".json",
-        ".jsx", ".php", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
+        ".ac", ".am", ".c", ".cc", ".cmake", ".conf", ".cpp", ".css",
+        ".cxx", ".go", ".h", ".hh", ".hpp", ".html", ".hxx", ".in",
+        ".java", ".js", ".json", ".jsx", ".list", ".m4", ".php", ".po",
+        ".pot", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
         ".yaml", ".yml",
     }
 )
+DEFAULT_FILENAMES = frozenset(
+    {"CMakeLists.txt", "LINGUAS", "Makefile", "Makefile.inc", "Makevars", "config.mk"}
+)
+CXX_SOURCE_EXTENSIONS = frozenset(
+    {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+)
+CXX_BUILD_EXTENSIONS = frozenset({".cmake"})
 DEFAULT_IGNORED_DIRECTORIES = frozenset(
     {
         ".git", ".hg", ".idea", ".mypy_cache", ".pytest_cache", ".ruff_cache",
@@ -39,6 +47,7 @@ class WorkspaceFile:
     path: str
     size: int
     sha256: str
+    line_count: int
 
 
 @dataclass
@@ -74,7 +83,12 @@ class WorkspaceInventory:
         return {
             "root": self.root,
             "files": [
-                {"path": item.path, "size": item.size, "sha256": item.sha256}
+                {
+                    "path": item.path,
+                    "size": item.size,
+                    "sha256": item.sha256,
+                    "line_count": item.line_count,
+                }
                 for item in self.files
             ],
             "skipped": dict(sorted(self.skipped.items())),
@@ -172,7 +186,10 @@ class RepositoryWorkspace:
                     self._record_skip(result, "symlink")
                 elif name in DEFAULT_IGNORED_FILES or name.startswith(".env."):
                     self._record_skip(result, "sensitive-config")
-                elif path.suffix.lower() not in self.extensions:
+                elif (
+                    name not in DEFAULT_FILENAMES
+                    and path.suffix.lower() not in self.extensions
+                ):
                     self._record_skip(result, "unsupported-extension")
                 else:
                     candidates.append(path)
@@ -206,13 +223,18 @@ class RepositoryWorkspace:
                 self._record_skip(result, "binary")
                 continue
             try:
-                data.decode("utf-8")
+                decoded = data.decode("utf-8")
             except UnicodeDecodeError:
                 self._record_skip(result, "non-utf8")
                 continue
             relative = path.relative_to(self.root).as_posix()
             result.files.append(
-                WorkspaceFile(relative, size, hashlib.sha256(data).hexdigest())
+                WorkspaceFile(
+                    relative,
+                    size,
+                    hashlib.sha256(data).hexdigest(),
+                    len(decoded.splitlines()),
+                )
             )
             result.total_bytes += size
         return result

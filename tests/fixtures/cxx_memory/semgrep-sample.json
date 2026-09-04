@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "check_id": "cxx.source.oob-write.constant-index",
+      "path": "src/buffer.c",
+      "start": {"line": 7},
+      "extra": {
+        "lines": "values[8] = 1;",
+        "metadata": {"cwe": "CWE-787", "candidate": true},
+        "metavars": {"$FUNC": {"abstract_content": "write_value"}}
+      }
+    }
+  ],
+  "errors": []
+}

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>files</key>
+  <array><string>../src/main.c</string></array>
+  <key>diagnostics</key>
+  <array>
+    <dict>
+      <key>check_name</key><string>alpha.security.ArrayBoundV2</string>
+      <key>type</key><string>Out-of-bound write</string>
+      <key>description</key><string>Human text mentions ../escape.c:999 but is not location evidence</string>
+      <key>issue_context_kind</key><string>function</string>
+      <key>issue_context</key><string>write_value</string>
+      <key>location</key><dict><key>line</key><integer>5</integer><key>col</key><integer>7</integer><key>file</key><integer>0</integer></dict>
+      <key>path</key>
+      <array>
+        <dict>
+          <key>kind</key><string>control</string>
+          <key>edges</key>
+          <array>
+            <dict>
+              <key>start</key><dict><key>line</key><integer>2</integer><key>col</key><integer>3</integer><key>file</key><integer>0</integer></dict>
+              <key>end</key><dict><key>line</key><integer>3</integer><key>col</key><integer>5</integer><key>file</key><integer>0</integer></dict>
+            </dict>
+          </array>
+        </dict>
+        <dict>
+          <key>kind</key><string>event</string>
+          <key>location</key><dict><key>line</key><integer>5</integer><key>col</key><integer>7</integer><key>file</key><integer>0</integer></dict>
+        </dict>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

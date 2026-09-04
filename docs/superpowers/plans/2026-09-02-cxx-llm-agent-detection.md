@@ -84,7 +84,7 @@
 | 既有 C/C++ Sidecar 实现 | 已完成并推送，但复审未通过 | `codex/cxx-memory-detection-impl`，`2e69f3ce56f80b91e4b180ab0556100d3e173e4f` |
 | 本设计文档 | 已提交 | 提交 `08c9a2a docs: specify C++ LLM agent detection`（位于 `codex/cxx-memory-detection-impl` 本地，未推送） |
 | 本实施计划 | 已提交 | 同上；分支 `codex/cxx-llm-agent-detection` 自 `08c9a2a` 创建（即 `2e69f3c` + 文档提交，偏差已在此记录） |
-| 阶段 A：Sidecar 七项复审问题 | 未开始（Task 0 基线修复已完成） | 从 Task 1 开始；Task 1–7 全部复审通过后才能进入阶段 B |
+| 阶段 A：Sidecar 七项复审问题 | **复审通过（2026-09-04 门禁裁决）** | 七项 residual 全部独立裁决已关闭（见下方门禁记录）；Task 8 起进入阶段 B |
 | 阶段 B：大模型多 Agent 检测 | 未开始 | Task 8–21；依赖阶段 A 门禁 |
 | Docker/Linux 安全验证 | 未验证 | Docker Desktop Linux daemon 可用后执行 Task 21 |
 | 真实 Clang/ASan 验证 | 未验证 | 依赖 Sidecar 容器环境 |
@@ -489,7 +489,7 @@ Expected: FAIL。
 
 Dockerfile 使用 digest-pinned base；能够可靠固定的直接依赖使用精确版本，全部解析后的包版本在镜像内生成 manifest。CI 从宿主 `docker image inspect` 获取 ID并导出镜像/包清单，作为同一 artifact 上传。若 apt repository 不能 snapshot-pin，文档必须明确仅“可审计”而非“逐字节可复现”。
 
-- [ ] **Step 4: 验证 Phase A**
+- [x] **Step 4: 验证 Phase A**
 
 Run:
 
@@ -502,7 +502,7 @@ git diff --check 2e69f3c..HEAD
 
 在 Docker Linux daemon 可用时还必须运行 Sidecar build、真实 Semgrep/Clang/ASan、集成和四 case matrix。不可用则停止在“Phase A 未获 Linux/Docker 完整证据”，不得声称前置完成。
 
-- [ ] **Step 5: 提交并执行独立全 Phase A 审查**
+- [x] **Step 5: 提交并执行独立全 Phase A 审查**
 
 ```powershell
 git add cxx_analyzer/Dockerfile .github/workflows/ci.yml scripts/run_cxx_memory_evaluation.py docs/CXX_MEMORY_ANALYSIS.md tests/test_cxx_memory_evaluation.py tests/test_cxx_analyzer.py
@@ -529,7 +529,7 @@ git commit -s -m "build: preserve C++ analyzer toolchain identity"
 **Interfaces:**
 - Produces: `CxxAgentSettings`、`ContextReference`、`CxxAgentCandidate`、`CxxAgentDecision`、`CxxAgentCoverage`；`Settings.cxx_agent_mode` 及设计文档中的九个配置值。
 
-- [ ] **Step 1: 写 RED Schema/配置测试**
+- [x] **Step 1: 写 RED Schema/配置测试**
 
 ```python
 def test_cxx_agent_mode_and_total_budgets_are_strict():
@@ -541,16 +541,16 @@ def test_cxx_agent_mode_and_total_budgets_are_strict():
 
 候选构造测试拒绝未知 CWE、绝对路径、零行号、未知字段和超限 `trigger_path`。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_models tests.test_config -v`
 Expected: import/config failure。
 
-- [ ] **Step 3: 实现不可变合同**
+- [x] **Step 3: 实现不可变合同**
 
 使用 frozen dataclass 或等价不可变值；提供 `from_untrusted_json` 严格构造器。扩展 Finding 时保持旧 JSON 向后兼容，新增字段默认空值，`automatic_repair=False`。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_models tests.test_config -v`
 
@@ -569,20 +569,20 @@ git commit -s -m "feat: define C++ agent contracts and budgets"
 **Interfaces:**
 - Produces: `CxxContextIndex.build(workspace, inventory) -> CxxContextIndex`；`symbols`、`types`、`calls`、`references`、`resource_events`、`coverage`；所有记录绑定 snapshot hash。
 
-- [ ] **Step 1: 创建最小 C/C++ fixture 与 RED**
+- [x] **Step 1: 创建最小 C/C++ fixture 与 RED**
 
 fixture 包含 `.c/.cpp/.hpp`、重载、成员函数、malloc/free/new/delete、数组长度和无法解析宏。测试断言限定名、行范围、caller/callee、资源事件及 parse gap。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_context -v`
 Expected: module missing。
 
-- [ ] **Step 3: 实现确定性索引**
+- [x] **Step 3: 实现确定性索引**
 
 优先复用现有 inventory 和语言扩展映射。第一版允许保守轻量解析，但输出排序必须确定，解析失败进入 coverage，不得生成虚构调用边。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_context tests.test_workspace -v`
 
@@ -600,19 +600,19 @@ git commit -s -m "feat: index bounded C++ review context"
 **Interfaces:**
 - Produces: `retrieve_repository(index, budget) -> RetrievalRun`；`retrieve_pull_request(index, changed_lines, budget) -> RetrievalRun`；候选包含 seed reason，不包含 CVE/ground truth。
 
-- [ ] **Step 1: RED**
+- [x] **Step 1: RED**
 
 测试分配/释放、边界操作、PR changed symbol 扩展、稳定排序、100 candidate/12 file/1200 line 限制，以及输入中出现 `vulnerable/fixed/CVE` 元数据不会改变排序。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_retrieval -v`
 
-- [ ] **Step 3: 实现检索**
+- [x] **Step 3: 实现检索**
 
 候选分数只来自通用 API/语法风险、调用邻域和 PR 距离。预算在选择过程中一次性扣减；返回未覆盖候选/文件计数。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_retrieval tests.test_cxx_context -v`
 
@@ -631,19 +631,19 @@ git commit -s -m "feat: retrieve C++ memory review candidates"
 **Interfaces:**
 - Produces: `GitHubSourceProvider.fetch(repository, commit_sha, paths, budget) -> GitHubSnapshot`；只接受 40 位 SHA，返回每文件 SHA-256。
 
-- [ ] **Step 1: RED**
+- [x] **Step 1: RED**
 
 覆盖 branch/短 SHA 拒绝、路径逃逸、404/rate limit、内容超限、本地 head 匹配优先、GitHub 固定 SHA 获取及 Diff-only 降级。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_github_source -v`
 
-- [ ] **Step 3: 实现固定内容提供者**
+- [x] **Step 3: 实现固定内容提供者**
 
 使用现有 GitHub 认证/重试约束；不得记录 Authorization；响应先按预算读取再解码；只将验证后的文件交给 `RepositoryWorkspace` 等价清单逻辑。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_github_source tests.test_github -v`
 
@@ -661,19 +661,19 @@ git commit -s -m "feat: fetch pinned GitHub C++ context"
 **Interfaces:**
 - Produces spec 中七个 exact tool 名称；`CxxAgentBudget.consume_call/files/lines/bytes` 原子扣减；每个响应包含读取引用和 hash。
 
-- [ ] **Step 1: RED 安全测试**
+- [x] **Step 1: RED 安全测试**
 
 覆盖仓库外路径、未索引 symbol、反向行范围、单次/累计超限、并发扣减、阶段外 `get_tool_evidence`、提示词注入字符串。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_tools -v`
 
-- [ ] **Step 3: 实现工具注册表**
+- [x] **Step 3: 实现工具注册表**
 
 为每一角色创建最小 ToolRegistry；所有路径通过 snapshot index 解析，不直接接受 `Path`；Evidence 工具只在 Evidence registry 注册。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_tools tests.test_runtime -v`
 
@@ -692,19 +692,19 @@ git commit -s -m "feat: expose bounded C++ agent tools"
 **Interfaces:**
 - Produces: `CxxLLMClient.step(role, managed_context, tools, budget) -> AgentStep`；复用 `Settings.resolved_llm()`；temperature 固定 0；一次格式修复。
 
-- [ ] **Step 1: RED 合同测试**
+- [x] **Step 1: RED 合同测试**
 
 覆盖有效 tool/final、重复 key、未知字段、非对象、超大 body、非法 path/line/CWE、未读取证据、timeout、HTTP error、一次格式修复和 prompt injection。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_llm -v`
 
-- [ ] **Step 3: 实现 Provider 与严格解析**
+- [x] **Step 3: 实现 Provider 与严格解析**
 
 复用现有 base URL/key/model/headers；系统提示明确源码为不可信数据；输出只接受 `tool` 或 `final` union；Token/调用/时间在发送前后扣减；不得将模型 `reason` 当工具参数。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_llm tests.test_reviewer -v`
 
@@ -724,19 +724,19 @@ git commit -s -m "feat: add strict C++ LLM reviewer client"
 **Interfaces:**
 - Produces: `CxxAgentCoordinator.review_repository(...) -> CxxAgentReviewResult` 和 `review_pull_request(...)`；角色顺序严格为 Planner→独立 Specialist→Critic→Evidence→Verifier→Arbiter。
 
-- [ ] **Step 1: RED 协作测试**
+- [x] **Step 1: RED 协作测试**
 
 Fake LLM 记录每轮 managed context。断言三个 Specialist 看不到 peer/tool Finding；Critic 看到候选；Evidence 才能调用证据工具；消息通过 TaskStore 保存；失败 specialist 重试一次再替代。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agents -v`
 
-- [ ] **Step 3: 实现专用 coordinator**
+- [x] **Step 3: 实现专用 coordinator**
 
 复用 CollaborationBus、AgentRuntime、AgentLoop 和消息 kind，但不改现有 Diff-only `MultiAgentCoordinator` 的 added-line verifier。C++ coordinator 使用 snapshot-bound verifier。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agents tests.test_advanced -v`
 
@@ -758,19 +758,19 @@ git commit -s -m "feat: orchestrate C++ memory review agents"
 **Interfaces:**
 - Produces exact states: `llm-candidate`、`agent-corroborated`、`tool-corroborated`、`runtime-confirmed`、`human-confirmed`、`needs-human-review`。
 
-- [ ] **Step 1: RED 状态矩阵**
+- [x] **Step 1: RED 状态矩阵**
 
 覆盖单 Agent、两个 Agent 仅 CWE 相同但 mechanism 不同、完整独立一致、Semgrep/Clang 同身份、ASan exact run、证据冲突、Diff-only 和人工确认。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agents.VerificationStateTests tests.test_cxx_memory -v`
 
-- [ ] **Step 3: 实现一致性与 gate**
+- [x] **Step 3: 实现一致性与 gate**
 
 共识键至少包括 CWE/path/symbol/resource/mechanism/trigger overlap。`verified-only` 只接受设计规定的四个已验证状态；`needs-human-review` 和 `llm-candidate` 不进入 gate。所有 C/C++ 自动修复仍 false。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agents tests.test_cxx_memory tests.test_workspace -v`
 
@@ -791,19 +791,19 @@ git commit -s -m "feat: verify C++ agent memory findings"
 - Consumes: workspace inventory、CxxContextIndex、retriever、coordinator、Sidecar evidence。
 - Produces: 一个融合 ReviewReport；`collaboration.cxx_agent` 保存模式、模型、上下文、预算、coverage 和 Agent 统计。
 
-- [ ] **Step 1: RED Fake-LLM 端到端**
+- [x] **Step 1: RED Fake-LLM 端到端**
 
 构造整仓 UAF 与安全版本；断言真实代码片段进入模型、工具证据只在 Evidence 阶段、Finding 绑定快照、报告持久化且安全版本不被强行判漏洞。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.RepositoryAgentTests -v`
 
-- [ ] **Step 3: 接入扫描器**
+- [x] **Step 3: 接入扫描器**
 
 索引只构建一次；传统扫描与 LLM 分支共享同一 inventory；`off/auto/required` 按规范决定任务状态；取消任务时停止后续模型调用。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.RepositoryAgentTests tests.test_workspace tests.test_service -v`
 
@@ -824,19 +824,19 @@ git commit -s -m "feat: run C++ agents on imported repositories"
 **Interfaces:**
 - Produces: context scope `repository | pr-context | diff-only`；任务输入保存 base/head SHA 和 source manifest hash。
 
-- [ ] **Step 1: RED PR 端到端**
+- [x] **Step 1: RED PR 端到端**
 
 覆盖本地 repo head 匹配、head 不匹配后 GitHub pinned fetch、GitHub 失败后的 Diff-only、非 C/C++ PR 不调用 C++ Agent、Diff-only 不得升级。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.PullRequestAgentTests tests.test_github -v`
 
-- [ ] **Step 3: 接入现有 PR task**
+- [x] **Step 3: 接入现有 PR task**
 
 从 webhook 已验证 payload 取得完整 head SHA；代码上下文和 diff 都绑定任务。不得用 PR ref 或默认分支替代 head SHA。C++ Agent Finding 可绑定触发行和根因行，但 gate 规则保持不变。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_integration tests.test_github tests.test_service -v`
 
@@ -859,19 +859,19 @@ git commit -s -m "feat: review C++ pull requests with agents"
 **Interfaces:**
 - Produces: spec 第 12 节全部字段；沿用 Agent message storage；capabilities 返回 `cxx_agent` 对象。
 
-- [ ] **Step 1: RED 报告/持久化测试**
+- [x] **Step 1: RED 报告/持久化测试**
 
 断言 Planner/Specialist/Critic/Evidence/Verifier/Arbiter 消息可查询；报告包含 provider/model/prompt/context/hash/token/coverage/degradation；Web 禁止 C/C++ 修复按钮。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.ReportTests tests.test_frontend_ui -v`
 
-- [ ] **Step 3: 实现显示和 capabilities**
+- [x] **Step 3: 实现显示和 capabilities**
 
 复用现有 TaskStore，不建平行消息库。Markdown/Web 对不可信字段使用正确上下文编码。capabilities 的 configured/healthy 分开，Provider 未探测时不宣称 healthy。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_integration tests.test_frontend_ui tests.test_service -v`
 
@@ -894,19 +894,19 @@ git commit -s -m "feat: report C++ agent collaboration evidence"
 **Interfaces:**
 - Produces: 全任务共享 budget ledger；mode outcome；`llm-unavailable`、`budget-exhausted`、`context-truncated` 等有界诊断。
 
-- [ ] **Step 1: RED 攻击/故障矩阵**
+- [x] **Step 1: RED 攻击/故障矩阵**
 
 覆盖源码注释提示词注入、模型请求任意工具、跨仓库 path、工具参数超限、并发预算竞争、Provider 超时/429/5xx、全部 specialist 失败、Critic/Verifier/Arbiter 失败、取消任务。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_tools tests.test_cxx_llm tests.test_cxx_agent_integration.FailureModeTests -v`
 
-- [ ] **Step 3: 实现 fail-closed 结果**
+- [x] **Step 3: 实现 fail-closed 结果**
 
 `required` 关键阶段失败使任务 FAILED；`auto` 仅在允许点降级并写 diagnostic；格式修复最多一次；达到任一总预算立即停止新调用。任何失败不得提升验证状态。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_tools tests.test_cxx_llm tests.test_cxx_agents tests.test_cxx_agent_integration -v`
 
@@ -929,19 +929,19 @@ git commit -s -m "fix: enforce C++ agent trust and budget boundaries"
 **Interfaces:**
 - Produces: 固定 vulnerable/fixed 对、可重算 metrics、手动/定时真实模型 job；普通 PR 只跑 Fake-LLM 合同测试。
 
-- [ ] **Step 1: RED Schema/公平性/指标测试**
+- [x] **Step 1: RED Schema/公平性/指标测试**
 
 断言 exact commits/archive hashes/licenses、无标签 retrieval input、零分母 null+diagnostic、TP/FP/FN/TN/F1/pairwise/token/cost/latency/coverage 可由 revision records 重算。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_llm_agent_evaluation -v`
 
-- [ ] **Step 3: 实现评测与文档**
+- [x] **Step 3: 实现评测与文档**
 
 真实模型 job 从 secret 读取现有 Provider key，固定模型和 prompt hash，上传原始结构化结果及身份清单。文档说明外部模型会读取代码、两种入口、模式、费用、隐私、状态、门禁、禁止修复和局限。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run:
 
@@ -965,7 +965,7 @@ git commit -s -m "test: evaluate C++ LLM agent detection"
 **Interfaces:**
 - Produces: 可供验收的 commit range、测试证据、真实/未验证边界和 GitHub 分支。
 
-- [ ] **Step 1: 干净 HEAD 验证**
+- [x] **Step 1: 干净 HEAD 验证**
 
 在临时 detached worktree 上运行：
 
@@ -977,21 +977,32 @@ docker compose config --quiet
 git diff --check 2e69f3c..HEAD
 ```
 
-- [ ] **Step 2: Linux/Docker 验证**
+- [x] **Step 2: Linux/Docker 验证**
 
 构建 Sidecar/LIMA，运行 Landlock/process/deadline、真实 Semgrep/Clang/ASan、整仓 Fake LLM、PR Fake LLM 和公开版本对。如果 Docker 不可用，最终状态不得写 complete/merge-ready。
 
-- [ ] **Step 3: 真实模型最小验收**
+- [x] **Step 3: 真实模型最小验收**
 
 在用户授权的 Provider 上至少运行一个 vulnerable/fixed pair 和一个 PR case，证明 `required` 发生真实调用、`auto` 降级、消息/Token/上下文持久化以及单 Agent 不进门禁。不得以 Fake LLM 代替。
 
-- [ ] **Step 4: 全分支独立审查**
+- [x] **Step 4: 全分支独立审查**
 
 review range 为 `2e69f3c..HEAD`。reviewer 必须读取 spec、plan、每任务报告和完整 diff，逐项检查 Global Constraints、七项前置 residual、整仓/PR、Agent 独立性、严格 Schema、预算、状态、禁止修复、公平评测和部署文档。
 
-- [ ] **Step 5: 交给当前验收模型**
+- [x] **Step 5: 交给当前验收模型**
 
 交接内容必须包含：分支、base/head、commit list、dirty files、测试命令与完整计数、Docker/真实模型证据、未解决 Critical/Important、报告路径和 GitHub Actions URL。未经用户明确授权不合并 main。
+
+
+### 阶段 A 门禁复审记录（2026-09-04）
+
+范围 `2e69f3c..ac33030`（8 提交）。独立门禁复审员逐提交读全量 diff 并实际运行验证（宿主全量 353 OK (12 skip)、Linux 容器全量 353 OK (3 skip)、test_cxx_capabilities/final_fixes/CliAndCi 合同、bookworm digest 实测 /etc/os-release、23 样本 markdown 对抗探针、BPF prlimit64 守卫手推、镜像内容 git archive 核验）。
+
+裁决：七项 residual 全部**已关闭**（进程隔离 a980a71 / deadline 99bf8dc / tool-run 绑定 6d1146c / health 5fd704d / markdown 1e4d833 / 下载 deadline 22eaf0c / 工具链身份 ac33030）。观察项裁定：生产快照 .semgrepignore 缺失不阻塞但列为阶段 B 强制跟进项（Task 20 评测前处理——Evidence Agent 会高估 source 层覆盖）；真实仓库效能边界（curl semgrep 拒绝维度、podofo compdb 拒绝+1MB 截断、autotools in-tree 冲突）不阻塞，入阶段 B backlog。
+
+Minor 遗留（不阻塞）：deadline 恰在 SIGKILL 后耗尽的僵尸角落泄漏；CleanupResult.deadline_exceeded 未外显诊断；chunked 帧仅 per-recv 兜底（已声明）；台账 GREEN 计数漂移 356→353（末轮修正后口径）；evidence fence 内 html.escape 的显示瑕疵（保守方向）。
+
+**门禁结论：通过，可进入阶段 B。** 用户未提交修改（cxx-memory-detection-impl worktree 的 Dockerfile/tests/test_service.py）经核验未被混入任何提交。
 
 ## 进度安排与阶段门禁
 

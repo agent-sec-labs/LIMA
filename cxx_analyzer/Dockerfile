@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7 AS base
+FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250 AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,6 +15,7 @@ RUN apt-get update \
         "clang-14" \
         "clang-tools-14" \
         cmake \
+        libclang-rt-14-dev \
         libfreetype6-dev \
         libgsasl7-dev \
         libssl-dev \

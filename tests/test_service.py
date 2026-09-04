@@ -22,7 +22,7 @@ class ServiceTests(unittest.TestCase):
         os.close(handle)
         self.settings = Settings(
             host="127.0.0.1", port=8080, db_path=self.path, max_diff_bytes=10000,
-            max_steps=8, timeout_seconds=10, llm_base_url="", llm_api_key="", llm_model="",
+            max_steps=8, timeout_seconds=120, llm_base_url="", llm_api_key="", llm_model="",
             github_webhook_secret="", github_token="", auto_post_review=False,
         )
 
@@ -42,6 +42,20 @@ class ServiceTests(unittest.TestCase):
             result["report"]["collaboration"]["protocol"],
         )
         self.assertGreater(result["report"]["collaboration"]["messages"], 0)
+        self.assertEqual(
+            "agreement-required-for-auto-clear-v1",
+            result["report"]["adjudication"]["policy"],
+        )
+        self.assertEqual(
+            "alert", result["report"]["adjudication"]["overall_disposition"]
+        )
+        self.assertEqual(
+            "multi-agent-verification-approved-risk",
+            result["report"]["adjudication"]["decisions"][0]["reason"],
+        )
+        self.assertEqual(
+            result["report"]["adjudication"], task["report"]["adjudication"]
+        )
         self.assertIn(
             "arbitration_decision", {item["kind"] for item in task["collaboration"]}
         )
@@ -129,6 +143,14 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual("team/project", scan.call_args.kwargs["repository_key"])
             finally:
                 service.queue.close()
+    def test_required_repository_semantic_triage_needs_a_model(self):
+        settings = Settings(**{
+            **self.settings.__dict__,
+            "repository_scan_llm_mode": "required",
+        })
+
+        with self.assertRaisesRegex(ValueError, "needs an LLM provider"):
+            ReviewService(settings)
 
     def test_completed_review_feedback_is_persisted_and_listed_per_task(self):
         diff = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+eval(data)\n"

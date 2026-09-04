@@ -42,6 +42,10 @@ services:
       - /tmp:size=256m,mode=1777
     volumes:
       - ${LIMA_REPOSITORY_IMPORT_PATH:-./repositories}:/repositories:ro
+      - ${LIMA_EXPERIMENT_OUTPUT_PATH:-./output/experiments}:/experiments
+      - experiment_cache:/experiment-cache
+      - repository_cache:/var/lib/lima/repository-cache
+      - repair_workspace:/var/lib/lima/repair-workspace
     cap_drop:
       - ALL
     security_opt:
@@ -56,6 +60,8 @@ services:
       LIMA_SKILLS_DIR: /app/skills
       LIMA_PUBLIC_BASE_URL: http://127.0.0.1:${LIMA_HTTP_PORT:-18080}
       LIMA_REPOSITORY_IMPORT_ROOT: /repositories
+      LIMA_REPOSITORY_CACHE_ROOT: ${LIMA_REPOSITORY_CACHE_ROOT:-/var/lib/lima/repository-cache}
+      LIMA_REPAIR_WORKSPACE_ROOT: ${LIMA_REPAIR_WORKSPACE_ROOT:-/var/lib/lima/repair-workspace}
       LIMA_REPOSITORY_SCAN_SAST_MODE: ${LIMA_REPOSITORY_SCAN_SAST_MODE:-required}
       LIMA_REPOSITORY_SCAN_MAX_FILES: ${LIMA_REPOSITORY_SCAN_MAX_FILES:-5000}
       LIMA_REPOSITORY_SCAN_MAX_FILE_BYTES: ${LIMA_REPOSITORY_SCAN_MAX_FILE_BYTES:-524288}
@@ -64,6 +70,31 @@ services:
       LIMA_CXX_ANALYZER_URL: ${LIMA_CXX_ANALYZER_URL:-http://cxx-analyzer:8090}
       LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS: ${LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS:-300}
       LIMA_CXX_MAX_RESPONSE_BYTES: ${LIMA_CXX_MAX_RESPONSE_BYTES:-2097152}
+      LIMA_CXX_AGENT_MODE: ${LIMA_CXX_AGENT_MODE:-off}
+      LIMA_CXX_AGENT_MODEL: ${LIMA_CXX_AGENT_MODEL:-}
+      LIMA_CXX_AGENT_MAX_CANDIDATES: ${LIMA_CXX_AGENT_MAX_CANDIDATES:-100}
+      LIMA_CXX_AGENT_MAX_CALLS: ${LIMA_CXX_AGENT_MAX_CALLS:-40}
+      LIMA_CXX_AGENT_MAX_CONTEXT_FILES: ${LIMA_CXX_AGENT_MAX_CONTEXT_FILES:-12}
+      LIMA_CXX_AGENT_MAX_CONTEXT_LINES: ${LIMA_CXX_AGENT_MAX_CONTEXT_LINES:-1200}
+      LIMA_CXX_AGENT_MAX_OUTPUT_BYTES: ${LIMA_CXX_AGENT_MAX_OUTPUT_BYTES:-1048576}
+      LIMA_CXX_AGENT_TIMEOUT_SECONDS: ${LIMA_CXX_AGENT_TIMEOUT_SECONDS:-600}
+      LIMA_CXX_AGENT_PARALLELISM: ${LIMA_CXX_AGENT_PARALLELISM:-3}
+      LIMA_CXX_AGENT_DIALOGUE_ROUNDS: ${LIMA_CXX_AGENT_DIALOGUE_ROUNDS:-2}
+      # GitHub API 凭据：远程仓库扫描必须带 Bearer 认证，否则共享匿名限额
+      # （60 次/小时）极易被 403 拒绝（2026-08-30 实证）。留空则退化为匿名。
+      LIMA_GITHUB_TOKEN: ${LIMA_GITHUB_TOKEN:-}
+      LIMA_REPOSITORY_SCAN_LLM_MODE: ${LIMA_REPOSITORY_SCAN_LLM_MODE:-off}
+      LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS: ${LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS:-60}
+      LIMA_REPOSITORY_SCAN_LLM_MAX_CANDIDATES: ${LIMA_REPOSITORY_SCAN_LLM_MAX_CANDIDATES:-6}
+      LIMA_REPOSITORY_SCAN_LLM_MAX_CONTEXT_CHARS: ${LIMA_REPOSITORY_SCAN_LLM_MAX_CONTEXT_CHARS:-36000}
+      LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS: ${LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS:-3000}
+      LIMA_EXPERIMENT_WORKERS: ${LIMA_EXPERIMENT_WORKERS:-1}
+      LIMA_EXPERIMENT_QUEUE_LEASE_SECONDS: ${LIMA_EXPERIMENT_QUEUE_LEASE_SECONDS:-3600}
+      LIMA_EXPERIMENT_DATASET_ROOT: /app/evaluation_data
+      LIMA_EXPERIMENT_ARTIFACT_ROOT: /experiments
+      LIMA_EXPERIMENT_CACHE_ROOT: /experiment-cache
+      LIMA_EXPERIMENT_MAX_LLM_CALLS: ${LIMA_EXPERIMENT_MAX_LLM_CALLS:-20}
+      LIMA_EXPERIMENT_MAX_TOTAL_TOKENS: ${LIMA_EXPERIMENT_MAX_TOTAL_TOKENS:-100000}
       LIMA_AUTH_REQUIRED: "true"
       LIMA_AUTH_SECRET: ${LIMA_AUTH_SECRET:?Set LIMA_AUTH_SECRET to a random value of at least 32 bytes}
       LIMA_BOOTSTRAP_ADMIN_USERNAME: ${LIMA_BOOTSTRAP_ADMIN_USERNAME:-admin}
@@ -98,7 +129,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=0700,uid=10002,gid=10002
-      - /work:size=512m,mode=0700,uid=10002,gid=10002
+      - /work:exec,size=512m,mode=0700,uid=10002,gid=10002
     volumes:
       - ${LIMA_REPOSITORY_IMPORT_PATH:-./repositories}:/repositories:ro
     cap_drop:
@@ -136,6 +167,15 @@ volumes:
   redis_data:
     name: security-agent_redis_data
     external: true
+  experiment_cache:
+  # Shared across replicas: the snapshot cache is content-addressed and its
+  # on-disk locks make cross-process materialization dedup safe (#12/#13/#14).
+  repository_cache:
+    name: lima-repository-cache
+  # Per-replica scratch space for disposable repair workspaces (#16/T7);
+  # mounted into the lima service for worker-side repair composition.
+  repair_workspace:
+    name: lima-repair-workspace
 
 networks:
   cxx_analysis:

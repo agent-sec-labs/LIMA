@@ -55,6 +55,7 @@ _FINDING_KEYS = {
     "language",
     "symbol",
     "analysis_mode",
+    "producer_run_ids",
 }
 _FINDING_STRING_KEYS = {
     "rule_id",
@@ -74,12 +75,25 @@ _FINDING_STRING_KEYS = {
     "analysis_mode",
 }
 _TOOL_RUN_KEYS = {
+    "run_id",
     "tool",
     "status",
     "returncode",
     "output_sha256",
     "output_truncated",
     "digests_complete",
+}
+MAX_RUN_ID_BYTES = 64
+MAX_PRODUCER_RUNS = 16
+_FINDING_TOOL_TO_RUN_TOOL = {
+    "semgrep": "semgrep",
+    "clang": "clang",
+    "asan": "asan-test",
+}
+_FINDING_TOOL_TO_RUN_STATUS = {
+    "semgrep": frozenset({"completed"}),
+    "clang": frozenset({"completed"}),
+    "asan": frozenset({"completed", "failed"}),
 }
 _TOOL_RUN_STATUSES = {
     "semgrep": frozenset({"completed", "failed", "timed-out"}),
@@ -88,9 +102,18 @@ _TOOL_RUN_STATUSES = {
     "asan-test": frozenset({"completed", "failed", "timed-out"}),
 }
 _COVERAGE_KEYS = {"source_files", "snapshot_files"}
-_HEALTH_KEYS = {"schema_version", "tools", "configuration"}
-_HEALTH_TOOL_KEYS = {"semgrep", "cmake", "clang"}
-_HEALTH_CONFIGURATION_KEYS = {"source", "build", "test"}
+_HEALTH_KEYS = {
+    "schema_version",
+    "source_available",
+    "build_available",
+    "test_configured",
+    "clang_c_available",
+    "clang_cxx_available",
+    "cmake_available",
+    "landlock_available",
+    "process_isolation_available",
+}
+_HEALTH_CAPABILITY_KEYS = frozenset(_HEALTH_KEYS - {"schema_version"})
 _HEX64 = frozenset("0123456789abcdef")
 _CXX_LANGUAGE_BY_SUFFIX = {
     ".c": "c",
@@ -129,9 +152,29 @@ class CxxAnalysisResult:
 
 @dataclass(frozen=True)
 class CxxAnalyzerHealth:
+    """Probed executability of every analyzer layer and prerequisite."""
+
     schema_version: int
-    tools: dict[str, bool]
-    configuration: dict[str, bool]
+    source_available: bool
+    build_available: bool
+    test_configured: bool
+    clang_c_available: bool
+    clang_cxx_available: bool
+    cmake_available: bool
+    landlock_available: bool
+    process_isolation_available: bool
+
+    def capabilities(self) -> dict[str, bool]:
+        return {
+            "source_available": self.source_available,
+            "build_available": self.build_available,
+            "test_configured": self.test_configured,
+            "clang_c_available": self.clang_c_available,
+            "clang_cxx_available": self.clang_cxx_available,
+            "cmake_available": self.cmake_available,
+            "landlock_available": self.landlock_available,
+            "process_isolation_available": self.process_isolation_available,
+        }
 
 
 class CxxMemoryAdapter(Protocol):
@@ -167,9 +210,19 @@ def validate_response_metadata(
 
     if type(tool_runs) is not list or len(tool_runs) > MAX_TOOL_RUNS:
         raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool runs")
+    seen_run_ids: set[str] = set()
     for run in tool_runs:
         if type(run) is not dict or set(run) != _TOOL_RUN_KEYS:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool run fields")
+        run_id = run["run_id"]
+        if (
+            type(run_id) is not str
+            or not run_id
+            or len(run_id.encode("utf-8")) > MAX_RUN_ID_BYTES
+            or run_id in seen_run_ids
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer run identity")
+        seen_run_ids.add(run_id)
         tool = run["tool"]
         status = run["status"]
         if type(tool) is not str or tool not in _TOOL_RUN_STATUSES:
@@ -283,24 +336,20 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health fields")
         if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
             raise CxxAnalyzerProtocolError("unsupported C/C++ analyzer health schema")
-        tools = payload["tools"]
-        configuration = payload["configuration"]
-        if (
-            type(tools) is not dict
-            or set(tools) != _HEALTH_TOOL_KEYS
-            or any(type(value) is not bool for value in tools.values())
+        if any(
+            type(payload[field]) is not bool for field in _HEALTH_CAPABILITY_KEYS
         ):
-            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health tools")
-        if (
-            type(configuration) is not dict
-            or set(configuration) != _HEALTH_CONFIGURATION_KEYS
-            or any(type(value) is not bool for value in configuration.values())
-        ):
-            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health configuration")
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer health capabilities")
         health = CxxAnalyzerHealth(
             schema_version=1,
-            tools=dict(tools),
-            configuration=dict(configuration),
+            source_available=payload["source_available"],
+            build_available=payload["build_available"],
+            test_configured=payload["test_configured"],
+            clang_c_available=payload["clang_c_available"],
+            clang_cxx_available=payload["clang_cxx_available"],
+            cmake_available=payload["cmake_available"],
+            landlock_available=payload["landlock_available"],
+            process_isolation_available=payload["process_isolation_available"],
         )
         self._health_cache = health
         return health
@@ -392,7 +441,36 @@ class CxxMemoryAnalyzerClient:
         )
         for item in payload["findings"]:
             cls._validate_finding(item)
+        cls._validate_producer_binding(payload)
         cls._validate_inventory_binding(payload, inventory)
+
+    @staticmethod
+    def _validate_producer_binding(payload: dict[str, Any]) -> None:
+        """Every producer reference must name an exact, layer-matched run."""
+
+        run_by_id = {run["run_id"]: run for run in payload["tool_runs"]}
+        for finding in payload["findings"]:
+            # _validate_finding has already constrained the finding tool.
+            expected_tool = _FINDING_TOOL_TO_RUN_TOOL.get(finding["tool"])
+            allowed_statuses = _FINDING_TOOL_TO_RUN_STATUS.get(finding["tool"])
+            if expected_tool is None or allowed_statuses is None:
+                raise CxxAnalyzerProtocolError(
+                    "invalid C/C++ analyzer finding tool binding"
+                )
+            for identifier in finding["producer_run_ids"]:
+                run = run_by_id.get(identifier)
+                if run is None:
+                    raise CxxAnalyzerProtocolError(
+                        "C/C++ analyzer finding cites an unknown tool run"
+                    )
+                if run["tool"] != expected_tool:
+                    raise CxxAnalyzerProtocolError(
+                        "C/C++ analyzer finding cites a mismatched tool run"
+                    )
+                if run["status"] not in allowed_statuses:
+                    raise CxxAnalyzerProtocolError(
+                        "C/C++ analyzer finding cites an unusable tool run"
+                    )
 
     @classmethod
     def _validate_inventory_binding(
@@ -437,6 +515,20 @@ class CxxMemoryAnalyzerClient:
     def _validate_finding(item: Any) -> None:
         if not isinstance(item, dict) or set(item) != _FINDING_KEYS:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer finding fields")
+        producers = item["producer_run_ids"]
+        if (
+            type(producers) is not list
+            or not producers
+            or len(producers) > MAX_PRODUCER_RUNS
+            or any(
+                type(identifier) is not str
+                or not identifier
+                or len(identifier.encode("utf-8")) > MAX_RUN_ID_BYTES
+                for identifier in producers
+            )
+            or len(set(producers)) != len(producers)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer producer runs")
         if any(not isinstance(item[key], str) for key in _FINDING_STRING_KEYS):
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer finding text")
         if any(not item[key] for key in _FINDING_STRING_KEYS - {"fix"}):

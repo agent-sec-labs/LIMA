@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import subprocess
 import sys
@@ -78,8 +79,12 @@ def valid_document(target):
     return {"schema_version": 1, "cases": cases}
 
 
+_RUN_ID_COUNTER = itertools.count(1)
+
+
 def tool_run(tool="semgrep", status="completed"):
     return {
+        "run_id": f"run-{next(_RUN_ID_COUNTER)}",
         "tool": tool,
         "status": status,
         "returncode": 0 if status == "completed" else None,
@@ -508,6 +513,91 @@ class MetricTests(unittest.TestCase):
 
 
 class ArchiveSafetyTests(unittest.TestCase):
+    def test_slow_trickle_cannot_extend_absolute_download_deadline(self):
+        """One greedy read can outlive the deadline; every read must re-bind it."""
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 500.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += max(0.0, seconds)
+
+        class TrickleSocket:
+            def __init__(self, clock):
+                self._clock = clock
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        class TrickleResponse(io.BytesIO):
+            def __init__(self, clock):
+                super().__init__(b"x" * (1024 * 1024))
+                self._clock = clock
+                self.fp = type(
+                    "Fp",
+                    (),
+                    {"raw": type("Raw", (), {"_sock": TrickleSocket(clock)})()},
+                )()
+
+            def geturl(self):
+                return "https://example.test/archive.tar.gz"
+
+            def read(self, size=-1):
+                # Greedy HTTPResponse semantics: loop until size is filled,
+                # one byte per simulated second regardless of socket timeouts.
+                data = bytearray()
+                while len(data) < size:
+                    self._clock.sleep(1.0)
+                    data.extend(b"x")
+                return bytes(data)
+
+            def read1(self, size=-1):
+                # Bounded semantics: one underlying read, one byte, one second.
+                self._clock.sleep(1.0)
+                return b"x"
+
+        clock = FakeClock()
+        response = TrickleResponse(clock)
+
+        class TrickleOpener:
+            def open(self, request, timeout):
+                return response
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "case.tar.gz"
+            with (
+                mock.patch.object(
+                    self.module.urllib.request,
+                    "build_opener",
+                    return_value=TrickleOpener(),
+                ),
+                mock.patch.object(self.module.time, "monotonic", clock.monotonic),
+                mock.patch.object(self.module, "_DOWNLOAD_DEADLINE_SECONDS", 3.0),
+            ):
+                started = clock.monotonic()
+                with self.assertRaises(TimeoutError):
+                    self.module.download_verified_archive(
+                        "https://example.test/archive.tar.gz",
+                        "0" * 64,
+                        destination,
+                    )
+                elapsed = clock.monotonic() - started
+                self.assertLessEqual(elapsed, 3.0 + 0.5, elapsed)
+                self.assertFalse(destination.exists())
+                self.assertFalse(destination.with_suffix(".gz.part").exists())
+            socket = response.fp.raw._sock
+            self.assertTrue(socket.timeouts)
+            self.assertTrue(
+                all(value <= 3.0 for value in socket.timeouts), socket.timeouts
+            )
+            self.assertLessEqual(min(socket.timeouts), 1.0)
+
+
     @classmethod
     def setUpClass(cls):
         cls.module = load_evaluation_module()
@@ -705,7 +795,44 @@ class CliAndCiContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_evaluation_module()
 
-    def test_cli_exposes_only_the_six_fixed_parameters(self):
+    def test_public_evaluation_artifact_retains_toolchain_manifests(self):
+        workflow = yaml.safe_load(
+            Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )
+        names = set()
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps") or []:
+                if "upload-artifact" not in str(step.get("uses") or ""):
+                    continue
+                name = str(step.get("with", {}).get("name") or "")
+                names.add(name.replace("${{ matrix.case-id }}", "").rstrip("-"))
+        self.assertGreaterEqual(
+            names,
+            {"evaluation-report", "debian-packages", "python-packages", "image-inspect"},
+        )
+        ci_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("analyzer-toolchain-packages.txt", ci_text)
+        self.assertIn("analyzer-python-packages.txt", ci_text)
+        self.assertIn("docker image inspect", ci_text)
+
+    def test_report_metadata_records_validated_base_image_identity(self):
+        base = "sha256:" + "b" * 64
+        report = self.module.add_report_metadata(
+            {"precision": None},
+            b'{}',
+            analyzer_image_digest="sha256:" + "a" * 64,
+            analyzer_base_image_digest=base,
+        )
+        self.assertEqual(base, report["analyzer_base_image_digest"])
+        with self.assertRaises(ValueError):
+            self.module.add_report_metadata(
+                {"precision": None},
+                b'{}',
+                analyzer_image_digest="sha256:" + "a" * 64,
+                analyzer_base_image_digest="latest",
+            )
+
+    def test_cli_exposes_only_the_seven_fixed_parameters(self):
         parser = self.module.build_parser()
         options = {
             option
@@ -720,6 +847,7 @@ class CliAndCiContractTests(unittest.TestCase):
                 "--output",
                 "--analyzer-url",
                 "--analyzer-image-digest",
+                "--analyzer-base-image-digest",
                 "--fail-under-precision",
             },
             options,

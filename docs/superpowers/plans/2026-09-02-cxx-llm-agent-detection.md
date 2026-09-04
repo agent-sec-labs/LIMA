@@ -82,13 +82,110 @@
 | 项目 | 当前状态 | 证据或下一步 |
 |---|---|---|
 | 既有 C/C++ Sidecar 实现 | 已完成并推送，但复审未通过 | `codex/cxx-memory-detection-impl`，`2e69f3ce56f80b91e4b180ab0556100d3e173e4f` |
-| 本设计文档 | 已完成，待本次文档提交 | `docs/superpowers/specs/2026-09-02-cxx-llm-agent-detection-design.md` |
-| 本实施计划 | 已完成，待本次文档提交 | 当前文件 |
-| 阶段 A：Sidecar 七项复审问题 | 未开始 | 从 Task 1 开始；Task 1–7 全部复审通过后才能进入阶段 B |
-| 阶段 B：大模型多 Agent 检测 | 未开始 | Task 8–21；依赖阶段 A 门禁 |
+| 本设计文档 | 已提交 | 提交 `08c9a2a docs: specify C++ LLM agent detection`（位于 `codex/cxx-memory-detection-impl` 本地，未推送） |
+| 本实施计划 | 已提交 | 同上；分支 `codex/cxx-llm-agent-detection` 自 `08c9a2a` 创建（即 `2e69f3c` + 文档提交，偏差已在此记录） |
+| 阶段 A：Sidecar 七项复审问题 | **复审通过（2026-09-04 门禁裁决）** | 七项 residual 全部独立裁决已关闭（见下方门禁记录）；Task 8 起进入阶段 B |
+| 阶段 B：大模型多 Agent 检测 | 进行中（Task 8 复审通过） | Task 9 起；阶段 A 门禁已通过 |
 | Docker/Linux 安全验证 | 未验证 | Docker Desktop Linux daemon 可用后执行 Task 21 |
 | 真实 Clang/ASan 验证 | 未验证 | 依赖 Sidecar 容器环境 |
 | 真实外部模型验收 | 未验证 | 依赖用户提供/允许使用的现有 LIMA Provider 配置 |
+
+### 基线调查记录（2026-09-02，Task 0 之前）
+
+基线全量宿主测试（`python -m unittest discover -s tests`）在 `08c9a2a` 上失败 1 项：
+`test_cxx_analyzer.SourceScanContainerTests.test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates`。
+根因调查结论（两项 semgrep 行为，均有实测证据）：
+
+1. **生产级缺陷（Task 0 修复）**：`run_source_scan` 把规则文件暂存在快照 scratch（绝对路径、不在
+   cwd 下），semgrep（含 Docker 固定的 1.130.0）默认给 `check_id` 加 config 路径前缀（如
+   `work.snapshots...cxx.source.oob-write.constant-index`），`parse_semgrep_json._rule_cwe` 只接受
+   裸 `cxx.source.*` → 必然拒绝 → **source-only 层在 semgrep 1.130 下永远产不出 Finding**。此前未暴露
+   的原因：Docker/Linux 端到端从未实际运行（台账本就记为“未验证”）。
+   修复：semgrep 调用加 `--no-rewrite-rule-ids`；同步更新宿主回归测试调用、argv 合同测试与索引。
+2. **宿主环境问题**：semgrep 在仓库无 `.semgrepignore` 时套用内置默认忽略表（含 `tests/` 等模式），
+   静默排除 `tests/fixtures/cxx_memory` 全部文件。修复：提交根 `.semgrepignore`（内容仅
+   `.git/ node_modules/ vendor/ .venv/ __pycache__/`）。该文件不在快照清单扩展名集合内，不会进入
+   sidecar 快照，对生产行为无影响（reviewer 已验证）。
+3. **观察项（未修复，留给阶段 A 复审裁决）**：生产快照内没有 `.semgrepignore`，semgrep 默认忽略表
+   会在真实扫描中静默跳过名为 `tests/`、`test/`、`doc/` 等目录的 C/C++ 文件，而 coverage 仍按清单
+   计数——覆盖声称与实际扫描存在偏差的可能。是否在 Task 7 工具链审计中处理待复审裁决。
+
+宿主环境备注：测试 venv 需 `semgrep==1.130.0` + `setuptools<81`（Python 3.13 无 pkg_resources）；
+semgrep 对 git linked worktree 的目录枚举有缺陷（扫描目标为目录时恒 0 文件），因此宿主全量测试在
+`D:\Projects\LIMA-test-mirror`（同分支独立 clone）中执行，开发提交仍在
+`D:\Projects\LIMA\.worktrees\cxx-llm-agent-detection`。
+
+```text
+Task 0 | 复审通过 | commits 08c9a2a..（见 git log） | RED: 基线 test_fixture_manifest... 失败（rule id outside narrow set / 路径反斜杠拒绝） | GREEN: 镜像中 python -m unittest discover -s tests → Ran 328 tests, OK (skipped=11) | reviewer: 通过（修复一处 Important 陈旧索引 [4]→[5] 后；.semgrepignore 需随提交）
+```
+
+```text
+Task 1 | 复审通过 | commits b54c051..(见 git log) | RED: 容器 python -m unittest tests.test_cxx_final_fixes.ProcessIsolationTests -v → 3 failures（不可信工具经 prlimit64 成功修改父进程 RLIMIT_NOFILE；并发现基线 Linux 既有失败 test_stream_timeout_kills_group_after_leader_exits_and_hashes_to_eof：leader 提前退出时立即杀组会截断后代输出，属 Docker/Linux 从未运行过的既有缺陷，一并修复） | GREEN: 容器 tests.test_cxx_final_fixes+test_cxx_analyzer 91 OK (3 skip)；容器全量 329 OK (3 skip)；宿主全量 329 OK (12 skip)；ruff 通过 | reviewer: 修复后通过（C1 aarch64 clone3 436→435 修正为 asm-generic 编号；I1 clone3 返回 ENOSYS 供 glibc≥2.34 回退 clone；I2 增加 self-prlimit64 放行与 clone3=ENOSYS 正向断言；M1 组 SIGKILL 提前到收割 leader 之前消除 PID 复用窗口；M4 删除死代码 _linux_group_exists；M5 guarded None 检查）
+```
+
+Task 1 补充记录：`cxx_analyzer/Dockerfile` 未改动——Compose 已配置 `init: true`（tini 作为 PID 1），且本修复在分析器进程内安装 `PR_SET_CHILD_SUBREAPER` 并由 `terminate_execution_boundary` 用 `waitpid(-pgid)` 精确回收，镜像层无需变更。leader 提前退出但后代仍持有管道的工具现在会等待管道 EOF 至 step deadline 并如实报告 `timed-out`（旧行为为 `completed`），该语义变化已由基线既有测试固化并由 reviewer 确认为良性。
+
+```text
+Task 2 | 复审通过 | commits a980a71..(见 git log) | RED: python -m unittest tests.test_cxx_final_fixes.RequestDeadlineTests → TypeError: run_step() got an unexpected keyword argument 'deadline'（接口缺失；初版真实进程测试另证 step_timeout int() 截断后 SIGKILL 可即时回收、真实时钟无法构造越界场景，改按计划本意用 FakeClock+挂起进程替身确定性复现） | GREEN: 宿主全量 330 OK (12 skip)；Linux 容器全量 330 OK (3 skip)；容器 final_fixes+analyzer 三连跑均 OK；ruff 全过 | reviewer: 修复后通过（I1 cleanup 预算放弃路径 detach TemporaryDirectory finalizer 防 GC 无界 rmtree、成功路径显式 cleanup 卸载；I2 条目/时间预算移入文件内层循环防单目录海量生成文件绕过；M1 check 复用 remaining_seconds；M3 报错文案；M5 run_step→_stream_process 的 expires_at 传递断言）
+```
+
+Task 2 补充记录：`cxx_analyzer/server.py` 未改动——deadline 已在 analyze_request 入口创建并贯穿 prepare/三层/verify/cleanup，既有测试固化；文件清单中的 server.py 属保守列举。source_scan/build_scan/sanitizer_scan 的 4 个 run_step 调用点按计划规则 4 作为接口同步在同一提交传入 `deadline=active_deadline`。"request-deadline-exceeded" 诊断标识当前仅在 ToolExecution.diagnostic 可见（v1 tool-run schema 有意不透传），外部超时一致性由 504 analysis_timed_out 兜底；prepare 失败路径的清理不受 deadline 约束但受 inventory 上限间接约束（≤5000 文件/20MB），均已在代码注释/台账注明。实现过程中自纠两个缺陷：teardown 预算曾误在 stream 开始时预计算（被 step 消耗）改为使用点计算；孤儿重挂靠竞态致 timeout 模式残留僵尸，ECHILD 增加 3×10ms 有界重试。
+
+```text
+Task 3 | 复审通过 | commits 99bf8dc..(见 git log) | RED: python -m unittest tests.test_cxx_final_fixes.ToolRunBindingTests → AttributeError: 'NormalizedFinding' object has no attribute 'bind_producer'（3 用例失败，接口缺失） | GREEN: 宿主全量 333 OK (12 skip)；Linux 容器全量 333 OK (3 skip)；ruff 全过 | reviewer: 通过（Important-1 已补——客户端 4 组新校验分支的 6 组负向变异入矩阵；Minor-3 已补——producer run status 契约恢复（semgrep/clang 须 completed、asan-test 须 completed/failed）；Minor-4 受控查找；Minor-5 复用 protocol.MAX_RUN_ID_BYTES）
+
+Task 3 补充记录：schema 为破坏性变更（v1 客户端与服务端必须同镜像原子发布，设计文档已接受）。Minor 遗留（记入台账跟进）：budget_blocked 与无证据共用 finding-without-tool-evidence 诊断串（客户端靠 analysis-budget-exhausted 同场区分）；服务端 create/bind_producer 无 MAX_PRODUCER_RUNS=16 上限（当前各层恰 1 个 producer，不可达）；tests/test_workspace.py:211 假 CxxAnalysisResult 的 run 无 run_id（绕过校验直填 dataclass，透传无害）。实现期间发现 patch("lima.cxx_memory.uuid.uuid4") 会污染全局 uuid 模块，测试 run_id 改用进程内计数器。含暂停/恢复：2026-09-03 依 handoff.md 暂停后恢复续作。
+
+```text
+Task 4 | 复审通过 | commits 6d1146c..(见 git log) | RED: python -m unittest tests.test_cxx_capabilities → 12 用例 13 errors（server.sandbox 不存在/旧 health schema/客户端拒绝逻辑缺失） | GREEN: 宿主全量 345 OK (12 skip)；Linux 容器全量 345 OK (3 skip)；ruff 变更文件全过（lima/service.py 36 个错误与 HEAD 逐数相同，零新增，既有风格债不动） | reviewer: 通过（无 Critical/Important；Minor 已修 2 项——未用常量与用例名、health docstring 澄清配置级语义）
+```
+
+Task 4 补充记录：health 为破坏性 schema 变更（tools/configuration 三键 → 8 个能力布尔 + capabilities 单键），schema_version 保持 1——两侧严格键集校验使版本错配降级为 invalid-response/unavailable，无虚假可用（reviewer 裁决 Minor）。Minor 遗留（记台账）：health 未探测 subreaper/fork 失败窗口（运行时 fail-closed 兜底）；静态 health 与逐快照构建选择的固有偏差（auto_cmake+显式 steps+CMakeLists 快照等组合可能运行时降级为诊断，docstring 已注明配置级语义）；双 clang 驱动齐备要求对纯 C 仓库保守低报；客户端 health 缓存无过期（计划"未过期"措辞未实现，运行时逐请求 fail-closed 兜底）；invalid-response 服务分支无测试覆盖；docs/CXX_MEMORY_ANALYSIS.md 的"核对 URL"表述失真（既有，留待文档任务）。tests/test_service.py 按计划约束未修改（其断言不引用旧字段，全量绿证明兼容）。
+
+```text
+Task 5 | 复审通过 | commits 5fd704d..(见 git log) | RED: python -m unittest tests.test_cxx_memory.CxxReportTests.test_cxx_markdown_cannot_inject_structure_or_double_escape_paths → a&amp;amp;b.cpp 双重转义实际出现于渲染输出 | GREEN: 宿主全量 347 OK (12 skip)；Linux 容器全量 347 OK (3 skip)；ruff lima/report.py 41 错误与 HEAD 相同（零新增） | reviewer: 修复后通过（I-1 source 字段双重编码同修；I-2 行内代码改字面上下文+自适应定界，不再实体化——markdown-it 实渲染验证；M-1 死分支删除；M-2 主题分隔前缀加 '='；M-3 www. 裸链接触发清洗；M-5 path None 健壮化；M-6 测试按机制断言并补 fallback 分支覆盖）
+```
+
+Task 5 补充记录：编码策略——prose 单次编码（HTML 实体 + [ ] * 实体化 + 结构前缀零宽防护含 thematic break）；行内代码为字面上下文（仅反引号自适应定界，不实体化，渲染器自行转义）；fence 自适应长度不变。有意接受的取舍（docstring 已注明）：词界 `_` 强调与 GFM `~~` 删除线等装饰性格式化不阻断（无结构注入面）；setext `===` 依赖发射结构（空行隔断）而非编码器。非 C/C++ finding 分支维持原状（范围外，其 evidence 围栏问题为既存）。
+
+```text
+Task 6 | 复审通过 | commits 1e4d833..(见 git log) | RED: python -m unittest tests.test_cxx_memory_evaluation.ArchiveSafetyTests.test_slow_trickle_cannot_extend_absolute_download_deadline → 模拟 elapsed=65536.0（一次贪婪 read(64K) 以每秒 1 字节滴流吞掉全部预算，远超 3.0 秒 deadline） | GREEN: 宿主全量 348 OK (12 skip)；Linux 容器全量 348 OK (3 skip)；ruff 两文件通过 | reviewer: 修复后通过（I-1 测试 partial 断言路径错误且置于临时目录外恒真——已修并补 socket timeout 重绑契约断言；I-2 注释过度承诺——chunked 帧/响应头阶段仍依赖 per-recv socket timeout，措辞已修正；M-4 read1 探测移出循环）
+```
+
+Task 6 补充记录：硬 deadline 的准确边界（reviewer 核对 CPython 源码确认）——Content-Length/连接关闭型响应（GitHub codeload 实际形态）下绝对 deadline 成立；Transfer-Encoding: chunked 的 chunk-size 行解析与响应头阶段内部 readline 循环仅有 per-recv ≤60s 兜底，恶意镜像可拖慢但不可无限挂死；彻底封死需 per-recv deadline 执行（http.client 不暴露）或看门狗，记为已知边界留待后续 residual。Minor 遗留：read1 阻塞至 OS socket timeout 的真实滴流路径无测试覆盖（依赖 OS 行为）。
+
+```text
+Task 7 | 复审通过 | commits 22eaf0c..(见 git log) | RED: python -m unittest tests.test_cxx_memory_evaluation.CliAndCiContractTests → artifact 集缺四项 + base digest 参数缺失 | GREEN: 宿主全量 356 OK (12 skip)；Linux 容器全量 356 OK (3 skip)；容器三连测（真实 semgrep/Clang-SA/ASan）多轮全绿；集成协议探针 12/12 vulnerable findings；四 case 公开评测矩阵本地执行（见补充记录）；ruff/compose config/git diff --check 全过 | reviewer: 修复后通过（C1 {{.Parent}} 在 BuildKit 下为空——改用基础镜像引用的 {{.Id}}（本地评测运行同故障实证）；I1 部分保留诊断在驱动层合并；I2 方向分类器改为括号即弃+前缀自增+<<=死代码修复并补 BoundsDirectionTests 15 形态单测；M1 manifest 导出容器加固；M2/M3/M5 文档与命名）
+
+Task 7 补充记录（八项"从未真正执行"基线缺陷的修复，全部有容器内实证）：
+(1) 基础镜像 digest 实为 trixie 无 clang-14 → 换 bookworm digest（四处同步）。
+(2) /work tmpfs 默认 noexec → ASan 二进制 EACCES → compose+CI 三处加 exec（执行仍受 Landlock+seccomp 全约束）。
+(3) 镜像无默认 cc/c++ → BUILD_ENVIRONMENT（CC/CXX=clang-14）入固定环境白名单。
+(4) cmake compile_commands 固定 "command" shell 串被一律拒绝 → shlex 解析为 argv 后走与 "arguments" 完全相同校验链（不执行原文）。
+(5) parse_clang_plist 对齐真实 clang-14：真实检查器串（unix.Malloc + cplusplus.NewDelete）；ArrayBoundV2 读写同型 → _bounds_direction 从已验证快照源码保守分类（歧义即弃 + clang-bounds-direction-undetermined 诊断）；plist 控制边端点为位置数组（start[0]/end[-1] 锚点）；clang-sample.plist 以容器内真实 clang-14 输出再生；manifest 的 std::array 两形态 clang_expected 按实证翻转 false。
+(6) Landlock 白明珠：/etc/ssl/certs 只读树（semgrep 启动需 CA 锚）；字符设备接纳（/dev/null 规则曾被静默丢弃）。
+(7) ASAN_OPTIONS abort_on_error 1→0（abort 走被拦的 tgkill → 偶发嵌套崩溃损毁报告）；parse_asan_log 单块损坏保留已验证 findings + needs-human-review（驱动层同步合并诊断）。
+(8) 夹具容器适配：/work/tmp 守卫、semgrep 探针 HOME、BuildScan 容器测试移除越界 _ANALYZER_TEMP_ROOT 补丁。
+镜像新增 libclang-rt-14-dev（ASan 链接运行库，缺它 sanitizer 层无法产出二进制——第六项实证缺陷）。CI manifest 导出容器加 --network none --read-only --cap-drop ALL。
+
+Task 7 四 case 公开评测矩阵本地证据（2026-09-04，Docker Desktop Linux daemon）：
+- 管线端到端全部跑通：HTTPS 归档下载（SHA-256 校验+安全解压）→ 快照指纹 → 沙箱内三层分析 → 评测报告（含镜像/基础镜像 digest、四 artifact 导出）。
+- 复审后再修两项真实仓库缺陷：CI base digest 取法（BuildKit 下 {{.Parent}} 为空——改用基础镜像引用的 {{.Id}}）；semgrep 真实输出的结构化 error type（["PartialParsing", [...]] 列表）此前导致整包拒绝——现取列表首元素做有界代表（str 仍原样），podofo/goaccess 源层正确降级为 semgrep-reported-errors。
+- 诚实指标：四 case pair_correct 均 False（检测未命中）。逐 case 诊断——curl: semgrep JSON 仍被拒（另一真实输出维度待定性）+ build_failed；podofo: build 完成 ✓ 但 semgrep 输出超 1MB 预算被截断 + compile-commands-rejected（条目超限或路径形态）；goaccess×2: semgrep-reported-errors（tree-sitter 无法解析部分真实 C 文件）+ autotools in-tree 构建（autoreconf 需写冻结源码树）与只读快照模型不兼容——build 层设计性限制。
+- 这些是当前窄规则集+证据模型在真实仓库上的已知边界（设计文档"第一版不承诺零日发现"），非管线缺陷；已如实记录在评测 JSON（output/cxx-memory-evaluation-*.json）。curl semgrep 拒绝维度与 podofo compile-commands 拒绝原因记为 Phase B 待办观察项。
+- 本地评测执行方式偏差（已记录）：评测器在宿主跑而非隔离容器（Windows bind-mount 对容器内新建目录的可见性怪癖），sidecar 以 127.0.0.1:18090 端口发布（CI 仍为内网隔离）；该偏差仅影响本地复现拓扑，不影响 sidecar 内部安全边界。
+
+```text
+Task 8 | 复审通过 | commits 9175abf..(见 git log) | RED: python -m unittest tests.test_cxx_agent_models tests.test_config → 3 errors（模块缺失 + cxx_agent_mode 属性缺失） | GREEN: 宿主全量 376 OK (12 skip)；Linux 容器全量 376 OK (3 skip)；ruff 新文件全过、config.py 9=9 models.py 14=14 零新增；compose config 通过 | reviewer: 修复后通过（I-1 空模型回退 LIMA_LLM_MODEL 经 effective_cxx_agent_model 实现，required 校验作用于有效模型、auto 允许空并运行时降级；I-2 to_agent_finding_payload severity 改 Severity.HIGH 并加 Finding(**payload) 消费测试；I-3 parse_untrusted_json 9 组直测——重复 key/NaN/非 UTF-8/非文本/坏 JSON/置信度溢出/trigger 路径语法；I-4 台账误勾回退——Task 7 提交的批量替换误勾 Task 8-21 全部步骤，已回退为未勾；M-5 置信度 OverflowError 包为 ValueError；M-6 trigger 步骤拒 NUL/反斜杠/CR/LF；M-9 compose 补齐全部十项透传）
+```
+
+Task 8 补充记录：配置命名偏差——计划接口名为 CxxAgentSettings，实现内联进 Settings 十字段（功能等价，后续任务引用 Settings.cxx_agent_*）；candidate_id 材料不含 title/confidence（id 语义=印证身份，与设计 §9 一致性键一致，复审裁决接受）；直接构造可绕过校验（与 models.Finding 先例一致，边界纪律由 from_untrusted_json 承担，裁决接受）；parse_untrusted_json 无输入字节上限（由 Task 13 在解析前执行 LIMA_CXX_AGENT_MAX_OUTPUT_BYTES 截断）；Decision 的 decision×state 相干性留 Task 15 状态机；默认 off 而非设计推荐 required（复审裁决接受：off 缺省保证存量部署升级不炸）。
+
+```text
+Task 9 | 复审通过 | commits f2d52b9..(见 git log) | RED: python -m unittest tests.test_cxx_context → 模块缺失 | GREEN: 宿主全量 389 OK (12 skip)；Linux 容器全量 389 OK (3 skip)；ruff 全过 | reviewer: 修复后通过（C1 函数定义行系统性虚构自调用边——改为头行只扫 { 后的体片段+test_definition_lines_do_not_create_fictional_self_edges 反向断言；I1 剥离器反斜杠转义——字符串内 \ 跳双字符；I2 _type_end 逐行计括号——Header==6 精确断言；I3 Allman/namespace/extern-C/class 内联方法——括号栈按 function/scope/other 三类归因，作用域内函数头可识别，allman.c fixture 锁定；I4 宏检测改用剥离后文本；I5 manifest.json fixture 使忽略断言生效；I6 逐文件 SHA-256 对账 inventory，漂移→snapshot-drift gap）
+```
+
+Task 9 补充记录：v1 已知不完备（复审 Minor 记录）：函数式转换 size_t(n) 会成边（书写名原则下的可辩护噪声）；operator== 定义静默跳过；references/resource_events 的文件包含性未单独断言；.h 文件 language 标 "c"；snapshot 绑定为逐文件 hash 对账（读盘一次）；MAX_PARSE_GAPS 触发后剩余文件由 source_files_total 反推。
 
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
@@ -129,7 +226,7 @@ git diff --check
 - Consumes: `run_step(...)`、Landlock/seccomp launcher、Compose `init: true`。
 - Produces: `terminate_execution_boundary(process, *, deadline) -> CleanupResult`；成功、失败、超时都保证边界内无存活后代，并处理 PID 1 收养的孤儿。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 新增 Linux 子进程用例：leader 依次尝试 `setsid`、`prlimit64` 操作父进程并派生会退出的孙进程；分别覆盖 leader 返回 0、返回 1、超时。断言父服务限制未改变、所有后代消失且无 zombie。
 
@@ -142,21 +239,21 @@ def test_success_failure_timeout_cannot_escape_or_leave_zombies():
         assert result.zombie_descendants == []
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ProcessIsolationTests -v`
 Expected: FAIL，至少证明 `prlimit64` 或 orphan/zombie 场景未被当前实现阻止。
 
-- [ ] **Step 3: 实现可证明的执行边界**
+- [x] **Step 3: 实现可证明的执行边界**
 
 使用容器内可用的 PID namespace/init 监督方式或严格 cgroup/supervisor；若运行环境缺少所需内核能力则 fail closed。seccomp 同时拒绝逃逸进程组和同 UID 进程控制系统调用。所有 leader 退出路径进入同一清理函数，不能只等待 leader PID。
 
-- [ ] **Step 4: 运行 GREEN 与回归**
+- [x] **Step 4: 运行 GREEN 与回归**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ProcessIsolationTests tests.test_cxx_analyzer -v`
 Expected: PASS；Windows 上 Linux-only 用例只允许以明确平台原因 skip。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add cxx_analyzer/sandbox.py cxx_analyzer/execution.py cxx_analyzer/Dockerfile tests/test_cxx_final_fixes.py
@@ -176,7 +273,7 @@ git commit -s -m "fix: contain C++ analyzer process trees"
 - Consumes: `RequestDeadline`。
 - Produces: `remaining_seconds(stage: str) -> float` 和 deadline-aware、受条目/字节/时间限制的清理；超过预算后以隔离边界销毁请求资源，不进行无限递归遍历。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 ```python
 def test_request_deadline_includes_termination_drain_and_cleanup():
@@ -186,21 +283,21 @@ def test_request_deadline_includes_termination_drain_and_cleanup():
     assert result.diagnostic == "request-deadline-exceeded"
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.RequestDeadlineTests -v`
 Expected: FAIL，当前 grace/drain/cleanup 越过 deadline。
 
-- [ ] **Step 3: 贯通单一 deadline**
+- [x] **Step 3: 贯通单一 deadline**
 
 从 HTTP handler 接收请求时创建唯一绝对 deadline，snapshot/source/build/ASan/termination/drain/cleanup 只消费该对象。不得创建新的完整总预算。清理采用请求私有根和有界删除；无法在 deadline 内完成时由已验证的隔离容器边界回收。
 
-- [ ] **Step 4: 运行 GREEN**
+- [x] **Step 4: 运行 GREEN**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.RequestDeadlineTests tests.test_cxx_analyzer -v`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add cxx_analyzer/deadline.py cxx_analyzer/execution.py cxx_analyzer/snapshot.py cxx_analyzer/server.py tests/test_cxx_final_fixes.py
@@ -223,7 +320,7 @@ git commit -s -m "fix: enforce one C++ request deadline"
 **Interfaces:**
 - Produces: 每个 tool-run 有不可重复 `run_id`；每个 Finding 有非空 `producer_run_ids: list[str]`；客户端验证引用存在、tool/layer 匹配且被保留。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 构造两个 `clang` 和两个 `asan-test` run，只有第二个产生 Finding，随后触发响应预算截断。断言不得保留错误 run，也不得留下无 producer 的 Finding。
 
@@ -236,21 +333,21 @@ def test_budget_preserves_exact_producer_runs():
         }
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ToolRunBindingTests tests.test_cxx_memory -v`
 Expected: FAIL，当前按 tool/status 猜测 producing run。
 
-- [ ] **Step 3: 实现 ID 和共同预算**
+- [x] **Step 3: 实现 ID 和共同预算**
 
 run ID 由 analyzer 生成并在单请求内唯一，不接受仓库输入。normalizer 保留各层 finding 和精确 producer。预算算法以 Finding 及其所有 producer 为不可拆分单元；无法一起保留时删除或降级 Finding。
 
-- [ ] **Step 4: 运行 GREEN 并检查 Schema**
+- [x] **Step 4: 运行 GREEN 并检查 Schema**
 
 Run: `python -m unittest tests.test_cxx_final_fixes.ToolRunBindingTests tests.test_cxx_memory tests.test_cxx_analyzer -v`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add cxx_analyzer lima/cxx_memory.py tests/test_cxx_final_fixes.py tests/test_cxx_memory.py
@@ -271,7 +368,7 @@ git commit -s -m "fix: bind C++ findings to exact tool runs"
 **Interfaces:**
 - Produces: versioned health object with `source_available`、`build_available`、`test_configured`、`clang_c_available`、`clang_cxx_available`、`cmake_available`、`landlock_available`、`process_isolation_available`。
 
-- [ ] **Step 1: 写 RED 合同测试**
+- [x] **Step 1: 写 RED 合同测试**
 
 ```python
 def test_auto_cmake_requires_cmake_and_both_clang_drivers():
@@ -281,16 +378,16 @@ def test_auto_cmake_requires_cmake_and_both_clang_drivers():
 
 同时覆盖 Landlock/进程隔离不可用时 build/test 不得显示 available。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_analyzer tests.test_cxx_memory tests.test_cxx_capabilities -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现精确探测和安全缓存**
+- [x] **Step 3: 实现精确探测和安全缓存**
 
 Sidecar health 使用执行时相同的 binary 和 kernel probe；主服务只展示已成功解析且未过期的版本化 health。连接失败时状态为 unavailable，不以 URL 非空代替健康。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_analyzer tests.test_cxx_memory tests.test_cxx_capabilities -v`
 
@@ -308,7 +405,7 @@ git commit -s -m "fix: report executable C++ analyzer capabilities"
 **Interfaces:**
 - Produces: 分离的 heading/prose/inline-code/fenced-evidence 编码函数；输入只编码一次。
 
-- [ ] **Step 1: 写 RED 测试**
+- [x] **Step 1: 写 RED 测试**
 
 覆盖 `---`、`***`、`[label](target)`、`<script>`、反引号、`&` 路径和多行 fence，解析结果不得产生额外 heading/link/HTML，显示路径仍为原字符。
 
@@ -319,16 +416,16 @@ def test_cxx_markdown_cannot_inject_structure_or_double_escape_paths():
     assert "[label](x)" not in rendered
 ```
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_memory.CxxMarkdownSafetyTests -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现按上下文编码**
+- [x] **Step 3: 实现按上下文编码**
 
 prose 转义 Markdown 标记和 HTML；inline-code 自适应 delimiter 且不重复 HTML encode；evidence 使用自适应 fence 或缩进块。调用者保存原始 path，只有最终输出点编码。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_memory -v`
 
@@ -346,7 +443,7 @@ git commit -s -m "fix: encode C++ report markdown contexts"
 **Interfaces:**
 - Produces: 小块/非阻塞或 `read1` 循环，每次底层 read 前按绝对剩余预算设置 socket timeout；slow trickle 不能延长总 deadline。
 
-- [ ] **Step 1: RED slow-trickle 测试**
+- [x] **Step 1: RED slow-trickle 测试**
 
 ```python
 def test_slow_trickle_cannot_extend_absolute_download_deadline():
@@ -354,16 +451,16 @@ def test_slow_trickle_cannot_extend_absolute_download_deadline():
         download_with_fake_clock(bytes_per_tick=1, tick_seconds=1, deadline_seconds=3)
 ```
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_memory_evaluation.ArchiveSafetyTests -v`
 Expected: FAIL 或观察一次 read 越过绝对 deadline。
 
-- [ ] **Step 3: 实现可抢占读取**
+- [x] **Step 3: 实现可抢占读取**
 
 将单次 read 控制到有界小块，底层 socket 每轮设置 `min(per_operation_timeout, remaining)`；零剩余立即失败并删除 partial。保持逐跳 HTTPS、hash、大小和 archive 安全边界。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_memory_evaluation -v`
 
@@ -385,7 +482,7 @@ git commit -s -m "fix: bound C++ evaluation downloads by deadline"
 **Interfaces:**
 - Produces: 实际 image ID、base image digest、精确直接/传递 Debian 与 Python package manifest；CI 将 package manifests 与 JSON report 一起上传。
 
-- [ ] **Step 1: RED 合同测试**
+- [x] **Step 1: RED 合同测试**
 
 ```python
 def test_public_evaluation_artifact_retains_toolchain_manifests():
@@ -395,16 +492,16 @@ def test_public_evaluation_artifact_retains_toolchain_manifests():
     }
 ```
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_memory_evaluation tests.test_cxx_analyzer -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现身份闭环**
+- [x] **Step 3: 实现身份闭环**
 
 Dockerfile 使用 digest-pinned base；能够可靠固定的直接依赖使用精确版本，全部解析后的包版本在镜像内生成 manifest。CI 从宿主 `docker image inspect` 获取 ID并导出镜像/包清单，作为同一 artifact 上传。若 apt repository 不能 snapshot-pin，文档必须明确仅“可审计”而非“逐字节可复现”。
 
-- [ ] **Step 4: 验证 Phase A**
+- [x] **Step 4: 验证 Phase A**
 
 Run:
 
@@ -417,7 +514,7 @@ git diff --check 2e69f3c..HEAD
 
 在 Docker Linux daemon 可用时还必须运行 Sidecar build、真实 Semgrep/Clang/ASan、集成和四 case matrix。不可用则停止在“Phase A 未获 Linux/Docker 完整证据”，不得声称前置完成。
 
-- [ ] **Step 5: 提交并执行独立全 Phase A 审查**
+- [x] **Step 5: 提交并执行独立全 Phase A 审查**
 
 ```powershell
 git add cxx_analyzer/Dockerfile .github/workflows/ci.yml scripts/run_cxx_memory_evaluation.py docs/CXX_MEMORY_ANALYSIS.md tests/test_cxx_memory_evaluation.py tests/test_cxx_analyzer.py
@@ -444,7 +541,7 @@ git commit -s -m "build: preserve C++ analyzer toolchain identity"
 **Interfaces:**
 - Produces: `CxxAgentSettings`、`ContextReference`、`CxxAgentCandidate`、`CxxAgentDecision`、`CxxAgentCoverage`；`Settings.cxx_agent_mode` 及设计文档中的九个配置值。
 
-- [ ] **Step 1: 写 RED Schema/配置测试**
+- [x] **Step 1: 写 RED Schema/配置测试**
 
 ```python
 def test_cxx_agent_mode_and_total_budgets_are_strict():
@@ -456,16 +553,16 @@ def test_cxx_agent_mode_and_total_budgets_are_strict():
 
 候选构造测试拒绝未知 CWE、绝对路径、零行号、未知字段和超限 `trigger_path`。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_models tests.test_config -v`
 Expected: import/config failure。
 
-- [ ] **Step 3: 实现不可变合同**
+- [x] **Step 3: 实现不可变合同**
 
 使用 frozen dataclass 或等价不可变值；提供 `from_untrusted_json` 严格构造器。扩展 Finding 时保持旧 JSON 向后兼容，新增字段默认空值，`automatic_repair=False`。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_models tests.test_config -v`
 
@@ -484,20 +581,20 @@ git commit -s -m "feat: define C++ agent contracts and budgets"
 **Interfaces:**
 - Produces: `CxxContextIndex.build(workspace, inventory) -> CxxContextIndex`；`symbols`、`types`、`calls`、`references`、`resource_events`、`coverage`；所有记录绑定 snapshot hash。
 
-- [ ] **Step 1: 创建最小 C/C++ fixture 与 RED**
+- [x] **Step 1: 创建最小 C/C++ fixture 与 RED**
 
 fixture 包含 `.c/.cpp/.hpp`、重载、成员函数、malloc/free/new/delete、数组长度和无法解析宏。测试断言限定名、行范围、caller/callee、资源事件及 parse gap。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_context -v`
 Expected: module missing。
 
-- [ ] **Step 3: 实现确定性索引**
+- [x] **Step 3: 实现确定性索引**
 
 优先复用现有 inventory 和语言扩展映射。第一版允许保守轻量解析，但输出排序必须确定，解析失败进入 coverage，不得生成虚构调用边。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_context tests.test_workspace -v`
 
@@ -907,6 +1004,17 @@ review range 为 `2e69f3c..HEAD`。reviewer 必须读取 spec、plan、每任务
 - [ ] **Step 5: 交给当前验收模型**
 
 交接内容必须包含：分支、base/head、commit list、dirty files、测试命令与完整计数、Docker/真实模型证据、未解决 Critical/Important、报告路径和 GitHub Actions URL。未经用户明确授权不合并 main。
+
+
+### 阶段 A 门禁复审记录（2026-09-04）
+
+范围 `2e69f3c..ac33030`（8 提交）。独立门禁复审员逐提交读全量 diff 并实际运行验证（宿主全量 353 OK (12 skip)、Linux 容器全量 353 OK (3 skip)、test_cxx_capabilities/final_fixes/CliAndCi 合同、bookworm digest 实测 /etc/os-release、23 样本 markdown 对抗探针、BPF prlimit64 守卫手推、镜像内容 git archive 核验）。
+
+裁决：七项 residual 全部**已关闭**（进程隔离 a980a71 / deadline 99bf8dc / tool-run 绑定 6d1146c / health 5fd704d / markdown 1e4d833 / 下载 deadline 22eaf0c / 工具链身份 ac33030）。观察项裁定：生产快照 .semgrepignore 缺失不阻塞但列为阶段 B 强制跟进项（Task 20 评测前处理——Evidence Agent 会高估 source 层覆盖）；真实仓库效能边界（curl semgrep 拒绝维度、podofo compdb 拒绝+1MB 截断、autotools in-tree 冲突）不阻塞，入阶段 B backlog。
+
+Minor 遗留（不阻塞）：deadline 恰在 SIGKILL 后耗尽的僵尸角落泄漏；CleanupResult.deadline_exceeded 未外显诊断；chunked 帧仅 per-recv 兜底（已声明）；台账 GREEN 计数漂移 356→353（末轮修正后口径）；evidence fence 内 html.escape 的显示瑕疵（保守方向）。
+
+**门禁结论：通过，可进入阶段 B。** 用户未提交修改（cxx-memory-detection-impl worktree 的 Dockerfile/tests/test_service.py）经核验未被混入任何提交。
 
 ## 进度安排与阶段门禁
 

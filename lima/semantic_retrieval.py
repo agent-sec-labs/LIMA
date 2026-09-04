@@ -25,10 +25,20 @@ SIGNAL_WEIGHTS = {
         "os.path.normpath": 8,
         ".joinpath(": 6,
         "os.path.join": 6,
+        "request.match_info": 28,
+        "async_move_files_to_cache": 36,
+        "move_files_to_cache": 28,
+        "check_in_upload_folder": 18,
+        "is_file_obj_with_meta": 52,
+        "validate_meta": 30,
+        "is_within_directory": 32,
         "extract": 5,
         "sendfile": 4,
     },
     "command": {
+        "exec(": 72,
+        "eval(": 72,
+        "os.startfile(": 40,
         "shell=true": 48,
         "os.system(": 44,
         "os.popen(": 40,
@@ -48,6 +58,10 @@ SIGNAL_WEIGHTS = {
         "cmd": 3,
     },
     "sql": {
+        # A SQL clause is query structure rather than a bindable value.  Keep this
+        # signal above generic execute()/query noise in large framework monorepos.
+        "partition_clause": 72,
+        "_initialize_partition_clause": 28,
         "request.args": 20,
         ".execute(": 20,
         ".order_by(": 12,
@@ -64,8 +78,9 @@ SIGNAL_WEIGHTS = {
 }
 
 SECURITY_IDENTIFIER_TERMS = (
-    "archive", "command", "cmd", "directory", "exec", "file", "filename", "model_path",
-    "option", "order", "path", "query", "root", "shell", "sort", "sql", "target", "template",
+    "archive", "clause", "column", "command", "cmd", "directory", "exec", "file",
+    "filename", "filter", "meta", "model_path", "option", "order", "partition", "path",
+    "query", "root", "schema", "shell", "sort", "sql", "table", "target", "template",
 )
 
 
@@ -85,7 +100,11 @@ SECURITY_CONTRACTS = {
     "path": (
         "Path parameters from archives, configuration, plugins or callers cross a trust boundary "
         "even without an HTTP handler. Normalization is not containment: commonprefix is lexical, "
-        "and abspath/expanduser/resolve alone do not prove that a target remains under an allowed root."
+        "and abspath/expanduser/resolve alone do not prove that a target remains under an allowed root. "
+        "A default metadata field does not prove that the caller supplied trusted file provenance, "
+        "and helper names containing cache/upload/check are not validation without an explicit guard. "
+        "Conversely, contextual model validation that requires an explicitly supplied trusted marker "
+        "can mitigate a file-provenance boundary without an unrelated directory-containment check."
     ),
     "command": (
         "CLI, configuration, downloaded metadata and AI-tool arguments may be attacker influenced. "
@@ -93,7 +112,9 @@ SECURITY_CONTRACTS = {
         "guards must cover shell metacharacters and use the same canonical form as execution. A "
         "fallback that quotes data only when a template has no placeholders does not protect metadata "
         "substituted by the template branch; permitted conversions and defaults must preserve shell "
-        "safety before execution."
+        "safety before execution. A command-string builder is not an execution sink by itself: require "
+        "a shown call edge to a shell or interpreter, and do not infer reachability when an override "
+        "uses a structured API and leaves a legacy builder unused."
     ),
     "sql": (
         "Database parameters protect values, not identifiers or ORDER BY structure. Request-derived "
@@ -193,18 +214,58 @@ class SecuritySemanticRetriever:
         )
 
     @staticmethod
-    def _function_nodes(tree: ast.Module):
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                yield node.name, node, ()
-            elif isinstance(node, ast.ClassDef):
-                class_context = tuple(
-                    child for child in node.body
-                    if isinstance(child, (ast.Assign, ast.AnnAssign))
+    def _class_fields(node: ast.ClassDef) -> set[str]:
+        fields = set()
+        for child in node.body:
+            if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                fields.add(child.target.id.lower())
+            elif isinstance(child, ast.Assign):
+                fields.update(
+                    target.id.lower()
+                    for target in child.targets
+                    if isinstance(target, ast.Name)
                 )
-                for child in node.body:
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        yield "%s.%s" % (node.name, child.name), child, class_context
+        return fields
+
+    @classmethod
+    def _is_file_model_class(cls, node: ast.ClassDef) -> bool:
+        type_only_bases = {
+            cls._call_name(base).rpartition(".")[2].lower()
+            for base in node.bases
+        }
+        if type_only_bases.intersection({"typeddict", "protocol", "namedtuple"}):
+            return False
+        fields = cls._class_fields(node)
+        return "meta" in fields and bool(
+            fields.intersection({"file", "filename", "path", "url"})
+        )
+
+    @classmethod
+    def _function_nodes(cls, tree: ast.Module):
+        """Yield relevant classes, methods and nested handlers with stable identities."""
+
+        def walk(statements, prefix: str, class_context: tuple[ast.AST, ...]):
+            for node in statements:
+                if not isinstance(
+                    node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    continue
+                qualname = "%s.%s" % (prefix, node.name) if prefix else node.name
+                if isinstance(node, ast.ClassDef):
+                    context = tuple(
+                        child for child in node.body
+                        if isinstance(child, (ast.Assign, ast.AnnAssign))
+                    )
+                    if cls._is_file_model_class(node):
+                        yield qualname, node, ()
+                    yield from walk(node.body, qualname, context)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    yield qualname, node, class_context
+                    # Framework route handlers are often closures registered inside a
+                    # method. They must retain their parent identity for scoring.
+                    yield from walk(node.body, qualname, class_context)
+
+        yield from walk(tree.body, "", ())
 
     @staticmethod
     def _call_name(node: ast.AST) -> str:
@@ -220,6 +281,17 @@ class SecuritySemanticRetriever:
         return not (
             isinstance(node, ast.Constant)
             and isinstance(node.value, (str, bytes, int, float, type(None)))
+        )
+
+    @classmethod
+    def _is_interpolated_expression(cls, node: ast.AST) -> bool:
+        """Return true when data is embedded into interpreter source text."""
+        if isinstance(node, (ast.JoinedStr, ast.BinOp)):
+            return True
+        return (
+            isinstance(node, ast.Call)
+            and cls._call_name(node.func).rpartition(".")[2].lower()
+            in {"format", "format_map"}
         )
 
     @classmethod
@@ -261,10 +333,19 @@ class SecuritySemanticRetriever:
             name.rpartition(".")[2] in {"execute", "executemany", "group_by", "order_by", "query"}
             for name in called_names
         )
+        structured_data_parse = any(
+            name in called_names
+            for name in (
+                "json.loads", "orjson.loads", "ujson.loads", "yaml.safe_load",
+            )
+        )
 
         def add(category: str, signal: str, weight: int) -> None:
             scores[category] += weight
             matched[category].add(signal)
+
+        if isinstance(node, ast.ClassDef) and cls._is_file_model_class(node):
+            add("path", "file-model-provenance-boundary", 160)
 
         arguments = []
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -279,6 +360,14 @@ class SecuritySemanticRetriever:
                 sql_context and any(term in name for term in ("column", "sort", "order"))
             ):
                 add("sql", "sql-structure-parameter", 8)
+            if any(term in name for term in ("partition_clause", "schema", "sql_clause")):
+                add("sql", "sql-structure-parameter", 28)
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            "route" in ast.unparse(decorator).lower()
+            for decorator in node.decorator_list
+        ):
+            add("path", "web-route-handler", 12)
 
         for item in ast.walk(node):
             if not isinstance(item, ast.Call):
@@ -293,6 +382,28 @@ class SecuritySemanticRetriever:
             )
             if shell_true:
                 add("command", "dynamic-shell-sink", 44)
+            if call_name in {"exec", "eval"} and item.args and cls._is_dynamic_expression(
+                item.args[0]
+            ):
+                add("command", "interpreter-execution-sink", 88)
+                if cls._is_interpolated_expression(item.args[0]):
+                    add("command", "interpreter-template-expansion", 96)
+            elif call_name == "compile" and item.args and cls._is_dynamic_expression(
+                item.args[0]
+            ):
+                add("command", "interpreter-compilation-sink", 48)
+            if call_name == "os.startfile":
+                add("command", "structured-platform-open", 80)
+            if (
+                leaf == "getattr"
+                and len(item.args) >= 2
+                and cls._is_dynamic_expression(item.args[1])
+                and structured_data_parse
+            ):
+                # Structured parsing plus getattr dispatch removes Python-code
+                # interpretation.  It remains an authorization boundary, but is
+                # strong, review-worthy mitigation evidence for CWE-78.
+                add("command", "dynamic-dispatch-boundary", 160)
             if call_name in {"os.system", "os.popen"}:
                 add("command", "command-execution-sink", 44)
             elif leaf in {"run", "popen", "call", "check_call", "check_output"} and (
@@ -312,6 +423,31 @@ class SecuritySemanticRetriever:
                 add("path", "path-normalization", 10)
             elif leaf in {"relative_to", "is_relative_to"}:
                 add("path", "path-containment-check", 26)
+            elif leaf in {"join", "joinpath"} and (
+                call_name == "os.path.join" or security_identifiers
+            ):
+                add("path", "path-construction", 12)
+            elif leaf in {"is_within_directory", "is_safe_path", "safe_join"}:
+                add("path", "path-containment-check", 42)
+
+            if call_name.endswith("match_info.get"):
+                add("path", "request-path-source", 38)
+            if leaf in {"open", "read_text", "read_bytes", "send_file", "sendfile"} and (
+                item.args and cls._is_dynamic_expression(item.args[0])
+            ):
+                add("path", "path-read-sink", 18)
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and "process_single_file" in node.name.lower()
+                ):
+                    # Component preprocess dispatch is dynamic, so the concrete
+                    # file-read implementation cannot be recovered from a direct
+                    # call edge. Preserve this distinctive downstream sink shape.
+                    add("path", "component-file-read-sink", 40)
+            if leaf in {"async_move_files_to_cache", "move_files_to_cache"}:
+                add("path", "file-cache-boundary", 46)
+            if leaf in {"model_validate", "is_file_obj_with_meta"}:
+                add("path", "file-provenance-validation", 46)
 
             if call_name.endswith("kwargs.get") and item.args and isinstance(
                 item.args[0], ast.Constant
@@ -387,6 +523,16 @@ class SecuritySemanticRetriever:
         return candidate.qualname.rpartition(".")[2]
 
     @classmethod
+    def _is_inbound_file_cache_boundary(cls, candidate: SemanticCandidate) -> bool:
+        return (
+            "file-cache-boundary" in candidate.signals
+            and (
+                "check_in_upload_folder" in candidate.signals
+                or cls._method_name(candidate).lower().startswith(("preprocess", "input"))
+            )
+        )
+
+    @classmethod
     def _is_pipeline_method(cls, candidate: SemanticCandidate) -> bool:
         name = cls._method_name(candidate).lower()
         return any(term in name for term in PIPELINE_METHOD_TERMS)
@@ -453,6 +599,33 @@ class SecuritySemanticRetriever:
                         )
                     )
                 )
+        if (
+            candidate.category == "path"
+            and "file-model-provenance-boundary" in candidate.signals
+        ):
+            neighbors.extend(
+                item for item in pool
+                if item.category == "path"
+                and "file-cache-boundary" in item.signals
+            )
+        if (
+            candidate.category == "path"
+            and "file-cache-boundary" in candidate.signals
+        ):
+            neighbors.extend(
+                item for item in pool
+                if item.category == "path"
+                and "file-model-provenance-boundary" in item.signals
+            )
+        if candidate.category == "path" and (
+            "file-model-provenance-boundary" in candidate.signals
+            or cls._is_inbound_file_cache_boundary(candidate)
+        ):
+            neighbors.extend(
+                item for item in pool
+                if item.category == "path"
+                and "component-file-read-sink" in item.signals
+            )
         if candidate.category == "command" and "check_unsafe" in candidate.qualname.lower():
             call_sites = [
                 item for item in pool
@@ -482,6 +655,8 @@ class SecuritySemanticRetriever:
         return sorted(
             deduplicated.values(),
             key=lambda item: (
+                cls._is_test_path(item.path),
+                0 if "component-file-read-sink" in item.signals else 1,
                 0 if "list(kwargs.keys())" in item.code.lower().replace(" ", "") else 1,
                 0 if "template%data" in item.code.lower().replace(" ", "") else 1,
                 -item.score,
@@ -554,6 +729,72 @@ class SecuritySemanticRetriever:
                     if has_containment
                     else "The caller-provided path is normalized but no allowed-root containment "
                     "check is visible before it is returned for downstream file/model use."
+                ),
+                related_symbols=(candidate.qualname,),
+            ))
+
+        if "file-model-provenance-boundary" in candidate.signals:
+            validated = (
+                "model_validator" in compact
+                and "is_file_obj_with_meta(" in compact
+            )
+            results.append(SecurityInvariant(
+                identifier="path-file-object-provenance",
+                category="path",
+                status="mitigation" if validated else "risk",
+                summary=(
+                    "File-like model data requires an explicit trusted metadata marker before its "
+                    "server-side path is accepted."
+                    if validated
+                    else "A file-like model accepts a server path and a default metadata marker "
+                    "without proving that the marker was explicitly supplied across the trust boundary."
+                ),
+                related_symbols=(candidate.qualname,),
+            ))
+
+        # Cache helpers are used for both untrusted inbound values and trusted
+        # application outputs.  Provenance validation is an input-boundary
+        # invariant; treating every postprocess/streaming cache write as an
+        # inbound risk creates a false edge and can contaminate a related model.
+        inbound_cache_boundary = cls._is_inbound_file_cache_boundary(candidate)
+        if inbound_cache_boundary:
+            validated = "model_validate(" in compact and "validate_meta" in compact
+            results.append(SecurityInvariant(
+                identifier="path-file-object-provenance",
+                category="path",
+                status="mitigation" if validated else "risk",
+                summary=(
+                    "Cached file input is reconstructed through contextual model validation that "
+                    "requires explicit provenance metadata."
+                    if validated
+                    else "Cached file input is reconstructed without contextual provenance validation, "
+                    "so a caller-controlled server path may be accepted as a trusted file object."
+                ),
+                related_symbols=(candidate.qualname,),
+            ))
+
+        request_path = "request-path-source" in candidate.signals
+        path_use = bool({
+            "path-construction", "path-read-sink",
+        }.intersection(candidate.signals))
+        if request_path and path_use:
+            contained = any(
+                marker in compact
+                for marker in (
+                    "is_within_directory(", "is_safe_path(", "safe_join(",
+                    "commonpath(", ".relative_to(", ".is_relative_to(",
+                )
+            )
+            results.append(SecurityInvariant(
+                identifier="path-request-location-containment",
+                category="path",
+                status="mitigation" if contained else "risk",
+                summary=(
+                    "The request-derived path and the final file selected for reading are constrained "
+                    "to the configured root."
+                    if contained
+                    else "A request-derived path is joined with a trusted root and then read without "
+                    "a component-aware containment check on the final selected file."
                 ),
                 related_symbols=(candidate.qualname,),
             ))
@@ -679,6 +920,21 @@ class SecuritySemanticRetriever:
                 summary="The delimiter is represented as a database parameter expression.",
                 related_symbols=(candidate.qualname,) + related,
             ))
+        if "partition_clause" in compact and "self.partition_clause=" in compact:
+            guarded = "_initialize_partition_clause(" in compact
+            results.append(SecurityInvariant(
+                identifier="sql-partition-clause-boundary",
+                category="sql",
+                status="mitigation" if guarded else "risk",
+                summary=(
+                    "The structural partition clause is rejected when it contains a statement "
+                    "separator before SQL template construction."
+                    if guarded
+                    else "A caller-controlled partition clause is stored for SQL template "
+                    "construction without a statement-separator guard."
+                ),
+                related_symbols=(candidate.qualname,) + related,
+            ))
         return results
 
     @classmethod
@@ -704,6 +960,38 @@ class SecuritySemanticRetriever:
         guard_normalizes = "dashify(" in guard or "canonicalize_option_name" in guard
         semantic_neighbors = cls._semantic_neighbors(candidate, pool)
         related = tuple(sorted(item.qualname for item in semantic_neighbors))
+        if "interpreter-execution-sink" in candidate.signals:
+            results.append(SecurityInvariant(
+                identifier="command-interpreter-data-boundary",
+                category="command",
+                status="risk",
+                summary=(
+                    "Caller-controlled text reaches Python exec/eval and is interpreted as code, "
+                    "not as structured data."
+                ),
+                related_symbols=(candidate.qualname,) + related,
+            ))
+        elif "dynamic-dispatch-boundary" in candidate.signals:
+            results.append(SecurityInvariant(
+                identifier="command-interpreter-data-boundary",
+                category="command",
+                status="mitigation",
+                summary=(
+                    "The request is parsed as structured data and dispatched without evaluating "
+                    "caller text as Python code; method authorization remains a separate review boundary."
+                ),
+                related_symbols=(candidate.qualname,) + related,
+            ))
+        if "structured-platform-open" in candidate.signals:
+            results.append(SecurityInvariant(
+                identifier="command-shell-data-boundary",
+                category="command",
+                status="mitigation",
+                summary=(
+                    "The platform file-open API receives the path as data without a command shell."
+                ),
+                related_symbols=(candidate.qualname,) + related,
+            ))
         raw_kwargs_callsite = any(
             "list(kwargs.keys())" in item.code.lower().replace(" ", "")
             for item in semantic_neighbors
@@ -792,36 +1080,157 @@ class SecuritySemanticRetriever:
             invariants=tuple(invariants),
         )
 
-    @staticmethod
+    @classmethod
     def evidence_packet(
-        candidates: list[SemanticCandidate], max_candidates: int = 6
+        cls, candidates: list[SemanticCandidate], max_candidates: int = 8
     ) -> list[SemanticCandidate]:
-        """Keep invariant anchors and their validation-to-use neighbors only."""
+        """Keep high-risk anchors while preserving category coverage and filling budget."""
         if max_candidates < 1:
             raise ValueError("evidence packet candidate limit must be positive")
+        if not candidates:
+            return []
         anchors = [item for item in candidates if item.invariants]
         if not anchors:
             return candidates[:max_candidates]
+        packet = []
+        seen = set()
+
+        def add(item: SemanticCandidate) -> None:
+            identity = (item.path, item.qualname)
+            if identity in seen or len(packet) >= max_candidates:
+                return
+            packet.append(item)
+            seen.add(identity)
+
+        risk_anchors = [
+            item for item in anchors
+            if any(invariant.status == "risk" for invariant in item.invariants)
+        ]
+        add((risk_anchors or anchors)[0])
+
+        categories = []
+        for item in candidates:
+            if item.category not in categories:
+                categories.append(item.category)
+        representatives = []
+        for category in categories:
+            category_anchors = [item for item in anchors if item.category == category]
+            category_risks = [
+                item for item in category_anchors
+                if any(invariant.status == "risk" for invariant in item.invariants)
+            ]
+            representative = next(iter(category_risks or category_anchors), None)
+            if representative is None:
+                representative = next(
+                    (item for item in candidates if item.category == category), None
+                )
+            if representative is not None:
+                add(representative)
+                representatives.append(representative)
+
+        # File provenance is a cross-symbol flow: the data model, the inbound
+        # consumer and the marker-aware cache helper jointly establish whether
+        # a server path can bypass validation. Reserve this bounded chain before
+        # generic repeated-invariant slots consume the packet.
+        provenance_models = [
+            item for item in candidates
+            if "file-model-provenance-boundary" in item.signals
+        ][:2]
+        inbound_consumers = [
+            item for item in candidates if cls._is_inbound_file_cache_boundary(item)
+        ][:2]
+        helper_names = {
+            call.rpartition(".")[2]
+            for item in inbound_consumers for call in item.calls
+        }
+        marker_helpers = [
+            item for item in candidates
+            if cls._method_name(item) in helper_names
+            and "is_file_obj_with_meta" in item.signals
+        ][:1]
+        downstream_sinks = [
+            item for item in candidates
+            if "component-file-read-sink" in item.signals
+        ][:2]
+        for item in (
+            *provenance_models, *inbound_consumers, *marker_helpers, *downstream_sinks
+        ):
+            add(item)
+
+        # Prefer rare invariant strata before taking repeated generic findings.
+        # This prevents ubiquitous migration/REPL patterns from hiding a distinct
+        # application boundary in a six-item packet.
+        stratum_frequency = {}
+        for item in anchors:
+            for invariant in item.invariants:
+                key = (invariant.identifier, invariant.status)
+                stratum_frequency[key] = stratum_frequency.get(key, 0) + 1
+        represented_strata = {
+            (invariant.identifier, invariant.status)
+            for item in packet for invariant in item.invariants
+        }
+        rare_anchors = sorted(
+            anchors,
+            key=lambda item: (
+                min(
+                    stratum_frequency[(invariant.identifier, invariant.status)]
+                    for invariant in item.invariants
+                ),
+                -item.score,
+                item.path,
+                item.start_line,
+            ),
+        )
+        for item in rare_anchors:
+            strata = {
+                (invariant.identifier, invariant.status)
+                for invariant in item.invariants
+            }
+            if strata.difference(represented_strata):
+                before = len(packet)
+                add(item)
+                if len(packet) > before:
+                    represented_strata.update(strata)
+
+        # Preserve more than the single highest-scoring example of an invariant.
+        # This matters in monorepos where a generic REPL or migration outranks the
+        # application-specific boundary.  Risk and mitigation are separate strata,
+        # and two examples per stratum keep the packet bounded while retaining a
+        # second independent code region or a nested handler.
+        invariant_strata = {}
+        for item in packet:
+            for invariant in item.invariants:
+                key = (invariant.identifier, invariant.status)
+                invariant_strata[key] = invariant_strata.get(key, 0) + 1
+        for item in anchors:
+            strata = {
+                (invariant.identifier, invariant.status)
+                for invariant in item.invariants
+            }
+            if any(invariant_strata.get(key, 0) < 2 for key in strata):
+                before = len(packet)
+                add(item)
+                if len(packet) > before:
+                    for key in strata:
+                        invariant_strata[key] = invariant_strata.get(key, 0) + 1
+
         related_symbols = {
             symbol
-            for anchor in anchors
+            for anchor in representatives
             for symbol in (
                 *anchor.relations,
                 *(symbol for invariant in anchor.invariants for symbol in invariant.related_symbols),
             )
         }
-        packet = []
-        seen = set()
-        for item in (*anchors, *candidates):
-            identity = (item.path, item.qualname)
-            if identity in seen:
-                continue
-            if item not in anchors and item.qualname not in related_symbols:
-                continue
-            packet.append(item)
-            seen.add(identity)
-            if len(packet) >= max_candidates:
-                break
+        for item in candidates:
+            if item.qualname in related_symbols:
+                add(item)
+        for item in anchors:
+            add(item)
+        # A single unrelated invariant must not collapse a six-candidate budget to
+        # one item, which previously hid otherwise well-ranked target code.
+        for item in candidates:
+            add(item)
         return packet
 
     def retrieve_run(self, root: str | Path) -> RetrievalRun:
@@ -914,10 +1323,20 @@ class SecuritySemanticRetriever:
             primary_identities.add(identity)
         shortlist = unique_primaries
         # Primary file/symbol candidates must not be starved by a high-scoring candidate's
-        # neighbors. Add bounded call/owner neighbors only after all diverse primaries.
+        # neighbors. Add bounded neighbors only after all diverse primaries. Provenance
+        # model/cache edges are cross-file root-cause pairs, so reserve their neighbors
+        # before generic owner/call expansion instead of letting early primaries consume
+        # the entire remaining budget.
         expanded = list(shortlist)
         seen = {(item.path, item.qualname) for item in shortlist}
-        for candidate in shortlist:
+        priority_neighbor_signals = {
+            "file-model-provenance-boundary", "file-cache-boundary",
+        }
+        neighbor_order = [
+            item for item in shortlist
+            if priority_neighbor_signals.intersection(item.signals)
+        ] + list(shortlist)
+        for candidate in neighbor_order:
             for item in self._semantic_neighbors(candidate, pool):
                 identity = (item.path, item.qualname)
                 if identity not in seen:

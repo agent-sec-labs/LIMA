@@ -609,6 +609,11 @@ def download_verified_archive(url: str, expected_sha256: str, destination: Path)
         ):
             if not _is_https(response.geturl()):
                 raise ValueError("archive redirect must remain HTTPS")
+            read1 = getattr(response, "read1", None)
+            if not callable(read1):
+                raise RuntimeError(
+                    "archive response stream cannot enforce the total deadline"
+                )
             while True:
                 try:
                     response_socket = response.fp.raw._sock
@@ -624,7 +629,11 @@ def download_verified_archive(url: str, expected_sha256: str, destination: Path)
                 set_timeout(
                     min(_DOWNLOAD_SOCKET_TIMEOUT_SECONDS, remaining_seconds())
                 )
-                block = response.read(64 * 1024)
+                # One bounded read per iteration, so a slow trickle on a
+                # content-length response cannot keep one greedy read alive
+                # past the absolute deadline. Chunked framing and header
+                # parsing still rely on the per-recv socket timeout.
+                block = read1(64 * 1024)
                 remaining_seconds()
                 if not block:
                     break
@@ -702,16 +711,23 @@ def add_report_metadata(
     raw_case_data: bytes,
     *,
     analyzer_image_digest: str | None,
+    analyzer_base_image_digest: str | None = None,
 ) -> dict[str, Any]:
     if (
         not isinstance(analyzer_image_digest, str)
         or not _IMAGE_DIGEST.fullmatch(analyzer_image_digest)
     ):
         raise ValueError("analyzer image digest must be an exact Docker image ID")
+    if analyzer_base_image_digest is not None and (
+        not isinstance(analyzer_base_image_digest, str)
+        or not _IMAGE_DIGEST.fullmatch(analyzer_base_image_digest)
+    ):
+        raise ValueError("analyzer base image digest must be an exact Docker image ID")
     result = dict(report)
     diagnostics = list(result.get("diagnostics", []))
     result["diagnostics"] = diagnostics
     result["analyzer_image_digest"] = analyzer_image_digest
+    result["analyzer_base_image_digest"] = analyzer_base_image_digest or ""
     result["case_data_sha256"] = hashlib.sha256(raw_case_data).hexdigest()
     result["validity_boundaries"] = [
         VALIDITY_BOUNDARY,
@@ -744,6 +760,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--analyzer-image-digest",
         type=_image_digest_argument,
         required=True,
+    )
+    parser.add_argument(
+        "--analyzer-base-image-digest",
+        type=_image_digest_argument,
+        default=None,
     )
     parser.add_argument("--fail-under-precision", type=float, required=True)
     return parser
@@ -792,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
         report,
         raw_case_data,
         analyzer_image_digest=args.analyzer_image_digest,
+        analyzer_base_image_digest=args.analyzer_base_image_digest,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

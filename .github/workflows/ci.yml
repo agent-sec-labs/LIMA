@@ -1,8 +1,11 @@
-name: ci
+name: lima-ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+    # Staged C/C++ integration stacks target codex/* branches before main.
+    branches: [main, "codex/**"]
   workflow_dispatch:
   schedule:
     - cron: '23 3 * * 3'
@@ -10,45 +13,243 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: lima-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
 
 jobs:
+  quality-contracts:
+    name: quality-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile Python sources
+        run: python -m compileall -q lima scripts tests
+      - name: Verify CI, frontend, and experiment contracts
+        run: >-
+          python -m unittest -v tests.test_ci_contract
+          tests.test_frontend_ui tests.test_experiments
+
   unit-tests:
+    name: unit-${{ matrix.os }}-py${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run complete unit and integration suite
+        run: >-
+          python scripts/run_ci_tests.py
+          --output output/ci/unit-${{ runner.os }}-py${{ matrix.python-version }}.log
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unit-${{ runner.os }}-py${{ matrix.python-version }}
+          path: output/ci/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  repair-constraints:
+    name: repair-constraints
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
-      - run: >-
+      - name: Enforce safe repair constraints
+        run: >-
           python scripts/run_repair_evaluation.py --format json
           --output output/repair-evaluation.json --min-constraint-accuracy 1.0
+      - name: Upload repair evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: repair-constraint-report
+          path: output/repair-evaluation.json
+          if-no-files-found: error
+          retention-days: 30
 
   container-tests:
+    name: container-read-only
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - run: docker build --target test --tag lima:test .
+      - name: Test Docker volume initialization
+        shell: pwsh
+        run: ./tests/test_lima_data_volumes.ps1 -Image lima:test
       - run: docker run --rm --read-only --tmpfs /tmp:rw,size=256m lima:test
 
+  security-baseline:
+    name: security-baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Fail on verified high-severity regressions
+        # fixtures 是 E2E 故意构造的含漏洞样本语料（eval 样本必须产出
+        # CWE-95 断言），与 tests/、evaluation_data/ 同为测试数据，不参与门禁；
+        # 排除按目录名匹配，仓库内命中项仅 frontend/e2e/fixtures。
+        run: >-
+          python scripts/scan_repository.py . --sast required --format json
+          --exclude-dir tests --exclude-dir evaluation_data
+          --exclude-dir fixtures
+          --output output/ci-security-audit.json --fail-on high --verified-only
+      - name: Upload security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-baseline-report
+          path: output/ci-security-audit.json
+          if-no-files-found: error
+          retention-days: 30
+
+  frontend-tests:
+    name: frontend-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Verify runner Node major version
+        run: >-
+          node -e "const m=Number(process.versions.node.split('.')[0]);
+          if (m < 18) { console.error('node ' + m + ' is below 18'); process.exit(1); }
+          console.log('node', process.versions.node);"
+      - name: Install locked frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Typecheck app and e2e programs
+        run: npm run typecheck
+        working-directory: frontend
+      - name: Unit tests with coverage threshold (lines >= 60)
+        run: npx vitest run --coverage
+        working-directory: frontend
+      - name: Production build
+        run: npm run build
+        working-directory: frontend
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend-e2e:
+    # 冻结决策 4（Epic #33）：Playwright E2E 只在 Linux CI 运行，
+    # 不进入 windows-latest 矩阵，也不要求贡献者本机执行。
+    name: frontend-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install runtime dependencies for the backend
+        run: python -m pip install -r requirements.txt
+      - name: Verify runner Node major version
+        run: >-
+          node -e "const m=Number(process.versions.node.split('.')[0]);
+          if (m < 18) { console.error('node ' + m + ' is below 18'); process.exit(1); }
+          console.log('node', process.versions.node);"
+      - name: Install locked frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Build the SPA served by the api handler
+        run: npm run build
+        working-directory: frontend
+      - name: Run audit lifecycle E2E
+        run: npx playwright test
+        working-directory: frontend
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frontend-e2e-report
+          path: frontend/test-results/
+          if-no-files-found: error
+          retention-days: 14
+
+  merge-gate:
+    name: merge-gate
+    if: always()
+    needs:
+      - quality-contracts
+      - unit-tests
+      - repair-constraints
+      - container-tests
+      - security-baseline
+      - frontend-tests
+      - frontend-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every engineering gate
+        shell: bash
+        run: |
+          test "${{ needs.quality-contracts.result }}" = "success"
+          test "${{ needs.unit-tests.result }}" = "success"
+          test "${{ needs.repair-constraints.result }}" = "success"
+          test "${{ needs.container-tests.result }}" = "success"
+          test "${{ needs.security-baseline.result }}" = "success"
+          test "${{ needs.frontend-tests.result }}" = "success"
+          test "${{ needs.frontend-e2e.result }}" = "success"
   cxx-sidecar-integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Build the pinned Sidecar test image
@@ -59,7 +260,7 @@ jobs:
         run: >-
           docker run --rm --network none --read-only
           --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002
-          --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002
+          --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002
           --cap-drop ALL --security-opt no-new-privileges:true
           --user 10002:10002 lima-cxx-analyzer:test
           python -m unittest -v
@@ -81,7 +282,7 @@ jobs:
           docker network create --internal lima-cxx-ci
           docker run --detach --name lima-cxx-analyzer --network lima-cxx-ci \
             --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
-            --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
             --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
             --mount type=bind,source="${PWD}/tests/fixtures/cxx_memory",target=/repositories/fixtures,readonly \
             lima-cxx-analyzer:ci
@@ -124,10 +325,10 @@ jobs:
           - goaccess-cve-2026-55777
           - goaccess-cve-2026-54715
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/cxx-memory/archives
           key: cxx-memory-archives-${{ hashFiles('evaluation_data/cxx_memory_cases.json') }}
@@ -147,10 +348,19 @@ jobs:
           docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:eval .
           ANALYZER_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval)"
           printf 'ANALYZER_IMAGE_DIGEST=%s\n' "$ANALYZER_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          ANALYZER_BASE_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250)"
+          printf 'ANALYZER_BASE_IMAGE_DIGEST=%s\n' "$ANALYZER_BASE_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          docker image inspect lima-cxx-analyzer:eval > output/image-inspect.json
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-toolchain-packages.txt > output/debian-packages.txt
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-python-packages.txt > output/python-packages.txt
           docker network create --internal lima-cxx-public
           docker run --detach --name lima-cxx-public-analyzer --network lima-cxx-public \
             --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
-            --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
             --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
             --env LIMA_CXX_AUTO_CMAKE=false \
             --env LIMA_CXX_BUILD_STEPS_JSON \
@@ -173,20 +383,39 @@ jobs:
             --mount type=bind,source="${PWD}/.cache/cxx-memory",target=/cache \
             --mount type=bind,source="${PWD}/output",target=/output \
             --workdir /workspace \
-            public.ecr.aws/docker/library/python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7 \
+            public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250 \
             python scripts/run_cxx_memory_evaluation.py \
-            --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
-            --output /output/cxx-memory-evaluation.json \
-            --analyzer-url http://lima-cxx-public-analyzer:8090 \
-            --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
-            --fail-under-precision 0.0
+              --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
+              --output /output/cxx-memory-evaluation.json \
+              --analyzer-url http://lima-cxx-public-analyzer:8090 \
+              --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
+              --analyzer-base-image-digest "$ANALYZER_BASE_IMAGE_DIGEST" \
+              --fail-under-precision 0.0
           docker network connect lima-cxx-public lima-cxx-evaluator
           docker start --attach lima-cxx-evaluator
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: cxx-memory-evaluation-${{ matrix.case-id }}
+          name: evaluation-report-${{ matrix.case-id }}
           path: output/cxx-memory-evaluation.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: debian-packages-${{ matrix.case-id }}
+          path: output/debian-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: python-packages-${{ matrix.case-id }}
+          path: output/python-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: image-inspect-${{ matrix.case-id }}
+          path: output/image-inspect.json
           if-no-files-found: warn
       - name: Stop public evaluation containers
         if: always()
@@ -194,18 +423,3 @@ jobs:
           docker rm --force lima-cxx-evaluator lima-cxx-public-analyzer 2>/dev/null || true
           docker network rm lima-cxx-public 2>/dev/null || true
 
-  security-baseline:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-          cache: pip
-      - run: python -m pip install -r requirements.txt
-      - run: >-
-          python scripts/scan_repository.py . --sast required --format json
-          --exclude-dir tests --exclude-dir evaluation_data
-          --output output/ci-security-audit.json --fail-on high --verified-only

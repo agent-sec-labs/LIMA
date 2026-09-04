@@ -2,7 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lima.semantic_retrieval import SecuritySemanticRetriever
+from lima.semantic_retrieval import (
+    SecurityInvariant,
+    SecuritySemanticRetriever,
+    SemanticCandidate,
+)
 
 
 class SecuritySemanticRetrievalTests(unittest.TestCase):
@@ -400,6 +404,304 @@ class SecuritySemanticRetrievalTests(unittest.TestCase):
         self.assertIn("Git.transform_kwargs", packet_symbols)
         self.assertTrue(all(item.invariants or item.qualname in command_guard.relations
                             for item in packet))
+
+    def test_nested_request_path_handler_is_retrieved_and_requires_containment(self):
+        vulnerable = (
+            "import os\n"
+            "class Manager:\n"
+            "    def add_routes(self):\n"
+            "        @routes.get('/preview/{filename:.*}')\n"
+            "        async def preview(request):\n"
+            "            filename = request.match_info.get('filename')\n"
+            "            target = os.path.join(self.root, filename)\n"
+            "            return Image.open(target)\n"
+        )
+        fixed = vulnerable.replace(
+            "            return Image.open(target)\n",
+            "            if not is_within_directory(self.root, target):\n"
+            "                raise PermissionError(target)\n"
+            "            return Image.open(target)\n",
+        )
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            (base / "vulnerable").mkdir()
+            (base / "fixed").mkdir()
+            (base / "vulnerable" / "manager.py").write_text(vulnerable, encoding="utf-8")
+            (base / "fixed" / "manager.py").write_text(fixed, encoding="utf-8")
+            retriever = SecuritySemanticRetriever()
+            vulnerable_candidates = retriever.retrieve(base / "vulnerable")
+            fixed_candidates = retriever.retrieve(base / "fixed")
+
+        identity = "Manager.add_routes.preview"
+        self.assertIn(identity, {item.qualname for item in vulnerable_candidates})
+        states = {
+            (invariant.identifier, invariant.status)
+            for candidates in (vulnerable_candidates, fixed_candidates)
+            for item in candidates if item.qualname == identity
+            for invariant in item.invariants
+        }
+        self.assertIn(("path-request-location-containment", "risk"), states)
+        self.assertIn(("path-request-location-containment", "mitigation"), states)
+
+    def test_interpreter_exec_and_structured_dispatch_are_distinguished(self):
+        vulnerable = (
+            "class Wrapper:\n"
+            "    def other(self, query):\n"
+            "        context = {'self': self}\n"
+            "        exec(f'result = {query}', context)\n"
+            "        return context['result']\n"
+        )
+        fixed = (
+            "class Wrapper:\n"
+            "    def other(self, query):\n"
+            "        params = json.loads(query)\n"
+            "        function = getattr(self.api, params['function'])\n"
+            "        return function(*params.get('args', []))\n"
+            "    def reflect(self, name):\n"
+            "        return getattr(self, name)\n"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            (base / "vulnerable").mkdir()
+            (base / "fixed").mkdir()
+            (base / "vulnerable" / "wrapper.py").write_text(vulnerable, encoding="utf-8")
+            (base / "fixed" / "wrapper.py").write_text(fixed, encoding="utf-8")
+            retriever = SecuritySemanticRetriever()
+            vulnerable_candidates = retriever.retrieve(base / "vulnerable")
+            fixed_candidates = retriever.retrieve(base / "fixed")
+
+        def state(candidates):
+            candidate = next(item for item in candidates if item.qualname == "Wrapper.other")
+            invariant = next(
+                item for item in candidate.invariants
+                if item.identifier == "command-interpreter-data-boundary"
+            )
+            return candidate.category, invariant.status, candidate.score
+
+        vulnerable_state = state(vulnerable_candidates)
+        fixed_state = state(fixed_candidates)
+        self.assertEqual(("command", "risk"), vulnerable_state[:2])
+        self.assertEqual(("command", "mitigation"), fixed_state[:2])
+        self.assertGreaterEqual(fixed_state[2], 120)
+        vulnerable_candidate = next(
+            item for item in vulnerable_candidates if item.qualname == "Wrapper.other"
+        )
+        self.assertIn("interpreter-template-expansion", vulnerable_candidate.signals)
+        self.assertNotIn("Wrapper.reflect", {item.qualname for item in fixed_candidates})
+
+    def test_file_model_provenance_requires_explicit_marker_validation(self):
+        vulnerable = (
+            "class FileDataDict(TypedDict):\n"
+            "    path: str\n"
+            "    meta: dict\n"
+            "class FileData(BaseModel):\n"
+            "    path: str\n"
+            "    meta: dict = {'_type': 'FileData'}\n"
+            "    def is_none(self):\n"
+            "        return self.path is None\n"
+        )
+        fixed = (
+            "class FileData(BaseModel):\n"
+            "    path: str\n"
+            "    meta: dict = {'_type': 'FileData'}\n"
+            "    @model_validator(mode='before')\n"
+            "    def validate_model(cls, value):\n"
+            "        if not is_file_obj_with_meta(value):\n"
+            "            raise ValueError(value)\n"
+            "        return value\n"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            (base / "vulnerable").mkdir()
+            (base / "fixed").mkdir()
+            (base / "vulnerable" / "models.py").write_text(vulnerable, encoding="utf-8")
+            (base / "fixed" / "models.py").write_text(fixed, encoding="utf-8")
+            for revision in ("vulnerable", "fixed"):
+                (base / revision / "cache.py").write_text(
+                    "async def async_move_files_to_cache(data):\n"
+                    "    return await async_traverse(data, is_file_obj_with_meta)\n",
+                    encoding="utf-8",
+                )
+                (base / revision / "pipeline.py").write_text(
+                    "def preprocess(inputs, data_model):\n"
+                    "    cached = async_move_files_to_cache(inputs, check_in_upload_folder=True)\n"
+                    "    return data_model.model_validate(cached)\n",
+                    encoding="utf-8",
+                )
+                (base / revision / "output.py").write_text(
+                    "def postprocess(result):\n"
+                    "    return async_move_files_to_cache(result, postprocess=True)\n",
+                    encoding="utf-8",
+                )
+                (base / revision / "component.py").write_text(
+                    "def _process_single_file(file_data):\n"
+                    "    with open(file_data.path, 'rb') as handle:\n"
+                    "        return handle.read()\n",
+                    encoding="utf-8",
+                )
+            retriever = SecuritySemanticRetriever()
+            vulnerable_candidates = retriever.retrieve(base / "vulnerable")
+            fixed_candidates = retriever.retrieve(base / "fixed")
+
+        def provenance(candidates):
+            candidate = next(item for item in candidates if item.qualname == "FileData")
+            state = next(
+                item.status for item in candidate.invariants
+                if item.identifier == "path-file-object-provenance"
+            )
+            return state, candidate.score
+
+        vulnerable_state = provenance(vulnerable_candidates)
+        fixed_state = provenance(fixed_candidates)
+        self.assertEqual("risk", vulnerable_state[0])
+        self.assertEqual("mitigation", fixed_state[0])
+        self.assertGreaterEqual(vulnerable_state[1], 160)
+        self.assertNotIn("FileDataDict", {
+            item.qualname for item in vulnerable_candidates
+        })
+        vulnerable_model = next(
+            item for item in vulnerable_candidates if item.qualname == "FileData"
+        )
+        self.assertIn("preprocess", vulnerable_model.relations)
+        self.assertTrue({
+            "FileData", "preprocess", "async_move_files_to_cache",
+            "_process_single_file",
+        }.issubset({
+            item.qualname
+            for item in SecuritySemanticRetriever.evidence_packet(vulnerable_candidates)
+        }))
+        sink = next(
+            item for item in vulnerable_candidates
+            if item.qualname == "_process_single_file"
+        )
+        self.assertIn("component-file-read-sink", sink.signals)
+        output = next(
+            item for item in vulnerable_candidates if item.qualname == "postprocess"
+        )
+        self.assertFalse(any(
+            item.identifier == "path-file-object-provenance"
+            for item in output.invariants
+        ))
+
+    def test_structural_partition_clause_guard_is_ranked_and_distinguished(self):
+        vulnerable = (
+            "class SQLColumnCheckOperator:\n"
+            "    sql_template = 'SELECT * FROM table WHERE {partition_clause}'\n"
+            "    def __init__(self, partition_clause=None):\n"
+            "        self.partition_clause = partition_clause\n"
+        )
+        fixed = vulnerable.replace(
+            "self.partition_clause = partition_clause",
+            "self.partition_clause = _initialize_partition_clause(partition_clause)",
+        )
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            (base / "vulnerable").mkdir()
+            (base / "fixed").mkdir()
+            (base / "vulnerable" / "sql.py").write_text(vulnerable, encoding="utf-8")
+            (base / "fixed" / "sql.py").write_text(fixed, encoding="utf-8")
+            retriever = SecuritySemanticRetriever(per_category=1)
+            vulnerable_candidates = retriever.retrieve(base / "vulnerable")
+            fixed_candidates = retriever.retrieve(base / "fixed")
+
+        def boundary(candidates):
+            candidate = next(
+                item for item in candidates
+                if item.qualname == "SQLColumnCheckOperator.__init__"
+            )
+            return next(
+                item.status for item in candidate.invariants
+                if item.identifier == "sql-partition-clause-boundary"
+            )
+
+        self.assertEqual("risk", boundary(vulnerable_candidates))
+        self.assertEqual("mitigation", boundary(fixed_candidates))
+
+    def test_evidence_packet_preserves_categories_and_fills_budget(self):
+        def candidate(index, category, invariant=False):
+            invariants = ()
+            if invariant:
+                invariants = (SecurityInvariant(
+                    identifier="risk-%d" % index,
+                    category=category,
+                    status="risk",
+                    summary="risk",
+                ),)
+            return SemanticCandidate(
+                path="src/%d.py" % index,
+                qualname="candidate_%d" % index,
+                start_line=1,
+                end_line=2,
+                category=category,
+                score=100 - index,
+                signals=("signal",),
+                code="def candidate_%d(): pass\n" % index,
+                invariants=invariants,
+            )
+
+        candidates = [
+            candidate(0, "command", True), candidate(1, "command"),
+            candidate(2, "path", True), candidate(3, "path"),
+            candidate(4, "sql", True), candidate(5, "sql"),
+            candidate(6, "command"), candidate(7, "path"),
+        ]
+        default_packet = SecuritySemanticRetriever.evidence_packet(candidates)
+        packet = SecuritySemanticRetriever.evidence_packet(candidates, 6)
+        self.assertEqual(8, len(default_packet))
+        self.assertEqual(6, len(packet))
+        self.assertEqual({"command", "path", "sql"}, {item.category for item in packet})
+
+    def test_evidence_packet_keeps_second_independent_invariant_anchor(self):
+        def candidate(index, category, invariant_id, status="risk"):
+            return SemanticCandidate(
+                path="src/%d.py" % index,
+                qualname="candidate_%d" % index,
+                start_line=1,
+                end_line=2,
+                category=category,
+                score=100 - index,
+                signals=("signal",),
+                code="def candidate_%d(): pass\n" % index,
+                invariants=(SecurityInvariant(
+                    identifier=invariant_id,
+                    category=category,
+                    status=status,
+                    summary="hypothesis",
+                ),),
+            )
+
+        candidates = [
+            candidate(0, "command", "command-boundary"),
+            candidate(1, "sql", "sql-boundary"),
+            candidate(2, "path", "path-boundary"),
+            candidate(3, "command", "command-boundary"),
+            candidate(4, "command", "command-boundary"),
+            candidate(5, "sql", "sql-boundary", "mitigation"),
+        ]
+        packet = SecuritySemanticRetriever.evidence_packet(candidates, 6)
+        packet_symbols = {item.qualname for item in packet}
+        self.assertIn("candidate_3", packet_symbols)
+        self.assertIn("candidate_5", packet_symbols)
+
+    def test_platform_file_open_is_kept_as_shell_mitigation_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "viewer.py").write_text(
+                "import os\n"
+                "class WindowsViewer:\n"
+                "    def show_file(self, path):\n"
+                "        os.startfile(path)\n"
+                "        return 1\n",
+                encoding="utf-8",
+            )
+            candidates = SecuritySemanticRetriever().retrieve(root)
+
+        candidate = next(
+            item for item in candidates if item.qualname == "WindowsViewer.show_file"
+        )
+        self.assertIn(
+            ("command-shell-data-boundary", "mitigation"),
+            {(item.identifier, item.status) for item in candidate.invariants},
+        )
 
 
 if __name__ == "__main__":

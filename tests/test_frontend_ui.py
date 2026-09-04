@@ -1,255 +1,116 @@
+"""T10 前端结构契约（issue #43）：React 是唯一前端表面，legacy web/ 已删除。
+
+legacy 时代本文件逐行锚定 web/index.html + web/app.js 的行为，是因为 Vanilla JS
+没有测试运行器；React 有 Vitest 之后行为断言由 frontend/ 套件承担，本文件改为
+锚定跨栈结构不变量：
+
+- legacy 目录删除、品牌资产迁移；
+- api.py 静态路由只服务 React dist（/ 重定向 /app/、无构建产物 fail-closed）；
+- 前端源包含任务详情对等功能（修复预览 / 修复分支 / 反馈 / 裁决推导）；
+- Docker / CI / 文档不再引用 web/。
+"""
+
 from __future__ import annotations
 
-from html.parser import HTMLParser
 from pathlib import Path
-import re
-import shutil
-import subprocess
 import unittest
-import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / "web"
 
 
-class _StrictEnoughHTMLParser(HTMLParser):
-    """Exercise the document parser so malformed markup fails loudly."""
+def _read(*parts: str) -> str:
+    return (ROOT.joinpath(*parts)).read_text(encoding="utf-8")
 
 
-def _read(name: str) -> str:
-    return (WEB / name).read_text(encoding="utf-8")
+class ReactOnlyFrontendContractTests(unittest.TestCase):
+    def test_legacy_web_directory_is_removed_and_logo_moves_to_docs(self) -> None:
+        self.assertFalse((ROOT / "web").exists(), "legacy web/ 目录必须整体删除")
+        self.assertTrue(
+            (ROOT / "docs" / "assets" / "lima-mark.svg").is_file(),
+            "README 引用的品牌资产应保留在 docs/assets/",
+        )
+        readme = _read("README.md")
+        self.assertIn("docs/assets/lima-mark.svg", readme)
+        self.assertNotIn("web/lima-mark.svg", readme)
+
+    def test_api_serves_react_only_with_root_redirect(self) -> None:
+        api = _read("lima", "api.py")
+        self.assertNotIn("WEB_ROOT", api)
+        self.assertNotIn("_serve_file", api)
+        self.assertNotIn("/assets/app.js", api)
+        self.assertNotIn("/assets/login.css", api)
+        # 根路径正式切换（冻结决策 3）：/ → /app/，无构建产物时 fail-closed 404。
+        self.assertIn('self.send_header("Location", "/app/")', api)
+        self.assertIn("frontend build not present", api)
+        # GitHub App 安装回跳指向 React 设置页（legacy #github-install 已退役）。
+        self.assertIn('self.send_header("Location", "/app/#/settings?"', api)
+
+    def test_task_detail_parity_anchors_exist_in_react_sources(self) -> None:
+        client = _read("frontend", "src", "shared", "api", "client.ts")
+        for endpoint in (
+            "/repair-preview",
+            "/fix",
+            "/feedback",
+            "/github/installations",
+        ):
+            self.assertIn(endpoint, client)
+        detail = _read("frontend", "src", "features", "tasks", "TaskDetailPage.tsx")
+        for surface in (
+            "生成修复预览",
+            "创建修复分支",
+            "这个判断准确吗？",
+            "证据处置：",
+        ):
+            self.assertIn(surface, detail)
+        model = _read("frontend", "src", "features", "tasks", "model.ts")
+        # 裁决推导 fail-closed 语义（与已删除的 web/app.js 逐字对齐）。
+        self.assertIn("legacy-fail-closed", model)
+        self.assertIn("unverified-finding-requires-human-review", model)
+        self.assertIn("候选 · 需复核", model)
+
+    def test_router_covers_the_workspace_surfaces(self) -> None:
+        router = _read("frontend", "src", "router", "index.tsx")
+        for route in (
+            "audit/new",
+            "tasks/:taskId",
+            "experiments",
+            "skills",
+            "settings",
+            "evolution",
+        ):
+            self.assertIn(f'path: "{route}"', router)
+
+    def test_frontend_toolchain_scripts_are_declared(self) -> None:
+        package = _read("frontend", "package.json")
+        for script in (
+            '"typecheck"',
+            '"test:coverage"',
+            '"build"',
+            '"e2e"',
+        ):
+            self.assertIn(script, package)
+
+    def test_build_pipeline_no_longer_references_legacy_web(self) -> None:
+        dockerfile = _read("Dockerfile")
+        self.assertNotIn(" ./web", dockerfile)
+        self.assertNotIn("COPY web", dockerfile)
+        # 运行时无 Node：frontend 仅存在于构建期阶段。
+        self.assertIn("AS frontend-build", dockerfile)
+        self.assertIn("--from=frontend-build /build/dist", dockerfile)
+        workflow = _read(".github", "workflows", "ci.yml")
+        self.assertNotIn("node --check", workflow)
+
+    def test_contributor_docs_point_to_the_frontend_toolchain(self) -> None:
+        contributing = _read("CONTRIBUTING.md")
+        self.assertNotIn("web/app.js", contributing)
+        self.assertNotIn("node --check", contributing)
+        self.assertIn("npm run typecheck", contributing)
+        collaboration = _read("docs", "GITHUB_COLLABORATION.md")
+        self.assertNotIn("node --check web", collaboration)
+        handoff = _read("docs", "DEVELOPER_HANDOFF.md")
+        self.assertNotIn("node --check web", handoff)
 
 
-def _check_task_oriented_navigation_and_first_run_guidance() -> None:
-    html = _read("index.html")
-    parser = _StrictEnoughHTMLParser()
-    parser.feed(html)
-    parser.close()
-
-    assert "砺码 · LIMA" in html
-    assert "SecurityAgent" not in html
-    assert "EvoAgent" not in html
-    for label in ("开始", "发起审计", "审计结果", "系统能力", "模型设置"):
-        assert label in html
-    assert 'id="demo-login"' in html
-    assert 'id="overview-demo"' in html
-    assert 'id="load-audit-sample"' in html
-    assert html.count('data-step="') == 3
-    assert 'data-audit-mode="repository"' in html
-    assert 'data-audit-mode="diff"' in html
-
-
-def _check_report_surface_is_human_readable_not_a_raw_payload_dump() -> None:
-    html = _read("index.html")
-    script = _read("app.js")
-
-    assert '<div id="task-report"' in html
-    assert '<pre id="task-report"' not in html
-    assert "function renderTaskReport" in script
-    assert "finding-table" in script
-    assert "severity-bars" in script
-    assert "formatJson" not in script
-    assert "JSON.stringify(task" not in script
-
-
-def _check_frontend_includes_feedback_guards_and_destructive_confirmation() -> None:
-    html = _read("index.html")
-    script = _read("app.js")
-
-    assert 'id="toast-stack"' in html
-    assert 'id="confirm-modal"' in html
-    assert "function confirmAction" in script
-    assert "await confirmAction" in script
-    assert "spinner-large" in script
-    assert 'role="alert"' in html
-
-
-def _check_model_helper_never_persists_or_posts_the_user_api_key() -> None:
-    html = _read("index.html")
-    script = _read("app.js")
-
-    assert 'id="model-api-key"' in html
-    assert 'autocomplete="off"' in html
-    assert "function buildModelConfig" in script
-    assert "LIMA_DEEPSEEK_API_KEY" in script
-    assert "LIMA_OPENROUTER_API_KEY" in script
-    assert "LIMA_LLM_API_KEY" in script
-    assert "EVOAGENT_LLM_API_KEY" not in script
-    assert not re.search(r"(?:localStorage|sessionStorage)\.setItem\([^\n]*api[_-]?key", script, re.I)
-    assert "/v1/settings" not in script
-
-
-def _check_repository_target_normalization_rejects_unsafe_path_shapes() -> None:
-    script = _read("app.js")
-
-    assert "function normalizeRepositoryTarget" in script
-    assert 'pieces.length !== 2' in script
-    assert 'part === ".."' in script
-    assert "github.com" in script
-
-
-def _check_visual_system_has_focus_tooltips_loading_and_responsive_rules() -> None:
-    css = _read("app.css")
-    html = _read("index.html")
-
-    assert "--primary: #2457d6" in css
-    assert "--page: #f4f7fb" in css
-    assert ":focus-visible" in css
-    assert "[data-tooltip]" in css
-    assert "prefers-reduced-motion" in css
-    assert "@media (max-width: 700px)" in css
-    assert 'data-tooltip="刷新当前页面数据"' in html
-    assert 'data-tooltip="显示或隐藏 API Key"' in html
-
-
-def _check_lima_logo_is_safe_scalable_and_wired_as_favicon() -> None:
-    html = _read("index.html")
-    logo_path = WEB / "lima-mark.svg"
-    logo = logo_path.read_text(encoding="utf-8")
-    api = (ROOT / "lima" / "api.py").read_text(encoding="utf-8")
-
-    root = ET.parse(logo_path).getroot()
-    assert root.tag.endswith("svg")
-    assert root.attrib["viewBox"] == "0 0 64 64"
-    assert "<script" not in logo.lower()
-    assert '<link rel="icon" type="image/svg+xml"' in html
-    assert html.count("/assets/lima-mark.svg") == 3
-    assert 'if path == "/assets/lima-mark.svg"' in api
-
-
-def _check_cxx_report_contract_exposes_layered_evidence_safely() -> None:
-    script = _read("app.js")
-    css = _read("app.css")
-
-    for token in (
-        "function analysisModeLabel", "纯源码候选", "构建支持的静态验证",
-        "Sanitizer 动态确认", "纯源码分析，尚未经过目标项目构建验证",
-        "工具证据 / trace", "分析降级说明", "不支持自动修复",
-        "finding.language", "finding.symbol", "evidence_records", "escapeHtml",
-        "automatic_repair !== false", "VERIFIED_STATES",
-    ):
-        assert token in script
-    assert "includes(\"verified\")" not in script
-    assert "escapeHtml(safeCxxText(finding.language)" in script
-    assert "escapeHtml(safeCxxText(finding.symbol)" in script
-    assert "escapeHtml(safeCxxText(record.snippet)" in script
-    assert "[内部地址已隐藏]" in script
-    assert "[运行路径已隐藏]" in script
-    assert "[敏感参数已隐藏]" in script
-    assert "finding-analysis-mode" in css
-    assert "source-only-warning" in css
-
-
-def _check_cxx_report_repair_gate_uses_explicit_eligibility() -> None:
-    script = _read("app.js")
-
-    assert "function canAutomaticallyRepair" in script
-    assert "!isCxxFinding(finding)" in script
-    assert "const hasRepairableFinding = findings.some(" in script
-    assert "reportReady && repositoryScan && hasRepairableFinding" in script
-    assert "reportReady && task.pull_request && hasRepairableFinding" in script
-
-
-def _check_frontend_script_parses_with_node() -> None:
-    node = shutil.which("node")
-    assert node is not None, "Node.js is required for the frontend syntax gate"
-    completed = subprocess.run(
-        [node, "--check", str(WEB / "app.js")],
-        capture_output=True, text=True, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-
-
-def _check_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair() -> None:
-    script = _read("app.js")
-
-    assert "const cxxAutomaticRepairNote = cxxFinding ?" in script
-    assert "filter((record) => record && typeof record === \"object\" && !Array.isArray(record) && Object.keys(record).length)" in script
-    assert "const safeRecords = records.filter(" in script
-
-
-def _check_cxx_frontend_helpers_execute_safe_redaction_and_fallback() -> None:
-    node = shutil.which("node")
-    assert node is not None, "Node.js is required for the frontend behavior gate"
-    program = r'''
-const fs = require("fs");
-const source = fs.readFileSync(process.argv[1], "utf8");
-function extractFunction(name) {
-  const start = source.indexOf(`function ${name}(`);
-  if (start < 0) throw new Error(`missing ${name}`);
-  const bodyStart = source.indexOf("{", start);
-  let depth = 0;
-  for (let index = bodyStart; index < source.length; index += 1) {
-    if (source[index] === "{") depth += 1;
-    if (source[index] === "}") depth -= 1;
-    if (depth === 0) return source.slice(start, index + 1);
-  }
-  throw new Error(`unterminated ${name}`);
-}
-const escapeHtml = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const safeCxxText = new Function(`${extractFunction("safeCxxText")}; return safeCxxText;`)();
-const cxxEvidenceRecords = new Function("escapeHtml", "safeCxxText", `${extractFunction("cxxEvidenceRecords")}; return cxxEvidenceRecords;`)(escapeHtml, safeCxxText);
-const rendered = safeCxxText('src/x.c ./src/x.c ../src/x.c /work/tmp/x C:\\secret\\x --key secret key=secret --key "quoted secret" monkey=ordinary');
-for (const value of ["/work/tmp/x", "C:\\secret\\x", "secret"]) {
-  if (rendered.includes(value)) throw new Error(`leaked ${value}`);
-}
-for (const value of ["src/x.c", "./src/x.c", "../src/x.c"]) {
-  if (!rendered.includes(value)) throw new Error(`lost ${value}`);
-}
-if (!rendered.includes("monkey=ordinary")) throw new Error("over-redacted ordinary evidence");
-const fallback = cxxEvidenceRecords({
-  evidence_records: [null, 3, [], {}], source: "tool", path: "src/x.c", line: 7,
-  evidence: "fallback <evidence>",
-});
-if (!fallback.includes("fallback &lt;evidence&gt;")) throw new Error("missing fallback");
-if (fallback.includes("undefined")) throw new Error("unsafe record field");
-const mixed = cxxEvidenceRecords({
-  evidence_records: [[], null, { source: "clang", path: "src/x.c", line: 7, snippet: "valid" }],
-  source: "tool", path: "src/x.c", line: 7, evidence: "fallback",
-});
-if (!mixed.includes("valid") || mixed.includes("fallback")) throw new Error("invalid mixed-record filtering");
-'''
-    completed = subprocess.run(
-        [node, "-e", program, str(WEB / "app.js")],
-        capture_output=True, text=True, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-
-
-class FrontendUiTests(unittest.TestCase):
-    def test_task_oriented_navigation_and_first_run_guidance(self) -> None:
-        _check_task_oriented_navigation_and_first_run_guidance()
-
-    def test_report_surface_is_human_readable_not_a_raw_payload_dump(self) -> None:
-        _check_report_surface_is_human_readable_not_a_raw_payload_dump()
-
-    def test_feedback_guards_and_destructive_confirmation(self) -> None:
-        _check_frontend_includes_feedback_guards_and_destructive_confirmation()
-
-    def test_model_helper_never_persists_or_posts_the_user_api_key(self) -> None:
-        _check_model_helper_never_persists_or_posts_the_user_api_key()
-
-    def test_repository_target_normalization_rejects_unsafe_path_shapes(self) -> None:
-        _check_repository_target_normalization_rejects_unsafe_path_shapes()
-
-    def test_visual_system_has_focus_tooltips_loading_and_responsive_rules(self) -> None:
-        _check_visual_system_has_focus_tooltips_loading_and_responsive_rules()
-
-    def test_lima_logo_is_safe_scalable_and_wired_as_favicon(self) -> None:
-        _check_lima_logo_is_safe_scalable_and_wired_as_favicon()
-
-    def test_cxx_report_contract_exposes_layered_evidence_safely(self) -> None:
-        _check_cxx_report_contract_exposes_layered_evidence_safely()
-
-    def test_cxx_report_repair_gate_uses_explicit_eligibility(self) -> None:
-        _check_cxx_report_repair_gate_uses_explicit_eligibility()
-
-    def test_frontend_script_parses_with_node(self) -> None:
-        _check_frontend_script_parses_with_node()
-
-    def test_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair(self) -> None:
-        _check_cxx_frontend_contract_handles_malformed_records_and_never_enables_repair()
-
-    def test_cxx_frontend_helpers_execute_safe_redaction_and_fallback(self) -> None:
-        _check_cxx_frontend_helpers_execute_safe_redaction_and_fallback()
+if __name__ == "__main__":
+    unittest.main()

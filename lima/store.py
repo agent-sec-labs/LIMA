@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
+from .task_progress import progress_summary
 
 
 def utc_now() -> str:
@@ -52,6 +53,8 @@ class TaskStore:
                     input_json TEXT NOT NULL,
                     report_json TEXT,
                     error TEXT,
+                    progress_json TEXT,
+                    failure_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )"""
@@ -159,6 +162,10 @@ class TaskStore:
             )
             self._ensure_column(conn, "tasks", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             self._ensure_column(conn, "tasks", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+            # 运行时进度独立于不可变的 input_json（T1 契约）。
+            self._ensure_column(conn, "tasks", "progress_json", "TEXT")
+            # 结构化失败同样走独立列，与 TaskState/progress 正交（T2/T4 契约）。
+            self._ensure_column(conn, "tasks", "failure_json", "TEXT")
             self._ensure_column(conn, "installations", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS checkpoints (
@@ -171,6 +178,36 @@ class TaskStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(task_id, node),
                     FOREIGN KEY(task_id) REFERENCES tasks(id)
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS experiment_runs (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    state TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    dataset_path TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    progress_json TEXT NOT NULL,
+                    result_json TEXT,
+                    error TEXT,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS experiment_cases (
+                    run_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    result_json TEXT,
+                    error TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, case_id),
+                    FOREIGN KEY(run_id) REFERENCES experiment_runs(id)
                 )"""
             )
             conn.execute(
@@ -395,6 +432,10 @@ class TaskStore:
         value["input"] = json.loads(value.pop("input_json"))
         report_json = value.pop("report_json")
         value["report"] = json.loads(report_json) if report_json else None
+        progress_json = value.pop("progress_json", None)
+        value["progress"] = json.loads(progress_json) if progress_json else None
+        failure_json = value.pop("failure_json", None)
+        value["failure"] = json.loads(failure_json) if failure_json else None
         value["trace"] = [dict(item) for item in events]
         value["collaboration"] = []
         for message in messages:
@@ -411,6 +452,24 @@ class TaskStore:
                 (task_id, message["sender"], message["recipient"], message["kind"],
                  message.get("correlation_id", ""),
                  json.dumps(message.get("content", {}), ensure_ascii=False), utc_now()),
+            )
+
+    def update_task_progress(self, task_id: str, progress: dict[str, Any]) -> None:
+        """Persist runtime progress without touching immutable task input."""
+
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET progress_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(progress, ensure_ascii=False), utc_now(), task_id),
+            )
+
+    def update_task_failure(self, task_id: str, failure: dict[str, Any]) -> None:
+        """Persist the structured failure payload on its own column."""
+
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET failure_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(failure, ensure_ascii=False), utc_now(), task_id),
             )
 
     def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
@@ -485,15 +544,20 @@ class TaskStore:
 
     def list_tasks(self, limit: int = 50, tenant_id: Optional[str] = None) -> list:
         with self._connect() as conn:
+            select_columns = (
+                "id,state,repository,pull_request,error,created_at,updated_at,"
+                "tenant_id,input_json,progress_json"
+            )
             if tenant_id is None:
                 rows = conn.execute(
-                    "SELECT id,state,repository,pull_request,error,created_at,updated_at,tenant_id,input_json "
-                    "FROM tasks ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 200)),)
+                    "SELECT " + select_columns + " FROM tasks "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (max(1, min(limit, 200)),),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id,state,repository,pull_request,error,created_at,updated_at,tenant_id,input_json "
-                    "FROM tasks WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?",
+                    "SELECT " + select_columns + " FROM tasks WHERE tenant_id=? "
+                    "ORDER BY created_at DESC LIMIT ?",
                     (tenant_id, max(1, min(limit, 200))),
                 ).fetchall()
         values = []
@@ -501,6 +565,10 @@ class TaskStore:
             value = dict(row)
             payload = json.loads(value.pop("input_json"))
             value["task_type"] = payload.get("task_type", "review")
+            progress_json = value.pop("progress_json", None)
+            value["progress"] = progress_summary(
+                json.loads(progress_json) if progress_json else None
+            )
             values.append(value)
         return values
 
@@ -845,6 +913,142 @@ class TaskStore:
             ).fetchone()
         return str(row["tenant_id"]) if row else None
 
+    @staticmethod
+    def _experiment_value(row: sqlite3.Row) -> Dict[str, Any]:
+        value = dict(row)
+        value["manifest"] = json.loads(value.pop("manifest_json"))
+        value["progress"] = json.loads(value.pop("progress_json"))
+        raw_result = value.pop("result_json")
+        value["result"] = json.loads(raw_result) if raw_result else None
+        value["cancel_requested"] = bool(value["cancel_requested"])
+        return value
+
+    def create_experiment(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        now = record.get("created_at") or utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO experiment_runs(id,tenant_id,state,mode,dataset_path,"
+                "manifest_json,progress_json,result_json,error,cancel_requested,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,NULL,NULL,0,?,?)",
+                (
+                    record["id"], record.get("tenant_id", "default"),
+                    record["state"], record["mode"], record["dataset_path"],
+                    json.dumps(record["manifest"], ensure_ascii=False),
+                    json.dumps(record.get("progress") or {}, ensure_ascii=False),
+                    now, now,
+                ),
+            )
+        return self.get_experiment(record["id"]) or {}
+
+    def get_experiment(
+        self, run_id: str, tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM experiment_runs WHERE id=?"
+        params: list[Any] = [run_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=?"
+            params.append(tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        if not row:
+            return None
+        value = self._experiment_value(row)
+        value["cases"] = self.list_experiment_cases(run_id)
+        return value
+
+    def list_experiments(
+        self, limit: int = 50, tenant_id: Optional[str] = None,
+    ) -> list:
+        query = "SELECT * FROM experiment_runs"
+        params: list[Any] = []
+        if tenant_id is not None:
+            query += " WHERE tenant_id=?"
+            params.append(tenant_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(limit, 200)))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        values = []
+        for row in rows:
+            value = self._experiment_value(row)
+            value["result_available"] = value.pop("result") is not None
+            values.append(value)
+        return values
+
+    def update_experiment(
+        self, run_id: str, state: str, progress: Dict[str, Any],
+        *, error: str = "", result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        rendered_result = (
+            json.dumps(result, ensure_ascii=False) if result is not None else None
+        )
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE experiment_runs SET state=?,progress_json=?,"
+                "result_json=COALESCE(?,result_json),error=?,updated_at=? WHERE id=?",
+                (
+                    state, json.dumps(progress, ensure_ascii=False), rendered_result,
+                    error[:2000] or None, utc_now(), run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("experiment not found")
+
+    def save_experiment_case(
+        self, run_id: str, case_id: str, stage: str, status: str,
+        *, attempt: int = 1, result: Optional[Dict[str, Any]] = None,
+        error: str = "",
+    ) -> None:
+        rendered = json.dumps(result, ensure_ascii=False) if result is not None else None
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO experiment_cases(run_id,case_id,stage,status,attempt,"
+                "result_json,error,updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id,case_id) DO UPDATE SET stage=excluded.stage,"
+                "status=excluded.status,attempt=excluded.attempt,"
+                "result_json=COALESCE(excluded.result_json,experiment_cases.result_json),"
+                "error=excluded.error,updated_at=excluded.updated_at",
+                (
+                    run_id, case_id, stage, status, attempt, rendered,
+                    error[:2000] or None, utc_now(),
+                ),
+            )
+
+    def list_experiment_cases(self, run_id: str) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM experiment_cases WHERE run_id=? ORDER BY case_id",
+                (run_id,),
+            ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            raw = value.pop("result_json")
+            value["result"] = json.loads(raw) if raw else None
+            values.append(value)
+        return values
+
+    def request_experiment_cancel(
+        self, run_id: str, tenant_id: Optional[str] = None,
+    ) -> bool:
+        query = "UPDATE experiment_runs SET cancel_requested=1,updated_at=? WHERE id=?"
+        params: list[Any] = [utc_now(), run_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=?"
+            params.append(tenant_id)
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(query, params)
+            return cursor.rowcount == 1
+
+    def reset_experiment_cancel(self, run_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE experiment_runs SET cancel_requested=0,updated_at=? WHERE id=?",
+                (utc_now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("experiment not found")
+
     def save_checkpoint(
         self, task_id: str, node: str, state: Dict[str, Any], status: str = "completed",
         attempt: int = 1, error: str = "",
@@ -1000,6 +1204,18 @@ class TaskStore:
                 (tenant_id, repository, int(auto_fix)),
             )
 
+    def list_repository_grants(self, tenant_id: str) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT repository,auto_fix FROM repository_grants "
+                "WHERE tenant_id=? ORDER BY repository",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {"repository": row["repository"], "auto_fix": bool(row["auto_fix"])}
+            for row in rows
+        ]
+
     def repository_allowed(
         self, tenant_id: str, repository: str, require_auto_fix: bool = False,
     ) -> bool:
@@ -1012,7 +1228,9 @@ class TaskStore:
                 (tenant_id, repository),
             ).fetchone()
         if total == 0:
-            return True
+            # 未配置任何授权时，审查（只读分析）保持放行以兼容默认部署；
+            # 自动修复会触发 GitHub 写操作，必须依赖显式授权，fail-closed。
+            return not require_auto_fix
         return bool(row and (not require_auto_fix or row["auto_fix"]))
 
     def audit(

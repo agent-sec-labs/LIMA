@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import importlib
 import io
+import itertools
 import json
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+try:
+    import resource
+except ImportError:  # Windows hosts have no resource module.
+    resource = None
 
 from cxx_analyzer import sandbox
 from cxx_analyzer.config import AnalyzerSettings
@@ -30,6 +39,22 @@ from lima.report import to_markdown
 from lima.workspace import RepositoryWorkspace
 
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def prepared_snapshot(temporary: str):
+    """Prepare one bounded snapshot for sandbox-exercising tests."""
+
+    base = Path(temporary)
+    repository = base / "imports" / "team" / "project"
+    repository.mkdir(parents=True)
+    (repository / "src").mkdir()
+    (repository / "src" / "main.cpp").write_text(
+        "int main() { return 0; }\n", encoding="utf-8"
+    )
+    work = base / "work"
+    work.mkdir()
+    fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+    return prepare_snapshot(base / "imports", "team/project", fingerprint, work)
 
 
 def analyzer_settings(**changes: object) -> AnalyzerSettings:
@@ -108,8 +133,12 @@ def normalized_finding(
     )
 
 
+_RUN_ID_COUNTER = itertools.count(1)
+
+
 def valid_tool_run(tool: str = "semgrep", status: str = "completed") -> dict[str, object]:
     return {
+        "run_id": f"run-{next(_RUN_ID_COUNTER)}",
         "tool": tool,
         "status": status,
         "returncode": 0,
@@ -133,17 +162,7 @@ class FakeResponse(io.BytesIO):
 
 class FinalSnapshotSecurityTests(unittest.TestCase):
     def _snapshot(self, temporary: str):
-        base = Path(temporary)
-        repository = base / "imports" / "team" / "project"
-        repository.mkdir(parents=True)
-        (repository / "src").mkdir()
-        (repository / "src" / "main.cpp").write_text(
-            "int main() { return 0; }\n", encoding="utf-8"
-        )
-        work = base / "work"
-        work.mkdir()
-        fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
-        return prepare_snapshot(base / "imports", "team/project", fingerprint, work)
+        return prepared_snapshot(temporary)
 
     def test_verified_source_is_read_only_and_only_request_owned_roots_are_writable(self):
         """C1: mutating declared source must not be authorized by the OS policy."""
@@ -173,6 +192,19 @@ class FinalSnapshotSecurityTests(unittest.TestCase):
             self.skipTest("required Landlock ABI is unavailable")
         with tempfile.TemporaryDirectory() as temporary:
             with self._snapshot(temporary) as snapshot:
+                probe = run_step(
+                    [sys.executable, "-c", "print('probe-ok', end='')"],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                    env={},
+                )
+                if probe.status != "completed":
+                    self.skipTest(
+                        "Landlock enforcement unavailable in this environment: "
+                        f"{probe.diagnostic}"
+                    )
                 code = (
                     "from pathlib import Path; "
                     "denied=False; "
@@ -212,6 +244,19 @@ class FinalSnapshotSecurityTests(unittest.TestCase):
             self.skipTest("required Landlock ABI is unavailable")
         with tempfile.TemporaryDirectory() as temporary:
             with self._snapshot(temporary) as snapshot:
+                probe = run_step(
+                    [sys.executable, "-c", "print('probe-ok', end='')"],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                    env={},
+                )
+                if probe.status != "completed":
+                    self.skipTest(
+                        "Landlock enforcement unavailable in this environment: "
+                        f"{probe.diagnostic}"
+                    )
                 for name, leader_status, timeout in (
                     ("success", 0, 5),
                     ("failure", 7, 5),
@@ -245,6 +290,388 @@ class FinalSnapshotSecurityTests(unittest.TestCase):
                         self.assertEqual("failed", result.status)
                     time.sleep(1.8)
                     self.assertFalse(marker.exists(), name)
+
+
+def _proc_state(pid: int) -> str | None:
+    """Return the scheduler state of a live pid, or None once it is gone."""
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    tail = stat.rsplit(")", 1)
+    if len(tail) != 2:
+        return None
+    fields = tail[1].split()
+    return fields[0] if fields else None
+
+
+@unittest.skipUnless(sys.platform == "linux", "process isolation boundary requires Linux")
+class ProcessIsolationTests(unittest.TestCase):
+    """Residual 1: same-UID process control and orphan/zombie reaping."""
+
+    _ESCAPE_TOOL = '''
+import ctypes, os, resource, sys, time
+from pathlib import Path
+
+mode = sys.argv[1]
+grand_marker = Path(sys.argv[2])
+result_marker = Path(sys.argv[3])
+
+pid = os.fork()
+if pid == 0:
+    staged = grand_marker.with_suffix(".staged")
+    staged.write_text(str(os.getpid()), encoding="utf-8")
+    staged.rename(grand_marker)
+    for descriptor in (0, 1, 2):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    time.sleep(30)
+    os._exit(0)
+
+while not grand_marker.exists():
+    time.sleep(0.05)
+
+escape = {}
+try:
+    os.setsid()
+    escape["setsid"] = "granted"
+except OSError as exc:
+    escape["setsid"] = "errno:%d" % (exc.errno or -1)
+
+class RLimit(ctypes.Structure):
+    _fields_ = [("cur", ctypes.c_long), ("max", ctypes.c_long)]
+
+libc = ctypes.CDLL(None, use_errno=True)
+old = RLimit()
+ctypes.set_errno(0)
+prc = libc.prlimit64(os.getppid(), 7, None, ctypes.byref(old))
+if prc == 0:
+    target = 64 if (old.cur == -1 or old.cur > 64) else 1
+    new = RLimit(target, old.max)
+    ctypes.set_errno(0)
+    prc = libc.prlimit64(os.getppid(), 7, ctypes.byref(new), None)
+    escape["prlimit64"] = "granted" if prc == 0 else "errno:%d" % ctypes.get_errno()
+else:
+    escape["prlimit64"] = "errno:%d" % ctypes.get_errno()
+
+# Self-targeted limits must stay usable: CPython setrlimit uses prlimit64(0).
+try:
+    current = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, current)
+    escape["self_prlimit64"] = "granted"
+except OSError as exc:
+    escape["self_prlimit64"] = "errno:%d" % (exc.errno or -1)
+
+# clone3 must fail with ENOSYS so glibc falls back to plain clone.
+ctypes.set_errno(0)
+crc = libc.syscall(435, 0, 0)
+escape["clone3"] = "errno:%d" % (ctypes.get_errno() if crc == -1 else 0)
+
+result_marker.write_text(repr(escape), encoding="utf-8")
+if mode == "timeout":
+    time.sleep(30)
+os._exit({"success": 0, "failure": 7}[mode])
+'''
+
+    def _run_untrusted_process_tree(self, mode: str) -> SimpleNamespace:
+        if sandbox.landlock_abi() < sandbox.MIN_LANDLOCK_ABI:
+            self.skipTest("required Landlock ABI is unavailable")
+        before = resource.getrlimit(resource.RLIMIT_NOFILE)
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                with prepared_snapshot(temporary) as snapshot:
+                    probe = run_step(
+                        [sys.executable, "-c", "print('probe-ok', end='')"],
+                        snapshot,
+                        ".",
+                        timeout_seconds=10,
+                        max_output_bytes=1024,
+                        env={},
+                    )
+                    if probe.status != "completed":
+                        self.skipTest(
+                            "Landlock enforcement unavailable in this environment: "
+                            f"{probe.diagnostic}"
+                        )
+                    grand_marker = snapshot.scratch_root / f"grandchild-{mode}.txt"
+                    result_marker = snapshot.scratch_root / f"escape-{mode}.txt"
+                    result = run_step(
+                        [
+                            sys.executable, "-c", self._ESCAPE_TOOL,
+                            mode, str(grand_marker), str(result_marker),
+                        ],
+                        snapshot,
+                        ".",
+                        3 if mode == "timeout" else 10,
+                        1024,
+                        {},
+                    )
+                    expected = {
+                        "success": "completed",
+                        "failure": "failed",
+                        "timeout": "timed-out",
+                    }[mode]
+                    self.assertEqual(expected, result.status)
+                    grandchild_pid = int(grand_marker.read_text(encoding="utf-8"))
+                    settle = time.monotonic() + 5.0
+                    state = _proc_state(grandchild_pid)
+                    while time.monotonic() < settle and state not in (None, "Z"):
+                        time.sleep(0.1)
+                        state = _proc_state(grandchild_pid)
+                    after = resource.getrlimit(resource.RLIMIT_NOFILE)
+                    return SimpleNamespace(
+                        parent_limits_unchanged=before == after,
+                        live_descendants=(
+                            [] if state in (None, "Z") else [grandchild_pid]
+                        ),
+                        zombie_descendants=[grandchild_pid] if state == "Z" else [],
+                        escape_report=(
+                            result_marker.read_text(encoding="utf-8")
+                            if result_marker.exists()
+                            else ""
+                        ),
+                    )
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, before)
+
+    def test_success_failure_timeout_cannot_escape_or_leave_zombies(self):
+        for mode in ("success", "failure", "timeout"):
+            with self.subTest(mode=mode):
+                result = self._run_untrusted_process_tree(mode)
+                self.assertTrue(result.parent_limits_unchanged)
+                self.assertEqual([], result.live_descendants)
+                self.assertEqual([], result.zombie_descendants)
+                if mode != "timeout":
+                    self.assertIn("'setsid': 'errno:", result.escape_report)
+                    self.assertIn("'prlimit64': 'errno:", result.escape_report)
+                    self.assertIn("'self_prlimit64': 'granted'", result.escape_report)
+                    self.assertIn(
+                        f"'clone3': 'errno:{errno.ENOSYS}'", result.escape_report
+                    )
+
+
+class _FakeClock:
+    """Deterministic monotonic clock whose sleeps advance simulated time."""
+
+    def __init__(self) -> None:
+        self._now = 1000.0
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self._now += max(0.0, seconds)
+
+
+class _HungProcess:
+    """Popen stand-in whose waits consume their full budget and never exit."""
+
+    pid = 424242
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self._clock = clock
+        self.stdout: object | None = None
+        self.stderr: object | None = None
+
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is not None and timeout > 0:
+            self._clock.sleep(timeout)
+        raise subprocess.TimeoutExpired("hung-tool", timeout)
+
+
+class _NeverEofStream:
+    """Pipe stand-in whose reader blocks until released, like a held pipe."""
+
+    def __init__(self) -> None:
+        self._release = threading.Event()
+
+    def read(self, size: int = -1) -> bytes:  # noqa: ARG002 - pipe protocol
+        self._release.wait()
+        return b""
+
+    def close(self) -> None:
+        self._release.set()
+
+
+class RequestDeadlineTests(unittest.TestCase):
+    """Residual 2: termination, drain and cleanup consume the request deadline."""
+
+    TEST_SCHEDULER_TOLERANCE = 0.5
+
+    def _consume_until_leader_timeout(self, clock: _FakeClock):
+        def _wait(process, deadline):  # noqa: ANN001, ARG001 - mock signature
+            clock.sleep(max(0.0, deadline - clock.monotonic()))
+            return False
+
+        return _wait
+
+    def test_request_deadline_includes_termination_drain_and_cleanup(self):
+        execution = importlib.import_module("cxx_analyzer.execution")
+        deadline_module = importlib.import_module("cxx_analyzer.deadline")
+        clock = _FakeClock()
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary) / "lima-cxx-fake"
+            (tree / "source").mkdir(parents=True)
+            (tree / "source" / "main.cpp").write_text(
+                "int main() {}\n", encoding="utf-8"
+            )
+            streams = [_NeverEofStream(), _NeverEofStream()]
+            process = _HungProcess(clock)
+            process.stdout, process.stderr = streams
+            with (
+                mock.patch.object(execution.time, "monotonic", clock.monotonic),
+                mock.patch.object(execution.time, "sleep", clock.sleep),
+                mock.patch.object(
+                    execution,
+                    "_wait_linux_leader_without_reaping",
+                    side_effect=self._consume_until_leader_timeout(clock),
+                ),
+            ):
+                result = self._analyze_with_slow_process_and_cleanup(
+                    clock,
+                    deadline_module,
+                    execution,
+                    importlib.import_module("cxx_analyzer.snapshot"),
+                    process,
+                    tree,
+                    total=5.0,
+                )
+                for stream in streams:
+                    stream.close()
+        self.assertLessEqual(
+            result.elapsed, 5.0 + self.TEST_SCHEDULER_TOLERANCE, result.elapsed
+        )
+        self.assertEqual("request-deadline-exceeded", result.diagnostic)
+        self.assertFalse(result.cleanup_completed)
+        self.assertTrue(result.tree_left_to_isolation_boundary)
+
+    @staticmethod
+    def _analyze_with_slow_process_and_cleanup(
+        clock,
+        deadline_module,
+        execution,
+        snapshot_module,
+        process,
+        tree,
+        *,
+        total: float,
+    ):
+        deadline = deadline_module.AnalysisDeadline(clock.monotonic() + total)
+        started = clock.monotonic()
+        capture = execution._stream_process(  # noqa: SLF001 - deadline contract probe
+            process,
+            deadline.step_timeout(30),
+            1024,
+            absolute_deadline=deadline.expires_at,
+        )
+        diagnostic = execution.final_diagnostic(deadline, capture.digests_complete)
+        cleanup_completed = snapshot_module._bounded_tree_delete(  # noqa: SLF001
+            tree, deadline
+        )
+        return SimpleNamespace(
+            elapsed=clock.monotonic() - started,
+            timed_out=capture.timed_out,
+            diagnostic=diagnostic,
+            cleanup_completed=cleanup_completed,
+            tree_left_to_isolation_boundary=tree.exists(),
+        )
+
+
+class ToolRunBindingTests(unittest.TestCase):
+    """Residual 3: findings reference the exact tool runs that produced them."""
+
+    def test_budget_preserves_exact_producer_runs(self):
+        server = importlib.import_module("cxx_analyzer.server")
+        clang_runs = [valid_tool_run("clang") for _ in range(2)]
+        asan_runs = [valid_tool_run("asan-test") for _ in range(2)]
+        # The FIRST clang run produced the clang finding; the old budget code
+        # kept the LAST tool/status match instead of the real producer.
+        clang_finding = normalized_finding("build-backed").bind_producer(
+            clang_runs[0]["run_id"]
+        )
+        asan_finding = normalized_finding("sanitizer-confirmed").bind_producer(
+            asan_runs[0]["run_id"]
+        )
+        filler = [valid_tool_run("clang") for _ in range(server.MAX_TOOL_RUNS)]
+        runs = [*clang_runs, *asan_runs, *filler]
+
+        findings, diagnostics, bounded_runs = server._bound_response_lists(
+            (clang_finding, asan_finding), [], runs
+        )
+
+        self.assertEqual(2, len(findings))
+        kept_ids = {run["run_id"] for run in bounded_runs}
+        for finding in findings:
+            self.assertTrue(set(finding.producer_run_ids) <= kept_ids)
+        self.assertIn(clang_runs[0]["run_id"], kept_ids)
+        self.assertIn(asan_runs[0]["run_id"], kept_ids)
+        self.assertLessEqual(len(bounded_runs), server.MAX_TOOL_RUNS)
+        self.assertIn("analysis-budget-exhausted", diagnostics)
+
+    def test_unbound_findings_are_dropped_instead_of_guessing_evidence(self):
+        server = importlib.import_module("cxx_analyzer.server")
+        run = valid_tool_run("semgrep")
+        orphan = normalized_finding("source-only")
+        bound = normalized_finding("source-only").bind_producer(run["run_id"])
+
+        findings, diagnostics, bounded_runs = server._bound_response_lists(
+            (orphan, bound), [], [run]
+        )
+
+        self.assertEqual((bound,), findings)
+        self.assertEqual(1, len(bounded_runs))
+        self.assertEqual(run["run_id"], bounded_runs[0]["run_id"])
+        self.assertIn("finding-without-tool-evidence", diagnostics)
+
+    def test_client_rejects_run_ids_that_are_duplicated(self):
+        payload_run = {**valid_tool_run(), "run_id": "a" * 32}
+        duplicate = {**valid_tool_run(), "run_id": "a" * 32}
+        finding = normalized_finding("source-only").bind_producer("a" * 32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src" / "main.cpp").write_text(
+                "int main() {}\n", encoding="utf-8"
+            )
+            workspace = RepositoryWorkspace(root)
+            inventory = workspace.inventory()
+            fingerprint = inventory.fingerprint()
+            document = {
+                "schema_version": 1,
+                "request_id": REQUEST_ID,
+                "status": "completed",
+                "snapshot_sha256": fingerprint,
+                "tool_runs": [payload_run, duplicate],
+                "findings": [finding.to_dict()],
+                "coverage": {"source_files": 1, "snapshot_files": 1},
+                "diagnostics": [],
+            }
+            with mock.patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID):
+                client = CxxMemoryAnalyzerClient(
+                    "http://analyzer",
+                    3,
+                    1_000_000,
+                    mock.Mock(return_value=FakeResponse(document)),
+                )
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    client.analyze(
+                        "team/project",
+                        fingerprint,
+                        ("source-only",),
+                        inventory=inventory,
+                    )
 
 
 class FinalDeadlineAndLanguageTests(unittest.TestCase):
@@ -425,7 +852,7 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         source_scan = importlib.import_module("cxx_analyzer.source_scan")
         for internal_status in ("sandbox-unavailable", "sandbox-failed"):
             run = source_scan._tool_run(
-                tool_execution(internal_status, returncode=None)
+                tool_execution(internal_status, returncode=None), "run-x"
             )
             self.assertEqual("failed", run["status"])
             validate_response_metadata(
@@ -446,14 +873,17 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         """I6: a retained ASan finding cannot outlive its asan-test run record."""
 
         server = importlib.import_module("cxx_analyzer.server")
-        asan = normalized_finding("sanitizer-confirmed")
+        producer = {**valid_tool_run("asan-test", "failed"), "returncode": 1}
+        asan = normalized_finding("sanitizer-confirmed").bind_producer(
+            producer["run_id"]
+        )
         runs = [valid_tool_run() for _ in range(server.MAX_TOOL_RUNS + 3)]
-        runs.append({**valid_tool_run("asan-test", "failed"), "returncode": 1})
+        runs.append(producer)
         findings, diagnostics, bounded_runs = server._bound_response_lists(
             (asan,), [], runs
         )
         self.assertEqual((asan,), findings)
-        self.assertTrue(any(run["tool"] == "asan-test" for run in bounded_runs))
+        self.assertTrue(any(run["run_id"] == producer["run_id"] for run in bounded_runs))
         self.assertLessEqual(len(bounded_runs), server.MAX_TOOL_RUNS)
         self.assertIn("analysis-budget-exhausted", diagnostics)
 
@@ -462,7 +892,7 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         self.assertIn("finding-without-tool-evidence", diagnostics)
 
     def test_health_requires_exact_clang_driver_pair_and_reports_safe_configuration(self):
-        """I7: availability and administrator configuration are explicit and versioned."""
+        """I7: probed executability and administrator configuration are explicit."""
 
         server = importlib.import_module("cxx_analyzer.server")
         settings = analyzer_settings(
@@ -476,14 +906,20 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             "clang-14": "/usr/bin/clang-14",
             "clang++-14": None,
         }
-        with mock.patch.object(server.shutil, "which", side_effect=paths.get):
+        with (
+            mock.patch.object(server.shutil, "which", side_effect=paths.get),
+            mock.patch.object(server.sandbox, "landlock_abi", return_value=4),
+            mock.patch.object(
+                server.sandbox, "process_isolation_available", return_value=True
+            ),
+        ):
             payload = server.health_payload(settings)
         self.assertEqual(1, payload["schema_version"])
-        self.assertFalse(payload["tools"]["clang"])
-        self.assertEqual(
-            {"source": True, "build": True, "test": False},
-            payload["configuration"],
-        )
+        self.assertTrue(payload["clang_c_available"])
+        self.assertFalse(payload["clang_cxx_available"])
+        self.assertFalse(payload["build_available"])
+        self.assertTrue(payload["source_available"])
+        self.assertFalse(payload["test_configured"])
 
     def test_semgrep_errors_are_bounded_and_make_the_source_layer_incomplete(self):
         """I8: JSON errors cannot coexist with accepted findings."""
@@ -544,16 +980,23 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
 
         payload = {
             "schema_version": 1,
-            "tools": {"semgrep": True, "cmake": False, "clang": True},
-            "configuration": {"source": True, "build": True, "test": False},
+            "source_available": True,
+            "build_available": True,
+            "test_configured": False,
+            "clang_c_available": True,
+            "clang_cxx_available": True,
+            "cmake_available": False,
+            "landlock_available": True,
+            "process_isolation_available": True,
         }
         opener = mock.Mock(return_value=FakeResponse(payload))
         client = CxxMemoryAnalyzerClient("http://analyzer", 30, 1_000_000, opener)
         first = client.health()
         second = client.health()
         self.assertIs(first, second)
-        self.assertEqual(payload["tools"], first.tools)
-        self.assertEqual(payload["configuration"], first.configuration)
+        self.assertTrue(first.source_available)
+        self.assertTrue(first.build_available)
+        self.assertFalse(first.cmake_available)
         self.assertEqual(1, opener.call_count)
         request = opener.call_args.args[0]
         self.assertEqual("GET", request.method)
@@ -573,6 +1016,11 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         service = object.__new__(service_module.ReviewService)
         service.repository_import = SimpleNamespace(capabilities=lambda: {})
         service.settings = SimpleNamespace(
+            repository_scan_sources="local-import",
+            repository_scan_llm_mode="off",
+            repository_scan_llm_max_candidates=6,
+            repository_scan_llm_max_context_chars=36_000,
+            repository_scan_llm_max_completion_tokens=3_000,
             repository_scan_sast_mode="off",
             repair_test_command=(),
             cxx_memory_mode="auto",
@@ -581,14 +1029,19 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
         )
+        service.llm_config = None
+        service.repository_semantic_triage = None
         service.repository_scanner = SimpleNamespace(
             python_dataflow=SimpleNamespace(max_call_depth=4),
             cxx_memory_adapter=client,
         )
         cxx = service.repository_scan_capabilities()["cxx_memory"]
         self.assertEqual("available", cxx["health_status"])
-        self.assertEqual(payload["tools"], cxx["tool_availability"])
-        self.assertEqual(payload["configuration"], cxx["configuration"])
+        self.assertEqual(
+            {field: value for field, value in payload.items()
+             if field != "schema_version"},
+            cxx["capabilities"],
+        )
         self.assertTrue(cxx["source_layer_available"])
         self.assertTrue(cxx["build_layer_available"])
         self.assertFalse(cxx["sanitizer_layer_available"])
@@ -598,8 +1051,14 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
 
         payload = {
             "schema_version": 1,
-            "tools": {"semgrep": True, "cmake": True, "clang": True},
-            "configuration": {"source": True, "build": False, "test": True},
+            "source_available": True,
+            "build_available": False,
+            "test_configured": True,
+            "clang_c_available": True,
+            "clang_cxx_available": True,
+            "cmake_available": True,
+            "landlock_available": True,
+            "process_isolation_available": True,
         }
         client = CxxMemoryAnalyzerClient(
             "http://analyzer",
@@ -611,6 +1070,11 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         service = object.__new__(service_module.ReviewService)
         service.repository_import = SimpleNamespace(capabilities=lambda: {})
         service.settings = SimpleNamespace(
+            repository_scan_sources="local-import",
+            repository_scan_llm_mode="off",
+            repository_scan_llm_max_candidates=6,
+            repository_scan_llm_max_context_chars=36_000,
+            repository_scan_llm_max_completion_tokens=3_000,
             repository_scan_sast_mode="off",
             repair_test_command=(),
             cxx_memory_mode="auto",
@@ -619,6 +1083,8 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
         )
+        service.llm_config = None
+        service.repository_semantic_triage = None
         service.repository_scanner = SimpleNamespace(
             python_dataflow=SimpleNamespace(max_call_depth=4),
             cxx_memory_adapter=client,

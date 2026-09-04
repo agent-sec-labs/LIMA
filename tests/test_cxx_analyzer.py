@@ -81,7 +81,7 @@ def _validate_sidecar_dockerfile_contract(dockerfile: str) -> None:
     instructions = _dockerfile_instructions(dockerfile)
     pinned_image = (
         "public.ecr.aws/docker/library/python:3.11-slim@sha256:"
-        "9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
+        "b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250"
     )
     expected_first = ("FROM", f"{pinned_image} AS base")
     if not instructions or instructions[0] != expected_first:
@@ -463,6 +463,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                     "cxx_analyzer.execution.os.pipe",
                     return_value=(status_read, status_write),
                 ):
+                    request_deadline = AnalysisDeadline.start(30)
                     result = run_step(
                         ("cmake", "--version"),
                         snapshot,
@@ -470,6 +471,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                         timeout_seconds=17,
                         max_output_bytes=1024,
                         env={},
+                        deadline=request_deadline,
                     )
 
         self.assertEqual("completed", result.status)
@@ -497,7 +499,12 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         self.assertTrue(called_options["close_fds"])
         self.assertTrue(called_options["start_new_session"])
         self.assertEqual(1, len(called_options["pass_fds"]))
-        stream.assert_called_once_with(process, 17, 1024)
+        stream.assert_called_once_with(
+            process,
+            17,
+            1024,
+            absolute_deadline=request_deadline.expires_at,
+        )
 
     def test_stream_process_bounds_high_throughput_output_and_hashes_all_bytes(self):
         stdout = b"A" * (2 * 1024 * 1024 + 17)
@@ -785,6 +792,23 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 "\nelse: print('outside-readable'); raise SystemExit(9)"
             )
             with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
+                # Environments such as GitHub-hosted runners may report a Landlock
+                # ABI yet reject ruleset creation; the analyzer fails closed there
+                # (covered by test_run_step_fails_closed_without_landlock), so this
+                # positive test only runs where enforcement actually works.
+                probe = run_step(
+                    [sys.executable, "-c", "print('probe-ok', end='')"],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                    env={},
+                )
+                if probe.status != "completed":
+                    self.skipTest(
+                        "Landlock enforcement unavailable in this environment: "
+                        f"{probe.diagnostic}"
+                    )
                 result = run_step(
                     [sys.executable, "-c", code, str(outside)],
                     snapshot,
@@ -976,9 +1000,13 @@ class AnalyzerServiceTests(unittest.TestCase):
         )
         self.assertLess(len(json.dumps(response).encode("utf-8")), 1024)
 
+    @patch("cxx_analyzer.server.sandbox.process_isolation_available", return_value=True)
+    @patch("cxx_analyzer.server.sandbox.landlock_abi", return_value=4)
     @patch("cxx_analyzer.server.shutil.which")
-    def test_health_discloses_only_schema_and_tool_availability(self, which):
-        which.side_effect = lambda tool: ("/usr/bin/" + tool if tool != "clang" else None)
+    def test_health_discloses_only_probed_executability(
+        self, which, _landlock, _isolation
+    ):
+        which.side_effect = lambda tool: "/usr/bin/" + tool
 
         status, payload = analyzer_server.dispatch_request(
             "GET", "/health", "", b"", self._settings()
@@ -988,8 +1016,14 @@ class AnalyzerServiceTests(unittest.TestCase):
         self.assertEqual(
             {
                 "schema_version": 1,
-                "tools": {"semgrep": True, "cmake": True, "clang": True},
-                "configuration": {"source": True, "build": True, "test": False},
+                "source_available": True,
+                "build_available": True,
+                "test_configured": False,
+                "clang_c_available": True,
+                "clang_cxx_available": True,
+                "cmake_available": True,
+                "landlock_available": True,
+                "process_isolation_available": True,
             },
             payload,
         )
@@ -1021,9 +1055,12 @@ class AnalyzerServiceTests(unittest.TestCase):
             symbol="write_value",
             analysis_mode="source-only",
             diagnostics=[],
+            producer_run_ids=("run-semgrep-1",),
         )
         source_scan_runner.return_value = LayerResult(
-            (candidate,), (), ({"tool": "semgrep", "status": "completed"},)
+            (candidate,),
+            (),
+            ({"run_id": "run-semgrep-1", "tool": "semgrep", "status": "completed"},),
         )
         for tool, tool_status, diagnostic in (
             ("cmake", "build_failed", "build_failed"),
@@ -1034,7 +1071,7 @@ class AnalyzerServiceTests(unittest.TestCase):
                 build_scan_runner.return_value = LayerResult(
                     (),
                     (diagnostic,),
-                    ({"tool": tool, "status": tool_status},),
+                    ({"run_id": f"run-{tool}", "tool": tool, "status": tool_status},),
                 )
 
                 result = analyzer_server.analyze_request(
@@ -1047,8 +1084,8 @@ class AnalyzerServiceTests(unittest.TestCase):
                 self.assertEqual([diagnostic], result["diagnostics"])
                 self.assertEqual(
                     [
-                        {"tool": "semgrep", "status": "completed"},
-                        {"tool": tool, "status": tool_status},
+                        {"run_id": "run-semgrep-1", "tool": "semgrep", "status": "completed"},
+                        {"run_id": f"run-{tool}", "tool": tool, "status": tool_status},
                     ],
                     result["tool_runs"],
                 )
@@ -1124,12 +1161,25 @@ class AnalyzerServiceTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(200, response.status)
             self.assertEqual(1, health["schema_version"])
-            self.assertEqual({"semgrep", "cmake", "clang"}, set(health["tools"]))
-            self.assertTrue(all(type(value) is bool for value in health["tools"].values()))
+            capability_fields = set(health) - {"schema_version"}
+            self.assertEqual(8, len(capability_fields))
+            self.assertTrue(
+                all(type(health[field]) is bool for field in capability_fields)
+            )
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+def _tmpfs_options(specification: str) -> dict[str, str]:
+    """Parse one Compose tmpfs spec, mapping valueless flags to empty strings."""
+
+    options: dict[str, str] = {}
+    for part in specification.split(":", 1)[1].split(","):
+        key, _, value = part.partition("=")
+        options[key] = value
+    return options
 
 
 class AnalyzerComposeSecurityTests(unittest.TestCase):
@@ -1174,6 +1224,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
                     "gid": "10002",
                 },
                 "/work": {
+                    "exec": "",
                     "size": "512m",
                     "mode": "0700",
                     "uid": "10002",
@@ -1181,9 +1232,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
                 },
             },
             {
-                str(item).split(":", 1)[0]: dict(
-                    option.split("=", 1) for option in str(item).split(":", 1)[1].split(",")
-                )
+                str(item).split(":", 1)[0]: _tmpfs_options(str(item))
                 for item in tmpfs
             },
         )
@@ -1350,8 +1399,9 @@ class SourceScanTests(unittest.TestCase):
                         "semgrep",
                         "--json",
                         "--quiet",
+                        "--no-rewrite-rule-ids",
                         "--config",
-                        call.args[0][4],
+                        call.args[0][5],
                         "--include",
                         "*.c",
                         "--include",
@@ -1377,7 +1427,7 @@ class SourceScanTests(unittest.TestCase):
                 self.assertEqual(17, call.kwargs["timeout_seconds"])
                 self.assertEqual(8192, call.kwargs["max_output_bytes"])
                 self.assertEqual({}, call.kwargs["env"])
-                self.assertFalse(Path(call.args[0][4]).resolve().is_relative_to(snapshot.root))
+                self.assertFalse(Path(call.args[0][5]).resolve().is_relative_to(snapshot.root))
                 self.assertEqual(1, len(result.findings))
                 self.assertEqual([], list(stage_root.iterdir()))
 
@@ -1486,6 +1536,7 @@ class SourceScanTests(unittest.TestCase):
                 "language",
                 "symbol",
                 "analysis_mode",
+                "producer_run_ids",
             ),
             tuple(finding.to_dict()),
         )
@@ -1555,6 +1606,57 @@ class SourceScanTests(unittest.TestCase):
         invalid["results"][0]["start"]["line"] = 0
         with self.assertRaises(ValueError):
             parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
+
+
+class BoundsDirectionTests(unittest.TestCase):
+    """The ArrayBoundV2 read/write classifier stays conservative or drops."""
+
+    @staticmethod
+    def direction(line: str, column: int):
+        from cxx_analyzer.build_scan import _bounds_direction
+
+        return _bounds_direction(line, column)
+
+    @staticmethod
+    def _column(line: str, marker: str, offset: int = 0) -> int:
+        return line.index(marker, offset) + 1
+
+    def test_simple_directions(self):
+        write_line = "void f(void) { int values[2] = {0}; values[2] = 1; }"
+        read_line = "int f(void) { int values[2] = {0}; return values[2]; }"
+        for line, column, expected in (
+            (write_line, self._column(write_line, "values", 30), "write"),
+            (read_line, self._column(read_line, "values", 30), "read"),
+            ("x = values[2];", 5, "read"),
+            ("values[2] += 1;", 1, "write"),
+            ("values[2]++;", 1, "write"),
+            ("++values[2];", 3, "write"),
+            ("values[2] = 1 + values[0];", 1, "write"),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(expected, self.direction(line, column))
+
+    def test_ambiguous_shapes_are_dropped(self):
+        for line, column in (
+            ("values[2] <<= 1;", 1),          # shift assignment
+            ("if (values[2] == 3) { go(); }", 5),  # brackets after expression
+            ("use(values[2], 1);", 5),         # argument position
+            ("int r = f(values[2], (x = 1));", 13),
+            ("values[2] +", 1),                # statement continues past line
+            ("return values[2] +", 8),
+            ("return value;", 8),              # no subscript at all
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(self.direction(line, column))
+
+    def test_reads_survive_common_shapes(self):
+        for line, column in (
+            ("int *p = &values[2];", 11),
+            ("x <<= values[2];", 8),
+            ("return values[2];", 8),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual("read", self.direction(line, column))
 
 
 class BuildScanTests(unittest.TestCase):
@@ -1961,12 +2063,33 @@ class BuildScanTests(unittest.TestCase):
             self.assertEqual(("src/main.cpp",), tuple(unit.file for unit in units))
             self.assertEqual(tuple(valid[0]["arguments"]), units[0].arguments)
 
+            command_source = str(source).replace("\\", "/")
+            cmake_style = [
+                {
+                    "directory": str(root),
+                    "file": str(source),
+                    "command": f"clang++ -c -DDEBUG=1 {command_source}",
+                }
+            ]
+            database.write_text(json.dumps(cmake_style), encoding="utf-8")
+            converted = load_compilation_database(snapshot, database)
+            self.assertEqual(
+                cmake_style[0]["command"].split(), list(converted[0].arguments)
+            )
+
             invalid_entries = (
                 [
                     {
                         "directory": str(root),
                         "file": str(source),
-                        "command": f"clang++ -c {source}",
+                        "command": 'clang++ -c "unterminated',
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "command": "clang++ -c /definitely/outside/escape.cpp",
                     }
                 ],
                 [
@@ -2123,7 +2246,14 @@ class BuildScanTests(unittest.TestCase):
             (root / "build").mkdir()
             (root / "src").mkdir()
             (root / "src" / "main.c").write_text(
-                "int write_value(void) { return 0; }\n", encoding="utf-8"
+                "int write_value(void)\n"
+                "{\n"
+                "    int values[2];\n"
+                "\n"
+                "      values[2] = 1;\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
             )
             snapshot = Mock(root=root, files=("src/main.c",))
 
@@ -2199,7 +2329,7 @@ class BuildScanTests(unittest.TestCase):
             (root / "src").mkdir()
             source = root / "src" / "main.c"
             source.write_text(
-                "void oob_write_array(void) { int values[2]; values[2] = 1; }\n",
+                "void oob_write_array(void) { int values[2] = {0}; values[2] = 1; }\n",
                 encoding="utf-8",
             )
             temp_root = root / "tool-output"
@@ -2254,8 +2384,8 @@ class BuildScanTests(unittest.TestCase):
                     [
                         {
                             "directory": str(root),
-                            "file": str(source),
-                            "command": f"cc -c {source}",
+                            "file": str(root.parent / "escape.cpp"),
+                            "arguments": ["cc", "-c", str(root.parent / "escape.cpp")],
                         }
                     ]
                 ),
@@ -2280,6 +2410,10 @@ class BuildScanContainerTests(unittest.TestCase):
 
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
         manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
         with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
             base = Path(temporary)
             import_root = base / "imports"
@@ -2303,10 +2437,9 @@ class BuildScanContainerTests(unittest.TestCase):
             )
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
-                tool_output = base / "tool-output"
-                tool_output.mkdir()
-                with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", tool_output):
-                    result = build_scan.run_build_scan(snapshot, BuildScanTests._settings())
+                # No analyzer temp root override: plists must be staged in the
+                # sandbox-writable scratch, exactly like production.
+                result = build_scan.run_build_scan(snapshot, BuildScanTests._settings())
 
         found = {(finding.cwe, finding.path, finding.symbol) for finding in result.findings}
         expected = {
@@ -2660,13 +2793,19 @@ class SanitizerScanTests(unittest.TestCase):
             analysis_mode="sanitizer-confirmed",
             diagnostics=[],
         )
+        candidate = candidate.bind_producer("run-semgrep")
+        confirmed = confirmed.bind_producer("run-asan")
         source_runner.return_value = LayerResult(
-            (candidate,), (), ({"tool": "semgrep", "status": "completed"},)
+            (candidate,),
+            (),
+            ({"run_id": "run-semgrep", "tool": "semgrep", "status": "completed"},),
         )
         context = BuildContext(snapshot.root, snapshot.files, sanitizer_enabled=True)
         build_runner.return_value = LayerResult((), (), (), context)
         sanitizer_runner.return_value = LayerResult(
-            (confirmed,), (), ({"tool": "asan-test", "status": "completed"},)
+            (confirmed,),
+            (),
+            ({"run_id": "run-asan", "tool": "asan-test", "status": "completed"},),
         )
         settings = self._settings(test_steps=(("test",),))
 
@@ -2686,8 +2825,8 @@ class SanitizerScanTests(unittest.TestCase):
         self.assertEqual([candidate.to_dict(), confirmed.to_dict()], result["findings"])
         self.assertEqual(
             [
-                {"tool": "semgrep", "status": "completed"},
-                {"tool": "asan-test", "status": "completed"},
+                {"run_id": "run-semgrep", "tool": "semgrep", "status": "completed"},
+                {"run_id": "run-asan", "tool": "asan-test", "status": "completed"},
             ],
             result["tool_runs"],
         )
@@ -2746,6 +2885,7 @@ class SanitizerScanTests(unittest.TestCase):
             symbol="report",
             analysis_mode="sanitizer-confirmed",
             diagnostics=[],
+            producer_run_ids=("run-asan",),
         )
         with patch.object(analyzer_server, "MAX_FINDINGS", 1):
             with patch.object(analyzer_server, "MAX_DIAGNOSTICS", 1):
@@ -2754,13 +2894,16 @@ class SanitizerScanTests(unittest.TestCase):
                         (low, high),
                         ["source", "asan"],
                         [
-                            {"tool": "semgrep", "status": "completed"},
-                            {"tool": "asan-test", "status": "completed"},
+                            {"run_id": "run-semgrep", "tool": "semgrep", "status": "completed"},
+                            {"run_id": "run-asan", "tool": "asan-test", "status": "completed"},
                         ],
                     )
         self.assertEqual((high,), findings)
         self.assertEqual(("analysis-budget-exhausted",), diagnostics)
-        self.assertEqual(({"tool": "asan-test", "status": "completed"},), tool_runs)
+        self.assertEqual(
+            ({"run_id": "run-asan", "tool": "asan-test", "status": "completed"},),
+            tool_runs,
+        )
 
 
 class SanitizerContainerTests(unittest.TestCase):
@@ -2786,6 +2929,10 @@ class SanitizerContainerTests(unittest.TestCase):
             "cwe-415/safe-1.c",
         )
         symbols = {item["path"]: item["symbol"] for item in manifest if item["path"] in selected}
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
         with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
             base = Path(temporary)
             import_root = base / "imports"
@@ -2816,9 +2963,17 @@ class SanitizerContainerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
-            settings = SanitizerScanTests._settings(
-                test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),),
-                total_timeout_seconds=120,
+            import dataclasses
+
+            settings = dataclasses.replace(
+                SanitizerScanTests._settings(
+                    test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),),
+                    total_timeout_seconds=240,
+                ),
+                auto_cmake=True,
+                build_steps=(),
+                step_timeout_seconds=90,
+                max_output_bytes=1_048_576,
             )
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
                 build = run_build_scan(snapshot, settings, sanitizer_enabled=True)
@@ -2880,6 +3035,7 @@ class SourceScanContainerTests(unittest.TestCase):
                 semgrep_path,
                 "--json",
                 "--quiet",
+                "--no-rewrite-rule-ids",
                 "--config",
                 str(Path("cxx_analyzer/rules/cxx-memory.yml").resolve()),
                 ".",
@@ -2889,14 +3045,20 @@ class SourceScanContainerTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=30,
+            env={**os.environ, "HOME": tempfile.gettempdir()},
         )
         if source_scan.recognized_host_semgrep_unavailability(
             completed.returncode, completed.stderr
         ):
             self.skipTest("Semgrep is installed but unavailable on this host")
         self.assertEqual(0, completed.returncode, completed.stderr)
+        # Windows host Semgrep emits OS separators in result paths while the
+        # analyzer contract (and the Linux Sidecar) only accepts posix paths.
+        document = json.loads(completed.stdout)
+        for result in document["results"]:
+            result["path"] = result["path"].replace("\\", "/")
         findings, _ = parse_semgrep_json(
-            completed.stdout,
+            json.dumps(document),
             {item["path"] for item in manifest},
         )
         self.assertTrue(all(item.verification_state == "candidate" for item in findings))

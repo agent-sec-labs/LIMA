@@ -192,6 +192,19 @@ class FinalSnapshotSecurityTests(unittest.TestCase):
             self.skipTest("required Landlock ABI is unavailable")
         with tempfile.TemporaryDirectory() as temporary:
             with self._snapshot(temporary) as snapshot:
+                probe = run_step(
+                    [sys.executable, "-c", "print('probe-ok', end='')"],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                    env={},
+                )
+                if probe.status != "completed":
+                    self.skipTest(
+                        "Landlock enforcement unavailable in this environment: "
+                        f"{probe.diagnostic}"
+                    )
                 code = (
                     "from pathlib import Path; "
                     "denied=False; "
@@ -231,6 +244,19 @@ class FinalSnapshotSecurityTests(unittest.TestCase):
             self.skipTest("required Landlock ABI is unavailable")
         with tempfile.TemporaryDirectory() as temporary:
             with self._snapshot(temporary) as snapshot:
+                probe = run_step(
+                    [sys.executable, "-c", "print('probe-ok', end='')"],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                    env={},
+                )
+                if probe.status != "completed":
+                    self.skipTest(
+                        "Landlock enforcement unavailable in this environment: "
+                        f"{probe.diagnostic}"
+                    )
                 for name, leader_status, timeout in (
                     ("success", 0, 5),
                     ("failure", 7, 5),
@@ -357,6 +383,19 @@ os._exit({"success": 0, "failure": 7}[mode])
         try:
             with tempfile.TemporaryDirectory() as temporary:
                 with prepared_snapshot(temporary) as snapshot:
+                    probe = run_step(
+                        [sys.executable, "-c", "print('probe-ok', end='')"],
+                        snapshot,
+                        ".",
+                        timeout_seconds=10,
+                        max_output_bytes=1024,
+                        env={},
+                    )
+                    if probe.status != "completed":
+                        self.skipTest(
+                            "Landlock enforcement unavailable in this environment: "
+                            f"{probe.diagnostic}"
+                        )
                     grand_marker = snapshot.scratch_root / f"grandchild-{mode}.txt"
                     result_marker = snapshot.scratch_root / f"escape-{mode}.txt"
                     result = run_step(

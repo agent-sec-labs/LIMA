@@ -1016,6 +1016,11 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         service = object.__new__(service_module.ReviewService)
         service.repository_import = SimpleNamespace(capabilities=lambda: {})
         service.settings = SimpleNamespace(
+            repository_scan_sources="local-import",
+            repository_scan_llm_mode="off",
+            repository_scan_llm_max_candidates=6,
+            repository_scan_llm_max_context_chars=36_000,
+            repository_scan_llm_max_completion_tokens=3_000,
             repository_scan_sast_mode="off",
             repair_test_command=(),
             cxx_memory_mode="auto",
@@ -1024,6 +1029,8 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
         )
+        service.llm_config = None
+        service.repository_semantic_triage = None
         service.repository_scanner = SimpleNamespace(
             python_dataflow=SimpleNamespace(max_call_depth=4),
             cxx_memory_adapter=client,
@@ -1063,6 +1070,11 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
         service = object.__new__(service_module.ReviewService)
         service.repository_import = SimpleNamespace(capabilities=lambda: {})
         service.settings = SimpleNamespace(
+            repository_scan_sources="local-import",
+            repository_scan_llm_mode="off",
+            repository_scan_llm_max_candidates=6,
+            repository_scan_llm_max_context_chars=36_000,
+            repository_scan_llm_max_completion_tokens=3_000,
             repository_scan_sast_mode="off",
             repair_test_command=(),
             cxx_memory_mode="auto",
@@ -1071,6 +1083,8 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
         )
+        service.llm_config = None
+        service.repository_semantic_triage = None
         service.repository_scanner = SimpleNamespace(
             python_dataflow=SimpleNamespace(max_call_depth=4),
             cxx_memory_adapter=client,

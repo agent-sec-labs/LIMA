@@ -55,6 +55,10 @@ COPY --chown=lima:lima docs/DEVELOPER_HANDOFF.md docs/GITHUB_COLLABORATION.md ./
 COPY --chown=lima:lima docs/assets ./docs/assets
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
 COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
+# C/C++ 分析器包与评估契约随单测进镜像（纯 Python、无额外依赖）。
+COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer
+COPY --chown=lima:lima scripts/run_cxx_memory_evaluation.py scripts/prepare_cxx_memory_evaluation_case.py ./scripts/
+COPY --chown=lima:lima evaluation_data/cxx_memory_cases.json ./evaluation_data/cxx_memory_cases.json
 USER lima:lima
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
 

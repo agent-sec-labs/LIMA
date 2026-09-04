@@ -564,9 +564,10 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             pid_file = Path(temporary) / "descendant.pid"
             script = (
-                "import pathlib,subprocess,sys; "
+                "import pathlib,subprocess,sys,time; "
                 f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
-                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); "
+                "time.sleep(30)"
             )
             process = subprocess.Popen(  # noqa: S603 - fixed local test child
                 [sys.executable, "-c", script],
@@ -785,6 +786,23 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 "\nelse: print('outside-readable'); raise SystemExit(9)"
             )
             with prepare_snapshot(import_root, "team/project", expected, work_root) as snapshot:
+                # Environments such as GitHub-hosted runners may report a Landlock
+                # ABI yet reject ruleset creation; the analyzer fails closed there
+                # (covered by test_run_step_fails_closed_without_landlock), so this
+                # positive test only runs where enforcement actually works.
+                probe = run_step(
+                    [sys.executable, "-c", "print('probe-ok', end='')"],
+                    snapshot,
+                    ".",
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                    env={},
+                )
+                if probe.status != "completed":
+                    self.skipTest(
+                        "Landlock enforcement unavailable in this environment: "
+                        f"{probe.diagnostic}"
+                    )
                 result = run_step(
                     [sys.executable, "-c", code, str(outside)],
                     snapshot,

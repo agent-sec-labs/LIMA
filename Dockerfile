@@ -42,6 +42,8 @@ COPY --chown=lima:lima scripts/probe_llm_triage.py ./scripts/probe_llm_triage.py
 COPY --chown=lima:lima evaluation_data ./evaluation_data
 
 FROM base AS test
+# CXX-I01：analyzer 测试在镜像内导入 cxx_analyzer（生产 runtime 不带，Sidecar 独立成镜像）。
+COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer
 COPY --chown=lima:lima tests ./tests
 COPY --chown=lima:lima Dockerfile pyproject.toml docker-compose.yml .env.example LIMA_ROADMAP.md CONTRIBUTING.md ./
 COPY --chown=lima:lima .github ./.github

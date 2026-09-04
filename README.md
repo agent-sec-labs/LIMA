@@ -1,20 +1,23 @@
 # 砺码 · LIMA
 
-<p align="center"><img src="web/lima-mark.svg" width="88" alt="砺码 LIMA Logo"></p>
+<p align="center"><img src="docs/assets/lima-mark.svg" width="88" alt="砺码 LIMA Logo"></p>
 
 **LIMA — LLM-powered Intelligent Mining & Auto-repair for Repositories**
 
-砺码 LIMA 是面向研发团队、安全工程师与应用安全研究者的仓库级安全 Agent。项目按 **工程 70% / 科研 30%** 推进，主链路是：
+砺码 LIMA 面向研发团队、安全工程师与应用安全研究者，长期定位为一个**以可复现证据驱动的 Repository Security Analysis、Vulnerability Mining 与 Verified Repair Agent Platform**。项目按 **工程 70% / 科研 30%** 推进，目标主链路是：
 
-> 代码/PR 获取 → 静态分析候选 → 数据流/多工具证据确认 → 结构化审计报告 → 最小修复 → 隔离验证 → 人工审批
+> Repository Snapshot → Audit Evidence Package → Mining 动态验证 → Vulnerability Evidence Package → 独立 Repair 验证 → Verified Patch
 
-首个可交付版本聚焦 Python 仓库和命令注入、路径遍历、SQL 注入、危险反序列化、认证/授权误用、敏感信息泄漏等常见高风险问题。默认本地模式不调用任何远程模型；LLM 是可选的语义增强层，不是事实来源。证据不足的结果会降级为人工复核，不追求“全语言、全 CWE、零误报、自动发现通用零日”等当前不可信的目标。
+Audit、Mining、Repair 具有独立信任边界，只通过版本化 Artifact 交换事实；LLM 参与语义剪枝、规划、验证方案和候选修复，但不能单独决定漏洞成立或补丁通过。当前 `1.6.0` 仍是“已有仓库审计/报告能力 + 早期修复能力”的过渡基线，尚未实现完整三阶段闭环。当前开发聚焦 Python Golden Path，并优先复用成熟静态分析、动态验证与代码变换工具，不追求“全语言、全 CWE、零误报、自动发现通用零日”等不可信目标。
 
-完整定位、论文证据和实施阶段见 [LIMA_ROADMAP.md](LIMA_ROADMAP.md)。从旧版本升级时，
+历史产品路线、论文证据和早期实施阶段见 [LIMA_ROADMAP.md](LIMA_ROADMAP.md)；当前开发定位与交接规则以 [Coding Agent 开发交接标准](docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md) 为准。从旧版本升级时，
 请同时阅读 [品牌与配置迁移说明](docs/LIMA_BRAND_MIGRATION.md)。
 Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_BRAND_ASSETS.md)。
+首次接手项目开发时，请先阅读 [项目定位与 Coding Agent 开发交接标准](docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md)；旧入口 [DEVELOPER_HANDOFF.md](docs/DEVELOPER_HANDOFF.md) 仅保留兼容跳转。
 
 > 以证据审代码，以闭环修漏洞。Audit with evidence. Repair with confidence.
+
+以下功能清单描述当前版本能力，不代表目标三阶段平台已经完成：
 
 - 审查统一 diff，输出结构化问题、修复建议和测试建议
 - GitHub `pull_request` webhook（`opened`、`reopened`、`synchronize`）
@@ -126,6 +129,50 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:18080/v1/repository-scans `
 ```
 
 扫描任务会保存路径和内容哈希组成的仓库快照指纹。修复预览前会重新计算指纹；扫描后只要目标仓库发生变化，旧任务就会拒绝生成补丁，必须重新扫描。预览只执行编译、AST 安全 Oracle 和全仓静态差分复扫，并明确返回 `publication_ready=false`；原生测试、原子 commit 和 Draft PR 仍只在 GitHub PR 修复闭环执行。
+
+#### 可选的生产语义复核
+
+应用在变量缺失时采用安全缺省值 `LIMA_REPOSITORY_SCAN_LLM_MODE=off`，不会因为只配置了通用 LLM Provider 就自动产生费用。当前 `.env.example` 已显式选择 `auto` 作为工程联调模板；复制模板后会对每项存在候选的仓库扫描产生一次有界远程调用。部署者必须在知晓代码证据会发送给所选模型供应商后保留 `auto`，否则应改回 `off`。启用“语义候选 → 模型批量 verdict → 混合仲裁”时使用：
+
+```env
+LIMA_REPOSITORY_SCAN_LLM_MODE=auto
+LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS=60
+LIMA_REPOSITORY_SCAN_LLM_MAX_CANDIDATES=6
+LIMA_REPOSITORY_SCAN_LLM_MAX_CONTEXT_CHARS=36000
+LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS=3000
+```
+
+`auto` 对每项仓库扫描最多执行一次有界批量请求；超时、网络失败、缺失 verdict 或输出契约无效时，任务仍保存本地扫描结果，但相关对象强制进入 `needs_review`，绝不自动放行。`required` 使用相同预算，但模型失败会使扫描任务失败；该失败属于永久失败，不会由任务队列重复请求并增加费用。发送给模型的证据上下文只包含选中的 Python 函数片段，不包含 API Key、`.env`、完整仓库或被忽略路径；API Key 仅作为供应商请求的认证头使用，报告只保存供应商、模型、Token 用量、时延、Prompt 哈希和有界证据摘要。
+
+只有确定性 mitigation 不变量与有效模型 clean verdict 对全部评估对象一致时，`auto_clear` 才可能为 `true`。模型单方面声称 clean、没有语义候选或零 Finding 都不是安全证明。
+
+#### 脱离 ChatGPT 的持久化外部实验
+
+LIMA 可以把 repository-disjoint 数据集作为后台实验提交给独立的 `lima:experiment:stream`。实验由 PostgreSQL/SQLite 记录状态，由 Redis Streams 或本地 ACK 队列交付；浏览器、PowerShell 或 ChatGPT 退出后不影响已启动任务。Docker Compose 将最终和中间 artifact 写入宿主机 `output/experiments/<run-id>`，固定快照缓存保存在独立 Docker volume。
+
+管理员登录网页后可直接进入“外部评测”：三步选择已审核数据集、确定性/检索/真实 LLM 模式和不可变预算。页面每 5 秒读取数据库状态，以进度条、预算卡片、逐案例表格和自然语言指标显示结果；取消、断点恢复和可能重复计费的模糊 LLM 重试均有明确二次确认。“一键加载示例”只在浏览器演示，不创建任务、不调用远程服务。
+
+```powershell
+$body = @{
+  dataset = 'popular_external_holdout_v2.json'
+  mode = 'llm-retrieval'
+  max_llm_calls = 20
+  max_total_tokens = 100000
+} | ConvertTo-Json
+
+$experiment = Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:18080/v1/experiments `
+  -Headers $headers -ContentType 'application/json' -Body $body
+
+Invoke-RestMethod -Headers $headers `
+  "http://127.0.0.1:18080/v1/experiments/$($experiment.run_id)"
+```
+
+Runner 按案例执行“固定快照 → 扫描/检索 → 可选 LLM → 原子 artifact”，已完成案例在恢复和最终聚合时不会再次扫描或调用模型。模型请求发出后若进程在结果落盘前中断，案例会进入 `AMBIGUOUS`、实验进入 `NEEDS_ATTENTION`；系统不会自动重试并产生重复费用。管理员确认后才能向 `/v1/experiments/{id}/resume` 提交 `{"allow_ambiguous_retry":true}`。预算属于冻结实验身份；预算耗尽后必须创建更高预算的新实验，不能修改原运行。API Key、`.env` 和认证头不进入数据库或实验包。
+
+5 仓库 v2 清单的选样证据、固定 commit、归档 SHA-256、资源排除项、预注册顺序和冻结基线见 [v1.6 外部评测预注册与结果](docs/V1_6_EXTERNAL_HOLDOUT_PREREGISTRATION.md)。两个冻结实验已经结束；其逐例结果已用于改进 v1.7，因此原 v2 清单只保留为历史 external baseline，后续复跑使用明确标注的 calibration 副本，不能重新宣称外部泛化。检索根因、实现变更和校准指标见 [v1.7 检索校准报告](docs/V1_7_RETRIEVAL_CALIBRATION.md)。下一次外部结论必须冻结全新的 repository-disjoint v3。
+
+多人协作的分层 CI、Required Check 与按修改类型选择测试的方法见 [GitHub 多人协作门禁](docs/GITHUB_COLLABORATION.md)。普通 PR 不注入模型 Key，也不会触发付费外部评测；管理员只需把稳定的 `merge-gate` 设置为 Required Status Check。
 
 如果不使用 Docker，请创建独立虚拟环境：
 
@@ -376,7 +423,7 @@ Invoke-RestMethod https://<公网域名>/health
 LIMA_REPAIR_TEST_COMMAND=python -m unittest discover -s tests
 ```
 
-未配置测试命令时，检测和补丁规划仍可工作，但 CWE-78/CWE-89/CWE-22 修复会在发布门禁处失败，不会创建 commit 或 PR。发布前依次执行编译、独立 AST 安全 Oracle、完整仓库差分复扫和原生测试；全部通过后才从固定的 PR commit SHA 创建单个原子提交与 Draft PR，仍需人工批准。CWE-22 模板会在解析符号链接后检查规范路径包含关系，但无法跨平台消除“检查后到打开前”文件系统并发变更的 TOCTOU 风险；高对抗文件系统场景还需要 OS 沙箱或 descriptor-relative open。
+自动修复还会在服务端做显式授权检查：租户必须先由管理员通过 `POST /v1/repository-grants` 为目标仓库授予 `auto_fix=true`，否则 `POST /v1/tasks/{id}/fix` 会被拒绝。没有配置任何授权的租户不再默认放行自动修复；只读审查不受影响。未配置测试命令时，检测和补丁规划仍可工作，但 CWE-78/CWE-89/CWE-22 修复会在发布门禁处失败，不会创建 commit 或 PR。发布前依次执行编译、独立 AST 安全 Oracle、完整仓库差分复扫和原生测试；全部通过后才从固定的 PR commit SHA 创建单个原子提交与 Draft PR，仍需人工批准。CWE-22 模板会在解析符号链接后检查规范路径包含关系，但无法跨平台消除“检查后到打开前”文件系统并发变更的 TOCTOU 风险；高对抗文件系统场景还需要 OS 沙箱或 descriptor-relative open。
 
 ### 修复约束评测
 
@@ -490,11 +537,18 @@ Redis 的非容器运行模式会自动退回 SQLite 与进程内线程队列，
 | `GET` | `/v1/tasks/{id}` | 获取状态、轨迹和报告 |
 | `GET` | `/v1/tasks/{id}/report` | 获取 Markdown 报告 |
 | `GET` | `/v1/tasks/{id}/feedback` | 获取该已完成任务的反馈历史 |
-| `POST` | `/v1/tasks/{id}/fix` | 创建自动修复分支和提交 |
+| `POST` | `/v1/tasks/{id}/fix` | 创建自动修复分支和提交（需先通过 `/v1/repository-grants` 授予该仓库 `auto_fix`） |
 | `POST` | `/v1/tasks/{id}/repair-preview` | 为完成的仓库扫描生成快照固定、只读的验证修复预览 |
 | `POST` | `/v1/tasks/{id}/feedback` | 回流误报、漏报或坏修复 |
 | `POST` | `/v1/tasks/{id}/cancel` | 请求取消任务 |
 | `POST` | `/v1/tasks/{id}/resume` | 从最近 checkpoint 续跑任务 |
+| `GET/POST` | `/v1/repository-grants` | 管理员查询或授予租户的仓库授权；`auto_fix=true` 是自动修复的前置条件 |
+| `POST` | `/v1/github/installations` | 管理员登记 GitHub App installation 并绑定当前租户 |
+| `POST` | `/v1/experiments` | 创建可恢复的 repository-disjoint 后台实验 |
+| `GET` | `/v1/experiments` | 查询当前租户的实验列表 |
+| `GET` | `/v1/experiments/{id}` | 查询实验、逐案例状态和最终结果 |
+| `POST` | `/v1/experiments/{id}/cancel` | 请求在下一个案例边界取消实验 |
+| `POST` | `/v1/experiments/{id}/resume` | 恢复失败实验；模糊 LLM 调用必须显式授权重试 |
 | `POST` | `/webhooks/github` | 接收 GitHub PR webhook |
 | `POST` | `/v1/skills/reload` | 动态重新加载 Skill |
 | `POST` | `/v1/evolution/auto` | 从失败案例生成并评测提示词版本 |

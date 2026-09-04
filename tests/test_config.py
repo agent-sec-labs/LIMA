@@ -47,6 +47,24 @@ class DotenvTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_repository_semantic_triage_budget_is_loaded_and_validated(self):
+        environment = {
+            "LIMA_REPOSITORY_SCAN_LLM_MODE": "auto",
+            "LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS": "30",
+            "LIMA_REPOSITORY_SCAN_LLM_MAX_CANDIDATES": "4",
+            "LIMA_REPOSITORY_SCAN_LLM_MAX_CONTEXT_CHARS": "12000",
+            "LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS": "900",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            settings = Settings.from_env()
+
+        settings.validate_evolution()
+        self.assertEqual("auto", settings.repository_scan_llm_mode)
+        self.assertEqual(30, settings.repository_scan_llm_timeout_seconds)
+        self.assertEqual(4, settings.repository_scan_llm_max_candidates)
+        self.assertEqual(12000, settings.repository_scan_llm_max_context_chars)
+        self.assertEqual(900, settings.repository_scan_llm_max_completion_tokens)
+
     def test_legacy_real_api_configuration_remains_resolvable(self):
         legacy = {
             "EVOAGENT_LLM_PROVIDER": "deepseek",

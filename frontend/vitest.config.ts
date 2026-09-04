@@ -1,0 +1,30 @@
+import { defineConfig } from "vitest/config";
+import react from "@vitejs/plugin-react";
+import { fileURLToPath, URL } from "node:url";
+
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
+  test: {
+    environment: "jsdom",
+    globals: false,
+    setupFiles: ["./src/test/setup.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
+    // CI 慢机（2 vCPU）下轮询类用例（真实 2s 定时器 + findByText）会超出
+    // Vitest 默认 5s 用例预算（PR #53 frontend-tests 实证），统一放宽；
+    // 30s 覆盖满载下最重的交互用例（修复分支确认流，本机高负载实测 >20s）。
+    testTimeout: 30_000,
+    hookTimeout: 20_000,
+    coverage: {
+      provider: "v8",
+      reporter: ["lcov", "html"],
+      reportsDirectory: "./coverage",
+      // 冻结规格：只设行覆盖率阈值，不添加其他维度。
+      thresholds: { lines: 60 },
+    },
+  },
+});

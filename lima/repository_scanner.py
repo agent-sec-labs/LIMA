@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import difflib
+import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from .cxx_memory import (
     REQUESTED_LAYERS,
@@ -13,13 +14,21 @@ from .cxx_memory import (
     CxxAnalyzerUnavailable,
     CxxMemoryAdapter,
 )
+from .adjudication import adjudicate_findings
 from .diff_parser import parse_unified_diff
 from .models import Finding, ReviewReport, Severity
 from .python_analyzer import PythonAstSecurityAnalyzer
 from .python_dataflow import PythonDataflowAnalyzer
 from .reviewer import Reviewer, SecurityRuleReviewer
 from .sast import BanditAdapter, SastAdapter
+from .task_progress import (
+    AST_ANALYSIS,
+    DATAFLOW_ANALYSIS,
+    INVENTORY,
+    SAST_ANALYSIS,
+)
 from .workspace import CXX_SOURCE_EXTENSIONS, RepositoryWorkspace, WorkspaceInventory
+
 
 SEVERITY_RANK = {
     Severity.LOW: 1,
@@ -35,6 +44,42 @@ VERIFICATION_RANK = {
     "build-verified": 3,
     "confirmed": 4,
 }
+
+# 冻结决策（Epic #33）：任何 coverage-affecting skip ≥ 1 即标记
+# completed_with_warnings，不做可配置阈值。ignored-directory 与
+# unsupported-extension 属于既定扫描范围（node_modules、图片等），不算覆盖损失。
+COVERAGE_AFFECTING_SKIPS = frozenset({
+    "symlink",
+    "unreadable",
+    "file-size-limit",
+    "file-limit",
+    "total-size-limit",
+    "binary",
+    "non-utf8",
+})
+
+# AST 逐文件进度的双门限节流（文件数或时间先到即发）。
+AST_PROGRESS_FILE_INTERVAL = 25
+AST_PROGRESS_TIME_INTERVAL_SECONDS = 0.5
+
+ProgressCallback = Callable[..., None]
+
+
+def coverage_warning_counts(inventory: WorkspaceInventory) -> dict[str, int]:
+    """Skip counts that reduced actually-scanned coverage, keyed by reason."""
+
+    return {
+        reason: count
+        for reason, count in sorted(inventory.skipped.items())
+        if reason in COVERAGE_AFFECTING_SKIPS and count > 0
+    }
+
+
+def _report(
+    callback: ProgressCallback | None, stage: str, message: str, **detail: object
+) -> None:
+    if callback is not None:
+        callback(stage, message, **detail)
 
 
 @dataclass
@@ -188,9 +233,18 @@ class RepositoryScanner:
             existing.severity = candidate.severity
 
     def scan(
-        self, workspace: RepositoryWorkspace, *, repository_key: str = ""
+        self,
+        workspace: RepositoryWorkspace,
+        *,
+        repository_key: str = "",
+        progress_callback: ProgressCallback | None = None,
     ) -> RepositoryScanResult:
+        _report(progress_callback, INVENTORY, "正在盘点工作区文件")
         inventory = workspace.inventory()
+        _report(
+            progress_callback, INVENTORY, "工作区盘点完成",
+            current=len(inventory.files), total=len(inventory.files), unit="files",
+        )
         findings: list[Finding] = []
         finding_index: dict[tuple[str, int, str], Finding] = {}
         cxx_finding_index: dict[tuple[str, str, str, int], Finding] = {}
@@ -208,6 +262,7 @@ class RepositoryScanner:
         repository_files = list(workspace.iter_text(inventory))
         project_dataflow = None
         if self.dataflow_enabled:
+            _report(progress_callback, DATAFLOW_ANALYSIS, "正在建立跨文件数据流索引")
             project_dataflow = self.python_dataflow.analyze_project({
                 path: content for path, content in repository_files
                 if path.endswith(".py")
@@ -221,27 +276,49 @@ class RepositoryScanner:
             cross_file_call_edges = project_dataflow.cross_file_edges
             dynamic_import_sites = project_dataflow.dynamic_import_sites
             ambiguous_python_modules = project_dataflow.ambiguous_modules
+            _report(
+                progress_callback, DATAFLOW_ANALYSIS, "数据流索引建立完成",
+                modules=dataflow_modules_indexed,
+                functions=dataflow_functions_indexed,
+            )
 
-        for path, content in repository_files:
+        total_files = len(repository_files)
+        last_emit = time.monotonic()
+        _report(
+            progress_callback, AST_ANALYSIS, "正在逐文件执行 AST 与规则分析",
+            current=0, total=total_files, unit="files",
+        )
+        for index, (path, content) in enumerate(repository_files, start=1):
             diff = _full_file_diff(path, content)
-            if not diff:
-                continue
-            parsed = parse_unified_diff(diff)
-            file_findings: list[Finding] = []
-            reviewers = self.reviewers
-            if path.endswith(".py"):
-                analysis = self.python_analyzer.analyze(path, content)
-                file_findings.extend(analysis.findings)
-                if analysis.parse_error:
-                    python_parse_errors += 1
-                reviewers = [
-                    item for item in reviewers
-                    if not isinstance(item, SecurityRuleReviewer)
-                ]
-            for reviewer in reviewers:
-                file_findings.extend(reviewer.review(diff, parsed))
-            for finding in file_findings:
-                self._merge_finding(findings, finding_index, finding)
+            if diff:
+                parsed = parse_unified_diff(diff)
+                file_findings: list[Finding] = []
+                reviewers = self.reviewers
+                if path.endswith(".py"):
+                    analysis = self.python_analyzer.analyze(path, content)
+                    file_findings.extend(analysis.findings)
+                    if analysis.parse_error:
+                        python_parse_errors += 1
+                    reviewers = [
+                        item for item in reviewers
+                        if not isinstance(item, SecurityRuleReviewer)
+                    ]
+                for reviewer in reviewers:
+                    file_findings.extend(reviewer.review(diff, parsed))
+                for finding in file_findings:
+                    self._merge_finding(findings, finding_index, finding)
+            now = time.monotonic()
+            if (
+                index % AST_PROGRESS_FILE_INTERVAL == 0
+                or index == total_files
+                or now - last_emit >= AST_PROGRESS_TIME_INTERVAL_SECONDS
+            ):
+                _report(
+                    progress_callback, AST_ANALYSIS,
+                    "已分析 %d/%d 个文件" % (index, total_files),
+                    current=index, total=total_files, unit="files",
+                )
+                last_emit = now
 
         if project_dataflow:
             for finding in project_dataflow.findings:
@@ -251,6 +328,7 @@ class RepositoryScanner:
         completed_sast = []
         if self.sast_mode != "off":
             for adapter in self.sast_adapters:
+                _report(progress_callback, SAST_ANALYSIS, "SAST 引擎运行中")
                 result = adapter.scan(workspace, inventory)
                 sast_summary[result.engine] = result.summary()
                 if result.status == "completed":
@@ -262,6 +340,11 @@ class RepositoryScanner:
                     )
                 for finding in result.findings:
                     self._merge_finding(findings, finding_index, finding)
+                _report(
+                    progress_callback, SAST_ANALYSIS,
+                    "SAST 引擎 %s 完成（%s）" % (result.engine, result.status),
+                    engine=result.engine,
+                )
 
         cxx_summary = {
             "status": "disabled" if self.cxx_memory_mode == "off" else "not-applicable",
@@ -373,5 +456,6 @@ class RepositoryScanner:
                 "cxx_memory": cxx_summary,
                 "skipped": dict(sorted(inventory.skipped.items())),
             },
+            adjudication=adjudicate_findings(findings),
         )
         return RepositoryScanResult(report=report, inventory=inventory)

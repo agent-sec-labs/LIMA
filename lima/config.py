@@ -74,6 +74,23 @@ def _bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+EPHEMERAL_CACHE_ROOT = "__ephemeral__"
+_DEFAULT_CACHE_ROOT = "output/repository-cache"
+
+
+def _repository_cache_root_from_env() -> str:
+    """Resolve LIMA_REPOSITORY_CACHE_ROOT; the ``__ephemeral__`` magic value
+    maps to a system-tmpdir cache root for disposable deployments (#14)."""
+
+    raw = os.getenv("LIMA_REPOSITORY_CACHE_ROOT", "").strip()
+    if raw == EPHEMERAL_CACHE_ROOT:
+        import tempfile
+        from pathlib import Path
+
+        return str(Path(tempfile.gettempdir()) / "lima-repository-cache")
+    return raw or _DEFAULT_CACHE_ROOT
+
+
 def _non_negative_int(name: str, default: int) -> int:
     value = int(os.getenv(name, str(default)))
     if value < 0:
@@ -148,7 +165,21 @@ class Settings:
     alert_smtp_host: str = ""
     alert_email_to: str = ""
     continuous_eval_seconds: int = 0
+    experiment_workers: int = 1
+    experiment_queue_lease_seconds: int = 3600
+    experiment_dataset_root: str = "evaluation_data"
+    experiment_artifact_root: str = "output/experiments"
+    experiment_cache_root: str = "output/experiment-cache"
+    experiment_max_llm_calls: int = 20
+    experiment_max_total_tokens: int = 100_000
     repository_import_root: str = ""
+    repository_cache_root: str = "output/repository-cache"
+    repair_workspace_root: str = "output/repair-workspaces"
+    repository_scan_sources: str = "local-import"
+    repository_cache_ttl_seconds: int = 14 * 24 * 3600
+    repository_cache_quota_bytes: int = 2 * 1024 * 1024 * 1024
+    repository_cache_min_free_bytes: int = 512 * 1024 * 1024
+    repository_cache_materialization_timeout_seconds: int = 3600
     repository_scan_sast_mode: str = "required"
     repository_scan_max_files: int = 5000
     repository_scan_max_file_bytes: int = 512 * 1024
@@ -167,6 +198,11 @@ class Settings:
     cxx_agent_timeout_seconds: int = 600
     cxx_agent_parallelism: int = 3
     cxx_agent_dialogue_rounds: int = 2
+    repository_scan_llm_mode: str = "off"
+    repository_scan_llm_timeout_seconds: int = 60
+    repository_scan_llm_max_candidates: int = 6
+    repository_scan_llm_max_context_chars: int = 36_000
+    repository_scan_llm_max_completion_tokens: int = 3_000
 
     def effective_cxx_agent_model(self) -> str:
         """The C/C++ agent model, falling back to the shared LLM model."""
@@ -278,10 +314,18 @@ class Settings:
             raise ValueError(
                 "LIMA_REPOSITORY_SCAN_SAST_MODE must be auto, off or required"
             )
+        if self.repository_scan_llm_mode not in {"off", "auto", "required"}:
+            raise ValueError(
+                "LIMA_REPOSITORY_SCAN_LLM_MODE must be off, auto or required"
+            )
         if min(
             self.repository_scan_max_files,
             self.repository_scan_max_file_bytes,
             self.repository_scan_max_total_bytes,
+            self.repository_scan_llm_timeout_seconds,
+            self.repository_scan_llm_max_candidates,
+            self.repository_scan_llm_max_context_chars,
+            self.repository_scan_llm_max_completion_tokens,
         ) < 1:
             raise ValueError("repository scan limits must be positive")
         if self.cxx_memory_mode not in {"auto", "off", "required"}:
@@ -324,6 +368,17 @@ class Settings:
             self.cxx_agent_dialogue_rounds,
         ) < 1:
             raise ValueError("C/C++ agent budgets must be positive")
+        if min(
+            self.repository_cache_ttl_seconds,
+            self.repository_cache_quota_bytes,
+            self.repository_cache_min_free_bytes,
+            self.repository_cache_materialization_timeout_seconds,
+        ) < 1:
+            raise ValueError("repository cache limits must be positive")
+        if self.repository_scan_sources not in {"local-import", "github", "both"}:
+            raise ValueError(
+                "LIMA_REPOSITORY_SCAN_SOURCES must be local-import, github or both"
+            )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -401,7 +456,45 @@ class Settings:
             continuous_eval_seconds=_non_negative_int(
                 "LIMA_CONTINUOUS_EVAL_SECONDS", 0
             ),
+            experiment_workers=_int("LIMA_EXPERIMENT_WORKERS", 1),
+            experiment_queue_lease_seconds=_int(
+                "LIMA_EXPERIMENT_QUEUE_LEASE_SECONDS", 3600
+            ),
+            experiment_dataset_root=os.getenv(
+                "LIMA_EXPERIMENT_DATASET_ROOT", "evaluation_data"
+            ),
+            experiment_artifact_root=os.getenv(
+                "LIMA_EXPERIMENT_ARTIFACT_ROOT", "output/experiments"
+            ),
+            experiment_cache_root=os.getenv(
+                "LIMA_EXPERIMENT_CACHE_ROOT", "output/experiment-cache"
+            ),
+            experiment_max_llm_calls=_int(
+                "LIMA_EXPERIMENT_MAX_LLM_CALLS", 20
+            ),
+            experiment_max_total_tokens=_int(
+                "LIMA_EXPERIMENT_MAX_TOTAL_TOKENS", 100_000
+            ),
             repository_import_root=os.getenv("LIMA_REPOSITORY_IMPORT_ROOT", ""),
+            repository_cache_root=_repository_cache_root_from_env(),
+            repair_workspace_root=os.getenv(
+                "LIMA_REPAIR_WORKSPACE_ROOT", "output/repair-workspaces"
+            ).strip() or "output/repair-workspaces",
+            repository_scan_sources=os.getenv(
+                "LIMA_REPOSITORY_SCAN_SOURCES", "local-import"
+            ).strip().lower(),
+            repository_cache_ttl_seconds=_int(
+                "LIMA_REPOSITORY_CACHE_TTL_SECONDS", 14 * 24 * 3600
+            ),
+            repository_cache_quota_bytes=_int(
+                "LIMA_REPOSITORY_CACHE_QUOTA_BYTES", 2 * 1024 * 1024 * 1024
+            ),
+            repository_cache_min_free_bytes=_int(
+                "LIMA_REPOSITORY_CACHE_MIN_FREE_BYTES", 512 * 1024 * 1024
+            ),
+            repository_cache_materialization_timeout_seconds=_int(
+                "LIMA_REPOSITORY_CACHE_MATERIALIZATION_TIMEOUT_SECONDS", 3600
+            ),
             repository_scan_sast_mode=os.getenv(
                 "LIMA_REPOSITORY_SCAN_SAST_MODE", "required"
             ).strip().lower(),
@@ -434,4 +527,19 @@ class Settings:
             cxx_agent_timeout_seconds=_int("LIMA_CXX_AGENT_TIMEOUT_SECONDS", 600),
             cxx_agent_parallelism=_int("LIMA_CXX_AGENT_PARALLELISM", 3),
             cxx_agent_dialogue_rounds=_int("LIMA_CXX_AGENT_DIALOGUE_ROUNDS", 2),
+            repository_scan_llm_mode=os.getenv(
+                "LIMA_REPOSITORY_SCAN_LLM_MODE", "off"
+            ).strip().lower(),
+            repository_scan_llm_timeout_seconds=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_TIMEOUT_SECONDS", 60
+            ),
+            repository_scan_llm_max_candidates=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_MAX_CANDIDATES", 6
+            ),
+            repository_scan_llm_max_context_chars=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_MAX_CONTEXT_CHARS", 36_000
+            ),
+            repository_scan_llm_max_completion_tokens=_int(
+                "LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS", 3_000
+            ),
         )

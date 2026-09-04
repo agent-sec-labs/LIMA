@@ -3,6 +3,7 @@ import json
 import mimetypes
 import os
 import re
+import traceback
 import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,12 +25,19 @@ REPAIR_PREVIEW = re.compile(r"^/v1/tasks/([0-9a-f-]+)/repair-preview$")
 FEEDBACK = re.compile(r"^/v1/tasks/([0-9a-f-]+)/feedback$")
 CANCEL = re.compile(r"^/v1/tasks/([0-9a-f-]+)/cancel$")
 RESUME = re.compile(r"^/v1/tasks/([0-9a-f-]+)/resume$")
+EXPERIMENT = re.compile(r"^/v1/experiments/([0-9a-f-]+)$")
+EXPERIMENT_CANCEL = re.compile(r"^/v1/experiments/([0-9a-f-]+)/cancel$")
+EXPERIMENT_RESUME = re.compile(r"^/v1/experiments/([0-9a-f-]+)/resume$")
 ROLLBACK = re.compile(r"^/v1/skills/([A-Za-z0-9_-]+)/versions/(\d+)/activate$")
 SKILL_ARTIFACT_VERSIONS = re.compile(r"^/v1/skill-evolution/([a-z0-9_-]+)/versions$")
 SKILL_ARTIFACT_ACTIVATE = re.compile(
     r"^/v1/skill-evolution/([a-z0-9_-]+)/versions/(\d+)/activate$"
 )
-WEB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
+# React 构建产物（frontend/ npm run build）是唯一前端表面：
+# / 与 /app/ 都指向它（T10 移除 legacy web/ 后的正式切换）。
+APP_DIST_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -75,19 +83,30 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._headers(status, content_type, len(body))
         self.wfile.write(body)
 
-    def _serve_file(self, filename: str) -> None:
-        path = os.path.abspath(os.path.join(WEB_ROOT, filename))
-        if not path.startswith(WEB_ROOT + os.sep) and path != WEB_ROOT:
+    def _serve_app_file(self, filename: str) -> None:
+        """Serve the React build under /app/ (only when frontend/dist exists)."""
+
+        path = os.path.abspath(os.path.join(APP_DIST_ROOT, filename))
+        if not path.startswith(APP_DIST_ROOT + os.sep):
             self._send_json(404, {"error": "not found"})
             return
         try:
             with open(path, "rb") as handle:
                 body = handle.read()
         except OSError:
-            self._send_json(404, {"error": "not found"})
-            return
+            # SPA 路由回退：未命中的 /app/ 路径返回应用外壳。
+            shell = os.path.join(APP_DIST_ROOT, "index.html")
+            try:
+                with open(shell, "rb") as handle:
+                    body = handle.read()
+            except OSError:
+                self._send_json(404, {"error": "not found"})
+                return
+            path = shell
         content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+        if content_type.startswith("text/") or content_type in {
+            "application/javascript", "application/json",
+        }:
             content_type += "; charset=utf-8"
         self._headers(200, content_type, len(body))
         self.wfile.write(body)
@@ -116,34 +135,103 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
+        if path == "/app" or path == "/app/":
+            if os.path.isdir(APP_DIST_ROOT):
+                self._serve_app_file("index.html")
+            else:
+                self._send_json(404, {"error": "frontend build not present"})
+            return
+        if path.startswith("/app/"):
+            if os.path.isdir(APP_DIST_ROOT):
+                self._serve_app_file(path[len("/app/"):])
+            else:
+                self._send_json(404, {"error": "frontend build not present"})
+            return
         if path == "/":
-            self._serve_file("index.html")
-            return
-        if path == "/assets/app.css":
-            self._serve_file("app.css")
-            return
-        if path == "/assets/login.css":
-            self._serve_file("login.css")
-            return
-        if path == "/assets/app.js":
-            self._serve_file("app.js")
-            return
-        if path == "/assets/lima-mark.svg":
-            self._serve_file("lima-mark.svg")
+            # T10：React 为唯一前端。根路径重定向到 /app/（无构建产物时
+            # 与 /app/ 一致地 fail-closed 返回 404，绝不回退旧 UI）。
+            if os.path.isdir(APP_DIST_ROOT):
+                self.send_response(302)
+                self.send_header("Location", "/app/")
+                self.end_headers()
+            else:
+                self._send_json(404, {"error": "frontend build not present"})
             return
         if path == "/health":
             self._send_json(200, {"status": "ok", "version": __version__,
                                   "reviewer": self.service.reviewer.name,
                                   "runtime": self.service.harness.name,
                                   "queue": self.service.queue.backend,
+                                  "experiment_queue": self.service.experiment_queue.backend,
                                   "llm_provider": self.service.llm_config.get("provider", "local"),
                                   "llm_model": self.service.llm_config.get("model", "")})
+            return
+        if path == "/github/install":
+            if not self.settings.github_app_slug:
+                self._send_json(503, {"error": "LIMA_GITHUB_APP_SLUG is not configured"})
+                return
+            location = (
+                "https://github.com/apps/"
+                f"{self.settings.github_app_slug}/installations/new"
+            )
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+            return
+        if path == "/github/setup":
+            # GitHub App 安装完成后由浏览器重定向到此地址；浏览器导航无法携带
+            # Bearer Token，因此这里不做任何服务端写入，只把参数转发给管理台，
+            # 由已登录的管理员前端调用 POST /v1/github/installations 完成登记。
+            installation_id = query.get("installation_id", [""])[0]
+            if not installation_id.isdigit() or len(installation_id) > 20:
+                self._send_json(400, {"error": "installation_id must be a numeric identifier"})
+                return
+            account = query.get("account", ["github-app"])[0][:100]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]*", account):
+                account = "github-app"
+            self.send_response(302)
+            # T10：登记面板位于 React 设置页（消费 github_installation 查询参数）。
+            target = urllib.parse.urlencode({
+                "github_installation": installation_id, "account": account,
+            })
+            self.send_header("Location", "/app/#/settings?" + target)
+            self.end_headers()
             return
         principal = self._authenticate_or_send("read")
         if principal is None:
             return
         if path == "/metrics":
             self._send_text(200, metrics.prometheus(), "text/plain; version=0.0.4; charset=utf-8")
+            return
+        if path == "/v1/experiments/catalog":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {
+                "datasets": self.service.experiment_catalog(),
+                "llm_available": bool(self.service.llm_config),
+            })
+            return
+        if path == "/v1/experiments":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {"experiments": self.service.list_experiments(
+                principal.tenant_id, int(query.get("limit", [50])[0])
+            )})
+            return
+        experiment_match = EXPERIMENT.match(path)
+        if experiment_match:
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            record = self.service.get_experiment(
+                experiment_match.group(1), principal.tenant_id
+            )
+            if not record:
+                self._send_json(404, {"error": "experiment not found"})
+                return
+            self._send_json(200, record)
             return
         if path == "/api/dashboard":
             self._send_json(200, {"stats": self.service.store.dashboard_stats(principal.tenant_id),
@@ -165,6 +253,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "permission denied"})
                 return
             self._send_json(200, self.service.repository_scan_capabilities())
+            return
+        if path == "/v1/repository-grants":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {
+                "grants": self.service.list_repository_grants(principal.tenant_id)
+            })
             return
         if path == "/api/skills":
             self._send_json(200, {
@@ -254,25 +350,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                 match.group(1), principal.tenant_id
             )})
             return
-        if path == "/github/install":
-            if not self.settings.github_app_slug:
-                self._send_json(503, {"error": "LIMA_GITHUB_APP_SLUG is not configured"})
-                return
-            self.send_response(302)
-            self.send_header("Location", "https://github.com/apps/%s/installations/new" % self.settings.github_app_slug)
-            self.end_headers()
-            return
-        if path == "/github/setup":
-            try:
-                installation_id = int(query.get("installation_id", [""])[0])
-            except ValueError:
-                self._send_json(400, {"error": "missing installation_id"})
-                return
-            self.service.store.save_installation(installation_id, query.get("account", ["github-app"])[0])
-            self.send_response(302)
-            self.send_header("Location", "/#github")
-            self.end_headers()
-            return
         report_match = REPORT.match(path)
         task_match = TASK.match(path)
         feedback_match = FEEDBACK.match(path)
@@ -325,6 +402,63 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, result)
                 return
+            if path == "/v1/experiments":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                max_calls = payload.get("max_llm_calls")
+                max_tokens = payload.get("max_total_tokens")
+                if max_calls is not None and not isinstance(max_calls, int):
+                    raise ValueError("max_llm_calls must be an integer")
+                if max_tokens is not None and not isinstance(max_tokens, int):
+                    raise ValueError("max_total_tokens must be an integer")
+                result = self.service.create_experiment(
+                    str(payload.get("dataset", "")),
+                    str(payload.get("mode", "retrieval")),
+                    principal.tenant_id,
+                    max_llm_calls=max_calls,
+                    max_total_tokens=max_tokens,
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "experiment.create", result["run_id"],
+                    {"mode": result["mode"], "dataset": str(payload.get("dataset", ""))},
+                )
+                self._send_json(202, result)
+                return
+            match = EXPERIMENT_CANCEL.match(path)
+            if match:
+                principal = self._principal("manage")
+                self._read_json(body)
+                cancelled = self.service.cancel_experiment(
+                    match.group(1), principal.tenant_id
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "experiment.cancel", match.group(1),
+                    {"cancel_requested": cancelled},
+                )
+                self._send_json(202 if cancelled else 404, {
+                    "cancel_requested": cancelled
+                })
+                return
+            match = EXPERIMENT_RESUME.match(path)
+            if match:
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                allow_ambiguous = payload.get("allow_ambiguous_retry", False)
+                if not isinstance(allow_ambiguous, bool):
+                    raise ValueError("allow_ambiguous_retry must be a boolean")
+                result = self.service.resume_experiment(
+                    match.group(1), principal.tenant_id,
+                    allow_ambiguous_retry=allow_ambiguous,
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "experiment.resume", match.group(1),
+                    {"allow_ambiguous_retry": allow_ambiguous},
+                )
+                self._send_json(202, result)
+                return
             if path == "/v1/reviews":
                 principal = self._principal("review")
                 payload = self._read_json(body)
@@ -347,16 +481,57 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/v1/repository-scans":
                 principal = self._principal("manage")
                 payload = self._read_json(body)
-                repository_key = str(payload.get("repository_key", ""))
-                result = self.service.enqueue_repository_scan(
-                    repository_key, principal.tenant_id
-                )
+                if "source" in payload:
+                    result = self.service.enqueue_repository_scan_source(
+                        payload["source"], principal.tenant_id
+                    )
+                else:
+                    result = self.service.enqueue_repository_scan(
+                        str(payload.get("repository_key", "")), principal.tenant_id
+                    )
                 self.service.store.audit(
                     principal.tenant_id, principal.username,
                     "repository.scan.create", result["task_id"],
-                    {"repository_key": result["repository"]},
+                    {
+                        "repository_key": result["repository"],
+                        "source": result.get("source"),
+                    },
                 )
                 self._send_json(202, result)
+                return
+            if path == "/v1/repository-grants":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                auto_fix = payload.get("auto_fix", False)
+                if not isinstance(auto_fix, bool):
+                    raise ValueError("auto_fix must be a boolean")
+                result = self.service.grant_repository(
+                    principal.tenant_id,
+                    str(payload.get("repository", "")), auto_fix,
+                    actor=principal.username,
+                )
+                self._send_json(201, result)
+                return
+            if path == "/v1/github/installations":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                installation_id = payload.get("installation_id")
+                if not isinstance(installation_id, int) or installation_id <= 0:
+                    raise ValueError("installation_id must be a positive integer")
+                account = str(payload.get("account", "github-app"))[:100]
+                self.service.store.save_installation(
+                    installation_id, account, principal.tenant_id
+                )
+                self.service.store.audit(
+                    principal.tenant_id, principal.username,
+                    "github.installation.register", str(installation_id),
+                    {"account": account},
+                )
+                self._send_json(201, {
+                    "installation_id": installation_id,
+                    "account": account,
+                    "tenant_id": principal.tenant_id,
+                })
                 return
             if path == "/webhooks/github":
                 if self.headers.get("X-GitHub-Event", "") != "pull_request":
@@ -566,9 +741,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
         except PermissionError as exc:
             self._send_json(403, {"error": str(exc)})
-        except Exception as exc:
+        except Exception:
             metrics.inc("http_errors_total")
-            self._send_json(500, {"error": "operation failed", "detail": str(exc)})
+            self.log_error(
+                "unhandled error on POST %s\n%s", self.path, traceback.format_exc()
+            )
+            self._send_json(500, {"error": "operation failed"})
 
 
 def run() -> None:
@@ -585,5 +763,5 @@ def run() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        service.queue.close()
+        service.close()
         server.server_close()

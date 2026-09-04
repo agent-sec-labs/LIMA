@@ -7,10 +7,13 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import lima.real_world_evaluation as evaluation_module
 from lima.real_world_evaluation import (
+    ANALYZER_COMPONENTS,
     LLMSecurityTriageClient,
     RealWorldSecurityEvaluator,
     SnapshotStore,
+    _symbol_matches,
     adjudicate_evidence,
     analyzer_fingerprint,
     load_real_world_dataset,
@@ -20,6 +23,9 @@ from lima.semantic_retrieval import SecurityInvariant, SemanticCandidate
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "evaluation_data" / "real_world_security_cases.json"
+CALIBRATION_DATASET = ROOT / "evaluation_data" / "popular_calibration_v1.json"
+CALIBRATION_DATASET_V2 = ROOT / "evaluation_data" / "popular_external_calibration_v2.json"
+EXTERNAL_HOLDOUT_V2 = ROOT / "evaluation_data" / "popular_external_holdout_v2.json"
 
 
 def archive(commit, files):
@@ -50,6 +56,14 @@ class Response:
 
 
 class RealWorldEvaluationTests(unittest.TestCase):
+    def test_parent_symbol_identity_matches_nested_security_boundary(self):
+        self.assertTrue(_symbol_matches("WindowsViewer.show_file", {"WindowsViewer"}))
+        self.assertTrue(_symbol_matches(
+            "ModelFileManager.add_routes.get_model_preview",
+            {"ModelFileManager.add_routes"},
+        ))
+        self.assertFalse(_symbol_matches("OtherViewer.show_file", {"WindowsViewer"}))
+
     def test_hybrid_adjudication_never_auto_clears_evidence_conflicts(self):
         candidates = [
             SemanticCandidate(
@@ -142,6 +156,75 @@ class RealWorldEvaluationTests(unittest.TestCase):
             {item["cwe"] for item in dataset["cases"]},
         )
         self.assertTrue(all(len(item["fixed_commit"]) == 40 for item in dataset["cases"]))
+
+    def test_v2_external_holdout_is_frozen_popular_and_repository_disjoint(self):
+        dataset = json.loads(EXTERNAL_HOLDOUT_V2.read_text(encoding="utf-8"))
+        development = json.loads(DATASET.read_text(encoding="utf-8"))
+        calibration = json.loads(CALIBRATION_DATASET.read_text(encoding="utf-8"))
+        known_repositories = {
+            item["repository"]
+            for manifest in (development, calibration)
+            for item in manifest["cases"]
+        }
+        repositories = {item["repository"] for item in dataset["cases"]}
+        excluded = set(dataset["selection_policy"]["excluded_repositories"])
+
+        self.assertEqual(5, len(dataset["cases"]))
+        self.assertEqual({"CWE-22", "CWE-78", "CWE-89"}, {
+            item["cwe"] for item in dataset["cases"]
+        })
+        self.assertTrue(repositories.isdisjoint(known_repositories))
+        self.assertTrue(known_repositories.issubset(excluded))
+        self.assertTrue(all(
+            len(item["vulnerable_archive_sha256"]) == 64
+            and len(item["fixed_archive_sha256"]) == 64
+            for item in dataset["cases"]
+        ))
+        self.assertEqual(
+            ["mlflow/mlflow"],
+            [item["repository"] for item in dataset["resource_exclusions"]],
+        )
+        self.assertEqual("external-holdout", dataset["evaluation_role"])
+        self.assertEqual(
+            "bf81ba2cf0719bd62b7b9b2bf3b621571a6a38fe5b6e79374c3cdc2e36f1e5f1",
+            dataset["frozen_analyzer_sha256"],
+        )
+
+    def test_v2_calibration_records_the_completed_holdout_without_relabeling_it(self):
+        holdout = json.loads(EXTERNAL_HOLDOUT_V2.read_text(encoding="utf-8"))
+        calibration = load_real_world_dataset(CALIBRATION_DATASET_V2)
+        self.assertEqual("calibration", calibration["evaluation_role"])
+        self.assertEqual(
+            "3a45b1138a5863ea4db6bb13b804f7eef4c3122fbcd5bc6bf176a0828ae181f4",
+            calibration["source_holdout_manifest_sha256"],
+        )
+        self.assertEqual(
+            holdout["frozen_analyzer_sha256"],
+            calibration["baseline_analyzer_sha256"],
+        )
+        self.assertEqual(
+            analyzer_fingerprint(),
+            calibration["calibration_analyzer_sha256"],
+        )
+        self.assertEqual(
+            [item["id"] for item in holdout["cases"]],
+            [item["id"] for item in calibration["cases"]],
+        )
+        self.assertTrue(all(item["split"] == "calibration" for item in calibration["cases"]))
+
+    def test_analyzer_fingerprint_is_portable_across_lf_and_crlf_checkouts(self):
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root)
+            for name in ANALYZER_COMPONENTS:
+                (package / name).write_bytes(b"first line\nsecond line\n")
+            with patch.object(
+                evaluation_module, "__file__", str(package / "real_world_evaluation.py")
+            ):
+                lf_fingerprint = analyzer_fingerprint()
+                for name in ANALYZER_COMPONENTS:
+                    (package / name).write_bytes(b"first line\r\nsecond line\r\n")
+                crlf_fingerprint = analyzer_fingerprint()
+        self.assertEqual(lf_fingerprint, crlf_fingerprint)
 
     def test_snapshot_store_extracts_pinned_archive_and_uses_cache(self):
         commit = "a" * 40
@@ -371,6 +454,9 @@ class RealWorldEvaluationTests(unittest.TestCase):
         self.assertIn("trust_boundary", prompt)
         self.assertIn("AI-tool argument", prompt)
         self.assertIn("absence of an HTTP call site is not by itself", prompt)
+        self.assertIn("default metadata value as validation", prompt)
+        self.assertIn("do not demand an unrelated root-containment", prompt)
+        self.assertIn("Do not infer that a returned command string is executed", prompt)
 
     def test_llm_candidate_contract_rejects_unprovided_symbol(self):
         response_body = {
@@ -449,6 +535,87 @@ class RealWorldEvaluationTests(unittest.TestCase):
         self.assertEqual(2, len(result["verdicts"]))
         self.assertEqual(120, result["usage"]["total_tokens"])
         self.assertIn("exactly one verdict for every FILE/SYMBOL", captured["messages"][1]["content"])
+
+    def test_llm_candidate_batch_describes_typed_file_provenance_flow(self):
+        candidates = [
+            SemanticCandidate(
+                path="models.py", qualname="FileData", start_line=1, end_line=3,
+                category="path", score=160,
+                signals=("file-model-provenance-boundary",),
+                code="class FileData:\n    path: str\n",
+                invariants=(SecurityInvariant(
+                    identifier="path-file-object-provenance", category="path",
+                    status="risk", summary="default marker is not provenance",
+                ),),
+            ),
+            SemanticCandidate(
+                path="blocks.py", qualname="Blocks.preprocess_data", start_line=1,
+                end_line=3, category="path", score=120,
+                signals=("file-cache-boundary", "check_in_upload_folder"),
+                code="def preprocess_data(value):\n    return move_files_to_cache(value)\n",
+                calls=("async_move_files_to_cache",),
+                invariants=(SecurityInvariant(
+                    identifier="path-file-object-provenance", category="path",
+                    status="risk", summary="missing contextual marker validation",
+                ),),
+            ),
+            SemanticCandidate(
+                path="blocks.py", qualname="Blocks.postprocess_data", start_line=5,
+                end_line=7, category="path", score=80,
+                signals=("file-cache-boundary",),
+                code="def postprocess_data(value):\n    return move_files_to_cache(value)\n",
+            ),
+            SemanticCandidate(
+                path="processing.py", qualname="async_move_files_to_cache", start_line=1,
+                end_line=3, category="path", score=110,
+                signals=("is_file_obj_with_meta",),
+                code="def async_move_files_to_cache(value):\n"
+                "    return traverse(value, is_file_obj_with_meta)\n",
+            ),
+            SemanticCandidate(
+                path="file.py", qualname="File._process_single_file", start_line=1,
+                end_line=3, category="path", score=170,
+                signals=("component-file-read-sink", "path-read-sink"),
+                code="def _process_single_file(value):\n"
+                "    return open(value.path, 'rb').read()\n",
+            ),
+        ]
+        response_body = {
+            "choices": [{"message": {"content": json.dumps({"verdicts": [
+                {
+                    "is_vulnerable": False, "cwe": "NONE", "path": item.path,
+                    "symbol": item.qualname, "root_cause": "guard shown",
+                    "confidence": 0.8, "locally_template_repairable": False,
+                }
+                for item in candidates
+            ]})}}],
+        }
+        captured = {}
+
+        def opener(request, timeout=None):
+            captured.update(json.loads(request.data.decode("utf-8")))
+            return Response(json.dumps(response_body).encode())
+
+        client = LLMSecurityTriageClient(
+            base_url="https://llm.invalid/v1", api_key="secret",
+            model="test-model", provider="test",
+        )
+        with patch(
+            "lima.real_world_evaluation.urllib.request.urlopen", side_effect=opener
+        ):
+            result = client.triage_candidate_batch(candidates)
+
+        self.assertTrue(result["contract_valid"])
+        prompt = captured["messages"][1]["content"]
+        self.assertIn("file-provenance-input-flow", prompt)
+        self.assertIn("FileData", prompt)
+        self.assertIn("Blocks.preprocess_data", prompt)
+        self.assertIn("scope boundary", prompt)
+        self.assertIn("Blocks.postprocess_data", prompt)
+        self.assertIn("marker-bypass hypothesis", prompt)
+        self.assertIn("async_move_files_to_cache", prompt)
+        self.assertIn("downstream file-use sink", prompt)
+        self.assertIn("File._process_single_file", prompt)
 
     def test_llm_candidate_batch_fails_contract_when_identity_is_omitted(self):
         candidate = SemanticCandidate(

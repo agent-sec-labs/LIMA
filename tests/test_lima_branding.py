@@ -33,7 +33,8 @@ class LimaBrandingTests(unittest.TestCase):
         self.assertIn('CMD ["python", "-m", "lima"]', dockerfile)
 
     def test_public_brand_and_configuration_prefix_are_lima(self) -> None:
-        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        # T10：React 唯一前端，品牌锚点从 web/index.html 切到构建外壳。
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("砺码 · LIMA", html)
         self.assertIn("LIMA_LLM_PROVIDER", example)

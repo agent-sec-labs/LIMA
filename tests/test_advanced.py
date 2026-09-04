@@ -15,7 +15,7 @@ from lima.store import TaskStore
 def settings(path):
     return Settings(
         host="127.0.0.1", port=8080, db_path=path, max_diff_bytes=10000,
-        max_steps=8, timeout_seconds=10, llm_base_url="", llm_api_key="", llm_model="",
+        max_steps=8, timeout_seconds=120, llm_base_url="", llm_api_key="", llm_model="",
         github_webhook_secret="", github_token="", auto_post_review=False,
         skills_dir="skills",
     )

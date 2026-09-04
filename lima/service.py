@@ -1,5 +1,9 @@
 import hashlib
+import re
+import sys
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .agents import MultiAgentCoordinator
@@ -26,19 +30,47 @@ from .observability import AlertManager, Observability
 from .postgres_store import create_store
 from .repair_preview import RepositoryRepairPreviewer
 from .report import to_markdown
-from .repository_import import RepositoryImportPolicy
-from .repository_scanner import RepositoryScanner
 from .reviewer import (
-    OpenAICompatibleReviewer,
-    ReliabilityRuleReviewer,
-    SecurityRuleReviewer,
+    OpenAICompatibleReviewer, ReliabilityRuleReviewer, SecurityRuleReviewer,
 )
-from .rollout import ReleaseManager
-from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
+from .diff_parser import parse_unified_diff
 from .skills import SkillRegistry
+from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
 from .store import utc_now
 from .task_queue import PermanentTaskError, TaskQueue
+from .task_failure import classify_exception
+from .task_progress import (
+    COMPLETED,
+    FINALIZING,
+    PREPARING_WORKSPACE,
+    QUEUED,
+    SEMANTIC_TRIAGE,
+    TaskProgress,
+)
+from .rollout import ReleaseManager
 from .verifier import RepairVerifier
+from .repository_import import RepositoryImportPolicy
+from .repository_cache import RepositoryCache
+from .repair_workspace import RepairWorkspace
+from .repository_materializer import GitHubMaterializer
+from .repository_scanner import RepositoryScanner, coverage_warning_counts
+from .repository_source import (
+    GITHUB_SOURCE_TYPE,
+    LOCAL_IMPORT_SOURCE_TYPE,
+    RepositorySource,
+    parse_repository_source,
+)
+from .repository_triage import (
+    RepositorySemanticTriage,
+    RepositorySemanticTriageError,
+)
+from .experiments import ExperimentRunner, LLM_MODES
+from .repair_preview import RepositoryRepairPreviewer
+from .real_world_evaluation import (
+    LLMSecurityTriageClient,
+    RealWorldSecurityEvaluator,
+    SnapshotStore,
+)
 from .workspace import (
     CXX_BUILD_EXTENSIONS,
     CXX_SOURCE_EXTENSIONS,
@@ -46,12 +78,101 @@ from .workspace import (
     RepositoryWorkspace,
 )
 
+DOCKER_REPOSITORY_CACHE_ROOT = Path("/var/lib/lima/repository-cache")
+
+
+def classify_repository_cache_root(root: str) -> str:
+    """Classify a cache root location for deployment visibility (#14).
+
+    ``named-volume`` roots live under the docker compose mount,
+    ``system-tmp`` roots are disposable by design; anything else is
+    ``unmanaged`` and only merits a startup warning, never enforcement.
+    """
+
+    resolved = Path(root).expanduser().resolve()
+    for label, base in (
+        ("named-volume", DOCKER_REPOSITORY_CACHE_ROOT),
+        ("system-tmp", Path(tempfile.gettempdir())),
+    ):
+        try:
+            resolved.relative_to(base.expanduser().resolve())
+            return label
+        except ValueError:
+            continue
+    return "unmanaged"
+
+
+def _warn_unmanaged_repository_cache_root(root: str) -> None:
+    if classify_repository_cache_root(root) == "unmanaged":
+        print(
+            f"WARNING: repository cache root "
+            f"'{Path(root).expanduser().resolve()}' is neither the docker "
+            f"named volume mount ({DOCKER_REPOSITORY_CACHE_ROOT}) nor under "
+            f"the system tmpdir; snapshots may not survive restarts and "
+            f"host disk usage is unmanaged.",
+            file=sys.stderr,
+        )
+
+
+class ScanProgressTracker:
+    """Bridge pipeline stage events into the durable TaskProgress record.
+
+    物化器与扫描器共用 ``pipeline_event(stage, message, **detail)`` 回调契约；
+    同阶段重复事件只刷新计数，不重置 ``stage_started_at``。每次变化立即落库
+    （轻量 UPDATE），报告仍由 ``store.succeed`` 单次最终提交。
+    """
+
+    def __init__(self, store, task_id: str, progress: TaskProgress) -> None:
+        self._store = store
+        self._task_id = task_id
+        self.progress = progress
+
+    @property
+    def stage(self) -> str:
+        return self.progress.stage
+
+    def advance(self, stage: str, message: str = "") -> None:
+        self.progress.advance(stage, message)
+        self._flush()
+
+    def pipeline_event(self, stage: str, message: str = "", **detail: Any) -> None:
+        counters = {
+            key: detail.pop(key)
+            for key in ("current", "total", "unit")
+            if key in detail
+        }
+        if stage != self.progress.stage:
+            self.progress.advance(stage, message)
+        elif message:
+            self.progress.update(message)
+        if counters:
+            self.progress.update(
+                current=counters.get("current"),
+                total=counters.get("total"),
+                unit=str(counters.get("unit", "")),
+            )
+        if detail:
+            self.progress.update(detail=detail)
+        self._flush()
+
+    def complete(self, completion: dict[str, Any]) -> None:
+        self.progress.advance(COMPLETED, "任务完成")
+        self.progress.update(detail={"completion": completion})
+        self._flush()
+
+    def _flush(self) -> None:
+        self._store.update_task_progress(self._task_id, self.progress.to_dict())
+
 
 class ReviewService:
     def __init__(self, settings: Settings):
         self.settings = settings
         settings.validate_evolution()
         self.llm_config = settings.resolved_llm()
+        if settings.repository_scan_llm_mode == "required" and not self.llm_config:
+            raise ValueError(
+                "required repository semantic triage needs an LLM provider"
+            )
         self.store = create_store(settings.database_url, settings.db_path)
         self.context_manager = ContextManager(
             settings.context_max_tokens, settings.context_reserved_tokens
@@ -129,15 +250,48 @@ class ReviewService:
                 timeout_seconds=settings.cxx_analysis_timeout_seconds,
                 max_response_bytes=settings.cxx_max_response_bytes,
             )
+        # 快照缓存与物化器惰性构建：local-import-only（默认）部署在启动时
+        # 不得触碰文件系统；只读根文件系统的容器只在真正需要 GitHub 物化时
+        # 才创建缓存目录，届时失败表现为单个任务失败而非服务崩溃。
+        self._repository_cache: RepositoryCache | None = None
+        # 物化只发生在异步 worker；测试可整体替换该实例注入离线 opener。
+        self.repository_materializer: GitHubMaterializer | None = None
         self.repository_scanner = RepositoryScanner(
             sast_mode=settings.repository_scan_sast_mode,
             cxx_memory_mode=settings.cxx_memory_mode,
             cxx_memory_adapter=cxx_memory_adapter,
         )
+        self.repository_semantic_triage = self._build_repository_semantic_triage()
+        self.experiment_runner = ExperimentRunner(
+            self.store,
+            settings.experiment_dataset_root,
+            settings.experiment_artifact_root,
+            self._build_experiment_evaluator,
+            llm_available=bool(self.llm_config),
+            llm_identity={
+                "provider": str(self.llm_config.get("provider", "")),
+                "model": str(self.llm_config.get("model", "")),
+            },
+            default_max_llm_calls=settings.experiment_max_llm_calls,
+            default_max_total_tokens=settings.experiment_max_total_tokens,
+        )
         self.queue = TaskQueue(
             self._process_queued, settings.async_workers, settings.redis_url,
             settings.queue_max_attempts, settings.queue_lease_seconds,
             self._on_dead_letter,
+            on_retry=self._on_task_retry,
+        )
+        self.experiment_queue = TaskQueue(
+            self._process_experiment_queued,
+            settings.experiment_workers,
+            settings.redis_url,
+            1,
+            settings.experiment_queue_lease_seconds,
+            self._on_experiment_dead_letter,
+            stream="lima:experiment:stream",
+            dead_letter_stream="lima:experiment:dlq",
+            group="lima-experiment-workers",
+            thread_prefix="lima-experiment-worker",
         )
 
     def _build_llm_reviewer(self, prompt: str = "") -> OpenAICompatibleReviewer:
@@ -152,6 +306,124 @@ class ReviewService:
             provider=str(self.llm_config["provider"]),
             extra_headers=dict(self.llm_config.get("headers") or {}),
         )
+
+    def _build_repository_semantic_triage(self):
+        mode = self.settings.repository_scan_llm_mode
+        if mode == "off":
+            return None
+        if not self.llm_config:
+            if mode == "required":
+                raise ValueError(
+                    "required repository semantic triage needs an LLM provider"
+                )
+            return None
+        client = LLMSecurityTriageClient(
+            base_url=str(self.llm_config["base_url"]),
+            api_key=str(self.llm_config["api_key"]),
+            model=str(self.llm_config["model"]),
+            provider=str(self.llm_config["provider"]),
+            extra_headers=dict(self.llm_config.get("headers") or {}),
+            timeout_seconds=self.settings.repository_scan_llm_timeout_seconds,
+            max_context_chars=self.settings.repository_scan_llm_max_context_chars,
+            max_completion_tokens=(
+                self.settings.repository_scan_llm_max_completion_tokens
+            ),
+        )
+        return RepositorySemanticTriage(
+            client,
+            mode=mode,
+            max_candidates=self.settings.repository_scan_llm_max_candidates,
+        )
+
+    def _build_experiment_evaluator(self, mode: str) -> RealWorldSecurityEvaluator:
+        llm_client = None
+        if mode in LLM_MODES:
+            if not self.llm_config:
+                raise ValueError("LLM experiment mode requires a configured provider")
+            llm_client = LLMSecurityTriageClient(
+                base_url=str(self.llm_config["base_url"]),
+                api_key=str(self.llm_config["api_key"]),
+                model=str(self.llm_config["model"]),
+                provider=str(self.llm_config["provider"]),
+                extra_headers=dict(self.llm_config.get("headers") or {}),
+                timeout_seconds=self.settings.repository_scan_llm_timeout_seconds,
+                max_context_chars=self.settings.repository_scan_llm_max_context_chars,
+                max_completion_tokens=(
+                    self.settings.repository_scan_llm_max_completion_tokens
+                ),
+            )
+        return RealWorldSecurityEvaluator(
+            SnapshotStore(self.settings.experiment_cache_root),
+            scanner=RepositoryScanner(sast_mode="off", dataflow_enabled=False),
+            llm_client=llm_client,
+        )
+
+    def create_experiment(
+        self, dataset: str, mode: str, tenant_id: str,
+        *, max_llm_calls: Optional[int] = None,
+        max_total_tokens: Optional[int] = None,
+    ) -> dict:
+        record = self.experiment_runner.create(
+            dataset, mode, tenant_id,
+            max_llm_calls=max_llm_calls,
+            max_total_tokens=max_total_tokens,
+        )
+        self.experiment_queue.submit({
+            "run_id": record["id"], "tenant_id": tenant_id,
+            "allow_ambiguous_retry": False,
+        }, message_id=record["id"])
+        return {
+            "run_id": record["id"], "state": record["state"],
+            "mode": record["mode"], "queue": self.experiment_queue.backend,
+        }
+
+    def get_experiment(self, run_id: str, tenant_id: str) -> Optional[dict]:
+        return self.store.get_experiment(run_id, tenant_id)
+
+    def list_experiments(self, tenant_id: str, limit: int = 50) -> list:
+        return self.store.list_experiments(limit, tenant_id)
+
+    def experiment_catalog(self) -> list:
+        return self.experiment_runner.catalog()
+
+    def cancel_experiment(self, run_id: str, tenant_id: str) -> bool:
+        return self.experiment_runner.cancel(run_id, tenant_id)
+
+    def resume_experiment(
+        self, run_id: str, tenant_id: str,
+        *, allow_ambiguous_retry: bool = False,
+    ) -> dict:
+        record = self.experiment_runner.prepare_resume(
+            run_id, tenant_id,
+            allow_ambiguous_retry=allow_ambiguous_retry,
+        )
+        if record["state"] == "QUEUED":
+            self.experiment_queue.submit({
+                "run_id": run_id, "tenant_id": tenant_id,
+                "allow_ambiguous_retry": allow_ambiguous_retry,
+            }, message_id="%s:%s" % (run_id, uuid.uuid4().hex[:8]))
+        return {"run_id": run_id, "state": record["state"], "resumed": True}
+
+    def _process_experiment_queued(self, payload: Dict[str, Any]) -> None:
+        self.experiment_runner.run(
+            str(payload["run_id"]),
+            allow_ambiguous_retry=bool(payload.get("allow_ambiguous_retry")),
+        )
+
+    def _on_experiment_dead_letter(
+        self, payload: Dict[str, Any], error: str,
+    ) -> None:
+        run_id = str(payload.get("run_id", ""))
+        record = self.store.get_experiment(run_id) if run_id else None
+        if record:
+            self.store.update_experiment(
+                run_id, "FAILED", record.get("progress") or {},
+                error="experiment queue failure: %s" % error[:1500],
+            )
+
+    def close(self) -> None:
+        self.queue.close()
+        self.experiment_queue.close()
 
     def _build_coordinator(self, reviewers: list) -> MultiAgentCoordinator:
         return MultiAgentCoordinator(
@@ -401,7 +673,13 @@ class ReviewService:
                     )
                 else:
                     health_status = "invalid-response"
+        allowed = self.settings.repository_scan_sources
         result.update({
+            "scan_sources": {
+                "configured": allowed,
+                "local_import": allowed in {"local-import", "both"},
+                "github": allowed in {"github", "both"},
+            },
             "sast_mode": self.settings.repository_scan_sast_mode,
             "dataflow_enabled": True,
             "dataflow_scope": "repository-static-imports",
@@ -442,6 +720,20 @@ class ReviewService:
                 "test_configuration_status": "sidecar-managed",
                 "automatic_repair": False,
             },
+            "semantic_triage_mode": self.settings.repository_scan_llm_mode,
+            "semantic_triage_enabled": self.repository_semantic_triage is not None,
+            "semantic_triage_provider": (
+                str(self.llm_config.get("provider", "")) if self.llm_config else ""
+            ),
+            "semantic_triage_max_candidates": (
+                self.settings.repository_scan_llm_max_candidates
+            ),
+            "semantic_triage_max_context_chars": (
+                self.settings.repository_scan_llm_max_context_chars
+            ),
+            "semantic_triage_max_completion_tokens": (
+                self.settings.repository_scan_llm_max_completion_tokens
+            ),
             "max_files": self.settings.repository_scan_max_files,
             "max_file_bytes": self.settings.repository_scan_max_file_bytes,
             "max_total_bytes": self.settings.repository_scan_max_total_bytes,
@@ -453,41 +745,230 @@ class ReviewService:
     ) -> Dict[str, Any]:
         key = self.repository_import.normalize_key(repository_key)
         self.repository_import.resolve(key)
+        return self._enqueue_scan_task(
+            RepositorySource.local_import(key), tenant_id, label=key
+        )
+
+    def _ensure_repository_cache(self) -> RepositoryCache:
+        """Lazily build the snapshot cache on first GitHub materialization."""
+
+        if self._repository_cache is None:
+            cache_root = (
+                self.settings.repository_cache_root or "output/repository-cache"
+            )
+            _warn_unmanaged_repository_cache_root(cache_root)
+            self._repository_cache = RepositoryCache(
+                cache_root,
+                ttl_seconds=self.settings.repository_cache_ttl_seconds,
+                quota_bytes=self.settings.repository_cache_quota_bytes,
+                min_free_bytes=self.settings.repository_cache_min_free_bytes,
+                materialization_timeout_seconds=(
+                    self.settings.repository_cache_materialization_timeout_seconds
+                ),
+            )
+        return self._repository_cache
+
+    def _materializer(self) -> GitHubMaterializer:
+        if self.repository_materializer is None:
+            self.repository_materializer = GitHubMaterializer(
+                self._ensure_repository_cache(),
+                # GitHub API 凭据接线：settings.github_token（LIMA_GITHUB_TOKEN）
+                # 必须随构造传入——此前漏传导致所有远程扫描匿名调用，
+                # 撞 60 次/小时的共享限额后被 GitHub 403 拒绝（2026-08-30 实证）。
+                auth_token=self.settings.github_token,
+            )
+        return self.repository_materializer
+
+    def compose_repair_workspace(
+        self, task_id: str, entry, requested_paths: list[str]
+    ) -> "RepairWorkspace":
+        """Compose a disposable repair workspace for a worker-side task.
+
+        仅接线（issue #16）：工作区由异步 worker 按任务创建与销毁，
+        不经过任何 API 端点；源快照、缓存卷与 GitHub 均不被修改。
+        """
+
+        return RepairWorkspace.compose(
+            self._ensure_repository_cache(),
+            self.settings.repair_workspace_root or "output/repair-workspaces",
+            task_id,
+            entry,
+            requested_paths,
+        )
+
+    def enqueue_repository_scan_source(
+        self, source: RepositorySource | dict[str, str], tenant_id: str = "default"
+    ) -> dict[str, Any]:
+        """Queue a repository scan from a normalized source description.
+
+        请求路径只做契约校验和来源枚举门禁，不做任何网络访问；
+        GitHub ref 的解析与快照物化只发生在异步 worker 内。
+        """
+
+        normalized = parse_repository_source(source)
+        allowed = self.settings.repository_scan_sources
+        if normalized.type == GITHUB_SOURCE_TYPE:
+            if allowed not in {"github", "both"}:
+                metrics.inc("repository_scan_source_github_rejected_total")
+                raise ValueError(
+                    "github repository scans are disabled by "
+                    "LIMA_REPOSITORY_SCAN_SOURCES"
+                )
+            return self._enqueue_scan_task(normalized, tenant_id)
+        if allowed not in {"local-import", "both"}:
+            metrics.inc("repository_scan_source_local_import_rejected_total")
+            raise ValueError(
+                "local-import repository scans are disabled by "
+                "LIMA_REPOSITORY_SCAN_SOURCES"
+            )
+        self.repository_import.resolve(normalized.repository_key)
+        return self._enqueue_scan_task(normalized, tenant_id)
+
+    def _enqueue_scan_task(
+        self, normalized: RepositorySource, tenant_id: str, label: str = ""
+    ) -> dict[str, Any]:
+        label = label or normalized.canonical_name or normalized.repository_key
+        is_local = normalized.type == LOCAL_IMPORT_SOURCE_TYPE
         task_id = str(uuid.uuid4())
-        self.store.create(task_id, key, None, {
-            "source": "repository-import",
+        scan_source = normalized.to_dict()
+        task_input: dict[str, Any] = {
+            "source": "repository-import" if is_local else "github-materializer",
             "task_type": "repository_scan",
-            "repository_key": key,
+            "scan_source": scan_source,
             "sast_mode": self.settings.repository_scan_sast_mode,
+            "semantic_triage_mode": self.settings.repository_scan_llm_mode,
             "cxx_memory_mode": self.settings.cxx_memory_mode,
-        }, tenant_id)
-        self.queue.submit({
+        }
+        message: dict[str, Any] = {
             "task_id": task_id,
             "task_type": "repository_scan",
-            "repository_key": key,
+            "scan_source": scan_source,
             "tenant_id": tenant_id,
-        }, message_id=task_id)
+        }
+        if is_local:
+            task_input["repository_key"] = normalized.repository_key
+            message["repository_key"] = normalized.repository_key
+        self.store.create(task_id, label, None, task_input, tenant_id)
+        # 任务实例化即开始进度跟踪（QUEUED），失败也始终有 progress 佐证 stage。
+        self.store.update_task_progress(
+            task_id,
+            TaskProgress.begin(
+                max_attempts=self.settings.queue_max_attempts
+            ).to_dict(),
+        )
+        self.queue.submit(message, message_id=task_id)
         metrics.inc("repository_scans_enqueued_total")
+        metrics.inc(
+            f"repository_scan_source_{'local_import' if is_local else 'github'}_accepted_total"
+        )
         return {
             "task_id": task_id,
+            "scan_id": task_id,
             "task_type": "repository_scan",
-            "repository": key,
+            "repository": label,
+            "source": scan_source,
             "state": "PENDING",
             "queue": self.queue.backend,
         }
 
-    def _process_repository_scan(
-        self, task_id: str, repository_key: str, tenant_id: str
+    def _scan_progress_tracker(self, task_id: str) -> ScanProgressTracker:
+        """Restore persisted progress (retry continuity) or begin a new one."""
+
+        existing = (self.store.get(task_id) or {}).get("progress")
+        if existing:
+            progress = TaskProgress.from_dict(existing)
+        else:
+            progress = TaskProgress.begin(
+                max_attempts=self.settings.queue_max_attempts
+            )
+        return ScanProgressTracker(self.store, task_id, progress)
+
+    def _record_task_failure(
+        self, task_id: str, exc: BaseException,
+        tracker: ScanProgressTracker | None = None,
     ) -> None:
-        root = self.repository_import.resolve(repository_key)
-        self.store.transition(
-            task_id,
-            TraceEvent(
-                1, TaskState.PLANNING,
-                "Validated repository key within the configured import root.",
-                utc_now(),
-            ),
+        """Persist the typed failure (stage preserved) before queue routing.
+
+        显式 typed 失败（T3 物化器）原样保留；未分类异常经 classify_exception
+        兜底，stage 取自当前 progress，保证 UI 不再只有裸异常字符串。
+        """
+
+        stage = tracker.stage if tracker is not None else ""
+        failure = classify_exception(exc, stage)
+        self.store.update_task_failure(task_id, failure.to_dict())
+
+    def _process_repository_scan(
+        self, task_id: str, repository_key: str, tenant_id: str,
+        scan_source: dict[str, Any] | None = None,
+    ) -> None:
+        tracker = self._scan_progress_tracker(task_id)
+        try:
+            if scan_source:
+                self._process_github_repository_scan(
+                    task_id, scan_source, tenant_id, tracker
+                )
+                return
+            tracker.pipeline_event(PREPARING_WORKSPACE, "正在准备本地导入工作区")
+            root = self.repository_import.resolve(repository_key)
+            self.store.transition(
+                task_id,
+                TraceEvent(
+                    1, TaskState.PLANNING,
+                    "Validated repository key within the configured import root.",
+                    utc_now(),
+                ),
+            )
+            self._execute_repository_scan(
+                task_id, root, tenant_id, repository_key,
+                {"repository_key": repository_key}, tracker,
+            )
+        except Exception as exc:
+            self._record_task_failure(task_id, exc, tracker)
+            raise
+
+    def _process_github_repository_scan(
+        self, task_id: str, scan_source: dict[str, Any], tenant_id: str,
+        tracker: ScanProgressTracker,
+    ) -> None:
+        # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
+        source = parse_repository_source(scan_source)
+        materialized = self._materializer().materialize(
+            source, progress_callback=tracker.pipeline_event
         )
+        revision = materialized["resolved_revision"]
+        metrics.inc(
+            f"repository_scan_source_github_"
+            f"{'cache_hit' if materialized['cache_hit'] else 'materialized'}_total"
+        )
+        # 扫描全程 pin 住快照，防止并发缓存清理在扫描进行中驱逐工作目录。
+        with self._ensure_repository_cache().pin(source, revision):
+            self.store.transition(
+                task_id,
+                TraceEvent(
+                    1, TaskState.PLANNING,
+                    "Materialized pinned GitHub snapshot at %s." % revision,
+                    utc_now(),
+                ),
+            )
+            self._execute_repository_scan(
+                task_id, Path(materialized["path"]), tenant_id,
+                source.canonical_name,
+                {
+                    "source": source.to_dict(),
+                    "resolved_revision": revision,
+                    "cache_hit": materialized["cache_hit"],
+                    "archive_sha256": materialized["archive_sha256"],
+                },
+                tracker,
+                materializer_warnings=materialized.get("warnings") or [],
+            )
+
+    def _execute_repository_scan(
+        self, task_id: str, root: Path, tenant_id: str,
+        repository_label: str, import_policy_extra: dict[str, Any],
+        progress: ScanProgressTracker | None = None,
+        materializer_warnings: list[dict[str, Any]] | None = None,
+    ) -> None:
         workspace = RepositoryWorkspace(
             root,
             max_files=self.settings.repository_scan_max_files,
@@ -503,19 +984,93 @@ class ReviewService:
         )
         with self.observability.span(
             "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
-            repository=repository_key,
+            repository=repository_label,
         ), metrics.timer("repository_scan_duration"):
             result = self.repository_scanner.scan(
-                workspace, repository_key=repository_key
+                workspace,
+                repository_key=repository_label,
+                progress_callback=(
+                    progress.pipeline_event if progress is not None else None
+                ),
             )
-        result.report.repository = repository_key
+        result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {
-            "repository_key": repository_key,
             "host_path_exposed": False,
             "repository_code_executed": False,
             "snapshot_sha256": result.inventory.fingerprint(),
             "snapshot_files": len(result.inventory.files),
+            **import_policy_extra,
         }
+        if self.repository_semantic_triage is not None:
+            if progress is not None:
+                progress.pipeline_event(SEMANTIC_TRIAGE, "正在语义复核候选发现")
+            try:
+                with metrics.timer("repository_semantic_triage_duration"):
+                    triage = self.repository_semantic_triage.run(
+                        root,
+                        result.report.adjudication,
+                        result.report.findings,
+                    )
+            except RepositorySemanticTriageError as exc:
+                metrics.inc("repository_semantic_triage_failed_total")
+                raise PermanentTaskError(str(exc)) from exc
+            if triage.findings:
+                result.report.findings.extend(triage.findings)
+                severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+                result.report.findings.sort(key=lambda item: (
+                    -severity_rank.get(item.severity.value, 0),
+                    item.path, item.line, item.rule_id,
+                ))
+                highest = max(
+                    (severity_rank.get(item.severity.value, 0)
+                     for item in result.report.findings),
+                    default=0,
+                )
+                result.report.risk = (
+                    "critical" if highest == 4 else
+                    "high" if highest == 3 else
+                    "medium" if highest == 2 else "low"
+                )
+                result.report.summary += (
+                    " Hybrid semantic triage added %d evidence-backed finding%s."
+                    % (len(triage.findings), "" if len(triage.findings) == 1 else "s")
+                )
+            result.report.adjudication = triage.adjudication
+            result.report.collaboration["semantic_triage"] = triage.diagnostics
+            if triage.diagnostics.get("status") == "completed":
+                metrics.inc("repository_semantic_triage_completed_total")
+            else:
+                metrics.inc("repository_semantic_triage_degraded_total")
+        else:
+            result.report.collaboration["semantic_triage"] = {
+                "mode": self.settings.repository_scan_llm_mode,
+                "status": (
+                    "disabled"
+                    if self.settings.repository_scan_llm_mode == "off"
+                    else "llm-not-configured"
+                ),
+                "secret_persisted": False,
+            }
+        # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
+        warnings_by_reason = coverage_warning_counts(result.inventory)
+        for warning in materializer_warnings or []:
+            if warning.get("category") == "coverage":
+                code = str(warning.get("code") or "COVERAGE_SKIPPED")
+                warnings_by_reason[code] = warnings_by_reason.get(code, 0) + 1
+        warning_count = sum(warnings_by_reason.values())
+        completion: dict[str, Any] = {
+            "status": (
+                "completed_with_warnings" if warning_count else "completed"
+            ),
+            "warning_count": warning_count,
+        }
+        if warnings_by_reason:
+            completion["warnings"] = warnings_by_reason
+        if progress is not None:
+            progress.pipeline_event(FINALIZING, "正在生成审计报告")
+            # 先落 COMPLETED progress 再翻状态：避免轮询方看到
+            # SUCCESS + 非 COMPLETED progress 的矛盾快照。
+            progress.complete(completion)
         self.store.succeed(
             task_id, result.report,
             TraceEvent(
@@ -527,6 +1082,27 @@ class ReviewService:
         )
         metrics.inc("repository_scans_total")
 
+    def _on_task_retry(
+        self, payload: Dict[str, Any], attempt: int, max_attempts: int,
+        exc: BaseException, delay: float,
+    ) -> None:
+        """Queue retry callback: bump progress attempt (scan tasks only).
+
+        评审类任务没有 progress 记录，直接跳过；attempt 反映队列重试计数。
+        """
+
+        task_id = payload.get("task_id", "")
+        if not task_id:
+            return
+        task = self.store.get(task_id)
+        progress = (task or {}).get("progress")
+        if not progress:
+            return
+        restored = TaskProgress.from_dict(progress)
+        restored.attempt = min(attempt + 1, max_attempts)
+        restored.advance(QUEUED, "任务将自动重试")
+        self.store.update_task_progress(task_id, restored.to_dict())
+
     def _process_queued(self, payload: Dict[str, Any]) -> None:
         task_id = payload["task_id"]
         task = self.store.get(task_id)
@@ -537,12 +1113,24 @@ class ReviewService:
             "task_type", "review"
         )
         if task_type == "repository_scan":
-            self._process_repository_scan(
-                task_id,
-                payload.get("repository_key")
-                or (task.get("input") or {}).get("repository_key", ""),
-                tenant_id,
-            )
+            scan_source = payload.get("scan_source") or (
+                task.get("input") or {}
+            ).get("scan_source")
+            if scan_source and scan_source.get("type") == "github":
+                self._process_repository_scan(
+                    task_id,
+                    payload.get("repository_key")
+                    or (task.get("input") or {}).get("repository_key", ""),
+                    tenant_id,
+                    scan_source,
+                )
+            else:
+                self._process_repository_scan(
+                    task_id,
+                    payload.get("repository_key")
+                    or (task.get("input") or {}).get("repository_key", ""),
+                    tenant_id,
+                )
             return
         diff = self.store.get_task_payload(task_id)
         if diff is None and payload.get("diff_url"):
@@ -749,3 +1337,28 @@ class ReviewService:
     def _authorize_repository(self, tenant_id: str, repository: str) -> None:
         if not self.store.repository_allowed(tenant_id, repository):
             raise PermissionError("repository is not authorized for this tenant")
+
+    def list_repository_grants(self, tenant_id: str) -> list:
+        return self.store.list_repository_grants(tenant_id)
+
+    def grant_repository(
+        self, tenant_id: str, repository: str, auto_fix: bool,
+        actor: str = "",
+    ) -> dict:
+        repository = repository.strip()
+        valid_name = (
+            len(repository) <= 200
+            and ".." not in repository
+            and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+                repository,
+            )
+        )
+        if not valid_name:
+            raise ValueError("repository must be a GitHub-style owner/name identifier")
+        self.store.grant_repository(tenant_id, repository, bool(auto_fix))
+        self.store.audit(
+            tenant_id, actor or "api", "repository.grant", repository,
+            {"auto_fix": bool(auto_fix)},
+        )
+        return {"repository": repository, "auto_fix": bool(auto_fix)}

@@ -1,5 +1,4 @@
 .git
-.github
 .env
 .venv
 __pycache__

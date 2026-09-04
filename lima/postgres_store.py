@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
 from .store import utc_now
+from .task_progress import progress_summary
 
 
 class PostgresTaskStore:
@@ -32,7 +33,9 @@ class PostgresTaskStore:
             """CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, state TEXT NOT NULL, repository TEXT NOT NULL,
                 pull_request INTEGER, input_json JSONB NOT NULL, report_json JSONB,
-                error TEXT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""",
+                error TEXT, progress_json JSONB, failure_json JSONB,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS trace_events (
                 id BIGSERIAL PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), step INTEGER NOT NULL,
                 state TEXT NOT NULL, message TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)""",
@@ -72,11 +75,24 @@ class PostgresTaskStore:
             "ALTER TABLE skill_evolution_runs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS progress_json JSONB",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS failure_json JSONB",
             "ALTER TABLE installations ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             """CREATE TABLE IF NOT EXISTS checkpoints (
                 task_id TEXT NOT NULL REFERENCES tasks(id), node TEXT NOT NULL, status TEXT NOT NULL,
                 attempt INTEGER NOT NULL DEFAULT 1, state_json JSONB NOT NULL, error TEXT,
                 updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(task_id,node))""",
+            """CREATE TABLE IF NOT EXISTS experiment_runs (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+                state TEXT NOT NULL, mode TEXT NOT NULL, dataset_path TEXT NOT NULL,
+                manifest_json JSONB NOT NULL, progress_json JSONB NOT NULL,
+                result_json JSONB, error TEXT, cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS experiment_cases (
+                run_id TEXT NOT NULL REFERENCES experiment_runs(id), case_id TEXT NOT NULL,
+                stage TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+                result_json JSONB, error TEXT, updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(run_id,case_id))""",
             """CREATE TABLE IF NOT EXISTS task_payloads (
                 task_id TEXT PRIMARY KEY REFERENCES tasks(id), diff TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL)""",
@@ -192,6 +208,8 @@ class PostgresTaskStore:
         value = dict(row)
         value["input"] = value.pop("input_json")
         value["report"] = value.pop("report_json")
+        value["progress"] = value.pop("progress_json", None)
+        value["failure"] = value.pop("failure_json", None)
         value["trace"] = [dict(item) for item in events]
         value["collaboration"] = []
         for message in messages:
@@ -213,6 +231,24 @@ class PostgresTaskStore:
                 (task_id, message["sender"], message["recipient"], message["kind"],
                  message.get("correlation_id", ""),
                  json.dumps(message.get("content", {}), ensure_ascii=False), utc_now()),
+            )
+
+    def update_task_progress(self, task_id: str, progress: dict[str, Any]) -> None:
+        """Persist runtime progress without touching immutable task input."""
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET progress_json=%s::jsonb, updated_at=%s WHERE id=%s",
+                (json.dumps(progress, ensure_ascii=False), utc_now(), task_id),
+            )
+
+    def update_task_failure(self, task_id: str, failure: dict[str, Any]) -> None:
+        """Persist the structured failure payload on its own column."""
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET failure_json=%s::jsonb, updated_at=%s WHERE id=%s",
+                (json.dumps(failure, ensure_ascii=False), utc_now(), task_id),
             )
 
     def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
@@ -292,7 +328,8 @@ class PostgresTaskStore:
             where = " WHERE tenant_id=%s" if tenant_id is not None else ""
             params = ([tenant_id] if tenant_id is not None else []) + [max(1, min(limit, 200))]
             rows = conn.execute(
-                "SELECT id,state,repository,pull_request,error,created_at,updated_at,tenant_id,input_json "
+                "SELECT id,state,repository,pull_request,error,created_at,"
+                "updated_at,tenant_id,input_json,progress_json "
                 "FROM tasks" + where + " ORDER BY created_at DESC LIMIT %s", params
             ).fetchall()
         values = []
@@ -300,6 +337,7 @@ class PostgresTaskStore:
             value = dict(row)
             payload = value.pop("input_json") or {}
             value["task_type"] = payload.get("task_type", "review")
+            value["progress"] = progress_summary(value.pop("progress_json", None))
             values.append(value)
         for value in values:
             value["created_at"] = value["created_at"].isoformat()
@@ -641,6 +679,145 @@ class PostgresTaskStore:
             row = conn.execute("SELECT diff FROM task_payloads WHERE task_id=%s", (task_id,)).fetchone()
         return row["diff"] if row else None
 
+    @staticmethod
+    def _experiment_value(row: Dict[str, Any]) -> Dict[str, Any]:
+        value = dict(row)
+        value["manifest"] = value.pop("manifest_json")
+        value["progress"] = value.pop("progress_json")
+        value["result"] = value.pop("result_json")
+        value["cancel_requested"] = bool(value["cancel_requested"])
+        for key in ("created_at", "updated_at"):
+            value[key] = value[key].isoformat()
+        return value
+
+    def create_experiment(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        now = record.get("created_at") or utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO experiment_runs(id,tenant_id,state,mode,dataset_path,"
+                "manifest_json,progress_json,result_json,error,cancel_requested,"
+                "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,"
+                "NULL,NULL,FALSE,%s,%s)",
+                (
+                    record["id"], record.get("tenant_id", "default"),
+                    record["state"], record["mode"], record["dataset_path"],
+                    json.dumps(record["manifest"], ensure_ascii=False),
+                    json.dumps(record.get("progress") or {}, ensure_ascii=False),
+                    now, now,
+                ),
+            )
+        return self.get_experiment(record["id"]) or {}
+
+    def get_experiment(
+        self, run_id: str, tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM experiment_runs WHERE id=%s"
+        params: list[Any] = [run_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=%s"
+            params.append(tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        if not row:
+            return None
+        value = self._experiment_value(row)
+        value["cases"] = self.list_experiment_cases(run_id)
+        return value
+
+    def list_experiments(
+        self, limit: int = 50, tenant_id: Optional[str] = None,
+    ) -> list:
+        query = "SELECT * FROM experiment_runs"
+        params: list[Any] = []
+        if tenant_id is not None:
+            query += " WHERE tenant_id=%s"
+            params.append(tenant_id)
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(max(1, min(limit, 200)))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        values = []
+        for row in rows:
+            value = self._experiment_value(row)
+            value["result_available"] = value.pop("result") is not None
+            values.append(value)
+        return values
+
+    def update_experiment(
+        self, run_id: str, state: str, progress: Dict[str, Any],
+        *, error: str = "", result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        rendered_result = (
+            json.dumps(result, ensure_ascii=False) if result is not None else None
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE experiment_runs SET state=%s,progress_json=%s::jsonb,"
+                "result_json=COALESCE(%s::jsonb,result_json),error=%s,updated_at=%s "
+                "WHERE id=%s",
+                (
+                    state, json.dumps(progress, ensure_ascii=False), rendered_result,
+                    error[:2000] or None, utc_now(), run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("experiment not found")
+
+    def save_experiment_case(
+        self, run_id: str, case_id: str, stage: str, status: str,
+        *, attempt: int = 1, result: Optional[Dict[str, Any]] = None,
+        error: str = "",
+    ) -> None:
+        rendered = json.dumps(result, ensure_ascii=False) if result is not None else None
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO experiment_cases(run_id,case_id,stage,status,attempt,"
+                "result_json,error,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s) "
+                "ON CONFLICT(run_id,case_id) DO UPDATE SET stage=EXCLUDED.stage,"
+                "status=EXCLUDED.status,attempt=EXCLUDED.attempt,"
+                "result_json=COALESCE(EXCLUDED.result_json,experiment_cases.result_json),"
+                "error=EXCLUDED.error,updated_at=EXCLUDED.updated_at",
+                (
+                    run_id, case_id, stage, status, attempt, rendered,
+                    error[:2000] or None, utc_now(),
+                ),
+            )
+
+    def list_experiment_cases(self, run_id: str) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM experiment_cases WHERE run_id=%s ORDER BY case_id",
+                (run_id,),
+            ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            value["result"] = value.pop("result_json")
+            value["updated_at"] = value["updated_at"].isoformat()
+            values.append(value)
+        return values
+
+    def request_experiment_cancel(
+        self, run_id: str, tenant_id: Optional[str] = None,
+    ) -> bool:
+        query = "UPDATE experiment_runs SET cancel_requested=TRUE,updated_at=%s WHERE id=%s"
+        params: list[Any] = [utc_now(), run_id]
+        if tenant_id is not None:
+            query += " AND tenant_id=%s"
+            params.append(tenant_id)
+        with self._connect() as conn:
+            cursor = conn.execute(query, params)
+            return cursor.rowcount == 1
+
+    def reset_experiment_cancel(self, run_id: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE experiment_runs SET cancel_requested=FALSE,updated_at=%s WHERE id=%s",
+                (utc_now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("experiment not found")
+
     def save_checkpoint(
         self, task_id: str, node: str, state: Dict[str, Any], status: str = "completed",
         attempt: int = 1, error: str = "",
@@ -774,6 +951,18 @@ class PostgresTaskStore:
                 (tenant_id, repository, auto_fix),
             )
 
+    def list_repository_grants(self, tenant_id: str) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT repository,auto_fix FROM repository_grants "
+                "WHERE tenant_id=%s ORDER BY repository",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {"repository": row["repository"], "auto_fix": bool(row["auto_fix"])}
+            for row in rows
+        ]
+
     def repository_allowed(
         self, tenant_id: str, repository: str, require_auto_fix: bool = False,
     ) -> bool:
@@ -785,7 +974,11 @@ class PostgresTaskStore:
                 "SELECT auto_fix FROM repository_grants WHERE tenant_id=%s AND repository=%s",
                 (tenant_id, repository),
             ).fetchone()
-        return True if total == 0 else bool(row and (not require_auto_fix or row["auto_fix"]))
+        # 未配置任何授权时，审查（只读分析）保持放行以兼容默认部署；
+        # 自动修复会触发 GitHub 写操作，必须依赖显式授权，fail-closed。
+        if total == 0:
+            return not require_auto_fix
+        return bool(row and (not require_auto_fix or row["auto_fix"]))
 
     def audit(
         self, tenant_id: str, actor: str, action: str, resource: str,

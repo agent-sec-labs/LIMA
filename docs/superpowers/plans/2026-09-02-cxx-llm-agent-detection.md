@@ -154,6 +154,27 @@ Task 6 | 复审通过 | commits 1e4d833..(见 git log) | RED: python -m unittest
 
 Task 6 补充记录：硬 deadline 的准确边界（reviewer 核对 CPython 源码确认）——Content-Length/连接关闭型响应（GitHub codeload 实际形态）下绝对 deadline 成立；Transfer-Encoding: chunked 的 chunk-size 行解析与响应头阶段内部 readline 循环仅有 per-recv ≤60s 兜底，恶意镜像可拖慢但不可无限挂死；彻底封死需 per-recv deadline 执行（http.client 不暴露）或看门狗，记为已知边界留待后续 residual。Minor 遗留：read1 阻塞至 OS socket timeout 的真实滴流路径无测试覆盖（依赖 OS 行为）。
 
+```text
+Task 7 | 复审通过 | commits 22eaf0c..(见 git log) | RED: python -m unittest tests.test_cxx_memory_evaluation.CliAndCiContractTests → artifact 集缺四项 + base digest 参数缺失 | GREEN: 宿主全量 356 OK (12 skip)；Linux 容器全量 356 OK (3 skip)；容器三连测（真实 semgrep/Clang-SA/ASan）多轮全绿；集成协议探针 12/12 vulnerable findings；四 case 公开评测矩阵本地执行（见补充记录）；ruff/compose config/git diff --check 全过 | reviewer: 修复后通过（C1 {{.Parent}} 在 BuildKit 下为空——改用基础镜像引用的 {{.Id}}（本地评测运行同故障实证）；I1 部分保留诊断在驱动层合并；I2 方向分类器改为括号即弃+前缀自增+<<=死代码修复并补 BoundsDirectionTests 15 形态单测；M1 manifest 导出容器加固；M2/M3/M5 文档与命名）
+
+Task 7 补充记录（八项"从未真正执行"基线缺陷的修复，全部有容器内实证）：
+(1) 基础镜像 digest 实为 trixie 无 clang-14 → 换 bookworm digest（四处同步）。
+(2) /work tmpfs 默认 noexec → ASan 二进制 EACCES → compose+CI 三处加 exec（执行仍受 Landlock+seccomp 全约束）。
+(3) 镜像无默认 cc/c++ → BUILD_ENVIRONMENT（CC/CXX=clang-14）入固定环境白名单。
+(4) cmake compile_commands 固定 "command" shell 串被一律拒绝 → shlex 解析为 argv 后走与 "arguments" 完全相同校验链（不执行原文）。
+(5) parse_clang_plist 对齐真实 clang-14：真实检查器串（unix.Malloc + cplusplus.NewDelete）；ArrayBoundV2 读写同型 → _bounds_direction 从已验证快照源码保守分类（歧义即弃 + clang-bounds-direction-undetermined 诊断）；plist 控制边端点为位置数组（start[0]/end[-1] 锚点）；clang-sample.plist 以容器内真实 clang-14 输出再生；manifest 的 std::array 两形态 clang_expected 按实证翻转 false。
+(6) Landlock 白明珠：/etc/ssl/certs 只读树（semgrep 启动需 CA 锚）；字符设备接纳（/dev/null 规则曾被静默丢弃）。
+(7) ASAN_OPTIONS abort_on_error 1→0（abort 走被拦的 tgkill → 偶发嵌套崩溃损毁报告）；parse_asan_log 单块损坏保留已验证 findings + needs-human-review（驱动层同步合并诊断）。
+(8) 夹具容器适配：/work/tmp 守卫、semgrep 探针 HOME、BuildScan 容器测试移除越界 _ANALYZER_TEMP_ROOT 补丁。
+镜像新增 libclang-rt-14-dev（ASan 链接运行库，缺它 sanitizer 层无法产出二进制——第六项实证缺陷）。CI manifest 导出容器加 --network none --read-only --cap-drop ALL。
+
+Task 7 四 case 公开评测矩阵本地证据（2026-09-04，Docker Desktop Linux daemon）：
+- 管线端到端全部跑通：HTTPS 归档下载（SHA-256 校验+安全解压）→ 快照指纹 → 沙箱内三层分析 → 评测报告（含镜像/基础镜像 digest、四 artifact 导出）。
+- 复审后再修两项真实仓库缺陷：CI base digest 取法（BuildKit 下 {{.Parent}} 为空——改用基础镜像引用的 {{.Id}}）；semgrep 真实输出的结构化 error type（["PartialParsing", [...]] 列表）此前导致整包拒绝——现取列表首元素做有界代表（str 仍原样），podofo/goaccess 源层正确降级为 semgrep-reported-errors。
+- 诚实指标：四 case pair_correct 均 False（检测未命中）。逐 case 诊断——curl: semgrep JSON 仍被拒（另一真实输出维度待定性）+ build_failed；podofo: build 完成 ✓ 但 semgrep 输出超 1MB 预算被截断 + compile-commands-rejected（条目超限或路径形态）；goaccess×2: semgrep-reported-errors（tree-sitter 无法解析部分真实 C 文件）+ autotools in-tree 构建（autoreconf 需写冻结源码树）与只读快照模型不兼容——build 层设计性限制。
+- 这些是当前窄规则集+证据模型在真实仓库上的已知边界（设计文档"第一版不承诺零日发现"），非管线缺陷；已如实记录在评测 JSON（output/cxx-memory-evaluation-*.json）。curl semgrep 拒绝维度与 podofo compile-commands 拒绝原因记为 Phase B 待办观察项。
+- 本地评测执行方式偏差（已记录）：评测器在宿主跑而非隔离容器（Windows bind-mount 对容器内新建目录的可见性怪癖），sidecar 以 127.0.0.1:18090 端口发布（CI 仍为内网隔离）；该偏差仅影响本地复现拓扑，不影响 sidecar 内部安全边界。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -449,7 +470,7 @@ git commit -s -m "fix: bound C++ evaluation downloads by deadline"
 **Interfaces:**
 - Produces: 实际 image ID、base image digest、精确直接/传递 Debian 与 Python package manifest；CI 将 package manifests 与 JSON report 一起上传。
 
-- [ ] **Step 1: RED 合同测试**
+- [x] **Step 1: RED 合同测试**
 
 ```python
 def test_public_evaluation_artifact_retains_toolchain_manifests():
@@ -459,12 +480,12 @@ def test_public_evaluation_artifact_retains_toolchain_manifests():
     }
 ```
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_memory_evaluation tests.test_cxx_analyzer -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现身份闭环**
+- [x] **Step 3: 实现身份闭环**
 
 Dockerfile 使用 digest-pinned base；能够可靠固定的直接依赖使用精确版本，全部解析后的包版本在镜像内生成 manifest。CI 从宿主 `docker image inspect` 获取 ID并导出镜像/包清单，作为同一 artifact 上传。若 apt repository 不能 snapshot-pin，文档必须明确仅“可审计”而非“逐字节可复现”。
 

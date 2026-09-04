@@ -795,7 +795,44 @@ class CliAndCiContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_evaluation_module()
 
-    def test_cli_exposes_only_the_six_fixed_parameters(self):
+    def test_public_evaluation_artifact_retains_toolchain_manifests(self):
+        workflow = yaml.safe_load(
+            Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )
+        names = set()
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps") or []:
+                if "upload-artifact" not in str(step.get("uses") or ""):
+                    continue
+                name = str(step.get("with", {}).get("name") or "")
+                names.add(name.replace("${{ matrix.case-id }}", "").rstrip("-"))
+        self.assertGreaterEqual(
+            names,
+            {"evaluation-report", "debian-packages", "python-packages", "image-inspect"},
+        )
+        ci_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("analyzer-toolchain-packages.txt", ci_text)
+        self.assertIn("analyzer-python-packages.txt", ci_text)
+        self.assertIn("docker image inspect", ci_text)
+
+    def test_report_metadata_records_validated_base_image_identity(self):
+        base = "sha256:" + "b" * 64
+        report = self.module.add_report_metadata(
+            {"precision": None},
+            b'{}',
+            analyzer_image_digest="sha256:" + "a" * 64,
+            analyzer_base_image_digest=base,
+        )
+        self.assertEqual(base, report["analyzer_base_image_digest"])
+        with self.assertRaises(ValueError):
+            self.module.add_report_metadata(
+                {"precision": None},
+                b'{}',
+                analyzer_image_digest="sha256:" + "a" * 64,
+                analyzer_base_image_digest="latest",
+            )
+
+    def test_cli_exposes_only_the_seven_fixed_parameters(self):
         parser = self.module.build_parser()
         options = {
             option
@@ -810,6 +847,7 @@ class CliAndCiContractTests(unittest.TestCase):
                 "--output",
                 "--analyzer-url",
                 "--analyzer-image-digest",
+                "--analyzer-base-image-digest",
                 "--fail-under-precision",
             },
             options,

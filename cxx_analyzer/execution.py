@@ -29,7 +29,16 @@ SANITIZER_ENVIRONMENT = {
     "CFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
     "CXXFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
     "LDFLAGS": "-fsanitize=address",
-    "ASAN_OPTIONS": "abort_on_error=1:detect_leaks=0:color=never",
+    # abort_on_error would route every report through tgkill, which the
+    # process-isolation denylist blocks; a plain nonzero exit keeps the
+    # report complete without the sandboxed abort path.
+    "ASAN_OPTIONS": "abort_on_error=0:detect_leaks=0:color=never",
+}
+# The analyzer image ships no default cc/c++ compiler, so plain CMake builds
+# must name the audited drivers explicitly instead of relying on detection.
+BUILD_ENVIRONMENT = {
+    "CC": "clang-14",
+    "CXX": "clang++-14",
 }
 OUTPUT_DIGEST_DOMAIN = b"LIMA-TOOL-OUTPUT-SHA256-v1\0stdout\0"
 _STDERR_DIGEST_TAG = b"\0stderr\0"
@@ -469,7 +478,7 @@ def run_step(
         raise ValueError("tool output limit must be a positive integer")
     if env is not None and not isinstance(env, Mapping):
         raise ValueError("tool environment must be a mapping")
-    if env not in (None, {}, SANITIZER_ENVIRONMENT):
+    if env not in (None, {}, SANITIZER_ENVIRONMENT, BUILD_ENVIRONMENT):
         raise ValueError("tool environment is not an analyzer-owned fixed environment")
     if deadline is not None and not isinstance(deadline, AnalysisDeadline):
         raise ValueError("tool deadline must be an AnalysisDeadline")

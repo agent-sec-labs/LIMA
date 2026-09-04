@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import plistlib
 import re
+import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -12,7 +13,12 @@ from typing import Final
 
 from .config import MAX_ARGUMENT_BYTES, MAX_ARGUMENTS_PER_STEP, AnalyzerSettings
 from .deadline import AnalysisDeadline
-from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
+from .execution import (
+    BUILD_ENVIRONMENT,
+    SANITIZER_ENVIRONMENT,
+    ToolExecution,
+    run_step,
+)
 from .languages import language_for_path
 from .normalizers import NormalizedFinding
 from .protocol import new_run_id, timed_out_tool_run, tool_run_from_execution
@@ -32,11 +38,17 @@ _CMAKE_STEPS: Final = (
     ("cmake", "--build", "build", "--parallel", "2"),
 )
 _CHECKER_CWE: Final = {
-    ("alpha.security.ArrayBoundV2", "Out-of-bound write"): "CWE-787",
-    ("alpha.security.ArrayBoundV2", "Out-of-bound read"): "CWE-125",
     ("unix.Malloc", "Use-after-free"): "CWE-416",
     ("unix.Malloc", "Double free"): "CWE-415",
+    ("cplusplus.NewDelete", "Use-after-free"): "CWE-416",
+    ("cplusplus.NewDelete", "Double free"): "CWE-415",
 }
+# clang-14 reports ArrayBoundV2 reads and writes with one shared type and
+# description; the direction is recovered from the verified snapshot source.
+_BOUNDS_CHECKER: Final = "alpha.security.ArrayBoundV2"
+_BOUNDS_ACCESS_TYPE: Final = "Out-of-bound access"
+_BOUNDS_WRITE: Final = "CWE-787"
+_BOUNDS_READ: Final = "CWE-125"
 _CWE_SLUG: Final = {
     "CWE-787": "oob-write",
     "CWE-125": "oob-read",
@@ -267,7 +279,16 @@ def _validate_argument_paths(root: Path, working_directory: Path, arguments: lis
 def load_compilation_database(
     snapshot: PreparedSnapshot, database_path: Path
 ) -> tuple[CompilationUnit, ...]:
-    """Load a bounded compdb, rejecting shell command strings and escaping files."""
+    """Load a bounded compdb, converting CMake command strings to audited argv.
+
+    CMake's exported databases only carry a "command" shell string. The
+    string is never executed: it is split with shell quoting rules into an
+    argv list that then passes the exact validation applied to "arguments"
+    entries, including option, path and snapshot-binding checks. Posix
+    shell quoting strips backslashes, which is lossless for the Linux
+    paths the analyzer container produces; a mangled path simply fails
+    the inventory binding instead of analyzing the wrong file.
+    """
 
     root = Path(snapshot.root).resolve()
     database, _ = _inside_snapshot(root, Path(database_path))
@@ -280,9 +301,17 @@ def load_compilation_database(
     snapshot_files = set(snapshot.files)
     units: list[CompilationUnit] = []
     for entry in document:
-        if not isinstance(entry, dict) or "command" in entry:
-            raise ValueError("compilation database command strings are forbidden")
+        if not isinstance(entry, dict):
+            raise ValueError("compilation database entry is invalid")
         arguments = entry.get("arguments")
+        if arguments is None and "command" in entry:
+            command = entry["command"]
+            if not isinstance(command, str) or not command:
+                raise ValueError("compilation database command is invalid")
+            try:
+                arguments = shlex.split(command, posix=True)
+            except ValueError as exc:
+                raise ValueError("compilation database command is invalid") from exc
         directory = entry.get("directory")
         file = entry.get("file")
         if (
@@ -350,6 +379,109 @@ def _structured_location(location: object, files: tuple[str | None, ...]) -> tup
     return path, line, column
 
 
+def _bounds_direction(line: str, column: int) -> str | None:
+    """Classify one flagged subscript expression as a write or a read.
+
+    ``column`` is 1-based and points at or near the flagged expression on
+    ``line``. The direction is reported only when the remainder of the
+    statement is unambiguous: the first depth-zero assignment (including
+    compound assignment and increment/decrement) after the expression's
+    closing bracket is a write, a semicolon is a read, and anything else
+    (any further bracket, an unterminated literal, a shift assignment, a
+    statement continuing past the line) stays undetermined so the caller
+    drops the diagnostic instead of guessing a CWE.
+    """
+
+    text = line
+    column = max(1, min(column, len(text)))
+    groups: list[tuple[int, int]] = []
+    depth = 0
+    opening = -1
+    for index, character in enumerate(text):
+        if character == "[":
+            if depth == 0:
+                opening = index
+            depth += 1
+        elif character == "]":
+            depth -= 1
+            if depth == 0 and opening >= 0:
+                groups.append((opening, index))
+                opening = -1
+            elif depth < 0:
+                return None
+    if depth != 0 or not groups:
+        return None
+    # Each group's expression starts at the identifier before the bracket.
+    spans: list[tuple[int, int]] = []
+    for start, end in groups:
+        identifier = start
+        while identifier > 0 and (
+            text[identifier - 1].isalnum() or text[identifier - 1] in "_.>"
+        ):
+            identifier -= 1
+        spans.append((identifier, end))
+    offset = column - 1
+    distances = [
+        max(span_start - offset, 0, offset - span_end)
+        for span_start, span_end in spans
+    ]
+    nearest = min(distances)
+    if nearest > 3 or distances.count(nearest) != 1:
+        return None
+    span_start = spans[distances.index(nearest)][0]
+    closing = spans[distances.index(nearest)][1]
+    # A pre-increment/decrement glued to the expression writes to it.
+    if span_start >= 2 and text[span_start - 2 : span_start] in ("++", "--"):
+        return "write"
+    index = closing + 1
+    while index < len(text):
+        character = text[index]
+        if character in "([{)]}":
+            # Nested or enclosing scopes make the rest of the statement
+            # ambiguous for line-local classification.
+            return None
+        if character in "\"'":
+            end = text.find(character, index + 1)
+            if end < 0:
+                return None
+            index = end
+        elif character == ";":
+            return "read"
+        elif character == "=":
+            before = text[index - 1] if index >= 1 else ""
+            before_before = text[index - 2] if index >= 2 else ""
+            after = text[index + 1 : index + 2]
+            if after == "=":
+                index += 1
+            elif before in "<>" and before_before in "<>":
+                return None
+            elif before in ("!", "=", "<", ">"):
+                pass
+            else:
+                return "write"
+        elif character in "+-":
+            if text[index + 1 : index + 2] == character:
+                return "write"
+        index += 1
+    return None
+
+
+def _snapshot_source_lines(
+    snapshot: PreparedSnapshot, relative_path: str, cache: dict[str, list[str]]
+) -> list[str] | None:
+    """Read one verified snapshot file as lines without trusting new writes."""
+
+    if relative_path in cache:
+        return cache[relative_path]
+    source = snapshot.root.joinpath(*PurePosixPath(relative_path).parts)
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = None
+    cache[relative_path] = lines  # type: ignore[assignment]
+    return lines
+
+
 def parse_clang_plist(
     raw: bytes,
     snapshot: PreparedSnapshot,
@@ -371,6 +503,7 @@ def parse_clang_plist(
     if not isinstance(raw_files, list) or not isinstance(raw_diagnostics, list):
         raise ValueError("Clang plist lacks files or diagnostics")
     files = tuple(_safe_plist_path(path, snapshot, relative_cwd) for path in raw_files)
+    source_lines: dict[str, list[str]] = {}
 
     findings: list[NormalizedFinding] = []
     diagnostics: list[str] = []
@@ -381,15 +514,32 @@ def parse_clang_plist(
         diagnostic_type = diagnostic.get("type")
         if not isinstance(checker, str) or not isinstance(diagnostic_type, str):
             raise ValueError("Clang plist checker metadata is invalid")
-        cwe = _CHECKER_CWE.get((checker, diagnostic_type))
-        if cwe is None:
-            diagnostics.append("unsupported Clang checker result")
-            continue
         try:
-            path, line, _ = _structured_location(diagnostic.get("location"), files)
+            path, line, column = _structured_location(
+                diagnostic.get("location"), files
+            )
         except LookupError:
             diagnostics.append("Clang diagnostic outside snapshot inventory")
             continue
+        if checker == _BOUNDS_CHECKER:
+            if diagnostic_type != _BOUNDS_ACCESS_TYPE:
+                diagnostics.append("unsupported Clang checker result")
+                continue
+            lines = _snapshot_source_lines(snapshot, path, source_lines)
+            direction = (
+                _bounds_direction(lines[line - 1], column)
+                if lines is not None and 1 <= line <= len(lines)
+                else None
+            )
+            if direction is None:
+                diagnostics.append("clang-bounds-direction-undetermined")
+                continue
+            cwe = _BOUNDS_WRITE if direction == "write" else _BOUNDS_READ
+        else:
+            cwe = _CHECKER_CWE.get((checker, diagnostic_type))
+            if cwe is None:
+                diagnostics.append("unsupported Clang checker result")
+                continue
         description = diagnostic.get("description")
         symbol = diagnostic.get("issue_context")
         if not isinstance(description, str) or not description.strip():
@@ -428,8 +578,21 @@ def parse_clang_plist(
                         ("start", "control-start"),
                         ("end", "control-end"),
                     ):
+                        # Real clang plists describe each endpoint as a
+                        # [range-start, range-end] pair of locations; the
+                        # trace anchors use the segment's outer corners.
+                        locations = edge.get(endpoint)
+                        if (
+                            not isinstance(locations, list)
+                            or not locations
+                            or len(locations) > 2
+                        ):
+                            raise ValueError("Clang plist control edge is invalid")
+                        anchor = (
+                            locations[0] if endpoint == "start" else locations[-1]
+                        )
                         frame_path, frame_line, frame_column = _structured_location(
-                            edge.get(endpoint), files
+                            anchor, files
                         )
                         trace.append(
                             {
@@ -587,7 +750,7 @@ def run_build_scan(
             ".",
             timeout_seconds=remaining,
             max_output_bytes=settings.max_output_bytes,
-            env=SANITIZER_ENVIRONMENT if sanitizer_enabled else {},
+            env=SANITIZER_ENVIRONMENT if sanitizer_enabled else BUILD_ENVIRONMENT,
             deadline=active_deadline,
         )
         run = _tool_run("build-step", execution, build_step=True)

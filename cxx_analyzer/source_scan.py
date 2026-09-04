@@ -97,7 +97,16 @@ def parse_semgrep_json(
     for error in errors:
         if not isinstance(error, dict):
             raise ValueError("Semgrep error is invalid")
-        error_type = error.get("type")
+        # Real Semgrep emits structured types (for example a
+        # ["PartialParsing", [...]] pair); only their boundedness matters
+        # because the error path never yields findings.
+        raw_type = error.get("type")
+        if isinstance(raw_type, str):
+            error_type = raw_type
+        elif isinstance(raw_type, list) and raw_type and isinstance(raw_type[0], str):
+            error_type = raw_type[0]
+        else:
+            error_type = json.dumps(raw_type, sort_keys=True, default=str)
         message = error.get("message")
         if (
             not isinstance(error_type, str)

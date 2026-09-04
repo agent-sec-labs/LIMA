@@ -73,7 +73,9 @@ _ETC_FILES = (
     "/etc/group",
     "/etc/localtime",
 )
-_READABLE_TREES = ("/proc",)
+# /etc/ssl/certs: semgrep's networking stack resolves CA trust anchors at
+# startup even for fully offline local-config runs.
+_READABLE_TREES = ("/proc", "/etc/ssl/certs")
 _READ_WRITE_FILES = ("/dev/null",)
 _SYSCALLS = {
     "x86_64": (444, 445, 446),
@@ -246,7 +248,12 @@ def _existing_rule(path: str | os.PathLike[str], access: int) -> SandboxRule | N
         return None
     if stat.S_ISLNK(metadata.st_mode):
         return None
-    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+    if not (
+        stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISREG(metadata.st_mode)
+        # Character devices admit the whitelisted /dev/null read-write rule.
+        or stat.S_ISCHR(metadata.st_mode)
+    ):
         return None
     return SandboxRule(resolved, access)
 

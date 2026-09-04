@@ -81,7 +81,7 @@ def _validate_sidecar_dockerfile_contract(dockerfile: str) -> None:
     instructions = _dockerfile_instructions(dockerfile)
     pinned_image = (
         "public.ecr.aws/docker/library/python:3.11-slim@sha256:"
-        "9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
+        "b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250"
     )
     expected_first = ("FROM", f"{pinned_image} AS base")
     if not instructions or instructions[0] != expected_first:
@@ -1155,6 +1155,16 @@ class AnalyzerServiceTests(unittest.TestCase):
             thread.join(timeout=2)
 
 
+def _tmpfs_options(specification: str) -> dict[str, str]:
+    """Parse one Compose tmpfs spec, mapping valueless flags to empty strings."""
+
+    options: dict[str, str] = {}
+    for part in specification.split(":", 1)[1].split(","):
+        key, _, value = part.partition("=")
+        options[key] = value
+    return options
+
+
 class AnalyzerComposeSecurityTests(unittest.TestCase):
     @staticmethod
     def _compose():
@@ -1197,6 +1207,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
                     "gid": "10002",
                 },
                 "/work": {
+                    "exec": "",
                     "size": "512m",
                     "mode": "0700",
                     "uid": "10002",
@@ -1204,9 +1215,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
                 },
             },
             {
-                str(item).split(":", 1)[0]: dict(
-                    option.split("=", 1) for option in str(item).split(":", 1)[1].split(",")
-                )
+                str(item).split(":", 1)[0]: _tmpfs_options(str(item))
                 for item in tmpfs
             },
         )
@@ -1580,6 +1589,57 @@ class SourceScanTests(unittest.TestCase):
         invalid["results"][0]["start"]["line"] = 0
         with self.assertRaises(ValueError):
             parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
+
+
+class BoundsDirectionTests(unittest.TestCase):
+    """The ArrayBoundV2 read/write classifier stays conservative or drops."""
+
+    @staticmethod
+    def direction(line: str, column: int):
+        from cxx_analyzer.build_scan import _bounds_direction
+
+        return _bounds_direction(line, column)
+
+    @staticmethod
+    def _column(line: str, marker: str, offset: int = 0) -> int:
+        return line.index(marker, offset) + 1
+
+    def test_simple_directions(self):
+        write_line = "void f(void) { int values[2] = {0}; values[2] = 1; }"
+        read_line = "int f(void) { int values[2] = {0}; return values[2]; }"
+        for line, column, expected in (
+            (write_line, self._column(write_line, "values", 30), "write"),
+            (read_line, self._column(read_line, "values", 30), "read"),
+            ("x = values[2];", 5, "read"),
+            ("values[2] += 1;", 1, "write"),
+            ("values[2]++;", 1, "write"),
+            ("++values[2];", 3, "write"),
+            ("values[2] = 1 + values[0];", 1, "write"),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(expected, self.direction(line, column))
+
+    def test_ambiguous_shapes_are_dropped(self):
+        for line, column in (
+            ("values[2] <<= 1;", 1),          # shift assignment
+            ("if (values[2] == 3) { go(); }", 5),  # brackets after expression
+            ("use(values[2], 1);", 5),         # argument position
+            ("int r = f(values[2], (x = 1));", 13),
+            ("values[2] +", 1),                # statement continues past line
+            ("return values[2] +", 8),
+            ("return value;", 8),              # no subscript at all
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(self.direction(line, column))
+
+    def test_reads_survive_common_shapes(self):
+        for line, column in (
+            ("int *p = &values[2];", 11),
+            ("x <<= values[2];", 8),
+            ("return values[2];", 8),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual("read", self.direction(line, column))
 
 
 class BuildScanTests(unittest.TestCase):
@@ -1986,12 +2046,33 @@ class BuildScanTests(unittest.TestCase):
             self.assertEqual(("src/main.cpp",), tuple(unit.file for unit in units))
             self.assertEqual(tuple(valid[0]["arguments"]), units[0].arguments)
 
+            command_source = str(source).replace("\\", "/")
+            cmake_style = [
+                {
+                    "directory": str(root),
+                    "file": str(source),
+                    "command": f"clang++ -c -DDEBUG=1 {command_source}",
+                }
+            ]
+            database.write_text(json.dumps(cmake_style), encoding="utf-8")
+            converted = load_compilation_database(snapshot, database)
+            self.assertEqual(
+                cmake_style[0]["command"].split(), list(converted[0].arguments)
+            )
+
             invalid_entries = (
                 [
                     {
                         "directory": str(root),
                         "file": str(source),
-                        "command": f"clang++ -c {source}",
+                        "command": 'clang++ -c "unterminated',
+                    }
+                ],
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(source),
+                        "command": "clang++ -c /definitely/outside/escape.cpp",
                     }
                 ],
                 [
@@ -2148,7 +2229,14 @@ class BuildScanTests(unittest.TestCase):
             (root / "build").mkdir()
             (root / "src").mkdir()
             (root / "src" / "main.c").write_text(
-                "int write_value(void) { return 0; }\n", encoding="utf-8"
+                "int write_value(void)\n"
+                "{\n"
+                "    int values[2];\n"
+                "\n"
+                "      values[2] = 1;\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
             )
             snapshot = Mock(root=root, files=("src/main.c",))
 
@@ -2224,7 +2312,7 @@ class BuildScanTests(unittest.TestCase):
             (root / "src").mkdir()
             source = root / "src" / "main.c"
             source.write_text(
-                "void oob_write_array(void) { int values[2]; values[2] = 1; }\n",
+                "void oob_write_array(void) { int values[2] = {0}; values[2] = 1; }\n",
                 encoding="utf-8",
             )
             temp_root = root / "tool-output"
@@ -2279,8 +2367,8 @@ class BuildScanTests(unittest.TestCase):
                     [
                         {
                             "directory": str(root),
-                            "file": str(source),
-                            "command": f"cc -c {source}",
+                            "file": str(root.parent / "escape.cpp"),
+                            "arguments": ["cc", "-c", str(root.parent / "escape.cpp")],
                         }
                     ]
                 ),
@@ -2305,6 +2393,10 @@ class BuildScanContainerTests(unittest.TestCase):
 
         fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
         manifest = json.loads((fixture_root / "manifest.json").read_text(encoding="utf-8"))
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
         with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
             base = Path(temporary)
             import_root = base / "imports"
@@ -2328,10 +2420,9 @@ class BuildScanContainerTests(unittest.TestCase):
             )
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
-                tool_output = base / "tool-output"
-                tool_output.mkdir()
-                with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", tool_output):
-                    result = build_scan.run_build_scan(snapshot, BuildScanTests._settings())
+                # No analyzer temp root override: plists must be staged in the
+                # sandbox-writable scratch, exactly like production.
+                result = build_scan.run_build_scan(snapshot, BuildScanTests._settings())
 
         found = {(finding.cwe, finding.path, finding.symbol) for finding in result.findings}
         expected = {
@@ -2821,6 +2912,10 @@ class SanitizerContainerTests(unittest.TestCase):
             "cwe-415/safe-1.c",
         )
         symbols = {item["path"]: item["symbol"] for item in manifest if item["path"] in selected}
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
         with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
             base = Path(temporary)
             import_root = base / "imports"
@@ -2851,9 +2946,17 @@ class SanitizerContainerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
-            settings = SanitizerScanTests._settings(
-                test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),),
-                total_timeout_seconds=120,
+            import dataclasses
+
+            settings = dataclasses.replace(
+                SanitizerScanTests._settings(
+                    test_steps=(("ctest", "--test-dir", "build", "--output-on-failure"),),
+                    total_timeout_seconds=240,
+                ),
+                auto_cmake=True,
+                build_steps=(),
+                step_timeout_seconds=90,
+                max_output_bytes=1_048_576,
             )
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
                 build = run_build_scan(snapshot, settings, sanitizer_enabled=True)
@@ -2925,6 +3028,7 @@ class SourceScanContainerTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=30,
+            env={**os.environ, "HOME": tempfile.gettempdir()},
         )
         if source_scan.recognized_host_semgrep_unavailability(
             completed.returncode, completed.stderr

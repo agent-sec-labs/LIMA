@@ -93,16 +93,21 @@ def parse_asan_log(
         return _review()
     clean = _ANSI.sub("", text)
     findings: list[NormalizedFinding] = []
+    diagnostics: list[str] = []
     for match in _ERROR.finditer(clean):
         if len(findings) >= MAX_FINDINGS:
-            return _review()
+            diagnostics.append("needs-human-review")
+            return (findings, diagnostics)
         next_error = _ERROR.search(clean, match.end())
         block = clean[match.start(): next_error.start() if next_error else len(clean)]
         error_type = match.group(1)
         summary = _SUMMARY.search(block)
         summary_type = "double-free" if error_type == "attempting double-free" else error_type
         if summary is None or summary.group(1) != summary_type:
-            return _review()
+            # One corrupted report invalidates the rest of the stream, not
+            # the fully validated findings before it.
+            diagnostics.append("needs-human-review")
+            return (findings, diagnostics)
         auxiliary = _AUXILIARY_STACK.search(block)
         primary_end = min(
             summary.start(), auxiliary.start() if auxiliary is not None else len(block)
@@ -113,7 +118,8 @@ def parse_asan_log(
         cwe = _map(error_type, access)
         frame = _safe_frame(primary, snapshot)
         if cwe is None or frame is None:
-            return _review()
+            diagnostics.append("needs-human-review")
+            return (findings, diagnostics)
         path, line, symbol = frame
         language = language_for_path(path)
         access_text = access if access is not None else "FREE"
@@ -200,6 +206,9 @@ def run_sanitizer_scan(
                 item.bind_producer(step_run_id)
                 for item in parsed[: MAX_FINDINGS - len(findings)]
             )
+            for diagnostic in parsed_diagnostics:
+                if diagnostic not in diagnostics:
+                    diagnostics.append(diagnostic)
         elif execution.status == "failed":
             no_sanitizer_evidence = (
                 parsed_diagnostics == ["needs-human-review"]

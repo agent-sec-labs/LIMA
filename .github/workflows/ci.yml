@@ -59,7 +59,7 @@ jobs:
         run: >-
           docker run --rm --network none --read-only
           --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002
-          --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002
+          --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002
           --cap-drop ALL --security-opt no-new-privileges:true
           --user 10002:10002 lima-cxx-analyzer:test
           python -m unittest -v
@@ -81,7 +81,7 @@ jobs:
           docker network create --internal lima-cxx-ci
           docker run --detach --name lima-cxx-analyzer --network lima-cxx-ci \
             --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
-            --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
             --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
             --mount type=bind,source="${PWD}/tests/fixtures/cxx_memory",target=/repositories/fixtures,readonly \
             lima-cxx-analyzer:ci
@@ -147,10 +147,19 @@ jobs:
           docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:eval .
           ANALYZER_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval)"
           printf 'ANALYZER_IMAGE_DIGEST=%s\n' "$ANALYZER_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          ANALYZER_BASE_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250)"
+          printf 'ANALYZER_BASE_IMAGE_DIGEST=%s\n' "$ANALYZER_BASE_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          docker image inspect lima-cxx-analyzer:eval > output/image-inspect.json
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-toolchain-packages.txt > output/debian-packages.txt
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-python-packages.txt > output/python-packages.txt
           docker network create --internal lima-cxx-public
           docker run --detach --name lima-cxx-public-analyzer --network lima-cxx-public \
             --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
-            --tmpfs /work:rw,size=512m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
             --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
             --env LIMA_CXX_AUTO_CMAKE=false \
             --env LIMA_CXX_BUILD_STEPS_JSON \
@@ -173,20 +182,39 @@ jobs:
             --mount type=bind,source="${PWD}/.cache/cxx-memory",target=/cache \
             --mount type=bind,source="${PWD}/output",target=/output \
             --workdir /workspace \
-            public.ecr.aws/docker/library/python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7 \
+            public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250 \
             python scripts/run_cxx_memory_evaluation.py \
-            --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
-            --output /output/cxx-memory-evaluation.json \
-            --analyzer-url http://lima-cxx-public-analyzer:8090 \
-            --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
-            --fail-under-precision 0.0
+              --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
+              --output /output/cxx-memory-evaluation.json \
+              --analyzer-url http://lima-cxx-public-analyzer:8090 \
+              --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
+              --analyzer-base-image-digest "$ANALYZER_BASE_IMAGE_DIGEST" \
+              --fail-under-precision 0.0
           docker network connect lima-cxx-public lima-cxx-evaluator
           docker start --attach lima-cxx-evaluator
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: cxx-memory-evaluation-${{ matrix.case-id }}
+          name: evaluation-report-${{ matrix.case-id }}
           path: output/cxx-memory-evaluation.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debian-packages-${{ matrix.case-id }}
+          path: output/debian-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: python-packages-${{ matrix.case-id }}
+          path: output/python-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-inspect-${{ matrix.case-id }}
+          path: output/image-inspect.json
           if-no-files-found: warn
       - name: Stop public evaluation containers
         if: always()

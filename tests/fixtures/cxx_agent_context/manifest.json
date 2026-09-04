@@ -1,0 +1,4 @@
+{
+  "schema_version": 1,
+  "notes": "non-source metadata must be ignored by the C/C++ index"
+}

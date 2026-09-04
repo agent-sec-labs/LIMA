@@ -181,6 +181,12 @@ Task 8 | 复审通过 | commits 9175abf..(见 git log) | RED: python -m unittest
 
 Task 8 补充记录：配置命名偏差——计划接口名为 CxxAgentSettings，实现内联进 Settings 十字段（功能等价，后续任务引用 Settings.cxx_agent_*）；candidate_id 材料不含 title/confidence（id 语义=印证身份，与设计 §9 一致性键一致，复审裁决接受）；直接构造可绕过校验（与 models.Finding 先例一致，边界纪律由 from_untrusted_json 承担，裁决接受）；parse_untrusted_json 无输入字节上限（由 Task 13 在解析前执行 LIMA_CXX_AGENT_MAX_OUTPUT_BYTES 截断）；Decision 的 decision×state 相干性留 Task 15 状态机；默认 off 而非设计推荐 required（复审裁决接受：off 缺省保证存量部署升级不炸）。
 
+```text
+Task 9 | 复审通过 | commits f2d52b9..(见 git log) | RED: python -m unittest tests.test_cxx_context → 模块缺失 | GREEN: 宿主全量 389 OK (12 skip)；Linux 容器全量 389 OK (3 skip)；ruff 全过 | reviewer: 修复后通过（C1 函数定义行系统性虚构自调用边——改为头行只扫 { 后的体片段+test_definition_lines_do_not_create_fictional_self_edges 反向断言；I1 剥离器反斜杠转义——字符串内 \ 跳双字符；I2 _type_end 逐行计括号——Header==6 精确断言；I3 Allman/namespace/extern-C/class 内联方法——括号栈按 function/scope/other 三类归因，作用域内函数头可识别，allman.c fixture 锁定；I4 宏检测改用剥离后文本；I5 manifest.json fixture 使忽略断言生效；I6 逐文件 SHA-256 对账 inventory，漂移→snapshot-drift gap）
+```
+
+Task 9 补充记录：v1 已知不完备（复审 Minor 记录）：函数式转换 size_t(n) 会成边（书写名原则下的可辩护噪声）；operator== 定义静默跳过；references/resource_events 的文件包含性未单独断言；.h 文件 language 标 "c"；snapshot 绑定为逐文件 hash 对账（读盘一次）；MAX_PARSE_GAPS 触发后剩余文件由 source_files_total 反推。
+
 任务状态只能填写 `未开始`、`进行中`、`受阻`、`已完成待复审` 或 `复审通过`。后续模型每完成一个
 任务，必须在本节追加一行，格式如下；不得用“基本完成”“应该通过”等模糊状态：
 
@@ -575,20 +581,20 @@ git commit -s -m "feat: define C++ agent contracts and budgets"
 **Interfaces:**
 - Produces: `CxxContextIndex.build(workspace, inventory) -> CxxContextIndex`；`symbols`、`types`、`calls`、`references`、`resource_events`、`coverage`；所有记录绑定 snapshot hash。
 
-- [ ] **Step 1: 创建最小 C/C++ fixture 与 RED**
+- [x] **Step 1: 创建最小 C/C++ fixture 与 RED**
 
 fixture 包含 `.c/.cpp/.hpp`、重载、成员函数、malloc/free/new/delete、数组长度和无法解析宏。测试断言限定名、行范围、caller/callee、资源事件及 parse gap。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_context -v`
 Expected: module missing。
 
-- [ ] **Step 3: 实现确定性索引**
+- [x] **Step 3: 实现确定性索引**
 
 优先复用现有 inventory 和语言扩展映射。第一版允许保守轻量解析，但输出排序必须确定，解析失败进入 coverage，不得生成虚构调用边。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_context tests.test_workspace -v`
 

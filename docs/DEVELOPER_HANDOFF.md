@@ -54,9 +54,10 @@ Implementation Agent 只修改 product-code allowlist，交付 final commit 和 
 - [IP-0003：Repository Profile / RAM Foundation](LIMA_Implementation_Packet_IP-0003_Repository_Profile.md) — Packet PR #103、Implementation PR #104 已合并（IP-DONE）
 - [IP-0004：Audit Evidence Package(AEP) Foundation](LIMA_Implementation_Packet_IP-0004_AEP_Foundation.md) — Packet PR #105、Implementation PR #107 已合并（IP-DONE）
 - [IP-0005：Vulnerability Evidence Package(VEP) Foundation](LIMA_Implementation_Packet_IP-0005_VEP_Foundation.md) — Packet PR #108、Implementation PR #110 已合并（IP-DONE）
-- [IP-0006：Repair Verification Report(RVR) Foundation](LIMA_Implementation_Packet_IP-0006_RVR_Foundation.md) — Packet 与 [正式开发任务交接](LIMA_Coding_Agent_IP-0006_正式开发任务交接.md) 冻结中；实现未开始
+- [IP-0006：Repair Verification Report(RVR) Foundation](LIMA_Implementation_Packet_IP-0006_RVR_Foundation.md) — Packet PR #111、Implementation PR #113 已合并（IP-DONE）
+- [IP-0007：Workflow Spine Schemas(Workflow / StageAttempt / SecurityOutcome)](LIMA_Implementation_Packet_IP-0007_Workflow_Spine_Schemas.md) — Packet 与 [正式开发任务交接](LIMA_Coding_Agent_IP-0007_正式开发任务交接.md) 冻结中；实现未开始
 
-IP-0001 至 IP-0005 完成以及 IP-0006 的 Packet 合并都不等于 Source Issue #58 完成。#58 只有在 Delivery Ledger 的全部 mandatory requirements、集成/真实运行和 Issue Closure Audit 均通过后才可手工关闭。
+IP-0001 至 IP-0006 完成以及 IP-0007 的 Packet 合并都不等于 Source Issue #58 完成。#58 只有在 Delivery Ledger 的全部 mandatory requirements、集成/真实运行和 Issue Closure Audit 均通过后才可手工关闭。
 
 ## 4. 不可混淆的四个 Gate
 

@@ -1,0 +1,1 @@
+{"attempt_number":1,"failure_kind":null,"inputs":[],"outputs":[{"artifact_id":"profile-0001","content_digest":"ad7d53a0ed22412dbbfc60d0ed9183d7e939e2d14e4eee2d9399944cb5c4dccc","kind":"lima.repository-profile","schema_version":"4.0"}],"skip_reason":null,"stage_attempt_id":"attempt-profile-0001","stage_type":"profile","status":"succeeded","workflow_id":"workflow-0001"}

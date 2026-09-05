@@ -44,6 +44,10 @@ SA_GOLDEN_D = "34746de4860ae5ce9ec69c43ad8c8ad596d4e79172a284bf3defc1a866edb259"
 WF_GOLDEN_D = "3be59c6c7f1736954fbce5f1e74b4c7789ab8a1e956f4229904ea30bbe756146"
 SO_GOLDEN_D = "bfa0b2dc55940bcdadf88f8e4991adb4d762f7a8b17ded3fa8817936504ba831"
 
+# Distinguish "caller did not pass payload/supersedes" from an explicit None
+# arrange value (DR-IP-0007-IMPL-01 fix, checklist item 6).
+_UNSET = object()
+
 
 def _ref(schema_name, artifact_id, content_digest, **overrides):
     kwargs = {
@@ -116,19 +120,23 @@ def _envelope(**overrides):
     return ArtifactEnvelope(**kwargs)
 
 
-def _workflow_envelope(payload=None, content_digest=WF_GOLDEN_D, lineage=None, supersedes=None,
+def _workflow_envelope(payload=_UNSET, content_digest=WF_GOLDEN_D, lineage=None, supersedes=_UNSET,
                        classification=ArtifactClassification.INTERNAL,
-                       retention=RetentionClass.STANDARD):
+                       retention=RetentionClass.STANDARD, schema_name=WORKFLOW_SCHEMA_NAME,
+                       blob_ref=None):
     return _envelope(
-        schema_name=WORKFLOW_SCHEMA_NAME,
+        schema_name=schema_name,
         artifact_id="wf-0001",
         stage_attempt_id="attempt-audit-0001",
         content_digest=content_digest,
         classification=classification,
         retention_class=retention,
-        payload=_workflow_payload() if payload is None else payload,
+        payload=_workflow_payload() if payload is _UNSET else payload,
         lineage=_workflow_lineage() if lineage is None else lineage,
-        supersedes=_ref("lima.workflow", "wf-0000", "0" * 64) if supersedes is None else supersedes,
+        supersedes=(
+            _ref("lima.workflow", "wf-0000", "0" * 64) if supersedes is _UNSET else supersedes
+        ),
+        blob_ref=blob_ref,
     )
 
 
@@ -136,18 +144,20 @@ def _attempt_envelope(**overrides):
     return _envelope(**overrides)
 
 
-def _outcome_envelope(payload=None, content_digest=SO_GOLDEN_D, lineage=None,
+def _outcome_envelope(payload=_UNSET, content_digest=SO_GOLDEN_D, lineage=None,
                       classification=ArtifactClassification.SENSITIVE,
-                      retention=RetentionClass.AUDIT):
+                      retention=RetentionClass.AUDIT, schema_name=SECURITY_OUTCOME_SCHEMA_NAME,
+                      blob_ref=None):
     return _envelope(
-        schema_name=SECURITY_OUTCOME_SCHEMA_NAME,
+        schema_name=schema_name,
         artifact_id="sec-0001",
         stage_attempt_id="attempt-repair-0002",
         content_digest=content_digest,
         classification=classification,
         retention_class=retention,
-        payload=_outcome_payload() if payload is None else payload,
+        payload=_outcome_payload() if payload is _UNSET else payload,
         lineage=_outcome_lineage() if lineage is None else lineage,
+        blob_ref=blob_ref,
     )
 
 

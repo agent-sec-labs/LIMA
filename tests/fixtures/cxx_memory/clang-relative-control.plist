@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>diagnostics</key>
+	<array>
+		<dict>
+			<key>category</key>
+			<string>Logic error</string>
+			<key>check_name</key>
+			<string>alpha.security.ArrayBoundV2</string>
+			<key>description</key>
+			<string>Out of bound memory access (access exceeds upper limit of memory block)</string>
+			<key>issue_context</key>
+			<string>write_value</string>
+			<key>location</key>
+			<dict>
+				<key>col</key>
+				<integer>7</integer>
+				<key>file</key>
+				<integer>0</integer>
+				<key>line</key>
+				<integer>5</integer>
+			</dict>
+			<key>path</key>
+			<array>
+				<dict>
+					<key>edges</key>
+					<array>
+						<dict>
+							<key>end</key>
+							<array>
+								<dict>
+									<key>col</key>
+									<integer>5</integer>
+									<key>file</key>
+									<integer>0</integer>
+									<key>line</key>
+									<integer>3</integer>
+								</dict>
+								<dict>
+									<key>col</key>
+									<integer>5</integer>
+									<key>file</key>
+									<integer>0</integer>
+									<key>line</key>
+									<integer>3</integer>
+								</dict>
+							</array>
+							<key>start</key>
+							<array>
+								<dict>
+									<key>col</key>
+									<integer>1</integer>
+									<key>file</key>
+									<integer>0</integer>
+									<key>line</key>
+									<integer>2</integer>
+								</dict>
+								<dict>
+									<key>col</key>
+									<integer>1</integer>
+									<key>file</key>
+									<integer>0</integer>
+									<key>line</key>
+									<integer>2</integer>
+								</dict>
+							</array>
+						</dict>
+					</array>
+					<key>kind</key>
+					<string>control</string>
+				</dict>
+				<dict>
+					<key>extended_message</key>
+					<string>Out of bound memory access</string>
+					<key>kind</key>
+					<string>event</string>
+					<key>location</key>
+					<dict>
+						<key>col</key>
+						<integer>7</integer>
+						<key>file</key>
+						<integer>0</integer>
+						<key>line</key>
+						<integer>5</integer>
+					</dict>
+					<key>message</key>
+					<string>Out of bound memory access</string>
+				</dict>
+			</array>
+			<key>type</key>
+			<string>Out-of-bound access</string>
+		</dict>
+	</array>
+	<key>files</key>
+	<array>
+		<string>../src/main.c</string>
+	</array>
+</dict>
+</plist>

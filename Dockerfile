@@ -1,4 +1,4 @@
-ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
+ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250
 ARG NODE_BASE_IMAGE=public.ecr.aws/docker/library/node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 
 # Node 仅存在于构建期：产出纯静态 dist，生产 runtime 无 Node（T5）。
@@ -42,6 +42,8 @@ COPY --chown=lima:lima scripts/probe_llm_triage.py ./scripts/probe_llm_triage.py
 COPY --chown=lima:lima evaluation_data ./evaluation_data
 
 FROM base AS test
+# CXX-I01：analyzer 测试在镜像内导入 cxx_analyzer（生产 runtime 不带，Sidecar 独立成镜像）。
+COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer
 COPY --chown=lima:lima tests ./tests
 COPY --chown=lima:lima Dockerfile pyproject.toml docker-compose.yml .env.example LIMA_ROADMAP.md CONTRIBUTING.md ./
 COPY --chown=lima:lima .github ./.github

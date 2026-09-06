@@ -57,9 +57,10 @@ Implementation Agent 只修改 product-code allowlist，交付 final commit 和 
 - [IP-0006：Repair Verification Report(RVR) Foundation](LIMA_Implementation_Packet_IP-0006_RVR_Foundation.md) — Packet PR #111、Implementation PR #113 已合并（IP-DONE）
 - [IP-0007：Workflow Spine Schemas(Workflow / StageAttempt / SecurityOutcome)](LIMA_Implementation_Packet_IP-0007_Workflow_Spine_Schemas.md) — Packet PR #126、Implementation PR #127 已合并（IP-DONE）
 - [IP-0008：Plan + RunManifest Schemas(执行意图对)](LIMA_Implementation_Packet_IP-0008_Plan_RunManifest_Schemas.md) — Packet PR #128、Implementation PR #129 已合并（IP-DONE）
-- [IP-0009：Summary + Failure Schemas(结论对)](LIMA_Implementation_Packet_IP-0009_Summary_Failure_Schemas.md) — Packet 与 [正式开发任务交接](LIMA_Coding_Agent_IP-0009_正式开发任务交接.md) 冻结中；实现未开始
+- [IP-0009：Summary + Failure Schemas(结论对)](LIMA_Implementation_Packet_IP-0009_Summary_Failure_Schemas.md) — Packet PR #130、Implementation PR #131 已合并（IP-DONE）
+- [IP-0010：PR3 类 Artifact(JSON Schema + 兼容矩阵 + ADR)](LIMA_Implementation_Packet_IP-0010_PR3_Artifacts.md) — Packet 与 [正式开发任务交接](LIMA_Coding_Agent_IP-0010_正式开发任务交接.md) 冻结中；实现未开始
 
-IP-0001 至 IP-0008 完成以及 IP-0009 的 Packet 合并都不等于 Source Issue #58 完成。#58 只有在 Delivery Ledger 的全部 mandatory requirements、集成/真实运行和 Issue Closure Audit 均通过后才可手工关闭。
+IP-0001 至 IP-0009 完成以及 IP-0010 的 Packet 合并都不等于 Source Issue #58 完成。#58 只有在 Delivery Ledger 的全部 mandatory requirements、集成/真实运行和 Issue Closure Audit 均通过后才可手工关闭。
 
 ## 4. 不可混淆的四个 Gate
 

@@ -574,7 +574,7 @@ class RunManifestTests(unittest.TestCase):
         )
         wire = _manifest_wire()
         wire["stage_attempts"] = [
-            _link_wire(kind="lima.stage-attempt", artifact_id="z-attempt", digest="3" * 64)
+            _link_wire(kind="lima.workflow", artifact_id="z-attempt", digest="3" * 64)
         ]
         self._assert_rejected(
             lambda: RunManifest.from_dict(wire, schema_version=V4),

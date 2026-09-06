@@ -374,7 +374,7 @@ class RunManifestEnvelopeTests(_RejectionMixin, unittest.TestCase):
 
     def test_tampered_payload_fails_before_domain_promotion(self):
         payload = _manifest_payload()
-        payload["plan"]["kind"] = "lima.workflow"
+        payload["plan"]["kind"] = "lima.run-manifest"
         envelope = _manifest_envelope(
             payload=payload, content_digest=compute_content_digest(payload)
         )

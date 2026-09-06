@@ -73,7 +73,8 @@ def _summary_lineage(extra=()):
     return [
         _ref("lima.workflow", "wf-0001", WF_D),
         _ref("lima.security-outcome", "sec-0001", SO_D),
-        _ref("lima.run-manifest", "run-0001", "1" * 64),
+        _ref("lima.run-manifest", "run-0001",
+             "213fbebd48a966ee9071b5a19f385731e833b17f4d8c7c653c55b2c19eaf9cd7"),
         _ref("lima.stage-attempt", "attempt-audit-0001", ALT_AUDIT_D),
         _ref("lima.stage-attempt", "attempt-profile-0001", SA_D),
         _ref("lima.vulnerability-evidence-package", "vep-0001", VEP_D),

@@ -477,7 +477,7 @@ SHA-256:`18c1faa3e058b4d5b293fd4148fa3ad5834a804c84928f868c5cc9a8b6a097d4`
 
 ### 17.3 `failure_report_v4_golden.json`(535 bytes)
 
-SHA-256:`751bf433b6ccda1352abbd4d562b22f92622246750632a3e380673fecf2610c2`
+SHA-256:`05a2005fd4856ff2e8e098ed6989a29aa24146b0672af086a9c3b62c07935539`
 
 environment/transient/stage_attempt 作用域(blocked 类失败,可重试;attempt + workflow 链接真实 digest;evidence ids 存在性):
 
@@ -516,7 +516,7 @@ SHA-256:`3a016bfa5b338894e989707f516b2d3535a421be90652f75318ce0ab98e20c95`
 
 [failure §17.3] schema_name = lima.failure-report / artifact_id = failure-0001
   workflow_id = workflow-0001 / stage_attempt_id = attempt-profile-0001(失败对象)
-  classification sensitive / retention audit / content_digest = 751bf433…10c2
+  classification sensitive / retention audit / content_digest = 05a2005f…35539
   lineage = [wf-0001/lima.workflow/3be59c6c…, attempt-profile-0001/lima.stage-attempt/34746de4…,
              sandbox-log-0001/lima.sandbox-log/"7"*64, sandbox-run-0001/lima.sandbox-run/"9"*64] / supersedes = null
 ```

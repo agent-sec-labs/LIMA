@@ -1,0 +1,1 @@
+{"$id":"urn:lima:v4:lima.repair-verification-report","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"candidates":{"items":{"type":["object","string"]},"maxItems":4096,"type":"array"},"source_vep":{"type":"object"}},"required":["candidates","source_vep"],"title":"lima.repair-verification-report","type":"object"}

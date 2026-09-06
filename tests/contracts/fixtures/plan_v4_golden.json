@@ -1,0 +1,1 @@
+{"inputs":[{"artifact_id":"vep-0001","content_digest":"cd76622b48d11c0300e63d7489701479c75dc2f4b06cc6c4e88af1f453061d01","kind":"lima.vulnerability-evidence-package","schema_version":"4.0"}],"planned_stages":["summarize"],"revision":1,"workflow_mode":"verify_vep"}

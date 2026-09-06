@@ -4,6 +4,9 @@ import json
 import unittest
 from pathlib import Path
 
+from lima.contracts.codec import canonical_decode, compute_content_digest
+from lima.contracts.common import SchemaVersion
+from lima.contracts.errors import ContractError, ContractErrorCode
 from lima.contracts.workflow import (
     ArtifactKind,
     ArtifactLink,
@@ -18,10 +21,6 @@ from lima.contracts.workflow import (
     WorkflowMode,
     WorkflowStatus,
 )
-
-from lima.contracts.codec import canonical_decode, compute_content_digest
-from lima.contracts.common import SchemaVersion
-from lima.contracts.errors import ContractError, ContractErrorCode
 
 V4 = SchemaVersion(4, 0)
 V42 = SchemaVersion(4, 2)

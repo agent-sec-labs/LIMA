@@ -3,6 +3,17 @@
 import unittest
 from pathlib import Path
 
+from lima.contracts.codec import canonical_decode, compute_content_digest
+from lima.contracts.common import (
+    ArtifactBlobReference,
+    ArtifactClassification,
+    ArtifactEnvelope,
+    ArtifactReference,
+    RetentionClass,
+    SchemaVersion,
+    encode_envelope,
+)
+from lima.contracts.errors import ContractError, ContractErrorCode
 from lima.contracts.workflow import (
     SECURITY_OUTCOME_SCHEMA_NAME,
     STAGE_ATTEMPT_SCHEMA_NAME,
@@ -18,18 +29,6 @@ from lima.contracts.workflow import (
     encode_stage_attempt_envelope,
     encode_workflow_envelope,
 )
-
-from lima.contracts.codec import canonical_decode, compute_content_digest
-from lima.contracts.common import (
-    ArtifactBlobReference,
-    ArtifactClassification,
-    ArtifactEnvelope,
-    ArtifactReference,
-    RetentionClass,
-    SchemaVersion,
-    encode_envelope,
-)
-from lima.contracts.errors import ContractError, ContractErrorCode
 
 VERSION_4_0 = SchemaVersion(4, 0)
 VERSION_4_2 = SchemaVersion(4, 2)

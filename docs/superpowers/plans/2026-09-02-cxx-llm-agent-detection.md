@@ -906,19 +906,19 @@ git commit -s -m "feat: report C++ agent collaboration evidence"
 **Interfaces:**
 - Produces: 全任务共享 budget ledger；mode outcome；`llm-unavailable`、`budget-exhausted`、`context-truncated` 等有界诊断。
 
-- [ ] **Step 1: RED 攻击/故障矩阵**
+- [x] **Step 1: RED 攻击/故障矩阵**
 
 覆盖源码注释提示词注入、模型请求任意工具、跨仓库 path、工具参数超限、并发预算竞争、Provider 超时/429/5xx、全部 specialist 失败、Critic/Verifier/Arbiter 失败、取消任务。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_tools tests.test_cxx_llm tests.test_cxx_agent_integration.FailureModeTests -v`
 
-- [ ] **Step 3: 实现 fail-closed 结果**
+- [x] **Step 3: 实现 fail-closed 结果**
 
 `required` 关键阶段失败使任务 FAILED；`auto` 仅在允许点降级并写 diagnostic；格式修复最多一次；达到任一总预算立即停止新调用。任何失败不得提升验证状态。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_tools tests.test_cxx_llm tests.test_cxx_agents tests.test_cxx_agent_integration -v`
 

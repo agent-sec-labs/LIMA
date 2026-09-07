@@ -313,6 +313,7 @@ class CxxLLMClientTests(unittest.TestCase):
     def test_transport_errors_propagate_without_repair(self):
         errors = [
             LLMTransportError(f"{PROVIDER} review request failed: timed out"),
+            LLMTransportError(f"{PROVIDER} API returned HTTP 429: too many requests"),
             LLMTransportError(f"{PROVIDER} API returned HTTP 502: bad gateway"),
         ]
         for error in errors:

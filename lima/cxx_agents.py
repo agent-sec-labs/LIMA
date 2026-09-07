@@ -182,10 +182,50 @@ _VERIFIED_STATE_PRIORITY = {
     "llm-candidate": 0,
 }
 
+# ----------------------------------------------------------------- diagnostics
+# Bounded diagnostic vocabulary (design spec sections 12/13, plan Task 19).
+# ``collaboration.cxx_agent`` degradation statuses and the ``diagnostics``
+# array may only carry these fixed codes; provider raw error text never
+# enters a report through this channel.  All producers of the classified
+# strings live in this repository (the budget marker below, the
+# "cancelled before the X stage" messages, and the strict client's
+# "invalid agent step response" failure), so the classification is
+# deterministic, not best-effort guessing.
+DIAGNOSTIC_LLM_UNAVAILABLE = "llm-unavailable"
+DIAGNOSTIC_BUDGET_EXHAUSTED = "budget-exhausted"
+DIAGNOSTIC_CONTEXT_TRUNCATED = "context-truncated"
+DIAGNOSTIC_CANCELLED = "cancelled"
+DIAGNOSTIC_PROTOCOL_ERROR = "protocol-error"
+
+CXX_AGENT_DIAGNOSTIC_VOCABULARY = frozenset({
+    DIAGNOSTIC_LLM_UNAVAILABLE,
+    DIAGNOSTIC_BUDGET_EXHAUSTED,
+    DIAGNOSTIC_CONTEXT_TRUNCATED,
+    DIAGNOSTIC_CANCELLED,
+    DIAGNOSTIC_PROTOCOL_ERROR,
+})
+# Stable emission order for report payloads.
+_DIAGNOSTIC_ORDER = (
+    DIAGNOSTIC_LLM_UNAVAILABLE,
+    DIAGNOSTIC_BUDGET_EXHAUSTED,
+    DIAGNOSTIC_CONTEXT_TRUNCATED,
+    DIAGNOSTIC_CANCELLED,
+    DIAGNOSTIC_PROTOCOL_ERROR,
+)
+_SKIP_BUDGET_MARKER = "budget was exhausted"
+_CANCEL_DIAGNOSTIC_MARKER = "cancelled"
+_INVALID_STEP_MARKER = "invalid agent step"
+
 __all__ = [
+    "CXX_AGENT_DIAGNOSTIC_VOCABULARY",
     "CxxAgentCoordinator",
     "CxxAgentReviewResult",
     "CxxRoleOutcome",
+    "DIAGNOSTIC_BUDGET_EXHAUSTED",
+    "DIAGNOSTIC_CANCELLED",
+    "DIAGNOSTIC_CONTEXT_TRUNCATED",
+    "DIAGNOSTIC_LLM_UNAVAILABLE",
+    "DIAGNOSTIC_PROTOCOL_ERROR",
     "LLM_ROLES",
     "ROLE_ARBITER",
     "ROLE_BOUNDS",
@@ -198,7 +238,53 @@ __all__ = [
     "ROLE_VERIFIER",
     "SEED_DOMAINS",
     "SPECIALIST_ROLES",
+    "bounded_diagnostic",
+    "bounded_diagnostics",
 ]
+
+
+def bounded_diagnostic(error: str) -> str:
+    """Classify one role failure reason into the closed diagnostic vocabulary.
+
+    The markers are produced by this module (``_BUDGET_ERROR_MARKER``, the
+    ``cancelled before the X stage`` messages, the skip messages) and by the
+    strict client's ``invalid agent step response`` failure, so every
+    remaining failure is a provider/transport failure.  The returned code is
+    always a member of :data:`CXX_AGENT_DIAGNOSTIC_VOCABULARY`.
+    """
+    text = error or ""
+    if _BUDGET_ERROR_MARKER in text or _SKIP_BUDGET_MARKER in text:
+        return DIAGNOSTIC_BUDGET_EXHAUSTED
+    if _CANCEL_DIAGNOSTIC_MARKER in text:
+        return DIAGNOSTIC_CANCELLED
+    if _INVALID_STEP_MARKER in text:
+        return DIAGNOSTIC_PROTOCOL_ERROR
+    return DIAGNOSTIC_LLM_UNAVAILABLE
+
+
+def bounded_diagnostics(
+    role_errors: Sequence[str] = (),
+    *,
+    context_truncated: bool = False,
+    llm_unavailable: bool = False,
+) -> list[str]:
+    """Bounded, deduplicated diagnostics for one pipeline run.
+
+    ``role_errors`` are the error strings of ``failed-replaced`` LLM roles;
+    ``context_truncated`` records honestly that retrieval left candidates
+    uncovered; ``llm_unavailable`` carries the top-level degradation status
+    for runs whose pipeline died before any role outcome existed.  The
+    result is ordered by the fixed vocabulary order and contains vocabulary
+    codes only.
+    """
+    codes = {
+        bounded_diagnostic(error) for error in role_errors if error
+    }
+    if context_truncated:
+        codes.add(DIAGNOSTIC_CONTEXT_TRUNCATED)
+    if llm_unavailable:
+        codes.add(DIAGNOSTIC_LLM_UNAVAILABLE)
+    return [code for code in _DIAGNOSTIC_ORDER if code in codes]
 
 
 class _CandidateSetError(RuntimeError):

@@ -14,10 +14,13 @@ from .context_manager import ContextManager
 from .cxx_agent_models import SUPPORTED_CWES as CXX_AGENT_SUPPORTED_CWES
 from .cxx_agent_tools import CxxAgentBudget
 from .cxx_agents import (
+    DIAGNOSTIC_CANCELLED,
+    DIAGNOSTIC_LLM_UNAVAILABLE,
     LLM_ROLES,
     ROLE_ORDER,
     SPECIALIST_ROLES,
     CxxAgentCoordinator,
+    bounded_diagnostics,
 )
 from .cxx_context import CxxContextIndex
 from .cxx_llm import CxxLLMClient
@@ -860,6 +863,28 @@ class ReviewService:
                 ),
                 "token_accounting": "bytes-proxy",
             }
+        # 有界诊断（设计第 12/13 节）：diagnostics 数组只允许固定词表代码，
+        # 覆盖任何上游散落的 provider 原文错误串。context-truncated 如实
+        # 记录检索未覆盖的候选；llm-unavailable 承接顶层降级状态。
+        retrieval = summary.get("retrieval")
+        uncovered = (
+            int(retrieval.get("uncovered_candidates") or 0)
+            if isinstance(retrieval, dict) else 0
+        )
+        role_errors = [
+            str(role.get("error"))
+            for role in summary.get("roles") or []
+            if isinstance(role, dict)
+            and role.get("status") == "failed-replaced"
+            and role.get("error")
+        ]
+        summary["diagnostics"] = bounded_diagnostics(
+            role_errors,
+            context_truncated=uncovered > 0,
+            llm_unavailable=(
+                str(summary.get("status") or "") == DIAGNOSTIC_LLM_UNAVAILABLE
+            ),
+        )
 
     def repository_scan_capabilities(self) -> Dict[str, Any]:
         result = self.repository_import.capabilities()
@@ -1547,9 +1572,11 @@ class ReviewService:
                     f"C++ agent pipeline failed in required mode: {exc}"
                 ) from exc
             metrics.inc("pull_request_cxx_agent_unavailable_total")
+            # 有界诊断：只落固定词表代码，provider 原文不进入报告载荷。
             return {
-                "mode": mode, "model": "", "status": "llm-unavailable",
-                "diagnostics": [str(exc)[:500]], **audit,
+                "mode": mode, "model": "",
+                "status": DIAGNOSTIC_LLM_UNAVAILABLE,
+                "diagnostics": [DIAGNOSTIC_LLM_UNAVAILABLE], **audit,
             }, []
         return summary, findings
 
@@ -1617,7 +1644,7 @@ class ReviewService:
             for outcome in review.role_outcomes
         )
         if cancelled:
-            status = "cancelled"
+            status = DIAGNOSTIC_CANCELLED
         elif probe.succeeded_turns == 0 and llm_failed:
             if mode == "required":
                 raise RuntimeError(
@@ -1629,7 +1656,7 @@ class ReviewService:
                     )[:500]
                 )
             metrics.inc("pull_request_cxx_agent_unavailable_total")
-            status = "llm-unavailable"
+            status = DIAGNOSTIC_LLM_UNAVAILABLE
         else:
             status = "completed"
         specialist_roles: dict[str, list] = {}

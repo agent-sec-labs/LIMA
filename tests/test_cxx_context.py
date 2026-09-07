@@ -1,6 +1,7 @@
 """Deterministic bounded context indexing over verified C/C++ snapshots."""
 
 import hashlib
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -271,6 +272,45 @@ class CxxContextLineAccountingTests(unittest.TestCase):
                 (edge.caller, edge.callee, edge.line) for edge in index.calls
             }
         )
+
+
+class CrlfRepositoryWorkspaceTests(unittest.TestCase):
+    """Real-workspace regression: CRLF files must index without drift gaps.
+
+    The inventory hashes exact file bytes; a universal-newline-translating
+    read_text would hash different bytes and misreport every CRLF file as
+    snapshot-drift (observed on the real-world ResInsight smoke run).
+    """
+
+    SOURCE = (
+        "void alloc_buf(void) {\n"
+        "    char *p = malloc(16);\n"
+        "    free(p);\n"
+        "}\n"
+    )
+
+    def test_crlf_file_indexes_without_snapshot_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "crlf.c").write_bytes(
+                self.SOURCE.replace("\n", "\r\n").encode("utf-8")
+            )
+            workspace = RepositoryWorkspace(root)
+            inventory = workspace.inventory()
+            index = CxxContextIndex.build(workspace, inventory)
+            self.assertEqual([], list(index.coverage.parse_gaps))
+            self.assertEqual(("crlf.c",), index.coverage.indexed)
+            self.assertTrue(index.symbols)
+            self.assertTrue(index.resource_events)
+            # Round-trip: read_text must preserve the exact CRLF bytes the
+            # inventory hashed.
+            self.assertEqual(
+                hashlib.sha256(
+                    workspace.read_text("crlf.c").encode("utf-8")
+                ).hexdigest(),
+                inventory.files[0].sha256,
+            )
+
 
 
 if __name__ == "__main__":

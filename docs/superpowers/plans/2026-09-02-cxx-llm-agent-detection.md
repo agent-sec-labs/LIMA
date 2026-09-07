@@ -977,7 +977,7 @@ git commit -s -m "test: evaluate C++ LLM agent detection"
 **Interfaces:**
 - Produces: 可供验收的 commit range、测试证据、真实/未验证边界和 GitHub 分支。
 
-- [ ] **Step 1: 干净 HEAD 验证**
+- [x] **Step 1: 干净 HEAD 验证**
 
 在临时 detached worktree 上运行：
 
@@ -989,19 +989,19 @@ docker compose config --quiet
 git diff --check 2e69f3c..HEAD
 ```
 
-- [ ] **Step 2: Linux/Docker 验证**
+- [x] **Step 2: Linux/Docker 验证**
 
 构建 Sidecar/LIMA，运行 Landlock/process/deadline、真实 Semgrep/Clang/ASan、整仓 Fake LLM、PR Fake LLM 和公开版本对。如果 Docker 不可用，最终状态不得写 complete/merge-ready。
 
-- [ ] **Step 3: 真实模型最小验收**
+- [x] **Step 3: 真实模型最小验收**
 
 在用户授权的 Provider 上至少运行一个 vulnerable/fixed pair 和一个 PR case，证明 `required` 发生真实调用、`auto` 降级、消息/Token/上下文持久化以及单 Agent 不进门禁。不得以 Fake LLM 代替。
 
-- [ ] **Step 4: 全分支独立审查**
+- [x] **Step 4: 全分支独立审查**
 
 review range 为 `2e69f3c..HEAD`。reviewer 必须读取 spec、plan、每任务报告和完整 diff，逐项检查 Global Constraints、七项前置 residual、整仓/PR、Agent 独立性、严格 Schema、预算、状态、禁止修复、公平评测和部署文档。
 
-- [ ] **Step 5: 交给当前验收模型**
+- [x] **Step 5: 交给当前验收模型**
 
 交接内容必须包含：分支、base/head、commit list、dirty files、测试命令与完整计数、Docker/真实模型证据、未解决 Critical/Important、报告路径和 GitHub Actions URL。未经用户明确授权不合并 main。
 

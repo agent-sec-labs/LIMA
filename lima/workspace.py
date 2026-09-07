@@ -243,7 +243,11 @@ class RepositoryWorkspace:
         path = self._safe_path(relative_path)
         if path.stat().st_size > self.max_file_bytes:
             raise ValueError("workspace file exceeds the per-file size limit")
-        return path.read_text(encoding="utf-8")
+        # Decode raw bytes without universal-newline translation: the
+        # inventory hashes exact file bytes, so any newline normalisation
+        # here would make CRLF files fail the index drift check (and would
+        # also contradict the U+000A-only line-number convention).
+        return path.read_bytes().decode("utf-8")
 
     def absolute_file(self, relative_path: str | os.PathLike[str]) -> Path:
         """Resolve an inventoried file while enforcing the workspace boundary."""

@@ -423,3 +423,75 @@ jobs:
           docker rm --force lima-cxx-evaluator lima-cxx-public-analyzer 2>/dev/null || true
           docker network rm lima-cxx-public 2>/dev/null || true
 
+  cxx-llm-agent-evaluation:
+    # 真实模型评测只在手动/定时任务运行，不在普通 PR 消耗 Token；
+    # 普通 PR 只跑 tests.test_cxx_llm_agent_evaluation 的 Fake-LLM 合同测试
+    #（随 unit-tests 全量执行，零网络、零密钥）。
+    # 凭证接线说明：tests.test_ci_contract 要求 ci.yml 保持 secretless（禁止任何
+    # 凭证引用），因此本 job 默认不携带密钥，未配置时以 provider-not-configured
+    # 跳过。启用真实调用：在下方两个 env 块把与 lima/config.py Provider 环境同名的
+    # 密钥变量绑定到仓库 Secret，并同步收窄 tests.test_ci_contract 的 secretless
+    # 断言范围。逐步操作见 docs/CXX_LLM_AGENT_ANALYSIS.md 的“CI 接线”一节。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        case-id:
+          - cwe-787-scratch-store-oob-write
+          - cwe-125-sample-window-oob-read
+          - cwe-416-session-release-uaf
+          - cwe-415-buffer-teardown-double-free
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check the opt-in provider configuration before any model call
+        # 双保险：job 级 if 已限定 schedule/workflow_dispatch，此步再挡一次未
+        # 接线的运行——零配置时跳过并说明，绝不静默降级成空报告或零调用报告。
+        if: github.event_name != 'pull_request'
+        env:
+          LIMA_LLM_PROVIDER: ${{ vars.LIMA_LLM_PROVIDER }}
+          LIMA_LLM_BASE_URL: ${{ vars.LIMA_LLM_BASE_URL }}
+          LIMA_CXX_AGENT_MODEL: ${{ vars.LIMA_CXX_AGENT_MODEL }}
+          LIMA_LLM_MODEL: ${{ vars.LIMA_LLM_MODEL }}
+        run: |
+          if [ -z "$LIMA_LLM_BASE_URL" ]; then
+            echo "provider-not-configured: no LIMA_LLM_BASE_URL repository variable is set;"
+            echo "the real-model C/C++ agent evaluation stays skipped until the opt-in"
+            echo "provider wiring from docs/CXX_LLM_AGENT_ANALYSIS.md ('CI 接线') is applied."
+            exit 0
+          fi
+      - name: Evaluate one pinned pair against the configured provider
+        if: github.event_name != 'pull_request'
+        env:
+          LIMA_LLM_PROVIDER: ${{ vars.LIMA_LLM_PROVIDER }}
+          LIMA_LLM_BASE_URL: ${{ vars.LIMA_LLM_BASE_URL }}
+          LIMA_CXX_AGENT_MODEL: ${{ vars.LIMA_CXX_AGENT_MODEL }}
+          LIMA_LLM_MODEL: ${{ vars.LIMA_LLM_MODEL }}
+        run: |
+          if [ -z "$LIMA_LLM_BASE_URL" ]; then
+            echo "provider-not-configured: nothing to evaluate."
+            exit 0
+          fi
+          mkdir -p output
+          python scripts/run_cxx_llm_agent_evaluation.py \
+            --cases evaluation_data/cxx_llm_agent_cases.json \
+            --case-id "${{ matrix.case-id }}" \
+            --output "output/cxx-llm-agent-evaluation-${{ matrix.case-id }}.json"
+      - name: Upload the raw structured report and identity manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cxx-llm-agent-evaluation-${{ matrix.case-id }}
+          path: output/cxx-llm-agent-evaluation-*.json
+          if-no-files-found: warn
+          retention-days: 30
+

@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "cwe-787-scratch-store-oob-write",
+      "title": "Synthetic out-of-bounds heap write pair",
+      "cwe": "CWE-787",
+      "origin": "synthetic",
+      "affected": {
+        "path": "src/scratch_store.c",
+        "symbol": "scratch_store_write"
+      },
+      "versions": {
+        "vulnerable": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-787-scratch-store-oob-write/vulnerable",
+          "content_sha256": "7c0e99e4f50c9687e62f8b33a07c9dac9eeb253e8781987bda594839784ae662"
+        },
+        "fixed": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-787-scratch-store-oob-write/fixed",
+          "content_sha256": "f22a13b951091aa7ce78bcaeb1c445d1bb31a5d8277f4169d174f53d8163e630"
+        }
+      },
+      "selection_rationale": "Synthetic pair: the vulnerable revision writes one element past the end of a heap scratch buffer with an off-by-one loop, and the fixed revision bounds the loop over a fixed-size stack array so no dynamic buffer exists.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "cwe-125-sample-window-oob-read",
+      "title": "Synthetic out-of-bounds heap read pair",
+      "cwe": "CWE-125",
+      "origin": "synthetic",
+      "affected": {
+        "path": "src/sample_window.c",
+        "symbol": "sample_window_first"
+      },
+      "versions": {
+        "vulnerable": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-125-sample-window-oob-read/vulnerable",
+          "content_sha256": "d31450cb7c0f453952b4ab81b398b65210ea5b93a9a836dcc89a84f1c6e738ac"
+        },
+        "fixed": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-125-sample-window-oob-read/fixed",
+          "content_sha256": "86a9cddec16ee61bd95eeea406a4fcc182d83a6589e95dfd99264cf4b4a68473"
+        }
+      },
+      "selection_rationale": "Synthetic pair: the vulnerable revision reads window[count] one element beyond the initialized heap window, and the fixed revision returns a checked element from a fixed-size stack window with the count validated up front.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "cwe-416-session-release-uaf",
+      "title": "Synthetic use-after-free pair",
+      "cwe": "CWE-416",
+      "origin": "synthetic",
+      "affected": {
+        "path": "src/session.c",
+        "symbol": "session_release"
+      },
+      "versions": {
+        "vulnerable": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-416-session-release-uaf/vulnerable",
+          "content_sha256": "24ee6118855558dc2223d7b4b3634a790360c20fd28fec951f55242a35bd204f"
+        },
+        "fixed": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-416-session-release-uaf/fixed",
+          "content_sha256": "f1263dddc8b2e4ac74b097566947b2238fda6e23046be649baaae7403381e5df"
+        }
+      },
+      "selection_rationale": "Synthetic pair: the vulnerable revision reads session[0] after free(session) has released the heap buffer, and the fixed revision keeps the value in a stack local so no release ordering hazard exists.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "cwe-415-buffer-teardown-double-free",
+      "title": "Synthetic double-free pair",
+      "cwe": "CWE-415",
+      "origin": "synthetic",
+      "affected": {
+        "path": "src/buffer_teardown.c",
+        "symbol": "buffer_teardown"
+      },
+      "versions": {
+        "vulnerable": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-415-buffer-teardown-double-free/vulnerable",
+          "content_sha256": "d53f440c0a464340ccb81199da4a5a9121a503b21b2c8272ef53071ef5b5de46"
+        },
+        "fixed": {
+          "kind": "local",
+          "source_dir": "tests/fixtures/cxx_llm_agent/cwe-415-buffer-teardown-double-free/fixed",
+          "content_sha256": "70f9debeb04199c7ae2e6b45f1bf37a1f17db37fce38ded80e9aa4cd5f8ef2d9"
+        }
+      },
+      "selection_rationale": "Synthetic pair: the vulnerable revision frees the same heap buffer twice on the late-failure teardown path, and the fixed revision removes the dynamic buffer so the failure path cannot release anything twice.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    }
+  ]
+}

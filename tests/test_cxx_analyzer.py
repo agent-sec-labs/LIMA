@@ -324,7 +324,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 sorted(
                     path.relative_to(snapshot.root).as_posix()
                     for path in snapshot.root.rglob("*")
-                    if path.is_file()
+                    if path.is_file() and path.name != ".semgrepignore"
                 ),
             )
             self.assertEqual(
@@ -338,6 +338,46 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                     if path.is_file()
                 },
             )
+
+    def test_prepare_snapshot_disables_semgrep_default_ignore_table(self):
+        """阶段 B 强制跟进项：生产快照必须自带 .semgrepignore。
+
+        Semgrep applies its built-in default ignore table (tests/, doc/, ...)
+        only when the scan root has no .semgrepignore. A production snapshot
+        without the file would silently skip those directories while coverage
+        still counts them, so the scan set and the verified inventory diverge.
+        The prepared snapshot therefore carries a comment-only .semgrepignore
+        that disables the default table without adding ignore patterns, and
+        the file stays outside the inventory and its fingerprint.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "src").mkdir()
+            (repository / "src" / "main.c").write_text(
+                "int main(void) { return 0; }\n", encoding="utf-8"
+            )
+            (repository / "tests").mkdir()
+            (repository / "tests" / "regression.c").write_text(
+                "int regression(void) { return 1; }\n", encoding="utf-8"
+            )
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+
+            snapshot = prepare_snapshot(import_root, "team/project", expected, work_root)
+            self.addCleanup(snapshot.cleanup)
+
+            ignore_path = snapshot.root / ".semgrepignore"
+            self.assertTrue(ignore_path.is_file())
+            self.assertNotIn(".semgrepignore", snapshot.files)
+            content = ignore_path.read_text(encoding="utf-8")
+            patterns = [
+                line
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            self.assertEqual([], patterns)
+            self.assertEqual(["src/main.c", "tests/regression.c"], sorted(snapshot.files))
+            snapshot.verify_inventory()
 
     def test_prepare_snapshot_rejects_unsafe_repository_keys(self):
         invalid_keys = (

@@ -941,19 +941,19 @@ git commit -s -m "fix: enforce C++ agent trust and budget boundaries"
 **Interfaces:**
 - Produces: 固定 vulnerable/fixed 对、可重算 metrics、手动/定时真实模型 job；普通 PR 只跑 Fake-LLM 合同测试。
 
-- [ ] **Step 1: RED Schema/公平性/指标测试**
+- [x] **Step 1: RED Schema/公平性/指标测试**
 
 断言 exact commits/archive hashes/licenses、无标签 retrieval input、零分母 null+diagnostic、TP/FP/FN/TN/F1/pairwise/token/cost/latency/coverage 可由 revision records 重算。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_llm_agent_evaluation -v`
 
-- [ ] **Step 3: 实现评测与文档**
+- [x] **Step 3: 实现评测与文档**
 
 真实模型 job 从 secret 读取现有 Provider key，固定模型和 prompt hash，上传原始结构化结果及身份清单。文档说明外部模型会读取代码、两种入口、模式、费用、隐私、状态、门禁、禁止修复和局限。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run:
 

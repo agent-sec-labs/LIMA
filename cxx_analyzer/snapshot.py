@@ -574,6 +574,37 @@ def _copy_inventory_file(
     return _InventoryFile(item.path, len(copied), copied_sha256, item.mode)
 
 
+_SEMGREPIGNORE_NAME = ".semgrepignore"
+# Comment-only content: the presence of the file makes Semgrep use it instead
+# of its built-in default ignore table (tests/, doc/, ...), while the file
+# itself declares no ignore patterns, so the scanned set equals the verified
+# inventory and coverage claims stay honest.
+_SEMGREPIGNORE_CONTENT = (
+    "# LIMA analyzer snapshot: comment-only on purpose.\n"
+    "# This file disables Semgrep's built-in default ignore table so the\n"
+    "# scanned set matches the verified inventory; it declares no patterns.\n"
+)
+
+
+def _write_semgrep_ignore(snapshot_root: Path) -> None:
+    """Stage a comment-only ``.semgrepignore`` inside the prepared snapshot.
+
+    强制跟进项（计划文档阶段 A 观察项）：生产快照原先没有 ``.semgrepignore``，
+    Semgrep 会对 ``tests/``、``doc/`` 等目录套用内置默认忽略表并静默跳过，
+    而 coverage 仍按清单计数——扫描集与清单集可能不一致。该文件与 ``build/``
+    一样是请求私有树内的运行时脚手架：在副本指纹复核之后写入，不计入快照
+    清单与哈希，对客户端协议零影响。
+    """
+
+    try:
+        with (snapshot_root / _SEMGREPIGNORE_NAME).open(
+            "x", encoding="utf-8", newline="\n"
+        ) as handle:
+            handle.write(_SEMGREPIGNORE_CONTENT)
+    except OSError as exc:
+        raise ValueError("snapshot .semgrepignore could not be staged") from exc
+
+
 def prepare_snapshot(
     import_root: str | os.PathLike[str],
     repository_key: str,
@@ -626,6 +657,7 @@ def prepare_snapshot(
         ]
         if _fingerprint(copied) != expected_sha256:
             raise ValueError("copied snapshot fingerprint does not match expected snapshot")
+        _write_semgrep_ignore(snapshot_root)
         build_root = snapshot_root / "build"
         build_root.mkdir(mode=0o700)
         (scratch_root / "home").mkdir(mode=0o700)

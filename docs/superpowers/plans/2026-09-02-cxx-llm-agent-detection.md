@@ -612,19 +612,19 @@ git commit -s -m "feat: index bounded C++ review context"
 **Interfaces:**
 - Produces: `retrieve_repository(index, budget) -> RetrievalRun`；`retrieve_pull_request(index, changed_lines, budget) -> RetrievalRun`；候选包含 seed reason，不包含 CVE/ground truth。
 
-- [ ] **Step 1: RED**
+- [x] **Step 1: RED**
 
 测试分配/释放、边界操作、PR changed symbol 扩展、稳定排序、100 candidate/12 file/1200 line 限制，以及输入中出现 `vulnerable/fixed/CVE` 元数据不会改变排序。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `python -m unittest tests.test_cxx_retrieval -v`
 
-- [ ] **Step 3: 实现检索**
+- [x] **Step 3: 实现检索**
 
 候选分数只来自通用 API/语法风险、调用邻域和 PR 距离。预算在选择过程中一次性扣减；返回未覆盖候选/文件计数。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_retrieval tests.test_cxx_context -v`
 

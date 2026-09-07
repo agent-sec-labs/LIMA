@@ -836,19 +836,19 @@ git commit -s -m "feat: run C++ agents on imported repositories"
 **Interfaces:**
 - Produces: context scope `repository | pr-context | diff-only`；任务输入保存 base/head SHA 和 source manifest hash。
 
-- [ ] **Step 1: RED PR 端到端**
+- [x] **Step 1: RED PR 端到端**
 
 覆盖本地 repo head 匹配、head 不匹配后 GitHub pinned fetch、GitHub 失败后的 Diff-only、非 C/C++ PR 不调用 C++ Agent、Diff-only 不得升级。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.PullRequestAgentTests tests.test_github -v`
 
-- [ ] **Step 3: 接入现有 PR task**
+- [x] **Step 3: 接入现有 PR task**
 
 从 webhook 已验证 payload 取得完整 head SHA；代码上下文和 diff 都绑定任务。不得用 PR ref 或默认分支替代 head SHA。C++ Agent Finding 可绑定触发行和根因行，但 gate 规则保持不变。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_integration tests.test_github tests.test_service -v`
 

@@ -22,6 +22,30 @@ def verify_signature(secret: str, body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def pull_request_commit_shas(payload: dict) -> "tuple[str, str]":
+    """Extract ``(head_sha, base_sha)`` from a verified pull_request payload.
+
+    Both commits must be exact lowercase 40-hex strings; branch names, short
+    or uppercase SHAs are rejected with ``ValueError``, because every
+    downstream source fetch binds these values as immutable refs and a moving
+    ref must never stand in for the pinned commit (design section 6). Callers
+    pass the already signature-verified webhook payload.
+    """
+    pull = (payload or {}).get("pull_request") if isinstance(payload, dict) else None
+    if not isinstance(pull, dict):
+        raise ValueError("invalid GitHub pull_request payload")
+    shas: list[str] = []
+    for field in ("head", "base"):
+        side = pull.get(field)
+        sha = side.get("sha") if isinstance(side, dict) else None
+        if not isinstance(sha, str) or not _COMMIT_SHA_PATTERN.fullmatch(sha):
+            raise ValueError(
+                f"pull_request.{field}.sha must be a lowercase 40-hex commit SHA"
+            )
+        shas.append(sha)
+    return shas[0], shas[1]
+
+
 class ResponseTooLarge(RuntimeError):
     """A bounded response exceeded the caller-provided byte limit.
 

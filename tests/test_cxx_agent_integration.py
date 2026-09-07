@@ -5,11 +5,17 @@ C/C++ Sidecar is a fake adapter, and GitHub materialization uses the fake
 opener pattern from the existing repository-scan integration tests.
 """
 
+import base64
+import hashlib
 import io
+import json
+import re
+import shutil
 import tempfile
 import time
 import unittest
 import urllib.error
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -34,6 +40,39 @@ from lima.service import ReviewService
 from lima.workspace import RepositoryWorkspace
 
 SHA = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+BASE_SHA = "f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1"
+
+# PR diff：把 VULN_C 作为一个新文件的全部新增行引入，使 changed lines 覆盖
+# leak 符号（5-9 行），与 vuln_scripts() 的 read_code_snippet("vuln.c", 5, 9)
+# 保持行号一致。
+PR_DIFF = (
+    "diff --git a/vuln.c b/vuln.c\n"
+    "new file mode 100644\n"
+    "index 0000000..1111111\n"
+    "--- /dev/null\n"
+    "+++ b/vuln.c\n"
+    "@@ -0,0 +1,9 @@\n"
+    "+#include <stdlib.h>\n"
+    "+\n"
+    "+static char *g_buf = 0;\n"
+    "+\n"
+    "+void leak(void) {\n"
+    "+    char *buf = malloc(64);\n"
+    "+    free(buf);\n"
+    "+    buf[0] = 'a';\n"
+    "+}\n"
+)
+
+PY_DIFF = (
+    "diff --git a/app.py b/app.py\n"
+    "new file mode 100644\n"
+    "index 0000000..2222222\n"
+    "--- /dev/null\n"
+    "+++ b/app.py\n"
+    "@@ -0,0 +1,2 @@\n"
+    "+def evaluate(code):\n"
+    "+    return eval(code)\n"
+)
 
 VULN_C = """#include <stdlib.h>
 
@@ -199,6 +238,22 @@ def vuln_scripts():
         ],
         ROLE_VERIFIER: [agent_step_final(UAF_CANDIDATE)],
     }
+
+
+def pr_scripts():
+    """PR 场景的诚实模型脚本。
+
+    pr-changed 锚的 seed_reason 是 pr-changed-symbol，按 SEED_DOMAINS 路由到
+    interprocedural specialist（设计第 5.3 节：PR 从修改行定位所在符号再扩
+    展），因此工具读取与候选产出发生在该角色。
+    """
+    scripts = vuln_scripts()
+    scripts.pop(ROLE_MEMORY_LIFETIME)
+    scripts[ROLE_INTERPROCEDURAL] = [
+        snippet_step("vuln.c", 5, 9),
+        agent_step_final(UAF_CANDIDATE),
+    ]
+    return scripts
 
 
 def write_repo(root, files):
@@ -589,3 +644,300 @@ class RepositoryAgentTests(unittest.TestCase):
 
         self.assertEqual("FAILED", task["state"])
         self.assertIn("required", str(task.get("failure") or ""))
+
+
+class FakePRGitHubClient:
+    """Offline GitHub client: diff fetch plus pinned Contents-API reads.
+
+    ``file_calls`` 记录每次 get_file_at_commit 的 (repository, path, sha)，
+    用于断言抓取绑定的是完整 40 位 head SHA 而非分支名或 PR ref。
+    """
+
+    def __init__(self, files=None, fail_fetch=False):
+        self.files = dict(files or {})
+        self.fail_fetch = fail_fetch
+        self.diff = ""
+        self.diff_calls = []
+        self.file_calls = []
+
+    def ensure_repository_access(self, repository):
+        return None
+
+    def get_repository(self, repository):
+        return {"full_name": repository}
+
+    def fetch_diff(self, url):
+        self.diff_calls.append(url)
+        return self.diff
+
+    def get_file_at_commit(
+        self, repository, path, commit_sha, max_response_bytes=None,
+    ):
+        self.file_calls.append((repository, path, commit_sha))
+        if self.fail_fetch:
+            raise RuntimeError("github contents api down")
+        content = self.files[path]
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        return {
+            "type": "file",
+            "size": len(content.encode("utf-8")),
+            "content": encoded,
+        }
+
+
+class FakeLocalSource:
+    """Offline LocalCommitSource: exact (repository, commit_sha) tree lookup."""
+
+    def __init__(self, trees=None):
+        self.trees = dict(trees or {})
+        self.calls = []
+
+    def snapshot(self, repository, commit_sha):
+        self.calls.append((repository, commit_sha))
+        return self.trees.get((repository, commit_sha))
+
+
+def pr_payload(action="opened", number=11, head=SHA, base=BASE_SHA,
+               repository="team/project"):
+    return {
+        "action": action,
+        "number": number,
+        "pull_request": {
+            "diff_url": f"https://github.com/{repository}/pull/{number}.diff",
+            "issue_url": f"https://api.github.com/repos/{repository}/issues/{number}",
+            # 分支名照常出现在 payload 里，但下游抓取只允许绑定 sha。
+            "head": {"ref": "feature/uaf", "sha": head},
+            "base": {"ref": "main", "sha": base},
+        },
+        "repository": {"full_name": repository},
+    }
+
+
+class PullRequestAgentTests(unittest.TestCase):
+    """GitHub PR 任务的三级上下文链（repository / pr-context / diff-only）。
+
+    head SHA 来自已验签 webhook payload 并绑定任务；所有网络访问都由 fake
+    client 记账，本地档由注入的 fake LocalCommitSource 提供零网络快照。
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(suffix="-cxx-pr-agent"))
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def make_service(self, mode, llm_model=""):
+        settings = Settings(
+            host="127.0.0.1", port=8080,
+            db_path=str(Path(self.root, "state.db")),
+            max_diff_bytes=10000, max_steps=8, timeout_seconds=120,
+            llm_base_url="http://127.0.0.1:9" if llm_model else "",
+            llm_api_key="stub-key" if llm_model else "",
+            llm_model=llm_model,
+            github_webhook_secret="", github_token="",
+            auto_post_review=False,
+            repository_scan_sources="github",
+            repository_scan_sast_mode="off",
+            repository_cache_root=str(Path(self.root, "cache")),
+            repository_cache_min_free_bytes=1,
+            cxx_memory_mode="off",
+            cxx_agent_mode=mode,
+        )
+        service = ReviewService(settings)
+        self.addCleanup(service.queue.close)
+        return service
+
+    def _wait_terminal(self, service, task_id):
+        task = None
+        for _ in range(400):
+            task = service.store.get(task_id, "tenant-a")
+            if task and task["state"] in {"SUCCESS", "FAILED"}:
+                return task
+            time.sleep(0.01)
+        self.fail("task did not reach a terminal state")
+
+    def _open_pr(self, service, github, local_source=None, diff=PR_DIFF,
+                 head=SHA, base=BASE_SHA):
+        github.diff = diff
+        service.github = github
+        if local_source is not None:
+            service.cxx_pr_local_source = local_source
+        payload = pr_payload(head=head, base=base)
+        digest = hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()
+        return service.handle_github_pull_request(
+            payload, "delivery-" + uuid.uuid4().hex, digest, "tenant-a",
+        )
+
+    def _agent_findings(self, task):
+        return [
+            item for item in task["report"]["findings"]
+            if item["source"] == "cxx-agent"
+        ]
+
+    def test_local_head_match_uses_repository_scope_without_github(self):
+        service = self.make_service("auto")
+        client = ScriptedAgentClient(pr_scripts())
+        service.repository_scanner.cxx_agent_client_factory = lambda: client
+        github = FakePRGitHubClient()
+        local = FakeLocalSource({("team/project", SHA): {"vuln.c": VULN_C}})
+
+        created = self._open_pr(service, github, local_source=local)
+        task = self._wait_terminal(service, created["task_id"])
+
+        self.assertEqual("SUCCESS", task["state"])
+        collaboration = task["report"]["collaboration"]["cxx_agent"]
+        self.assertEqual("auto", collaboration["mode"])
+        self.assertEqual("completed", collaboration["status"])
+        self.assertEqual("repository", collaboration["scope"])
+        self.assertEqual("wired", collaboration["local-source"])
+        self.assertEqual(SHA, collaboration["head_sha"])
+        self.assertEqual(BASE_SHA, collaboration["base_sha"])
+        self.assertEqual("fake-cxx-model", collaboration["model"])
+        self.assertIn("budget", collaboration)
+        self.assertIn("retrieval", collaboration)
+        self.assertIn("roles", collaboration)
+        # 本地精确命中：GitHub 零调用，本地档只被查询一次且绑定完整 head SHA。
+        self.assertEqual([], github.file_calls)
+        self.assertEqual([("team/project", SHA)], local.calls)
+        # 任务输入保存 base/head SHA 与 source manifest hash。
+        self.assertEqual(SHA, task["input"]["head_sha"])
+        self.assertEqual(BASE_SHA, task["input"]["base_sha"])
+        manifest = task["input"]["source_manifest_sha256"]
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", manifest))
+        self.assertEqual(manifest, collaboration["source_manifest_sha256"])
+        # Agent Finding 走完整管线，绑定修改行符号与触发路径。
+        agent_findings = self._agent_findings(task)
+        self.assertEqual(1, len(agent_findings))
+        self.assertEqual("vuln.c", agent_findings[0]["path"])
+        self.assertEqual(8, agent_findings[0]["line"])
+        self.assertEqual("leak", agent_findings[0]["symbol"])
+        self.assertIs(False, agent_findings[0]["automatic_repair"])
+        self.assertEqual(["leak", "free", "buf[0]"], agent_findings[0]["trigger_path"])
+        # 模型读到的是固定快照里的真实代码。
+        reads = [call for call in client.calls if call["role"] == ROLE_INTERPROCEDURAL]
+        self.assertTrue(reads)
+        self.assertIn("malloc(64)", reads[-1]["context"])
+        self.assertIn("buf[0] = 'a';", reads[-1]["context"])
+
+    def test_head_mismatch_fetches_github_snapshot_pinned_to_head_sha(self):
+        service = self.make_service("auto")
+        client = ScriptedAgentClient(pr_scripts())
+        service.repository_scanner.cxx_agent_client_factory = lambda: client
+        # 本地档存在但 commit 不等于 head SHA：精确匹配语义下视为 miss。
+        github = FakePRGitHubClient(files={"vuln.c": VULN_C})
+        local = FakeLocalSource({("team/project", BASE_SHA): {"vuln.c": VULN_C}})
+
+        created = self._open_pr(service, github, local_source=local)
+        task = self._wait_terminal(service, created["task_id"])
+
+        self.assertEqual("SUCCESS", task["state"])
+        collaboration = task["report"]["collaboration"]["cxx_agent"]
+        self.assertEqual("pr-context", collaboration["scope"])
+        self.assertEqual("completed", collaboration["status"])
+        # 抓取必须绑定 40 位 head SHA：既不是分支名，也不是 base SHA。
+        self.assertEqual([("team/project", "vuln.c", SHA)], github.file_calls)
+        self.assertEqual([("team/project", SHA)], local.calls)
+        self.assertEqual(1, len(self._agent_findings(task)))
+        self.assertTrue(re.fullmatch(
+            r"[0-9a-f]{64}", task["input"]["source_manifest_sha256"],
+        ))
+
+    def test_github_failure_degrades_to_diff_only_without_agent(self):
+        service = self.make_service("auto")
+        # 脚本故意可用：diff-only 下管线绝不运行，任何调用都是失败。
+        client = ScriptedAgentClient(pr_scripts())
+        service.repository_scanner.cxx_agent_client_factory = lambda: client
+        github = FakePRGitHubClient(files={"vuln.c": VULN_C}, fail_fetch=True)
+        local = FakeLocalSource()
+
+        created = self._open_pr(service, github, local_source=local)
+        task = self._wait_terminal(service, created["task_id"])
+
+        self.assertEqual("SUCCESS", task["state"])
+        collaboration = task["report"]["collaboration"]["cxx_agent"]
+        self.assertEqual("diff-only", collaboration["scope"])
+        self.assertEqual("diff-only", collaboration["status"])
+        self.assertEqual(
+            "local-miss+github-unavailable", collaboration["reason"],
+        )
+        self.assertEqual(SHA, collaboration["head_sha"])
+        # Diff-only 不得升级：零 cxx-agent Finding、零模型调用。
+        self.assertEqual([], self._agent_findings(task))
+        self.assertEqual([], client.calls)
+        # 固定 SHA 的抓取尝试确实发生过（降级不是静默跳过）。
+        self.assertEqual([("team/project", "vuln.c", SHA)], github.file_calls)
+        self.assertNotIn("source_manifest_sha256", task["input"])
+
+    def test_diff_only_does_not_escalate_even_in_required_mode(self):
+        service = self.make_service("required", llm_model="stub-model")
+        client = ScriptedAgentClient(pr_scripts())
+        service.repository_scanner.cxx_agent_client_factory = lambda: client
+        github = FakePRGitHubClient(files={"vuln.c": VULN_C}, fail_fetch=True)
+
+        created = self._open_pr(service, github)
+        task = self._wait_terminal(service, created["task_id"])
+
+        # 源头降级不是 agent 失败：任务保持成功，如实记录 diff-only，
+        # 绝不为满足 required 而用 diff-only 证据运行管线。
+        self.assertEqual("SUCCESS", task["state"])
+        collaboration = task["report"]["collaboration"]["cxx_agent"]
+        self.assertEqual("diff-only", collaboration["status"])
+        self.assertEqual([], self._agent_findings(task))
+        self.assertEqual([], client.calls)
+
+    def test_non_cxx_pull_request_skips_agent_and_fetch(self):
+        service = self.make_service("auto")
+        client = ScriptedAgentClient(pr_scripts())
+        service.repository_scanner.cxx_agent_client_factory = lambda: client
+        github = FakePRGitHubClient()
+        local = FakeLocalSource({("team/project", SHA): {"vuln.c": VULN_C}})
+
+        created = self._open_pr(
+            service, github, local_source=local, diff=PY_DIFF,
+        )
+        task = self._wait_terminal(service, created["task_id"])
+
+        self.assertEqual("SUCCESS", task["state"])
+        collaboration = task["report"]["collaboration"]["cxx_agent"]
+        self.assertEqual("no-cxx-sources", collaboration["status"])
+        # 零 LLM、零 fetch、零本地查询。
+        self.assertEqual([], client.calls)
+        self.assertEqual([], github.file_calls)
+        self.assertEqual([], local.calls)
+        self.assertNotIn("source_manifest_sha256", task["input"])
+
+    def test_api_pull_request_without_head_sha_keeps_existing_report(self):
+        service = self.make_service("auto")
+        client = ScriptedAgentClient(pr_scripts())
+        service.repository_scanner.cxx_agent_client_factory = lambda: client
+
+        created = service.enqueue_review(
+            "team/project", PR_DIFF, 11, tenant_id="tenant-a",
+        )
+        task = self._wait_terminal(service, created["task_id"])
+
+        # API 提交的 PR 任务没有已验签 head SHA：行为与既有流程逐字节等价，
+        # 不出现 collaboration.cxx_agent。
+        self.assertEqual("SUCCESS", task["state"])
+        self.assertNotIn("cxx_agent", task["report"]["collaboration"])
+        self.assertEqual([], client.calls)
+
+    def test_required_mode_llm_failure_fails_pr_task(self):
+        service = self.make_service("required", llm_model="stub-model")
+        service.repository_scanner.cxx_agent_client_factory = (
+            lambda: ExplodingAgentClient()
+        )
+        github = FakePRGitHubClient(files={"vuln.c": VULN_C})
+
+        created = self._open_pr(service, github)
+        task = self._wait_terminal(service, created["task_id"])
+
+        # 评审类任务的失败走队列 dead-letter 路径，error 而非 typed failure。
+        self.assertEqual("FAILED", task["state"])
+        self.assertIn("required", str(task.get("error") or ""))
+        self.assertEqual([("team/project", "vuln.c", SHA)], github.file_calls)
+
+
+if __name__ == "__main__":
+    unittest.main()

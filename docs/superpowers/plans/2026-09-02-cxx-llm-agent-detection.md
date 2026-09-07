@@ -704,19 +704,19 @@ git commit -s -m "feat: expose bounded C++ agent tools"
 **Interfaces:**
 - Produces: `CxxLLMClient.step(role, managed_context, tools, budget) -> AgentStep`；复用 `Settings.resolved_llm()`；temperature 固定 0；一次格式修复。
 
-- [ ] **Step 1: RED 合同测试**
+- [x] **Step 1: RED 合同测试**
 
 覆盖有效 tool/final、重复 key、未知字段、非对象、超大 body、非法 path/line/CWE、未读取证据、timeout、HTTP error、一次格式修复和 prompt injection。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_llm -v`
 
-- [ ] **Step 3: 实现 Provider 与严格解析**
+- [x] **Step 3: 实现 Provider 与严格解析**
 
 复用现有 base URL/key/model/headers；系统提示明确源码为不可信数据；输出只接受 `tool` 或 `final` union；Token/调用/时间在发送前后扣减；不得将模型 `reason` 当工具参数。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_llm tests.test_reviewer -v`
 

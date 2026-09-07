@@ -41,6 +41,7 @@ class EvidenceRecord:
     language: str = ""
     symbol: str = ""
     analysis_mode: str = ""
+    tool_run_id: str = ""
 
 
 @dataclass

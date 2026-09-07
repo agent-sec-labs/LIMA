@@ -7,16 +7,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lima.cxx_agent_models import CxxAgentCandidate
 from lima.cxx_memory import (
     REQUESTED_LAYERS,
     CxxAnalysisResult,
     CxxAnalyzerProtocolError,
     CxxAnalyzerUnavailable,
     CxxMemoryAnalyzerClient,
+    bind_tool_evidence,
     map_asan_error,
 )
 from lima.fixer import SafeFixer
-from lima.models import Finding, Severity
+from lima.models import EvidenceRecord, Finding, Severity
 from lima.report import to_markdown
 from lima.repository_scanner import VERIFICATION_RANK, RepositoryScanner
 from lima.workspace import (
@@ -515,6 +517,22 @@ class CxxMemoryClientTests(unittest.TestCase):
                 symbol="release",
                 analysis_mode="source-only",
                 automatic_repair=False,
+                # Task 15: the converted finding now carries the producer run
+                # identity on its primary evidence record.
+                evidence_records=[EvidenceRecord(
+                    source="semgrep",
+                    kind="line",
+                    path="src/free.c",
+                    line=12,
+                    snippet="free(p)",
+                    rule_id="cxx.double-free",
+                    cwe="CWE-415",
+                    confidence=0.72,
+                    language="c",
+                    symbol="release",
+                    analysis_mode="source-only",
+                    tool_run_id=payload["tool_runs"][0]["run_id"],
+                )],
             ),
             finding,
         )
@@ -1105,6 +1123,360 @@ class CxxReportTests(unittest.TestCase):
                 )
                 evidence_trace = markdown.split("**工具证据 / trace**", 1)[1]
                 self.assertIn("top-level fallback evidence", evidence_trace)
+
+
+def binding_candidate(
+    *,
+    path="src/free.c",
+    line=12,
+    symbol="release",
+    cwe="CWE-415",
+    mechanism="free called twice",
+):
+    return CxxAgentCandidate.from_untrusted_json({
+        "cwe": cwe,
+        "path": path,
+        "line": line,
+        "symbol": symbol,
+        "title": "double free claim",
+        "mechanism": mechanism,
+        "trigger_path": ["entry", "release"],
+        "confidence": 0.8,
+    })
+
+
+def binding_finding(
+    *,
+    source="semgrep",
+    path="src/free.c",
+    line=12,
+    symbol="release",
+    cwe="CWE-415",
+    run_id="run-1",
+):
+    return Finding(
+        rule_id=f"cxx.{source}.identity",
+        severity=Severity.HIGH,
+        title=f"{source} identity hit",
+        explanation=f"{source} matched the candidate identity",
+        path=path,
+        line=line,
+        evidence="free(p)",
+        fix="",
+        test="Reproduce under AddressSanitizer",
+        confidence=0.9,
+        cwe=cwe,
+        source=source,
+        evidence_kind="line",
+        verification_state="candidate",
+        language="c",
+        symbol=symbol,
+        analysis_mode="tool",
+        automatic_repair=False,
+        evidence_records=[EvidenceRecord(
+            source=source,
+            kind="match",
+            path=path,
+            line=line,
+            snippet="free(p)",
+            rule_id=f"cxx.{source}.identity",
+            cwe=cwe,
+            confidence=0.9,
+            language="c",
+            symbol=symbol,
+            analysis_mode="tool",
+            tool_run_id=run_id,
+        )],
+    )
+
+
+def binding_run(run_id="run-1", tool="semgrep", status="completed"):
+    return {
+        "run_id": run_id,
+        "tool": tool,
+        "status": status,
+        "returncode": 0 if status == "completed" else 1,
+        "output_sha256": "b" * 64,
+        "output_truncated": False,
+        "digests_complete": True,
+    }
+
+
+class BindToolEvidenceTests(unittest.TestCase):
+    """Task 15: tool evidence binding from CxxAnalysisResult to candidates."""
+
+    def test_semgrep_identity_hit_binds_tool_corroborated(self):
+        candidate = binding_candidate()
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run()],
+            findings=[binding_finding()],
+            coverage={"source_files": 1, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([candidate], analysis)
+
+        corroboration = binding[candidate.candidate_id]
+        self.assertEqual("tool-corroborated", corroboration.state)
+        self.assertEqual(("run-1",), corroboration.tool_run_ids)
+        self.assertFalse(corroboration.conflict)
+        self.assertEqual(1, len(corroboration.matched))
+        self.assertEqual("semgrep", corroboration.matched[0].source)
+        self.assertEqual("run-1", corroboration.matched[0].tool_run_id)
+
+    def test_clang_identity_hit_binds_tool_corroborated(self):
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run("run-clang", "clang")],
+            findings=[binding_finding(source="clang", run_id="run-clang")],
+            coverage={"source_files": 1, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([binding_candidate()], analysis)
+
+        self.assertEqual(
+            "tool-corroborated", binding[binding_candidate().candidate_id].state
+        )
+
+    def test_symbol_identity_accepts_qualified_suffix_and_line_distance(self):
+        candidate = binding_candidate()
+        suffix = bind_tool_evidence(
+            [candidate],
+            CxxAnalysisResult(
+                status="completed",
+                tool_runs=[binding_run()],
+                findings=[binding_finding(symbol="mod::release")],
+                coverage={"source_files": 1, "snapshot_files": 2},
+                diagnostics=[],
+            ),
+        )
+        self.assertEqual("tool-corroborated", suffix[candidate.candidate_id].state)
+
+        # The strict constructor requires a non-empty symbol, so the
+        # symbol-less candidate shape is built directly here.
+        bare = CxxAgentCandidate(
+            candidate_id="direct-bare-candidate",
+            cwe="CWE-415",
+            path="src/free.c",
+            line=12,
+            symbol="",
+            title="double free claim",
+            mechanism="free called twice",
+            trigger_path=("entry", "release"),
+            confidence=0.8,
+        )
+        near = bind_tool_evidence(
+            [bare],
+            CxxAnalysisResult(
+                status="completed",
+                tool_runs=[binding_run()],
+                findings=[binding_finding(symbol="", line=14)],
+                coverage={"source_files": 1, "snapshot_files": 2},
+                diagnostics=[],
+            ),
+        )
+        self.assertEqual("tool-corroborated", near[bare.candidate_id].state)
+
+        far = bind_tool_evidence(
+            [bare],
+            CxxAnalysisResult(
+                status="completed",
+                tool_runs=[binding_run()],
+                findings=[binding_finding(symbol="", line=17)],
+                coverage={"source_files": 1, "snapshot_files": 2},
+                diagnostics=[],
+            ),
+        )
+        self.assertEqual("", far[bare.candidate_id].state)
+        self.assertFalse(far[bare.candidate_id].conflict)
+
+        mixed = bind_tool_evidence(
+            [candidate],
+            CxxAnalysisResult(
+                status="completed",
+                tool_runs=[binding_run()],
+                findings=[binding_finding(symbol="")],
+                coverage={"source_files": 1, "snapshot_files": 2},
+                diagnostics=[],
+            ),
+        )
+        self.assertEqual("", mixed[candidate.candidate_id].state)
+
+    def test_cwe_mismatch_at_same_identity_is_conflict_not_evidence(self):
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run()],
+            findings=[binding_finding(cwe="CWE-416")],
+            coverage={"source_files": 1, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([binding_candidate()], analysis)
+
+        corroboration = binding[binding_candidate().candidate_id]
+        self.assertEqual("", corroboration.state)
+        self.assertTrue(corroboration.conflict)
+        self.assertEqual((), corroboration.matched)
+
+    def test_conflicting_pair_keeps_the_matching_hit_and_flags_conflict(self):
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run(), binding_run("run-2", "clang")],
+            findings=[
+                binding_finding(source="semgrep"),
+                binding_finding(source="clang", cwe="CWE-416", run_id="run-2"),
+            ],
+            coverage={"source_files": 1, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([binding_candidate()], analysis)
+
+        corroboration = binding[binding_candidate().candidate_id]
+        self.assertEqual("tool-corroborated", corroboration.state)
+        self.assertTrue(corroboration.conflict)
+
+    def test_empty_tool_findings_are_not_safety(self):
+        empty = bind_tool_evidence(
+            [binding_candidate()],
+            CxxAnalysisResult(
+                status="completed",
+                tool_runs=[binding_run()],
+                findings=[],
+                coverage={"source_files": 1, "snapshot_files": 2},
+                diagnostics=[],
+            ),
+        )
+        corroboration = empty[binding_candidate().candidate_id]
+        self.assertEqual("", corroboration.state)
+        self.assertFalse(corroboration.conflict)
+        self.assertEqual((), corroboration.matched)
+        self.assertEqual((), corroboration.tool_run_ids)
+
+    def test_asan_binding_requires_an_existing_completed_run(self):
+        def analysis_for(runs):
+            return CxxAnalysisResult(
+                status="completed",
+                tool_runs=runs,
+                findings=[binding_finding(source="asan", run_id="run-asan")],
+                coverage={"source_files": 1, "snapshot_files": 2},
+                diagnostics=[],
+            )
+
+        confirmed = bind_tool_evidence(
+            [binding_candidate()],
+            analysis_for([binding_run("run-asan", "asan-test")]),
+        )
+        self.assertEqual(
+            "runtime-confirmed", confirmed[binding_candidate().candidate_id].state
+        )
+        self.assertFalse(confirmed[binding_candidate().candidate_id].conflict)
+
+        for label, runs in (
+            ("failed", [binding_run("run-asan", "asan-test", status="failed")]),
+            ("unknown-run", []),
+            ("wrong-tool", [binding_run("run-asan", "semgrep")]),
+        ):
+            with self.subTest(label=label):
+                unsafe = bind_tool_evidence(
+                    [binding_candidate()], analysis_for(runs)
+                )
+                corroboration = unsafe[binding_candidate().candidate_id]
+                self.assertEqual("", corroboration.state)
+                self.assertTrue(corroboration.conflict)
+
+    def test_runtime_confirmed_dominates_over_tool_corroborated(self):
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run(), binding_run("run-asan", "asan-test")],
+            findings=[
+                binding_finding(source="semgrep"),
+                binding_finding(source="asan", run_id="run-asan"),
+            ],
+            coverage={"source_files": 1, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([binding_candidate()], analysis)
+
+        corroboration = binding[binding_candidate().candidate_id]
+        self.assertEqual("runtime-confirmed", corroboration.state)
+        self.assertEqual(("run-1", "run-asan"), corroboration.tool_run_ids)
+
+    def test_semgrep_hit_with_unresolvable_run_is_conflict(self):
+        # Symmetric with the ASan rule (Minor-3): a Semgrep/Clang identity
+        # hit only corroborates when its run identity resolves to an
+        # existing, tool-matching, completed run; otherwise it is unsafely
+        # bound evidence, never tool-corroborated.
+        candidate = binding_candidate()
+        for label, runs in (
+            ("missing-run", []),
+            ("failed-run", [binding_run("run-1", "semgrep", status="failed")]),
+            ("tool-mismatch", [binding_run("run-1", "clang")]),
+        ):
+            with self.subTest(label=label):
+                analysis = CxxAnalysisResult(
+                    status="completed",
+                    tool_runs=runs,
+                    findings=[binding_finding(source="semgrep")],
+                    coverage={"source_files": 1, "snapshot_files": 2},
+                    diagnostics=[],
+                )
+                binding = bind_tool_evidence([candidate], analysis)
+
+                corroboration = binding[candidate.candidate_id]
+                self.assertEqual("", corroboration.state)
+                self.assertTrue(corroboration.conflict)
+                self.assertEqual((), corroboration.matched)
+
+    def test_asan_partial_binding_keeps_conflict_signal(self):
+        candidate = binding_candidate()
+        finding = binding_finding(source="asan", run_id="run-asan")
+        finding.evidence_records.append(EvidenceRecord(
+            source="asan",
+            kind="match",
+            path="src/free.c",
+            line=12,
+            snippet="free(p)",
+            rule_id="cxx.asan.identity",
+            cwe="CWE-415",
+            confidence=0.9,
+            language="c",
+            symbol="release",
+            analysis_mode="tool",
+            tool_run_id="run-ghost",
+        ))
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run("run-asan", "asan-test")],
+            findings=[finding],
+            coverage={"source_files": 1, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([candidate], analysis)
+
+        corroboration = binding[candidate.candidate_id]
+        self.assertEqual("runtime-confirmed", corroboration.state)
+        self.assertTrue(corroboration.conflict)
+        self.assertEqual(1, len(corroboration.matched))
+        self.assertEqual("run-asan", corroboration.matched[0].tool_run_id)
+        self.assertEqual(("run-asan",), corroboration.tool_run_ids)
+
+    def test_binding_covers_every_candidate_and_is_deterministic(self):
+        first = binding_candidate()
+        second = binding_candidate(path="src/other.c", line=3, symbol="aux")
+        analysis = CxxAnalysisResult(
+            status="completed",
+            tool_runs=[binding_run()],
+            findings=[binding_finding()],
+            coverage={"source_files": 2, "snapshot_files": 2},
+            diagnostics=[],
+        )
+        binding = bind_tool_evidence([first, second], analysis)
+
+        self.assertEqual(
+            sorted([first.candidate_id, second.candidate_id]), sorted(binding)
+        )
+        self.assertEqual("", binding[second.candidate_id].state)
+        self.assertFalse(binding[second.candidate_id].conflict)
+        self.assertEqual(binding, bind_tool_evidence([first, second], analysis))
 
 
 if __name__ == "__main__":

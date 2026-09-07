@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Final
@@ -26,6 +27,22 @@ CXX_AGENT_VERIFICATION_STATES: Final = frozenset(
         "human-confirmed",
         "needs-human-review",
     }
+)
+VERIFIED_STATES: Final = frozenset(
+    {
+        "agent-corroborated",
+        "tool-corroborated",
+        "runtime-confirmed",
+        "human-confirmed",
+    }
+)
+AGENT_CONSENSUS_KEYS: Final = (
+    "cwe",
+    "path",
+    "symbol",
+    "resource",
+    "mechanism",
+    "trigger-overlap",
 )
 SUPPORTED_CWES: Final = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
 AGENT_ROLES: Final = frozenset(
@@ -226,6 +243,11 @@ class CxxAgentCandidate:
             banned = {"/", chr(92), chr(0), chr(13), chr(10)}
             if any(ch in step for ch in banned) or ".." in step:
                 raise ValueError("trigger_path steps must not contain path syntax")
+            # Task 15 fix: the validated step must actually be collected.
+            # Since f2d52b9 the loop validated each step but never appended
+            # it, so every candidate silently carried an empty trigger_path
+            # and trigger-overlap consensus could never fire.
+            steps.append(step)
         line = _bounded_int(fields["line"], "line", 1, 10_000_000)
         material = json.dumps(
             {
@@ -360,6 +382,145 @@ class CxxAgentCoverage:
         )
 
 
+@dataclass(frozen=True)
+class ConsensusVerdict:
+    """Deterministic consensus outcome for one specialist candidate.
+
+    ``state`` is ``agent-corroborated`` (at least two independent specialist
+    roles proposed fully agreeing claims), ``llm-candidate`` (a single role),
+    or ``needs-human-review`` (degraded non-CWE shells never take part in and
+    never receive consensus).  ``agreement_keys`` names the consensus keys the
+    agreeing peers matched; it is the full key set when corroborated and empty
+    otherwise.
+    """
+
+    state: str
+    supporting_roles: tuple[str, ...] = ()
+    agreement_keys: tuple[str, ...] = ()
+
+
+def _normalized_mechanism(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _agreement_key_hits(
+    candidate: CxxAgentCandidate, peer: CxxAgentCandidate
+) -> tuple[str, ...]:
+    hits: list[str] = []
+    if candidate.cwe == peer.cwe:
+        hits.append("cwe")
+    if candidate.path == peer.path:
+        hits.append("path")
+    if candidate.symbol == peer.symbol:
+        hits.append("symbol")
+    if (candidate.path, candidate.line, candidate.symbol) == (
+        peer.path,
+        peer.line,
+        peer.symbol,
+    ):
+        # The resource/buffer identity is the exact snapshot position.
+        hits.append("resource")
+    if _normalized_mechanism(candidate.mechanism) == _normalized_mechanism(
+        peer.mechanism
+    ):
+        hits.append("mechanism")
+    if not set(candidate.trigger_path).isdisjoint(peer.trigger_path):
+        hits.append("trigger-overlap")
+    return tuple(hits)
+
+
+def candidate_agreement(
+    candidate: CxxAgentCandidate, peer: CxxAgentCandidate
+) -> bool:
+    """True only when every consensus key agrees.
+
+    Consistency is never title- or CWE-only: agreement requires the exact
+    snapshot position (path, line, symbol -- the resource identity), the same
+    CWE, a whitespace-insensitive mechanism match and a non-empty
+    ``trigger_path`` intersection (design spec section 9).
+    """
+
+    return len(_agreement_key_hits(candidate, peer)) == len(AGENT_CONSENSUS_KEYS)
+
+
+def agent_consensus_state(
+    role_reports: Mapping[str, Sequence[CxxAgentCandidate]],
+) -> dict[str, ConsensusVerdict]:
+    """Score every specialist candidate against the other roles' candidates.
+
+    Pure and deterministic (zero LLM): a candidate is ``agent-corroborated``
+    only when candidates from at least two distinct roles agree with it under
+    :func:`candidate_agreement`; duplicates inside one role never count as
+    independent support.  Candidates carrying the degraded non-CWE marker
+    (``cwe`` outside :data:`SUPPORTED_CWES`) are excluded from consensus on
+    both sides and always receive ``needs-human-review``.
+    """
+
+    instances: list[tuple[str, CxxAgentCandidate]] = []
+    for role in sorted(role_reports):
+        for candidate in role_reports[role]:
+            instances.append((role, candidate))
+    ordered_ids: list[str] = []
+    by_id: dict[str, CxxAgentCandidate] = {}
+    for _role, candidate in instances:
+        if candidate.candidate_id not in by_id:
+            by_id[candidate.candidate_id] = candidate
+            ordered_ids.append(candidate.candidate_id)
+
+    verdicts: dict[str, ConsensusVerdict] = {}
+    for candidate_id in ordered_ids:
+        candidate = by_id[candidate_id]
+        if candidate.cwe not in SUPPORTED_CWES:
+            verdicts[candidate_id] = ConsensusVerdict(
+                "needs-human-review", (), ()
+            )
+            continue
+        supporting: set[str] = set()
+        key_hits: set[str] = set()
+        for role, peer in instances:
+            if peer.cwe not in SUPPORTED_CWES:
+                continue
+            hits = _agreement_key_hits(candidate, peer)
+            if len(hits) == len(AGENT_CONSENSUS_KEYS):
+                supporting.add(role)
+                key_hits.update(hits)
+        if len(supporting) >= 2:
+            verdicts[candidate_id] = ConsensusVerdict(
+                "agent-corroborated",
+                tuple(sorted(supporting)),
+                tuple(sorted(key_hits)),
+            )
+        else:
+            verdicts[candidate_id] = ConsensusVerdict(
+                "llm-candidate", tuple(sorted(supporting)), ()
+            )
+    return verdicts
+
+
+def verified_only_gate(
+    candidates: Sequence[CxxAgentCandidate],
+) -> tuple[tuple[CxxAgentCandidate, ...], tuple[CxxAgentCandidate, ...]]:
+    """Split candidates into (accepted, rejected) for the verified-only gate.
+
+    Exactly the four states in :data:`VERIFIED_STATES` pass; ``llm-candidate``
+    and ``needs-human-review`` never do.  Both halves are sorted by
+    ``(path, line, symbol, candidate_id)`` so the gate output is deterministic.
+    """
+
+    def sort_key(item: CxxAgentCandidate) -> tuple[str, int, str, str]:
+        return (item.path, item.line, item.symbol, item.candidate_id)
+
+    accepted = tuple(sorted(
+        (item for item in candidates if item.verification_state in VERIFIED_STATES),
+        key=sort_key,
+    ))
+    rejected = tuple(sorted(
+        (item for item in candidates if item.verification_state not in VERIFIED_STATES),
+        key=sort_key,
+    ))
+    return accepted, rejected
+
+
 def to_agent_finding_payload(candidate: CxxAgentCandidate) -> dict[str, Any]:
     """Project one candidate onto the Finding JSON shape the report expects."""
 
@@ -386,13 +547,19 @@ def to_agent_finding_payload(candidate: CxxAgentCandidate) -> dict[str, Any]:
 
 
 __all__: list[str] = [
+    "AGENT_CONSENSUS_KEYS",
     "AGENT_ROLES",
     "CXX_AGENT_VERIFICATION_STATES",
+    "ConsensusVerdict",
     "ContextReference",
     "CxxAgentCandidate",
     "CxxAgentCoverage",
     "CxxAgentDecision",
     "SUPPORTED_CWES",
+    "VERIFIED_STATES",
+    "agent_consensus_state",
+    "candidate_agreement",
     "parse_untrusted_json",
     "to_agent_finding_payload",
+    "verified_only_gate",
 ]

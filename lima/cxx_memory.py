@@ -1,4 +1,13 @@
-"""Strict client boundary for the isolated C/C++ memory analyzer."""
+"""Strict client boundary for the isolated C/C++ memory analyzer.
+
+Tool-evidence binding (:func:`bind_tool_evidence`) matches Sidecar findings
+to agent candidates by a function-level identity: path + CWE + symbol, with
+a bounded line-distance fallback only when both symbols are empty.  This is
+deliberately wider than the agent-consensus position key (exact
+``path, line, symbol`` in :mod:`lima.cxx_agent_models`): Sidecar tools
+report symbol-level matches and their line numbers drift between tool
+versions, while consensus claims anchor on exact snapshot positions.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
-from .models import Finding, Severity
+from .models import EvidenceRecord, Finding, Severity
 from .workspace import WorkspaceInventory
 
 SUPPORTED_CWES = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
@@ -285,6 +294,157 @@ def map_asan_error(error_type: str, access: str) -> str | None:
     if error_type == "attempting double-free" and access == "FREE":
         return "CWE-415"
     return None
+
+
+_RUNTIME_CONFIRMATION_SOURCE = "asan"
+
+
+@dataclass(frozen=True)
+class ToolCorroboration:
+    """Deterministic tool-evidence binding for one agent candidate.
+
+    ``state`` is ``runtime-confirmed`` (an ASan finding at the same identity
+    bound to a completed tool run), ``tool-corroborated`` (a Semgrep or Clang
+    finding at the same identity), or empty (no usable tool evidence; an empty
+    tool result is never treated as safety).  ``conflict`` marks conflicting
+    evidence (same identity, different CWE) or an unbindable ASan hit; the
+    arbiter maps it to ``needs-human-review``.
+    """
+
+    state: str
+    matched: tuple[EvidenceRecord, ...] = ()
+    tool_run_ids: tuple[str, ...] = ()
+    conflict: bool = False
+
+
+def _finding_matches_identity(finding: Finding, candidate: Any) -> bool:
+    """Same-location identity between a tool finding and an agent candidate.
+
+    The path must be equal.  Symbols match when they are equal or one is a
+    ``::``-qualified suffix of the other; when both are empty the line
+    distance must stay within three lines.  Mixed empty/non-empty symbols
+    never match.
+    """
+
+    if finding.path != candidate.path:
+        return False
+    finding_symbol = (finding.symbol or "").strip()
+    candidate_symbol = (candidate.symbol or "").strip()
+    if finding_symbol and candidate_symbol:
+        return (
+            finding_symbol == candidate_symbol
+            or candidate_symbol.endswith("::" + finding_symbol)
+            or finding_symbol.endswith("::" + candidate_symbol)
+        )
+    if not finding_symbol and not candidate_symbol:
+        return abs(finding.line - candidate.line) <= 3
+    return False
+
+
+def _run_is_usable(run: Any, tool: str) -> bool:
+    return (
+        isinstance(run, dict)
+        and run.get("tool") == tool
+        and run.get("status") == "completed"
+    )
+
+
+def bind_tool_evidence(
+    candidates: Any,
+    analysis: CxxAnalysisResult,
+) -> dict[str, ToolCorroboration]:
+    """Bind Sidecar tool findings to agent candidates by shared identity.
+
+    Identity standard (deliberately function-level, wider than the consensus
+    side): the path and CWE must be equal and the symbols must match exactly
+    or by ``::``-qualified suffix; only when both symbols are empty does the
+    line distance (<= 3 lines) decide, and mixed empty/non-empty symbols
+    never match.  Unlike the agent-consensus position key (exact
+    ``path, line, symbol``), the line is not compared when a symbol is
+    present: Sidecar tools report symbol-level matches and their line
+    numbers drift between tool versions, so demanding line equality would
+    silently drop true hits.
+
+    Pure and deterministic (zero LLM).  Beyond the identity hit, every
+    matched finding must also bind to an exact, completed tool run: its
+    evidence records must carry a ``tool_run_id`` that names a run present in
+    ``analysis.tool_runs`` whose tool matches the finding source
+    (``semgrep``/``clang`` runs share the finding tool name verbatim; ASan
+    findings cite runs named ``asan-test``) and whose status is
+    ``completed``.  Resolvable records are returned in ``matched`` --
+    Semgrep/Clang hits yield ``tool-corroborated``, ASan hits
+    ``runtime-confirmed`` -- while a hit whose run identity is missing,
+    unknown, tool-mismatched or incomplete is unsafely bound evidence and
+    sets ``conflict`` (the upstream arbiter falls back to
+    ``needs-human-review``).  Same-identity findings with a different CWE are
+    conflicts too.  Empty or missing tool findings leave the candidate
+    untouched -- an empty tool result is never safety.
+    """
+
+    runs_by_id: dict[str, Any] = {}
+    for run in getattr(analysis, "tool_runs", None) or ():
+        if isinstance(run, dict) and isinstance(run.get("run_id"), str):
+            runs_by_id[run["run_id"]] = run
+    findings = [
+        finding
+        for finding in getattr(analysis, "findings", None) or ()
+        if isinstance(finding, Finding)
+    ]
+    bindings: dict[str, ToolCorroboration] = {}
+    for candidate in candidates:
+        matched: list[EvidenceRecord] = []
+        run_ids: list[str] = []
+        runtime_ready = False
+        tool_ready = False
+        conflict = False
+        for finding in findings:
+            if not _finding_matches_identity(finding, candidate):
+                continue
+            if finding.cwe != candidate.cwe:
+                # Same identity, different CWE: conflicting evidence.
+                conflict = True
+                continue
+            expected_tool = _FINDING_TOOL_TO_RUN_TOOL.get(finding.source)
+            if expected_tool is None:
+                # Not one of the three Sidecar tools (the strict client never
+                # emits one): it can neither corroborate nor conflict.
+                continue
+            records = [
+                record
+                for record in (finding.evidence_records or ())
+                if isinstance(record, EvidenceRecord)
+            ]
+            resolvable: list[EvidenceRecord] = []
+            for record in records:
+                run_id = record.tool_run_id
+                if run_id and _run_is_usable(runs_by_id.get(run_id), expected_tool):
+                    resolvable.append(record)
+                    if run_id not in run_ids:
+                        run_ids.append(run_id)
+                else:
+                    # A hit whose run identity is missing, unknown,
+                    # tool-mismatched or incomplete is unsafely bound
+                    # evidence, never corroboration.
+                    conflict = True
+            if resolvable:
+                matched.extend(resolvable)
+                if finding.source == _RUNTIME_CONFIRMATION_SOURCE:
+                    runtime_ready = True
+                else:
+                    tool_ready = True
+        if runtime_ready:
+            state = "runtime-confirmed"
+        elif tool_ready:
+            state = "tool-corroborated"
+        else:
+            state = ""
+        bindings[candidate.candidate_id] = ToolCorroboration(
+            state=state,
+            matched=tuple(matched),
+            tool_run_ids=tuple(run_ids),
+            conflict=conflict,
+        )
+    return bindings
 
 
 class CxxMemoryAnalyzerClient:
@@ -575,6 +735,10 @@ class CxxMemoryAnalyzerClient:
 
     @staticmethod
     def _convert_finding(item: dict[str, Any]) -> Finding:
+        # The producer run identity is carried on the primary evidence record
+        # (validated by _validate_producer_binding) so downstream consumers can
+        # bind a finding to the exact tool run that produced it.  The record
+        # mirrors Finding's implicit fallback record plus that identity.
         return Finding(
             rule_id=item["rule_id"],
             severity=Severity(item["severity"]),
@@ -594,4 +758,18 @@ class CxxMemoryAnalyzerClient:
             symbol=item["symbol"],
             analysis_mode=item["analysis_mode"],
             automatic_repair=False,
+            evidence_records=[EvidenceRecord(
+                source=item["tool"],
+                kind=item["evidence_kind"],
+                path=item["path"],
+                line=item["line"],
+                snippet=item["evidence"],
+                rule_id=item["rule_id"],
+                cwe=item["cwe"],
+                confidence=item["confidence"],
+                language=item["language"],
+                symbol=item["symbol"],
+                analysis_mode=item["analysis_mode"],
+                tool_run_id=item["producer_run_ids"][0],
+            )],
         )

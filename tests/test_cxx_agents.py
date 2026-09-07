@@ -27,8 +27,19 @@ plan's RED list requires is asserted against those recordings:
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 
-from lima.cxx_agent_models import CxxAgentCandidate, CxxAgentCoverage
+from lima.cxx_agent_models import (
+    AGENT_CONSENSUS_KEYS,
+    CXX_AGENT_VERIFICATION_STATES,
+    VERIFIED_STATES,
+    CxxAgentCandidate,
+    CxxAgentCoverage,
+    agent_consensus_state,
+    candidate_agreement,
+    to_agent_finding_payload,
+    verified_only_gate,
+)
 from lima.cxx_agent_tools import CxxAgentBudget
 from lima.cxx_agents import (
     ROLE_ARBITER,
@@ -55,8 +66,9 @@ from lima.cxx_context import (
     TypeRecord,
 )
 from lima.cxx_llm import AgentStep
+from lima.cxx_memory import CxxAnalysisResult, bind_tool_evidence
 from lima.cxx_retrieval import RetrievalCandidate, RetrievalRun
-from lima.models import EvidenceRecord
+from lima.models import EvidenceRecord, Finding, Severity
 from lima.store import TaskStore
 
 SNAPSHOT = "c" * 64
@@ -132,6 +144,109 @@ MEM_A = make_candidate("src/session.cpp", 6, "Session::read", "ALPHA-UAF-TITLE")
 BOUNDS_A = make_candidate("src/wrapper.c", 5, "read_wrapper", "BETA-BOUNDS-TITLE")
 INTER_A = make_candidate("src/other.cpp", 1, "helper", "GAMMA-INTER-TITLE")
 GHOST = make_candidate("src/ghost.cpp", 9, "ghost_fn", "out-of-set location")
+
+
+def make_claim(
+    path,
+    line,
+    symbol,
+    cwe="CWE-416",
+    mechanism="callback retains an alias after owner deletion",
+    trigger=("register_callback", "Session::close", "on_event"),
+    confidence=0.8,
+):
+    return CxxAgentCandidate.from_untrusted_json({
+        "cwe": cwe,
+        "path": path,
+        "line": line,
+        "symbol": symbol,
+        "title": "UAF claim title",
+        "mechanism": mechanism,
+        "trigger_path": list(trigger),
+        "confidence": confidence,
+    })
+
+
+def make_shell_candidate(path, line, symbol):
+    """Mirror the coordinator's degraded seed shell (direct construction)."""
+    return CxxAgentCandidate(
+        candidate_id="retrieval-test-" + f"{path}:{line}:{symbol}".replace("/", "-"),
+        cwe="unreviewed",
+        path=path,
+        line=line,
+        symbol=symbol,
+        title="retrieval seed passthrough (allocation-event)",
+        mechanism="degraded role output: unreviewed retrieval seed",
+        trigger_path=(symbol,),
+        confidence=0.0,
+        verification_state="needs-human-review",
+    )
+
+
+def tool_run(run_id, tool="semgrep", status="completed"):
+    return {
+        "run_id": run_id,
+        "tool": tool,
+        "status": status,
+        "returncode": 0 if status == "completed" else 1,
+        "output_sha256": "b" * 64,
+        "output_truncated": False,
+        "digests_complete": True,
+    }
+
+
+def tool_finding(
+    source,
+    cwe="CWE-416",
+    path="src/session.cpp",
+    line=6,
+    symbol="Session::read",
+    run_id="",
+):
+    return Finding(
+        rule_id=f"cxx.{source}.identity",
+        severity=Severity.HIGH,
+        title=f"{source} identity hit",
+        explanation=f"{source} matched the candidate identity",
+        path=path,
+        line=line,
+        evidence="memcpy(buf, src, n)",
+        fix="",
+        test="Reproduce under AddressSanitizer",
+        confidence=0.9,
+        cwe=cwe,
+        source=source,
+        evidence_kind="line",
+        verification_state="candidate",
+        language="c++",
+        symbol=symbol,
+        analysis_mode="tool",
+        automatic_repair=False,
+        evidence_records=[EvidenceRecord(
+            source=source,
+            kind="match",
+            path=path,
+            line=line,
+            snippet="TOOL-MATCH",
+            rule_id=f"cxx.{source}.identity",
+            cwe=cwe,
+            confidence=0.9,
+            language="c++",
+            symbol=symbol,
+            analysis_mode="tool",
+            tool_run_id=run_id,
+        )],
+    )
+
+
+def make_analysis(findings, runs):
+    return CxxAnalysisResult(
+        status="completed",
+        tool_runs=list(runs),
+        findings=list(findings),
+        coverage={"source_files": 3, "snapshot_files": 4},
+        diagnostics=[],
+    )
 
 
 def step_final(*candidates):
@@ -872,6 +987,433 @@ class ContractTests(unittest.TestCase):
                 ScriptedClient({}), make_index(), FakeReader(),
                 max_assignment_candidates=0,
             )
+
+
+class VerificationStateTests(CoordinatorTestCase):
+    """Task 15 RED matrix: six exact verification states.
+
+    Covers the pure state machine (consensus keys, independence, verified-only
+    gate) and the deterministic arbiter wiring (tool binding, conflicts,
+    Diff-only cap, degraded shells, human confirmation, constant repair ban).
+    """
+
+    # ------------------------------------------------------- pure state machine
+
+    def test_candidate_agreement_requires_full_consensus_key_equality(self):
+        base = make_claim("src/session.cpp", 6, "Session::read")
+        self.assertTrue(candidate_agreement(
+            base,
+            make_claim(
+                "src/session.cpp", 6, "Session::read",
+                mechanism="  callback retains an alias\nafter owner deletion ",
+            ),
+        ))
+        for mutated in (
+            make_claim("src/session.cpp", 6, "Session::read", cwe="CWE-125"),
+            make_claim("src/buffer.c", 6, "Session::read"),
+            make_claim("src/session.cpp", 6, "read"),
+            make_claim("src/session.cpp", 9, "Session::read"),
+            make_claim(
+                "src/session.cpp", 6, "Session::read",
+                mechanism="double free on the error path",
+            ),
+            make_claim(
+                "src/session.cpp", 6, "Session::read",
+                trigger=("entry", "sink"),
+            ),
+        ):
+            self.assertFalse(candidate_agreement(base, mutated))
+        # Titles and confidence are not consensus keys: identical claims with a
+        # different wording still agree (candidate ids already exclude them).
+        self.assertTrue(candidate_agreement(
+            base,
+            make_claim("src/session.cpp", 6, "Session::read", confidence=0.5),
+        ))
+
+    def test_consensus_requires_two_independent_roles(self):
+        # I-1 ruling, keep in mind when touching specialist validation:
+        # specialist finals are deliberately NOT location-subset-checked.
+        # Seed routing is a focus heuristic, not a knowledge boundary; a role
+        # that really read code elsewhere (read_paths gate + indexed-path
+        # tool checks) may report a location outside its assignment, and a
+        # second role's six-key-agreeing claim at that location is exactly
+        # the independent corroboration design section 9 requires.  Adding a
+        # location-subset check to specialists would make cross-role
+        # consensus architecturally unreachable.
+        claim = make_claim("src/session.cpp", 6, "Session::read")
+
+        same_role = agent_consensus_state({
+            "memory-lifetime": [claim, claim],
+        })
+        self.assertEqual("llm-candidate", same_role[claim.candidate_id].state)
+        self.assertEqual(("memory-lifetime",), same_role[claim.candidate_id].supporting_roles)
+
+        two_roles = agent_consensus_state({
+            "memory-lifetime": [claim],
+            "bounds": [make_claim("src/session.cpp", 6, "Session::read")],
+        })
+        verdict = two_roles[claim.candidate_id]
+        self.assertEqual("agent-corroborated", verdict.state)
+        self.assertEqual(("bounds", "memory-lifetime"), verdict.supporting_roles)
+        self.assertEqual(tuple(sorted(AGENT_CONSENSUS_KEYS)), verdict.agreement_keys)
+        self.assertTrue(set(VERIFIED_STATES) <= CXX_AGENT_VERIFICATION_STATES)
+
+    def test_degraded_shells_never_form_or_join_consensus(self):
+        claim = make_claim("src/session.cpp", 6, "Session::read")
+        shell = make_shell_candidate("src/session.cpp", 6, "Session::read")
+
+        twin_shells = agent_consensus_state({
+            "memory-lifetime": [shell],
+            "bounds": [make_shell_candidate("src/session.cpp", 6, "Session::read")],
+        })
+        self.assertEqual("needs-human-review", twin_shells[shell.candidate_id].state)
+        self.assertEqual((), twin_shells[shell.candidate_id].supporting_roles)
+
+        mixed = agent_consensus_state({
+            "memory-lifetime": [claim],
+            "bounds": [shell],
+        })
+        self.assertEqual("llm-candidate", mixed[claim.candidate_id].state)
+        self.assertEqual("needs-human-review", mixed[shell.candidate_id].state)
+
+    def test_verified_only_gate_accepts_exactly_the_four_verified_states(self):
+        states = (
+            "llm-candidate",
+            "agent-corroborated",
+            "tool-corroborated",
+            "runtime-confirmed",
+            "human-confirmed",
+            "needs-human-review",
+        )
+        stated = tuple(
+            replace(
+                make_claim(f"src/s{index}.cpp", 1, f"sym{index}", mechanism=f"m{index}"),
+                verification_state=state,
+            )
+            for index, state in enumerate(states)
+        )
+        accepted, rejected = verified_only_gate(stated)
+
+        self.assertEqual(
+            ["agent-corroborated", "tool-corroborated", "runtime-confirmed", "human-confirmed"],
+            [item.verification_state for item in accepted],
+        )
+        self.assertEqual(
+            tuple(sorted(
+                accepted,
+                key=lambda item: (item.path, item.line, item.symbol, item.candidate_id),
+            )),
+            accepted,
+        )
+        self.assertEqual(
+            ["llm-candidate", "needs-human-review"],
+            [item.verification_state for item in rejected],
+        )
+        self.assertEqual(((), ()), verified_only_gate(()))
+
+    def test_agent_finding_payload_never_allows_automatic_repair(self):
+        for state in sorted(CXX_AGENT_VERIFICATION_STATES):
+            candidate = replace(MEM_A, verification_state=state)
+            payload = to_agent_finding_payload(candidate)
+            self.assertIs(False, payload["automatic_repair"], state)
+
+    # ------------------------------------------------------- arbiter wiring
+
+    def test_single_agent_candidate_stays_llm_candidate_and_misses_gate(self):
+        client, result = self.run_happy()
+
+        self.assertEqual((MEM_A,), result.candidates)
+        self.assertEqual("llm-candidate", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "llm-candidate"),), result.verification_states
+        )
+        self.assertEqual((), result.verified_only)
+
+    def test_same_cwe_different_mechanism_never_corroborates(self):
+        variant = make_claim(
+            "src/session.cpp", 6, "Session::read",
+            mechanism="double free on the error path", confidence=0.7,
+        )
+        self.assertFalse(candidate_agreement(MEM_A, variant))
+        scripts = {
+            **happy_scripts(),
+            ROLE_BOUNDS: [step_final(variant)],
+            ROLE_CRITIC: [step_final(MEM_A, variant)],
+            ROLE_EVIDENCE: [step_final(MEM_A, variant)],
+            ROLE_VERIFIER: [step_final(MEM_A, variant)],
+        }
+        result = self.coordinator(ScriptedClient(scripts)).review_repository(make_run())
+
+        self.assertEqual(1, len(result.candidates))
+        self.assertEqual("llm-candidate", result.candidates[0].verification_state)
+        self.assertEqual((), result.verified_only)
+
+    def test_full_independent_agreement_enters_verified_gate(self):
+        # See the I-1 note on test_consensus_requires_two_independent_roles:
+        # bounds returning a candidate at memory-lifetime's routed location is
+        # the legitimate cross-role independent-discovery channel, not a bug.
+        corroboration = make_candidate(
+            "src/session.cpp", 6, "Session::read", "ALPHA-UAF-TITLE"
+        )
+        self.assertEqual(MEM_A.candidate_id, corroboration.candidate_id)
+        scripts = {
+            **happy_scripts(),
+            ROLE_BOUNDS: [step_final(corroboration)],
+            ROLE_CRITIC: [step_final(MEM_A)],
+            ROLE_EVIDENCE: [step_final(MEM_A)],
+            ROLE_VERIFIER: [step_final(MEM_A)],
+        }
+        result = self.coordinator(ScriptedClient(scripts)).review_repository(make_run())
+
+        self.assertEqual(1, len(result.candidates))
+        self.assertEqual("agent-corroborated", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "agent-corroborated"),), result.verification_states
+        )
+        self.assertEqual(1, len(result.verified_only))
+        self.assertEqual(
+            "agent-corroborated", result.verified_only[0].verification_state
+        )
+
+    def test_semgrep_and_clang_identity_hits_yield_tool_corroborated(self):
+        for source in ("semgrep", "clang"):
+            with self.subTest(source=source):
+                analysis = make_analysis(
+                    [tool_finding(source, run_id=f"run-{source}-1")],
+                    [tool_run(f"run-{source}-1", source)],
+                )
+                result = self.coordinator(
+                    ScriptedClient(happy_scripts()), tool_analysis=analysis
+                ).review_repository(make_run())
+
+                self.assertEqual(
+                    "tool-corroborated", result.candidates[0].verification_state
+                )
+                self.assertEqual(
+                    ((MEM_A.candidate_id, "tool-corroborated"),),
+                    result.verification_states,
+                )
+                self.assertEqual(1, len(result.verified_only))
+
+    def test_asan_exact_run_yields_runtime_confirmed(self):
+        analysis = make_analysis(
+            [tool_finding("asan", run_id="run-asan-1")],
+            [tool_run("run-asan-1", "asan-test")],
+        )
+        result = self.coordinator(
+            ScriptedClient(happy_scripts()), tool_analysis=analysis
+        ).review_repository(make_run())
+
+        self.assertEqual("runtime-confirmed", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "runtime-confirmed"),), result.verification_states
+        )
+        self.assertEqual(1, len(result.verified_only))
+
+    def test_evidence_conflict_forces_needs_human_review(self):
+        analysis = make_analysis(
+            [
+                tool_finding("semgrep", run_id="run-semgrep-1"),
+                tool_finding("clang", cwe="CWE-125", run_id="run-clang-1"),
+            ],
+            [tool_run("run-semgrep-1", "semgrep"), tool_run("run-clang-1", "clang")],
+        )
+        result = self.coordinator(
+            ScriptedClient(happy_scripts()), tool_analysis=analysis
+        ).review_repository(make_run())
+
+        self.assertEqual("needs-human-review", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "needs-human-review"),), result.verification_states
+        )
+        self.assertEqual((), result.verified_only)
+
+    def test_asan_hit_without_completed_run_is_unsafe_binding(self):
+        for label, runs in (
+            ("failed-run", [tool_run("run-asan-1", "asan-test", status="failed")]),
+            ("missing-run", []),
+        ):
+            with self.subTest(label=label):
+                analysis = make_analysis(
+                    [tool_finding("asan", run_id="run-asan-1")], runs
+                )
+                result = self.coordinator(
+                    ScriptedClient(happy_scripts()), tool_analysis=analysis
+                ).review_repository(make_run())
+
+                self.assertEqual(
+                    "needs-human-review", result.candidates[0].verification_state
+                )
+                self.assertEqual((), result.verified_only)
+
+    def test_diff_only_caps_every_state_at_llm_candidate(self):
+        corroboration = make_candidate(
+            "src/session.cpp", 6, "Session::read", "ALPHA-UAF-TITLE"
+        )
+        scripts = {
+            **happy_scripts(),
+            ROLE_BOUNDS: [step_final(corroboration)],
+            ROLE_CRITIC: [step_final(MEM_A)],
+            ROLE_EVIDENCE: [step_final(MEM_A)],
+            ROLE_VERIFIER: [step_final(MEM_A)],
+        }
+        analysis = make_analysis(
+            [tool_finding("asan", run_id="run-asan-1")],
+            [tool_run("run-asan-1", "asan-test")],
+        )
+        result = self.coordinator(
+            ScriptedClient(scripts),
+            tool_analysis=analysis,
+            source_mode="diff-only",
+        ).review_repository(make_run())
+
+        self.assertEqual("llm-candidate", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "llm-candidate"),), result.verification_states
+        )
+        self.assertEqual((), result.verified_only)
+
+    def test_conflict_overrides_diff_only_cap(self):
+        analysis = make_analysis(
+            [
+                tool_finding("semgrep", run_id="run-semgrep-1"),
+                tool_finding("clang", cwe="CWE-125", run_id="run-clang-1"),
+            ],
+            [tool_run("run-semgrep-1", "semgrep"), tool_run("run-clang-1", "clang")],
+        )
+        result = self.coordinator(
+            ScriptedClient(happy_scripts()),
+            tool_analysis=analysis,
+            source_mode="diff-only",
+        ).review_repository(make_run())
+
+        self.assertEqual("needs-human-review", result.candidates[0].verification_state)
+        self.assertEqual((), result.verified_only)
+
+    def test_human_confirmation_survives_diff_only_cap(self):
+        # The operator's confirmation is external authority; the verified-only
+        # gate accepts human-confirmed unconditionally, so the Diff-only cap
+        # must not silently downgrade it (I-2 ruling).
+        result = self.coordinator(
+            ScriptedClient(happy_scripts()),
+            source_mode="diff-only",
+            human_confirmed_ids=frozenset({MEM_A.candidate_id}),
+        ).review_repository(make_run())
+
+        self.assertEqual("human-confirmed", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "human-confirmed"),), result.verification_states
+        )
+        self.assertEqual(1, len(result.verified_only))
+
+    def test_human_confirmed_ids_enter_verified_gate(self):
+        result = self.coordinator(
+            ScriptedClient(happy_scripts()),
+            human_confirmed_ids=frozenset({MEM_A.candidate_id}),
+        ).review_repository(make_run())
+
+        self.assertEqual("human-confirmed", result.candidates[0].verification_state)
+        self.assertEqual(
+            ((MEM_A.candidate_id, "human-confirmed"),), result.verification_states
+        )
+        self.assertEqual(1, len(result.verified_only))
+
+    def test_degraded_shells_stay_needs_human_review_under_tool_evidence(self):
+        shell_session = make_shell_candidate("src/session.cpp", 6, "Session::read")
+        shell_buffer = make_shell_candidate("src/buffer.c", 10, "make_buffer")
+        scripts = {
+            **happy_scripts(),
+            ROLE_MEMORY_LIFETIME: [RuntimeError("m1"), RuntimeError("m2")],
+            ROLE_CRITIC: [step_final(shell_session, shell_buffer)],
+            ROLE_EVIDENCE: [step_final(shell_session, shell_buffer)],
+            ROLE_VERIFIER: [step_final(shell_session, shell_buffer)],
+        }
+        analysis = make_analysis(
+            [tool_finding("semgrep", run_id="run-semgrep-1")],
+            [tool_run("run-semgrep-1", "semgrep")],
+        )
+        result = self.coordinator(
+            ScriptedClient(scripts), tool_analysis=analysis
+        ).review_repository(make_run())
+
+        self.assertEqual(2, len(result.candidates))
+        for candidate in result.candidates:
+            self.assertEqual("unreviewed", candidate.cwe)
+            self.assertEqual("needs-human-review", candidate.verification_state)
+        self.assertEqual((), result.verified_only)
+
+    def test_evidence_strength_priority_over_consensus(self):
+        corroboration = make_candidate(
+            "src/session.cpp", 6, "Session::read", "ALPHA-UAF-TITLE"
+        )
+        scripts = {
+            **happy_scripts(),
+            ROLE_BOUNDS: [step_final(corroboration)],
+            ROLE_CRITIC: [step_final(MEM_A)],
+            ROLE_EVIDENCE: [step_final(MEM_A)],
+            ROLE_VERIFIER: [step_final(MEM_A)],
+        }
+        semgrep = make_analysis(
+            [tool_finding("semgrep", run_id="run-semgrep-1")],
+            [tool_run("run-semgrep-1", "semgrep")],
+        )
+        tool_result = self.coordinator(
+            ScriptedClient(scripts), tool_analysis=semgrep
+        ).review_repository(make_run())
+        self.assertEqual("tool-corroborated", tool_result.candidates[0].verification_state)
+
+        asan = make_analysis(
+            [tool_finding("asan", run_id="run-asan-1")],
+            [tool_run("run-asan-1", "asan-test")],
+        )
+        runtime_result = self.coordinator(
+            ScriptedClient(scripts), tool_analysis=asan
+        ).review_repository(make_run())
+        self.assertEqual(
+            "runtime-confirmed", runtime_result.candidates[0].verification_state
+        )
+
+    def test_unknown_source_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.coordinator(ScriptedClient(happy_scripts()), source_mode="offline")
+
+    def test_arbiter_defensively_drops_non_indexed_paths(self):
+        # Defense in depth (I-1): all upstream gates only admit indexed
+        # paths, so the arbiter must never see one.  Constructed directly
+        # here to pin the arbiter's own guard: an out-of-index survivor is
+        # dropped and recorded, not silently forwarded.
+        coordinator = self.coordinator(ScriptedClient(happy_scripts()))
+        final, rejections = coordinator._arbitrate(
+            (),
+            {},
+            (frozenset(), frozenset(), frozenset(), frozenset(), frozenset()),
+            (GHOST,),
+        )
+
+        self.assertEqual((), final)
+        self.assertEqual(
+            ("src/ghost.cpp:9:ghost_fn: path-not-indexed:defensive",), rejections
+        )
+
+    def test_tool_binding_matches_the_final_candidates_deterministically(self):
+        analysis = make_analysis(
+            [tool_finding("semgrep", run_id="run-semgrep-1")],
+            [tool_run("run-semgrep-1", "semgrep")],
+        )
+        result = self.coordinator(
+            ScriptedClient(happy_scripts()), tool_analysis=analysis
+        ).review_repository(make_run())
+        binding = bind_tool_evidence(result.candidates, analysis)
+
+        self.assertEqual([MEM_A.candidate_id], sorted(binding))
+        corroboration = binding[MEM_A.candidate_id]
+        self.assertEqual("tool-corroborated", corroboration.state)
+        self.assertEqual(("run-semgrep-1",), corroboration.tool_run_ids)
+        self.assertFalse(corroboration.conflict)
+        self.assertEqual(1, len(corroboration.matched))
+        self.assertEqual(
+            bind_tool_evidence(result.candidates, analysis), binding
+        )
 
 
 if __name__ == "__main__":

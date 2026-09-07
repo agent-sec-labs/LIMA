@@ -22,22 +22,35 @@ Isolation red lines (design spec 8.1-8.5):
   subset but contributes no claim text of its own.
 * Each specialist sees only its own seed-routed assignment plus its own tool
   observations; peer candidates and evidence records never enter a
-  specialist context.
+  specialist context.  A specialist's final candidate set is bounded by the
+  client's ``read_paths`` gate (path level: every candidate path must have
+  been read in this task) and the tool layer's indexed-path checks -- it is
+  deliberately NOT restricted to its assignment locations.  Seed routing is
+  a focus heuristic, not a knowledge boundary: after really reading the code
+  there, reporting an independently discovered location outside the routing
+  is exactly the cross-role independent corroboration the design's
+  consensus needs, so a location-level subset check would make consensus
+  architecturally unreachable.
 * The critic sees the specialist candidate union (with source-role labels)
   but neither peer observations nor raw peer output.
 * Only the evidence role receives ``get_tool_evidence`` (the evidence
   registry); every other role's review registry rejects it as an unknown
   tool.
 
-Untrusted-output red line: every stage's final candidate set is validated
-against its input set by location key.  A violating set triggers exactly one
-format-repair request; a second violation degrades the role to
-``failed-replaced`` and the pipeline passes the previous stage's survivors
-through unchanged (or, for the planner, deterministic shells built from the
-retrieval seeds).  Degradation never invents locations, CWEs or mechanisms:
-seed shells carry the non-CWE marker ``unreviewed``, confidence ``0.0`` and
-verification state ``needs-human-review`` so they can neither masquerade as
-an LLM claim nor merge into CWE-based consensus downstream.
+Untrusted-output red line: the planner and the critic/evidence/verifier
+filter stages validate their final candidate sets against their input sets
+by location key (a violating set triggers exactly one format-repair request;
+a second violation degrades the role to ``failed-replaced`` and the pipeline
+passes the previous stage's survivors through unchanged -- or, for the
+planner, deterministic shells built from the retrieval seeds).  Specialist
+finals are intentionally exempt from that location-level subset check (see
+above); their paths stay bounded by the ``read_paths`` gate, and the arbiter
+additionally drops any merged candidate whose path is not part of the
+indexed snapshot as defense in depth.  Degradation never invents locations,
+CWEs or mechanisms: seed shells carry the non-CWE marker ``unreviewed``,
+confidence ``0.0`` and verification state ``needs-human-review`` so they can
+neither masquerade as an LLM claim nor merge into CWE-based consensus
+downstream.
 
 Budget honesty: all roles share one :class:`~lima.cxx_agent_tools.CxxAgentBudget`.
 Once ``AgentBudgetExceeded`` surfaces in any stage, the failing role is
@@ -45,6 +58,27 @@ marked ``failed-replaced`` immediately (a retry would fail identically) and
 every later LLM role is skipped without a client call, passing its incoming
 survivors straight through; the arbiter still closes the pipeline and the
 coverage records ``candidates_budget_exhausted``.
+
+Verification states (design spec section 9): the final state of every merged
+candidate is decided by deterministic code, never by an LLM role.  The
+arbiter combines (a) the independent-specialist consensus from
+:func:`~lima.cxx_agent_models.agent_consensus_state`, (b) the identity-bound
+Sidecar tool evidence from
+:func:`~lima.cxx_memory.bind_tool_evidence` (constructor
+``tool_analysis``), (c) an optional ``human_confirmed_ids`` allow-list and
+(d) the ``source_mode`` cap.  Branch order: degraded shells
+(``cwe=unreviewed``) stay ``needs-human-review``; conflicting or unsafely
+bound evidence forces ``needs-human-review`` in every mode (honesty about
+conflicts is mode-independent and ``needs-human-review`` is not a verified
+state); explicit human confirmation short-circuits next and is deliberately
+not suppressed by the Diff-only cap (the verified-only gate accepts
+``human-confirmed`` unconditionally); Diff-only then caps every
+pipeline-produced state at ``llm-candidate``; remaining cases take the
+strongest of consensus and tool state (``runtime-confirmed`` >
+``tool-corroborated`` > ``agent-corroborated`` > ``llm-candidate``).  The
+verifier role receives an
+informational consensus/tool preview in its context but cannot change a
+state, and ``automatic_repair`` stays ``False`` everywhere.
 
 ``read_paths`` decision: the ``read_paths`` handed to the client starts from
 the paths already present in the role's input (assignment candidates for
@@ -72,11 +106,18 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from typing import Any
 
 from .agents import CollaborationBus
-from .cxx_agent_models import CxxAgentCandidate, CxxAgentCoverage
+from .cxx_agent_models import (
+    SUPPORTED_CWES,
+    ConsensusVerdict,
+    CxxAgentCandidate,
+    CxxAgentCoverage,
+    agent_consensus_state,
+    verified_only_gate,
+)
 from .cxx_agent_tools import (
     AgentBudgetExceeded,
     CxxAgentBudget,
@@ -84,6 +125,7 @@ from .cxx_agent_tools import (
     build_evidence_registry,
     build_review_registry,
 )
+from .cxx_memory import CxxAnalysisResult, ToolCorroboration, bind_tool_evidence
 from .cxx_retrieval import (
     SEED_ALLOCATION,
     SEED_CALL_NEIGHBORHOOD,
@@ -125,11 +167,20 @@ SEED_DOMAINS = {
 }
 
 ROLE_OUTCOME_STATUSES = frozenset({"ok", "failed-retried", "failed-replaced"})
+SOURCE_MODES = frozenset({"repository", "pr-context", "diff-only"})
 _DEGRADED_CWE_MARKER = "unreviewed"
 _DEGRADED_VERIFICATION_STATE = "needs-human-review"
 _REVIEW_REPORT = "review-report"
 _BUDGET_ERROR_MARKER = "agent tool budget exhausted"
 _CandidateKey = tuple[str, int, str]
+# Final-state composition priority (design spec section 9).  Conflicts and
+# unsafely bound evidence override it; Diff-only caps every produced state.
+_VERIFIED_STATE_PRIORITY = {
+    "runtime-confirmed": 3,
+    "tool-corroborated": 2,
+    "agent-corroborated": 1,
+    "llm-candidate": 0,
+}
 
 __all__ = [
     "CxxAgentCoordinator",
@@ -181,7 +232,13 @@ class CxxRoleOutcome:
 
 @dataclass(frozen=True)
 class CxxAgentReviewResult:
-    """Deterministic outcome of one coordinator run over a fixed snapshot."""
+    """Deterministic outcome of one coordinator run over a fixed snapshot.
+
+    ``verification_states`` holds the deterministic ``(candidate_id, state)``
+    pairs the arbiter assigned (in the merged candidate order) and
+    ``verified_only`` the candidates that pass the verified-only gate
+    (exactly the four verified states, sorted by location then id).
+    """
 
     candidates: tuple[CxxAgentCandidate, ...]
     role_outcomes: tuple[CxxRoleOutcome, ...]
@@ -189,6 +246,8 @@ class CxxAgentReviewResult:
     snapshot_sha256: str
     message_count: int
     arbiter_rejections: tuple[str, ...] = ()
+    verification_states: tuple[tuple[str, str], ...] = ()
+    verified_only: tuple[CxxAgentCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         seen: list[str] = []
@@ -257,6 +316,96 @@ def _seed_shell(anchor: RetrievalCandidate) -> CxxAgentCandidate:
         confidence=0.0,
         verification_state=_DEGRADED_VERIFICATION_STATE,
     )
+
+
+def _compose_verification_state(
+    candidate: CxxAgentCandidate,
+    verdict: ConsensusVerdict | None,
+    corroboration: ToolCorroboration,
+    human_confirmed: bool,
+    diff_only: bool,
+) -> str:
+    """Deterministic final verification state for one merged candidate.
+
+    Branch order (design spec section 9):
+
+    1. Degraded shells (``cwe`` outside :data:`SUPPORTED_CWES`) never leave
+       ``needs-human-review`` -- no consensus, tool or human channel upgrades
+       a candidate that no LLM ever analysed.
+    2. Conflicting or unsafely bound tool evidence forces
+       ``needs-human-review`` in every mode: honesty about conflicts is
+       mode-independent, and ``needs-human-review`` is not a verified state,
+       so reporting it never violates the Diff-only cap below.
+    3. An explicitly human-confirmed candidate id becomes
+       ``human-confirmed``: the operator's confirmation is external
+       authority and the verified-only gate accepts ``human-confirmed``
+       unconditionally, so it short-circuits here and is never suppressed by
+       the Diff-only cap.
+    4. Diff-only context caps every pipeline-produced state (consensus and
+       tool) at ``llm-candidate`` -- unread old code must never become
+       verified evidence.
+    5. Otherwise the strongest of the consensus state and the bound tool
+       state wins: ``runtime-confirmed`` > ``tool-corroborated`` >
+       ``agent-corroborated`` > ``llm-candidate``.
+    """
+
+    if candidate.cwe not in SUPPORTED_CWES:
+        return _DEGRADED_VERIFICATION_STATE
+    if corroboration.conflict:
+        return _DEGRADED_VERIFICATION_STATE
+    if human_confirmed:
+        return "human-confirmed"
+    if diff_only:
+        return "llm-candidate"
+    states = ["llm-candidate"]
+    if verdict is not None and verdict.state in _VERIFIED_STATE_PRIORITY:
+        states.append(verdict.state)
+    if corroboration.state in _VERIFIED_STATE_PRIORITY:
+        states.append(corroboration.state)
+    return max(states, key=lambda item: _VERIFIED_STATE_PRIORITY[item])
+
+
+def _verification_preview_block(
+    candidates: tuple[CxxAgentCandidate, ...],
+    consensus: Mapping[str, ConsensusVerdict],
+    tool_binding: Mapping[str, ToolCorroboration],
+) -> str:
+    """Informational consensus/tool summary for the verifier's context.
+
+    The verifier may use it to filter candidates, but it never decides the
+    final states: those are recomputed deterministically by the arbiter.
+    """
+
+    lines = [
+        "Deterministic verification preview (specialist consensus and tool "
+        "evidence binding; informational only, the arbiter assigns the final "
+        "states):"
+    ]
+    if not candidates:
+        lines.append("- no candidates are under final verification")
+        return "\n".join(lines)
+    for candidate in candidates:
+        verdict = consensus.get(candidate.candidate_id)
+        if verdict is not None:
+            consensus_state = verdict.state
+            roles = ",".join(verdict.supporting_roles)
+        else:
+            consensus_state = "llm-candidate"
+            roles = ""
+        binding = tool_binding.get(candidate.candidate_id)
+        if binding is not None:
+            tool_state = binding.state or "none"
+            conflict = " conflict" if binding.conflict else ""
+        else:
+            tool_state = "none"
+            conflict = ""
+        lines.append(
+            f"- path={candidate.path} line={candidate.line} "
+            f"symbol={candidate.symbol} id={candidate.candidate_id} "
+            f"consensus={consensus_state} roles={roles} "
+            f"tool={tool_state}{conflict}"
+        )
+    return "\n".join(lines)
 
 
 class _ReadTrackingReader:
@@ -520,6 +669,9 @@ class CxxAgentCoordinator:
         loop_timeout_seconds: int = 45,
         max_assignment_candidates: int = 8,
         budget: CxxAgentBudget | None = None,
+        tool_analysis: CxxAnalysisResult | None = None,
+        source_mode: str = "repository",
+        human_confirmed_ids: frozenset[str] | None = None,
     ) -> None:
         if (
             isinstance(max_assignment_candidates, bool)
@@ -527,6 +679,13 @@ class CxxAgentCoordinator:
             or max_assignment_candidates < 1
         ):
             raise ValueError("max_assignment_candidates must be a positive integer")
+        if source_mode not in SOURCE_MODES:
+            raise ValueError(
+                f"source_mode must be one of {sorted(SOURCE_MODES)}, got {source_mode!r}"
+            )
+        confirmed_ids = frozenset(human_confirmed_ids or ())
+        if any(not isinstance(item, str) or not item for item in confirmed_ids):
+            raise ValueError("human_confirmed_ids must hold non-empty candidate ids")
         self._client = client
         self._index = index
         self._reader = reader
@@ -539,6 +698,13 @@ class CxxAgentCoordinator:
         self._max_assignment_candidates = max_assignment_candidates
         self._budget = budget if budget is not None else CxxAgentBudget()
         self._indexed_paths = frozenset(index.coverage.indexed)
+        # Sidecar tool evidence injected for deterministic verification (an
+        # independent channel that coexists with the evidence role's
+        # ``evidence_lookup``: the LLM role only sees records through its tool,
+        # while the arbiter binds ``tool_analysis`` findings by identity).
+        self._tool_analysis = tool_analysis
+        self._source_mode = source_mode
+        self._human_confirmed_ids = confirmed_ids
 
     def review_repository(
         self, retrieval_run: RetrievalRun, budget: CxxAgentBudget | None = None
@@ -874,8 +1040,55 @@ class CxxAgentCoordinator:
             rejections.append(
                 f"{anchor.path}:{anchor.line}:{anchor.symbol}: dropped-by-{dropper}"
             )
+        # Defense in depth: every upstream gate (the planner anchor rebuild,
+        # the critic/evidence/verifier filter stages, the indexed-path checks
+        # inside the snapshot tools and the client's read_paths gate) only
+        # admits indexed snapshot paths.  A non-indexed path here therefore
+        # means a regression in some future upstream change; drop it and
+        # record the reason instead of letting it reach the report.
+        unindexed = tuple(
+            candidate for candidate in final if candidate.path not in self._indexed_paths
+        )
+        if unindexed:
+            final = tuple(
+                candidate for candidate in final if candidate.path in self._indexed_paths
+            )
+            rejections.extend(
+                f"{candidate.path}:{candidate.line}:{candidate.symbol}: "
+                "path-not-indexed:defensive"
+                for candidate in unindexed
+            )
         rejections.sort()
         return final, tuple(rejections)
+
+    def _finalize_verification_states(
+        self,
+        final_candidates: tuple[CxxAgentCandidate, ...],
+        consensus: Mapping[str, ConsensusVerdict],
+    ) -> tuple[CxxAgentCandidate, ...]:
+        """Assign the deterministic verification state to every candidate.
+
+        The states are computed here -- in deterministic code, never by an
+        LLM role -- from the specialist consensus and the identity-bound tool
+        evidence, then written onto immutable copies of the merged candidates.
+        """
+
+        tool_binding = (
+            bind_tool_evidence(final_candidates, self._tool_analysis)
+            if self._tool_analysis is not None
+            else {}
+        )
+        stated: list[CxxAgentCandidate] = []
+        for candidate in final_candidates:
+            state = _compose_verification_state(
+                candidate,
+                consensus.get(candidate.candidate_id),
+                tool_binding.get(candidate.candidate_id, ToolCorroboration(state="")),
+                candidate.candidate_id in self._human_confirmed_ids,
+                self._source_mode == "diff-only",
+            )
+            stated.append(replace(candidate, verification_state=state))
+        return tuple(stated)
 
     def _emit_agent_failure(
         self, bus: CollaborationBus, role: str, attempt: int, exc: Exception
@@ -923,6 +1136,12 @@ class CxxAgentCoordinator:
             for item in specialist_outcomes[role].candidates
         )
         union_keys = frozenset(_candidate_key(item) for _, item in union)
+        # Deterministic consensus over the specialist finals (zero LLM).  The
+        # verifier only receives an informational summary; the arbiter owns
+        # the final state assignment.
+        consensus = agent_consensus_state({
+            role: specialist_outcomes[role].candidates for role in SPECIALIST_ROLES
+        })
 
         def review_registry(reader: SnapshotReader) -> ToolRegistry:
             return build_review_registry(self._index, reader, run_budget)
@@ -968,6 +1187,11 @@ class CxxAgentCoordinator:
             "candidates": [asdict(item) for item in evidence_survivors],
         })
 
+        tool_preview = (
+            bind_tool_evidence(evidence_survivors, self._tool_analysis)
+            if self._tool_analysis is not None
+            else {}
+        )
         verifier_context = "\n\n".join([
             header,
             _candidate_block(
@@ -975,6 +1199,7 @@ class CxxAgentCoordinator:
                 "this list, bound to the indexed snapshot):",
                 evidence_survivors,
             ),
+            _verification_preview_block(evidence_survivors, consensus, tool_preview),
             (
                 f"Coverage: {len(self._indexed_paths)} indexed files, "
                 f"{len(self._index.symbols)} indexed symbols, "
@@ -1004,6 +1229,9 @@ class CxxAgentCoordinator:
             ),
             verifier_survivors,
         )
+        final_candidates = self._finalize_verification_states(
+            final_candidates, consensus
+        )
         coverage = CxxAgentCoverage(
             indexed_files=len(self._indexed_paths),
             indexed_symbols=len(self._index.symbols),
@@ -1031,9 +1259,15 @@ class CxxAgentCoordinator:
         # reads the lengths of ``approved_findings``/``rejected_findings`` from
         # the last arbitration message; the C++ payload keeps its candidate ids
         # and deterministic rejection strings inside those keys.
+        verification_states = tuple(
+            (item.candidate_id, item.verification_state)
+            for item in final_candidates
+        )
+        verified_only = verified_only_gate(final_candidates)[0]
         bus.send(ROLE_ARBITER, _REVIEW_REPORT, "arbitration_decision", {
             "approved_findings": [item.candidate_id for item in final_candidates],
             "rejected_findings": list(rejections),
+            "verification_states": [list(pair) for pair in verification_states],
             "coverage": asdict(coverage),
             "roles": {role: outcome.status for role, outcome in outcomes_by_role.items()},
         })
@@ -1044,4 +1278,6 @@ class CxxAgentCoordinator:
             snapshot_sha256=retrieval_run.snapshot_sha256,
             message_count=bus.count(),
             arbiter_rejections=rejections,
+            verification_states=verification_states,
+            verified_only=verified_only,
         )

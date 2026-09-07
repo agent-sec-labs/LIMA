@@ -770,19 +770,19 @@ git commit -s -m "feat: orchestrate C++ memory review agents"
 **Interfaces:**
 - Produces exact states: `llm-candidate`、`agent-corroborated`、`tool-corroborated`、`runtime-confirmed`、`human-confirmed`、`needs-human-review`。
 
-- [ ] **Step 1: RED 状态矩阵**
+- [x] **Step 1: RED 状态矩阵**
 
 覆盖单 Agent、两个 Agent 仅 CWE 相同但 mechanism 不同、完整独立一致、Semgrep/Clang 同身份、ASan exact run、证据冲突、Diff-only 和人工确认。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agents.VerificationStateTests tests.test_cxx_memory -v`
 
-- [ ] **Step 3: 实现一致性与 gate**
+- [x] **Step 3: 实现一致性与 gate**
 
 共识键至少包括 CWE/path/symbol/resource/mechanism/trigger overlap。`verified-only` 只接受设计规定的四个已验证状态；`needs-human-review` 和 `llm-candidate` 不进入 gate。所有 C/C++ 自动修复仍 false。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agents tests.test_cxx_memory tests.test_workspace -v`
 

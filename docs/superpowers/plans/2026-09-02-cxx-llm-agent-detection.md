@@ -736,19 +736,19 @@ git commit -s -m "feat: add strict C++ LLM reviewer client"
 **Interfaces:**
 - Produces: `CxxAgentCoordinator.review_repository(...) -> CxxAgentReviewResult` 和 `review_pull_request(...)`；角色顺序严格为 Planner→独立 Specialist→Critic→Evidence→Verifier→Arbiter。
 
-- [ ] **Step 1: RED 协作测试**
+- [x] **Step 1: RED 协作测试**
 
 Fake LLM 记录每轮 managed context。断言三个 Specialist 看不到 peer/tool Finding；Critic 看到候选；Evidence 才能调用证据工具；消息通过 TaskStore 保存；失败 specialist 重试一次再替代。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agents -v`
 
-- [ ] **Step 3: 实现专用 coordinator**
+- [x] **Step 3: 实现专用 coordinator**
 
 复用 CollaborationBus、AgentRuntime、AgentLoop 和消息 kind，但不改现有 Diff-only `MultiAgentCoordinator` 的 added-line verifier。C++ coordinator 使用 snapshot-bound verifier。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agents tests.test_advanced -v`
 

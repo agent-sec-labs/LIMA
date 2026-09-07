@@ -13,7 +13,12 @@ from .config import Settings
 from .context_manager import ContextManager
 from .cxx_agent_models import SUPPORTED_CWES as CXX_AGENT_SUPPORTED_CWES
 from .cxx_agent_tools import CxxAgentBudget
-from .cxx_agents import LLM_ROLES, SPECIALIST_ROLES, CxxAgentCoordinator
+from .cxx_agents import (
+    LLM_ROLES,
+    ROLE_ORDER,
+    SPECIALIST_ROLES,
+    CxxAgentCoordinator,
+)
 from .cxx_context import CxxContextIndex
 from .cxx_llm import CxxLLMClient
 from .cxx_memory import (
@@ -96,6 +101,11 @@ from .workspace import (
 )
 
 DOCKER_REPOSITORY_CACHE_ROOT = Path("/var/lib/lima/repository-cache")
+
+# 设计第 12 节：报告显示提示词版本。C/C++ Agent 的系统提示由 cxx_llm 按
+# 「角色 + 固定不可信数据规则 + 固定步骤 schema」组合；这里发布该组合的稳定
+# 标识，报告只记录标识与角色清单，不落提示词全文（避免巨型载荷）。
+CXX_AGENT_PROMPT_TEMPLATE = "lima-cxx-agent-system-v1"
 
 
 def classify_repository_cache_root(root: str) -> str:
@@ -382,6 +392,13 @@ class ReviewService:
             _cxx_agent_budget_factory
             if settings.cxx_agent_mode != "off"
             else None
+        )
+        # 报告身份（设计第 12 节）：provider/model 只在真的装配了 provider
+        # 时非空；与 client 工厂同源，未配置即留空，绝不宣称。
+        self.cxx_agent_provider = (
+            str(self.llm_config.get("provider", ""))
+            if cxx_agent_client_factory is not None
+            else ""
         )
         # 快照缓存与物化器惰性构建：local-import-only（默认）部署在启动时
         # 不得触碰文件系统；只读根文件系统的容器只在真正需要 GitHub 物化时
@@ -801,6 +818,49 @@ class ReviewService:
         metrics.inc("reviews_enqueued_total")
         return {"task_id": task_id, "state": "PENDING", "queue": self.queue.backend}
 
+    def _enrich_cxx_agent_summary(self, summary: dict[str, Any]) -> None:
+        """Add service-owned report identity to one ``cxx_agent`` summary.
+
+        ``RepositoryScanner`` 产出管线侧载荷（status/budget/retrieval/
+        verification/roles）；provider、prompt 模板标识、usage 用量与
+        ``automatic_repair`` 红线由装配层（本类）补充。仅触碰 ``cxx_agent``
+        字典，非 agent 任务逐字节等价。
+        """
+
+        if not isinstance(summary, dict) or "mode" not in summary:
+            return
+        summary.setdefault("provider", self.cxx_agent_provider)
+        summary.setdefault("prompt", {
+            "template": CXX_AGENT_PROMPT_TEMPLATE,
+            "roles": list(ROLE_ORDER),
+        })
+        summary.setdefault("automatic_repair", False)
+        budget = summary.get("budget")
+        if isinstance(budget, dict):
+            remaining = budget.get("remaining") or {}
+            # 诚实标注：v1 不拿 provider token 计数，用量是输出字节的代理。
+            summary["usage"] = {
+                "calls": max(
+                    0, int(budget.get("max_calls", 0)) - int(remaining.get("calls", 0))
+                ),
+                "context_files": max(
+                    0,
+                    int(budget.get("max_context_files", 0))
+                    - int(remaining.get("files", 0)),
+                ),
+                "context_lines": max(
+                    0,
+                    int(budget.get("max_context_lines", 0))
+                    - int(remaining.get("lines", 0)),
+                ),
+                "output_bytes": max(
+                    0,
+                    int(budget.get("max_output_bytes", 0))
+                    - int(remaining.get("bytes_remaining", 0)),
+                ),
+                "token_accounting": "bytes-proxy",
+            }
+
     def repository_scan_capabilities(self) -> Dict[str, Any]:
         result = self.repository_import.capabilities()
         health_status = "disabled"
@@ -894,7 +954,49 @@ class ReviewService:
             "max_file_bytes": self.settings.repository_scan_max_file_bytes,
             "max_total_bytes": self.settings.repository_scan_max_total_bytes,
         })
+        result["cxx_agent"] = self._cxx_agent_capabilities()
         return result
+
+    def _cxx_agent_capabilities(self) -> dict[str, Any]:
+        """Design §11: the ``cxx_agent`` capabilities object.
+
+        ``configured`` 与 ``healthy`` 分开：configured 只表示 mode 非 off 且
+        resolved_llm 非空；healthy 只有真实探测过 provider 才非 null——v1 在
+        capabilities 端点不做探测，恒为 None（不能仅凭 URL/key 非空宣称可用）。
+        ``automatic_repair`` 恒为 False（设计验收 10）。属性访问全部走
+        ``getattr`` 兜底：测试用的部分 settings stub 缺少 agent 字段时，
+        如实按未配置上报，而不是崩溃或宣称可用。
+        """
+
+        mode = str(getattr(self.settings, "cxx_agent_mode", "off") or "off")
+        configured = bool(mode != "off" and self.llm_config)
+        github_source_available = bool(
+            getattr(self.settings, "github_token", "")
+            or (
+                getattr(self.settings, "github_app_id", "")
+                and getattr(self.settings, "github_private_key_path", "")
+            )
+        )
+        model = ""
+        if configured:
+            effective_model = getattr(
+                self.settings, "effective_cxx_agent_model", None
+            )
+            model = str(effective_model()) if callable(effective_model) else ""
+        return {
+            "mode": mode,
+            "provider": str(getattr(self, "cxx_agent_provider", "") or "")
+            if configured
+            else "",
+            "model": model,
+            "repository_scan": mode != "off",
+            "pull_request_scan": mode != "off",
+            "external_source_context": github_source_available,
+            "automatic_repair": False,
+            "configured": configured,
+            # None = not probed; no availability claim without a real probe.
+            "healthy": None,
+        }
 
     def enqueue_repository_scan(
         self, repository_key: str, tenant_id: str = "default"
@@ -1161,6 +1263,9 @@ class ReviewService:
             "snapshot_files": len(result.inventory.files),
             **import_policy_extra,
         }
+        self._enrich_cxx_agent_summary(
+            result.report.collaboration.get("cxx_agent") or {}
+        )
         if self.repository_semantic_triage is not None:
             if progress is not None:
                 progress.pipeline_event(SEMANTIC_TRIAGE, "正在语义复核候选发现")
@@ -1545,6 +1650,7 @@ class ReviewService:
             mode, status, probe, review, retrieval, budget,
         )
         summary.update(audit)
+        self._enrich_cxx_agent_summary(summary)
         return findings, summary
 
     def _on_dead_letter(self, payload: Dict[str, Any], error: str) -> None:

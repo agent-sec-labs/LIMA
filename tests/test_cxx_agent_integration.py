@@ -19,6 +19,14 @@ import uuid
 import zipfile
 from pathlib import Path
 
+from lima.agents import (
+    KIND_ARBITRATION_DECISION,
+    KIND_ASSIGNMENT,
+    KIND_EVIDENCE_REPORT,
+    KIND_PEER_CHALLENGE,
+    KIND_SPECIALIST_EVIDENCE,
+    KIND_VERIFICATION_DECISION,
+)
 from lima.config import Settings
 from lima.cxx_agent_models import CxxAgentCandidate
 from lima.cxx_agents import (
@@ -34,6 +42,7 @@ from lima.cxx_agents import (
 from lima.cxx_llm import AgentStep
 from lima.cxx_memory import CxxAnalysisResult
 from lima.models import EvidenceRecord, Finding, Severity
+from lima.report import to_markdown
 from lima.repository_materializer import GitHubMaterializer
 from lima.repository_scanner import RepositoryScanner
 from lima.service import ReviewService
@@ -937,6 +946,277 @@ class PullRequestAgentTests(unittest.TestCase):
         self.assertEqual("FAILED", task["state"])
         self.assertIn("required", str(task.get("error") or ""))
         self.assertEqual([("team/project", "vuln.c", SHA)], github.file_calls)
+
+
+class ReportTests(unittest.TestCase):
+    """Task 18：持久化消息按 kind 可查询、报告字段与 capabilities 形态。
+
+    复用 Task 16/17 的离线 fixture（脚本化 fake client、fake opener 物化），
+    通过真实 service 链路断言 TaskStore 消息查询 API 与报告渲染契约。
+    """
+
+    SIX_MESSAGE_KINDS = (
+        KIND_ASSIGNMENT,
+        KIND_SPECIALIST_EVIDENCE,
+        KIND_PEER_CHALLENGE,
+        KIND_EVIDENCE_REPORT,
+        KIND_VERIFICATION_DECISION,
+        KIND_ARBITRATION_DECISION,
+    )
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(suffix="-cxx-report"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def make_service(self, mode, llm_model=""):
+        settings = Settings(
+            host="127.0.0.1", port=8080,
+            db_path=str(Path(self.root, "state.db")),
+            max_diff_bytes=10000, max_steps=8, timeout_seconds=120,
+            llm_base_url="http://127.0.0.1:9" if llm_model else "",
+            llm_api_key="stub-key" if llm_model else "",
+            llm_model=llm_model,
+            github_webhook_secret="", github_token="",
+            auto_post_review=False,
+            repository_scan_sources="github",
+            repository_scan_sast_mode="off",
+            repository_cache_root=str(Path(self.root, "cache")),
+            repository_cache_min_free_bytes=1,
+            cxx_memory_mode="off",
+            cxx_agent_mode=mode,
+        )
+        service = ReviewService(settings)
+        self.addCleanup(service.queue.close)
+        return service
+
+    def _enqueue_vuln_repo(self, service):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("repo-main/vuln.c", VULN_C)
+            bundle.writestr("repo-main/safe.c", SAFE_C)
+        opener = RepositoryAgentTests._FakeOpener(buffer.getvalue())
+        service.repository_materializer = GitHubMaterializer(
+            service._ensure_repository_cache(), opener=opener,
+        )
+        return service.enqueue_repository_scan_source(
+            {
+                "type": "github",
+                "url": "https://github.com/agent-sec-labs/LIMA",
+                "ref": SHA,
+            },
+            "tenant-a",
+        )
+
+    def _wait_terminal(self, service, task_id):
+        task = None
+        for _ in range(400):
+            task = service.store.get(task_id, "tenant-a")
+            if task and task["state"] in {"SUCCESS", "FAILED"}:
+                return task
+            time.sleep(0.01)
+        self.fail("task did not reach a terminal state")
+
+    def _run_honest_repository_chain(self, service):
+        service.repository_scanner.cxx_agent_client_factory = (
+            lambda: ScriptedAgentClient(vuln_scripts())
+        )
+        created = self._enqueue_vuln_repo(service)
+        task = self._wait_terminal(service, created["task_id"])
+        self.assertEqual("SUCCESS", task["state"])
+        return created["task_id"], task
+
+    # ------------------------------------------------------- persistence
+
+    def test_six_agent_message_kinds_are_queryable_by_kind(self):
+        service = self.make_service("auto", llm_model="stub-model")
+        task_id, _ = self._run_honest_repository_chain(service)
+
+        for kind in self.SIX_MESSAGE_KINDS:
+            messages = service.store.list_agent_messages(task_id, kind=kind)
+            self.assertTrue(messages, f"no persisted message of kind {kind}")
+            for message in messages:
+                self.assertEqual(kind, message["kind"])
+                self.assertIn("sender", message)
+                self.assertIn("recipient", message)
+                self.assertIn("content", message)
+                self.assertIn("correlation_id", message)
+                self.assertIn("created_at", message)
+
+        all_messages = service.store.list_agent_messages(task_id)
+        self.assertTrue(set(self.SIX_MESSAGE_KINDS) <= set(
+            message["kind"] for message in all_messages
+        ))
+        # 消息按持久化顺序返回；未知 kind 过滤为空而非报错。
+        self.assertEqual(
+            [], service.store.list_agent_messages(task_id, kind="not-a-kind"),
+        )
+
+    # ----------------------------------------------------------- report
+
+    def test_report_markdown_renders_agent_evidence_fields(self):
+        service = self.make_service("auto", llm_model="stub-model")
+        task_id, task = self._run_honest_repository_chain(service)
+        collaboration = task["report"]["collaboration"]["cxx_agent"]
+        messages = service.store.list_agent_messages(
+            task_id, kind=KIND_ARBITRATION_DECISION,
+        )
+        self.assertTrue(messages)
+
+        rendered = to_markdown(task["report"])
+
+        # 真实调用声明 + provider/model（服务端身份，不是仅凭配置宣称）。
+        self.assertIn("## C/C++ LLM agent", rendered)
+        self.assertIn("- LLM really invoked: **yes**", rendered)
+        provider_label = service.llm_config["provider"]
+        self.assertIn(f"`{provider_label}`", rendered)
+        self.assertIn("`fake-cxx-model`", rendered)
+        # Prompt：模板标识 + 角色清单，不含提示词全文。
+        self.assertIn("- Prompt template: `lima-cxx-agent-system-v1`", rendered)
+        self.assertIn("roles: `planner, memory-lifetime", rendered)
+        # Context 统计：检索候选/文件/行 + 未覆盖。
+        self.assertIn("- Context sent: candidates `1` · files `1` · lines `", rendered)
+        # Hash：固定快照哈希进入报告。
+        self.assertIn(
+            f"- Snapshot sha256: `{collaboration['snapshot_sha256']}`", rendered,
+        )
+        # Token：诚实标注 bytes-proxy（v1 无 provider token 计数）。
+        self.assertIn("- Usage: calls `", rendered)
+        self.assertIn("bytes-proxy", rendered)
+        # Coverage：验证计数 + verified-only 门禁 + 角色状态。本链无 Sidecar
+        # 工具证据，唯一候选保持 llm-candidate（诚实，不虚标验证等级）。
+        self.assertIn(
+            "- Verification: `llm-candidate` `1` · verified-only `0`", rendered,
+        )
+        self.assertIn("- Roles: `planner` `ok`", rendered)
+        self.assertIn("- Tool evidence bound: `False`", rendered)
+        # 自动修复红线。
+        self.assertIn("- Automatic repair: **false**", rendered)
+
+        # 每个 Finding 的 Agent 来源与验证状态徽标。
+        agent_finding = next(
+            item for item in task["report"]["findings"]
+            if item["source"] == "cxx-agent"
+        )
+        self.assertIn(f"- Candidate: `{agent_finding['candidate_id']}`", rendered)
+        self.assertIn("- Agent roles: `memory-lifetime`", rendered)
+        self.assertIn(
+            "- Trigger path: leak → free → buf&#91;0&#93;", rendered,
+        )
+        self.assertIn("- Verification state: `llm-candidate` ·", rendered)
+        self.assertIn("不支持自动修复", rendered)
+
+    def test_report_markdown_renders_degradation_when_llm_unavailable(self):
+        service = self.make_service("auto", llm_model="stub-model")
+        service.repository_scanner.cxx_agent_client_factory = (
+            lambda: ExplodingAgentClient()
+        )
+        created = self._enqueue_vuln_repo(service)
+        task = self._wait_terminal(service, created["task_id"])
+
+        self.assertEqual("SUCCESS", task["state"])
+        self.assertEqual(
+            "llm-unavailable",
+            task["report"]["collaboration"]["cxx_agent"]["status"],
+        )
+        rendered = to_markdown(task["report"])
+
+        self.assertIn("## C/C++ LLM agent", rendered)
+        self.assertIn("- LLM really invoked: **no**", rendered)
+        self.assertIn("- Degradation: `llm-unavailable`", rendered)
+        self.assertIn("failed-replaced", rendered)
+        # 自动修复红线在降级报告同样成立。
+        self.assertIn("- Automatic repair: **false**", rendered)
+
+    def test_report_markdown_escapes_untrusted_agent_fields(self):
+        write_repo(self.root, {"vuln.c": VULN_C})
+        hostile = CxxAgentCandidate.from_untrusted_json({
+            "cwe": "CWE-416",
+            "path": "vuln.c",
+            "line": 8,
+            "symbol": "leak",
+            "title": "<script>alert(1)</script> use after free",
+            "mechanism": (
+                "free then write\n# injected heading\n"
+                "[link](https://evil.example)"
+            ),
+            "trigger_path": ["leak", "free", "<img src=x onerror=alert(2)>"],
+            "confidence": 0.9,
+        })
+        scripts = {
+            ROLE_PLANNER: [planner_step()],
+            ROLE_MEMORY_LIFETIME: [
+                snippet_step("vuln.c", 5, 9),
+                agent_step_final(hostile),
+            ],
+            ROLE_CRITIC: [agent_step_final(hostile)],
+            ROLE_EVIDENCE: [agent_step_final(hostile)],
+            ROLE_VERIFIER: [agent_step_final(hostile)],
+        }
+        scanner = vuln_scanner(lambda: ScriptedAgentClient(scripts))
+
+        result = scanner.scan(
+            RepositoryWorkspace(self.root), repository_key="team/project",
+        )
+        rendered = to_markdown(result.report.to_dict())
+
+        self.assertIn("## C/C++ LLM agent", rendered)
+        # 模型产出的 title/mechanism/trigger_path 全部上下文编码。
+        self.assertNotIn("<script>", rendered)
+        self.assertNotIn("<img", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+        self.assertNotIn("\n# injected", rendered)
+        self.assertNotIn("[link](https://evil.example)", rendered)
+        self.assertIn("&lt;img src=x onerror=alert(2)&gt;", rendered)
+
+    def test_pr_report_markdown_renders_scope_and_source_manifest_hash(self):
+        service = self.make_service("auto", llm_model="stub-model")
+        service.repository_scanner.cxx_agent_client_factory = (
+            lambda: ScriptedAgentClient(pr_scripts())
+        )
+        github = FakePRGitHubClient()
+        local = FakeLocalSource({("team/project", SHA): {"vuln.c": VULN_C}})
+        github.diff = PR_DIFF
+        service.github = github
+        service.cxx_pr_local_source = local
+        payload = pr_payload(head=SHA, base=BASE_SHA)
+        digest = hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()
+        created = service.handle_github_pull_request(
+            payload, "delivery-" + uuid.uuid4().hex, digest, "tenant-a",
+        )
+        task = self._wait_terminal(service, created["task_id"])
+
+        self.assertEqual("SUCCESS", task["state"])
+        rendered = to_markdown(task["report"])
+        self.assertIn(
+            "- Status: `completed` · mode `auto` · scope `repository`", rendered,
+        )
+        manifest = task["input"]["source_manifest_sha256"]
+        self.assertIn(f"- Source manifest sha256: `{manifest}`", rendered)
+        self.assertIn(f"- Head/base SHA: `{SHA}` / `{BASE_SHA}`", rendered)
+
+    # ----------------------------------------------------- capabilities
+
+    def test_capabilities_cxx_agent_object_without_false_health(self):
+        off = self.make_service("off").repository_scan_capabilities()["cxx_agent"]
+        self.assertEqual("off", off["mode"])
+        self.assertFalse(off["configured"])
+        self.assertFalse(off["repository_scan"])
+        self.assertFalse(off["pull_request_scan"])
+        self.assertFalse(off["external_source_context"])
+        self.assertFalse(off["automatic_repair"])
+        # 未探测：healthy 必须为 null，不得宣称可用。
+        self.assertIsNone(off["healthy"])
+
+        service = self.make_service("auto", llm_model="stub-model")
+        configured = service.repository_scan_capabilities()["cxx_agent"]
+        self.assertEqual("auto", configured["mode"])
+        self.assertTrue(configured["configured"])
+        self.assertTrue(configured["repository_scan"])
+        self.assertTrue(configured["pull_request_scan"])
+        self.assertEqual(service.llm_config["provider"], configured["provider"])
+        self.assertEqual("stub-model", configured["model"])
+        self.assertIsNone(configured["healthy"])
+        self.assertFalse(configured["automatic_repair"])
 
 
 if __name__ == "__main__":

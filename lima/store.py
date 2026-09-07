@@ -454,6 +454,33 @@ class TaskStore:
                  json.dumps(message.get("content", {}), ensure_ascii=False), utc_now()),
             )
 
+    def list_agent_messages(self, task_id: str, kind: str = "") -> list:
+        """Query persisted agent messages for one task, optionally by kind.
+
+        Reuses the single ``agent_messages`` transcript written by
+        :meth:`record_agent_message`; no parallel message store. Rows return
+        in persistence order with the same shape as ``get()["collaboration"]``
+        items (``content_json`` decoded).
+        """
+
+        sql = (
+            "SELECT sender,recipient,kind,correlation_id,content_json,created_at "
+            "FROM agent_messages WHERE task_id=?"
+        )
+        params: list = [task_id]
+        if kind:
+            sql += " AND kind=?"
+            params.append(kind)
+        sql += " ORDER BY id"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        messages = []
+        for row in rows:
+            item = dict(row)
+            item["content"] = json.loads(item.pop("content_json"))
+            messages.append(item)
+        return messages
+
     def update_task_progress(self, task_id: str, progress: dict[str, Any]) -> None:
         """Persist runtime progress without touching immutable task input."""
 

@@ -871,24 +871,24 @@ git commit -s -m "feat: review C++ pull requests with agents"
 **Interfaces:**
 - Produces: spec 第 12 节全部字段；沿用 Agent message storage；capabilities 返回 `cxx_agent` 对象。
 
-- [ ] **Step 1: RED 报告/持久化测试**
+- [x] **Step 1: RED 报告/持久化测试**
 
 断言 Planner/Specialist/Critic/Evidence/Verifier/Arbiter 消息可查询；报告包含 provider/model/prompt/context/hash/token/coverage/degradation；Web 禁止 C/C++ 修复按钮。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.ReportTests tests.test_frontend_ui -v`
 
-- [ ] **Step 3: 实现显示和 capabilities**
+- [x] **Step 3: 实现显示和 capabilities**
 
 复用现有 TaskStore，不建平行消息库。Markdown/Web 对不可信字段使用正确上下文编码。capabilities 的 configured/healthy 分开，Provider 未探测时不宣称 healthy。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_integration tests.test_frontend_ui tests.test_service -v`
 
 ```powershell
-git add lima/agents.py lima/store.py lima/report.py lima/service.py web/app.js tests/test_frontend_ui.py tests/test_cxx_agent_integration.py
+git add lima/agents.py lima/store.py lima/report.py lima/service.py tests/test_frontend_ui.py tests/test_cxx_agent_integration.py  # web/app.js 已随 T10 legacy web/ 删除，Web 契约由 tests/test_frontend_ui.py 锚定
 git commit -s -m "feat: report C++ agent collaboration evidence"
 ```
 

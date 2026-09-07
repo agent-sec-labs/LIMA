@@ -17,6 +17,13 @@ _VERIFICATION_STATE_LABELS = {
     "confirmed": "Sanitizer 动态确认",
     "syntax-verified": "语法约束已验证",
     "dataflow-verified": "数据流已验证",
+    # C/C++ agent 管线的六种验证状态（设计第 9 节）。
+    "llm-candidate": "LLM 候选 · 需复核",
+    "agent-corroborated": "双 Agent 共识候选 · 需复核",
+    "tool-corroborated": "工具证据已绑定",
+    "runtime-confirmed": "运行时证据已确认",
+    "human-confirmed": "人工已确认",
+    "needs-human-review": "证据不足或冲突 · 需人工复核",
 }
 _DIAGNOSTIC_LABELS = {
     "BUILD_FAILED": "构建支持的静态验证未完成",
@@ -175,6 +182,127 @@ def _finding_decision(item: Dict[str, Any], adjudication: Dict[str, Any]) -> Dic
     ), {})
 
 
+def _cxx_trigger_path_text(value: Any) -> str:
+    """Join model-supplied trigger-path steps for prose-context encoding."""
+
+    if not isinstance(value, list | tuple):
+        return ""
+    return " → ".join(
+        str(step) for step in value if isinstance(step, str) and step
+    )
+
+
+def _cxx_agent_degradation_line(agent: dict, status: str) -> str:
+    """One honest degradation line: reason, bounded diagnostics, failed roles."""
+
+    parts = [f"`{status}`"]
+    reason = str(agent.get("reason") or "")
+    if reason:
+        parts.append(_cxx_markdown_prose(reason, 200))
+    diagnostics = agent.get("diagnostics")
+    if isinstance(diagnostics, list):
+        for item in diagnostics[:_MAX_CXX_DIAGNOSTICS]:
+            parts.append(_cxx_markdown_prose(item, 200))
+    roles = agent.get("roles")
+    if isinstance(roles, list):
+        failed = [
+            f"{item.get('role', '?')}={item.get('status', '?')}"
+            for item in roles
+            if isinstance(item, dict) and item.get("status") not in {None, "ok"}
+        ]
+        if failed:
+            parts.append(f"failed roles: {', '.join(failed)}")
+    return f"- Degradation: {' · '.join(parts)}"
+
+
+def _cxx_agent_section(agent: dict) -> Iterable[str]:
+    """Render the ``collaboration.cxx_agent`` audit payload (design §12).
+
+    覆盖：是否真正调用 LLM、provider/model、提示词模板标识与角色清单、
+    上下文统计、快照/manifest/head 哈希、用量（bytes-proxy）、coverage
+    （验证计数 + 角色状态）、降级链与 ``automatic_repair=false`` 红线。
+    哈希/模式/角色状态都是服务端可信值，走内联码；diagnostics/reason
+    可能携带 provider 返回文本，一律经 ``_cxx_markdown_prose`` 编码。
+    """
+
+    status = str(agent.get("status", "unknown"))
+    invoked = "yes" if status == "completed" else "no"
+    lines = [
+        "## C/C++ LLM agent",
+        "",
+        "- Status: `{status}` · mode `{mode}` · scope `{scope}`".format(
+            status=status,
+            mode=agent.get("mode", "off"),
+            scope=agent.get("scope", "repository"),
+        ),
+        f"- LLM really invoked: **{invoked}** · "
+        f"provider `{agent.get('provider', '')}` · "
+        f"model `{agent.get('model', '')}`",
+    ]
+    prompt = agent.get("prompt")
+    if isinstance(prompt, dict):
+        roles = ", ".join(str(item) for item in (prompt.get("roles") or ()))
+        template = prompt.get("template", "unknown")
+        lines.append(f"- Prompt template: `{template}` · roles: `{roles or 'none'}`")
+    retrieval = agent.get("retrieval")
+    if isinstance(retrieval, dict):
+        lines.append(
+            "- Context sent: candidates `{candidates}` · files `{files}`"
+            " · lines `{lines}` · uncovered `{uncovered}`".format(
+                candidates=retrieval.get("candidates", 0),
+                files=retrieval.get("context_files", 0),
+                lines=retrieval.get("context_lines", 0),
+                uncovered=retrieval.get("uncovered_candidates", 0),
+            )
+        )
+    if agent.get("snapshot_sha256"):
+        lines.append(f"- Snapshot sha256: `{agent['snapshot_sha256']}`")
+    if agent.get("source_manifest_sha256"):
+        lines.append(f"- Source manifest sha256: `{agent['source_manifest_sha256']}`")
+    head_sha = str(agent.get("head_sha") or "")
+    if head_sha:
+        lines.append(f"- Head/base SHA: `{head_sha}` / `{agent.get('base_sha', '')}`")
+    usage = agent.get("usage")
+    if isinstance(usage, dict):
+        lines.append(
+            "- Usage: calls `{calls}` · context files `{files}`"
+            " · context lines `{lines}` · output bytes `{bytes}`"
+            " (bytes-proxy; provider token counts unavailable in v1)".format(
+                calls=usage.get("calls", 0),
+                files=usage.get("context_files", 0),
+                lines=usage.get("context_lines", 0),
+                bytes=usage.get("output_bytes", 0),
+            )
+        )
+    verification = agent.get("verification")
+    if isinstance(verification, dict):
+        states = sorted(
+            (str(key), value) for key, value in verification.items()
+            if key != "verified_only"
+        )
+        rendered = " · ".join(f"`{key}` `{value}`" for key, value in states)
+        if "verified_only" in verification:
+            suffix = f"verified-only `{verification['verified_only']}`"
+            rendered = f"{rendered} · {suffix}" if rendered else suffix
+        if rendered:
+            lines.append(f"- Verification: {rendered}")
+    role_outcomes = agent.get("roles")
+    if isinstance(role_outcomes, list) and role_outcomes:
+        rendered_roles = " · ".join(
+            f"`{item.get('role', '?')}` `{item.get('status', '?')}`"
+            for item in role_outcomes if isinstance(item, dict)
+        )
+        lines.append(f"- Roles: {rendered_roles}")
+    if "tool_evidence_bound" in agent:
+        bound = bool(agent["tool_evidence_bound"])
+        lines.append(f"- Tool evidence bound: `{bound}`")
+    lines.append("- Automatic repair: **false**")
+    if status != "completed":
+        lines.append(_cxx_agent_degradation_line(agent, status))
+    lines.append("")
+    return lines
+
+
 def to_markdown(report: Dict[str, Any]) -> str:
     if report.get("pull_request") is None:
         title = "# LIMA Repository Audit"
@@ -243,6 +371,9 @@ def to_markdown(report: Dict[str, Any]) -> str:
             ),
             "",
         ])
+    cxx_agent = collaboration.get("cxx_agent")
+    if isinstance(cxx_agent, dict):
+        lines.extend(_cxx_agent_section(cxx_agent))
     semantic = collaboration.get("semantic_triage") or {}
     if semantic:
         retrieval = semantic.get("retrieval") or {}
@@ -373,6 +504,9 @@ def to_markdown(report: Dict[str, Any]) -> str:
                     _verification_state_label(item.get("verification_state")),
                 ),
                 "- Tool: %s" % inline_code(item.get("source", "unknown")),
+                f"- Candidate: {inline_code(item.get('candidate_id', '') or 'unbound')}",
+                f"- Agent roles: {inline_code(item.get('agent_role', '') or 'unassigned')}",
+                f"- Trigger path: {display(_cxx_trigger_path_text(item.get('trigger_path')))}",
                 "",
                 "**工具证据 / trace**",
                 "",

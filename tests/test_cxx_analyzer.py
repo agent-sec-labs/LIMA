@@ -37,7 +37,12 @@ from cxx_analyzer.sandbox import (
     landlock_abi,
 )
 from cxx_analyzer.snapshot import prepare_snapshot
-from cxx_analyzer.source_scan import LayerResult, parse_semgrep_json, run_source_scan
+from cxx_analyzer.source_scan import (
+    MAX_SEMGREP_ERRORS,
+    LayerResult,
+    parse_semgrep_json,
+    run_source_scan,
+)
 from lima.workspace import RepositoryWorkspace
 
 
@@ -1606,6 +1611,34 @@ class SourceScanTests(unittest.TestCase):
         invalid["results"][0]["start"]["line"] = 0
         with self.assertRaises(ValueError):
             parse_semgrep_json(json.dumps(invalid), {"src/buffer.c"})
+
+    def test_parse_semgrep_json_tolerates_warn_level_syntax_notices_beyond_cap(self):
+        fixture_root = Path(__file__).parent / "fixtures" / "cxx_memory"
+        valid = json.loads((fixture_root / "semgrep-sample.json").read_text(encoding="utf-8"))
+
+        many_warns = copy.deepcopy(valid)
+        many_warns["errors"] = [
+            {"code": 3, "level": "warn", "type": "Syntax error",
+             "message": f"Syntax error at line src/file{i}.c:1"}
+            for i in range(100)
+        ]
+        # Findings stay suppressed while any error exists, but the payload is
+        # no longer rejected wholesale for abundant per-file syntax notices
+        # (real-world repositories easily exceed the error cap).
+        findings, diagnostics = parse_semgrep_json(
+            json.dumps(many_warns), {"src/buffer.c"}
+        )
+        self.assertEqual((), findings)
+        self.assertEqual(["semgrep-reported-errors"], diagnostics)
+
+        many_failures = copy.deepcopy(valid)
+        many_failures["errors"] = [
+            {"code": 2, "level": "error", "type": "Fatal error",
+             "message": f"failure {i}"}
+            for i in range(MAX_SEMGREP_ERRORS + 1)
+        ]
+        with self.assertRaises(ValueError):
+            parse_semgrep_json(json.dumps(many_failures), {"src/buffer.c"})
 
 
 class BoundsDirectionTests(unittest.TestCase):

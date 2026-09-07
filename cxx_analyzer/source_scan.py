@@ -92,8 +92,12 @@ def parse_semgrep_json(
         raise ValueError("Semgrep JSON lacks a results list")
 
     errors = document["errors"]
-    if len(errors) > MAX_SEMGREP_ERRORS:
-        raise ValueError("Semgrep JSON contains too many errors")
+    # Semgrep emits level:"warn" syntax notices per unparseable file (common on
+    # real-world C with third-party macros). They still block findings below,
+    # but only genuine level:"error" failures count against the tamper-bound
+    # cap; otherwise a large real repository that merely skips some files
+    # rejects the whole payload (observed: 830 warn entries on ResInsight).
+    blocking_errors = 0
     for error in errors:
         if not isinstance(error, dict):
             raise ValueError("Semgrep error is invalid")
@@ -117,6 +121,10 @@ def parse_semgrep_json(
             or len(message.encode("utf-8")) > MAX_SEMGREP_ERROR_BYTES
         ):
             raise ValueError("Semgrep error is invalid")
+        if error.get("level") != "warn":
+            blocking_errors += 1
+    if blocking_errors > MAX_SEMGREP_ERRORS:
+        raise ValueError("Semgrep JSON contains too many errors")
     if errors:
         return (), ["semgrep-reported-errors"]
 

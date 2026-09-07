@@ -643,19 +643,19 @@ git commit -s -m "feat: retrieve C++ memory review candidates"
 **Interfaces:**
 - Produces: `GitHubSourceProvider.fetch(repository, commit_sha, paths, budget) -> GitHubSnapshot`；只接受 40 位 SHA，返回每文件 SHA-256。
 
-- [ ] **Step 1: RED**
+- [x] **Step 1: RED**
 
 覆盖 branch/短 SHA 拒绝、路径逃逸、404/rate limit、内容超限、本地 head 匹配优先、GitHub 固定 SHA 获取及 Diff-only 降级。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_github_source -v`
 
-- [ ] **Step 3: 实现固定内容提供者**
+- [x] **Step 3: 实现固定内容提供者**
 
 使用现有 GitHub 认证/重试约束；不得记录 Authorization；响应先按预算读取再解码；只将验证后的文件交给 `RepositoryWorkspace` 等价清单逻辑。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_github_source tests.test_github -v`
 

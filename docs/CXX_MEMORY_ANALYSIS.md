@@ -49,6 +49,46 @@ LIMA_CXX_TEST_STEPS_JSON=[["ctest","--test-dir","build","--output-on-failure"]]
 
 输出超限时只保留有界前缀、摘要和截断诊断；摘要不完整时不会提升 Finding。
 
+## HTTP 接口契约
+
+### Sidecar 内部 API（仅容器内网，不供前端或外部直连）
+
+`GET /health` 返回真实可执行能力：`build_available`、`clang_c_available`、`clang_cxx_available`、
+`cmake_available`、`landlock_available`、`process_isolation_available`、`source_available`、
+`test_configured` 与 `schema_version`。
+
+`POST /v1/analyze`（`Content-Type: application/json`）：
+
+| 请求字段 | 说明 |
+|---|---|
+| `request_id` | 调用方生成的 UUID，响应原样带回 |
+| `repository_key` | `/repositories/` 下的快照目录键 |
+| `snapshot_sha256` | 调用方清单指纹；与服务端实测不一致即 `snapshot_rejected` |
+| `requested_layers` | `source-only` / `build-backed` / `sanitizer-confirmed` 子集 |
+
+响应顶层字段：`status`（`completed` 或失败态）、`findings`、`coverage`（`snapshot_files`/
+`source_files`）、`diagnostics`（降级原因，见上）、`tool_runs`（工具与运行状态溯源）、
+`snapshot_sha256`、`schema_version`。单条 Finding 字段：
+
+| 字段 | 含义 |
+|---|---|
+| `cwe` / `path` / `line` / `symbol` | 定位与分类；`symbol` 可为 `unknown` |
+| `analysis_mode` | 产出层：`source-only` / `build-backed` / `sanitizer-confirmed` |
+| `verification_state` | 置信：`candidate` / `build-verified` / `confirmed` |
+| `title` / `explanation` / `evidence` / `test` | 人类可读的结论、依据与建议验证方式 |
+| `rule_id` | 固定窄规则族 `cxx.source.*`（ASan 层为 `cxx.asan.*`） |
+| `severity` / `confidence` | 严重度与置信 |
+| `automatic_repair` | 恒为 `false`：C/C++ 不自动修复 |
+
+### 主服务对前端的暴露（随服务接线切片生效）
+
+前端不新增调用，C++ 结果出现在既有接口：`GET /api/repository-scans/capabilities` 的
+`cxx_memory` 能力块（模式、`health_status`、三层可用性、`supported_cwes`、
+`automatic_repair: false`），以及扫描任务报告的 findings 与
+`collaboration.cxx_memory.diagnostics`。前端渲染规则：`verification_state` 画置信徽章；
+`automatic_repair === false` 隐藏修复入口；`diagnostics` 展示降级说明；绝不直连 Sidecar
+`8090`。
+
 ## Compose 部署与健康检查
 
 ```powershell

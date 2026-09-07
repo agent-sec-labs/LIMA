@@ -10,6 +10,8 @@ from .agents import MultiAgentCoordinator
 from .auth import AuthManager
 from .config import Settings
 from .context_manager import ContextManager
+from .cxx_agent_tools import CxxAgentBudget
+from .cxx_llm import CxxLLMClient
 from .cxx_memory import (
     REQUESTED_LAYERS,
     SUPPORTED_CWES,
@@ -250,6 +252,33 @@ class ReviewService:
                 timeout_seconds=settings.cxx_analysis_timeout_seconds,
                 max_response_bytes=settings.cxx_max_response_bytes,
             )
+        # C/C++ Agent 装配：单次调用方不能覆盖模型、提示词或预算（设计第 11
+        # 节），client/budget 工厂只来自 Settings；resolved_llm() 非空时才提供
+        # client 工厂，模型用 effective_cxx_agent_model() 覆盖。
+        cxx_agent_client_factory = None
+
+        def _cxx_agent_client_factory():
+            resolved = dict(self.llm_config)
+            resolved["model"] = settings.effective_cxx_agent_model()
+            return CxxLLMClient(
+                resolved, timeout=settings.cxx_agent_timeout_seconds,
+            )
+
+        def _cxx_agent_budget_factory() -> CxxAgentBudget:
+            return CxxAgentBudget(
+                max_calls=settings.cxx_agent_max_calls,
+                max_context_files=settings.cxx_agent_max_context_files,
+                max_context_lines=settings.cxx_agent_max_context_lines,
+                max_output_bytes=settings.cxx_agent_max_output_bytes,
+            )
+
+        if settings.cxx_agent_mode != "off" and self.llm_config:
+            cxx_agent_client_factory = _cxx_agent_client_factory
+        cxx_agent_budget_factory = (
+            _cxx_agent_budget_factory
+            if settings.cxx_agent_mode != "off"
+            else None
+        )
         # 快照缓存与物化器惰性构建：local-import-only（默认）部署在启动时
         # 不得触碰文件系统；只读根文件系统的容器只在真正需要 GitHub 物化时
         # 才创建缓存目录，届时失败表现为单个任务失败而非服务崩溃。
@@ -260,6 +289,11 @@ class ReviewService:
             sast_mode=settings.repository_scan_sast_mode,
             cxx_memory_mode=settings.cxx_memory_mode,
             cxx_memory_adapter=cxx_memory_adapter,
+            cxx_agent_mode=settings.cxx_agent_mode,
+            cxx_agent_client_factory=cxx_agent_client_factory,
+            cxx_agent_budget_factory=cxx_agent_budget_factory,
+            cxx_agent_max_candidates=settings.cxx_agent_max_candidates,
+            cxx_agent_store=self.store,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
         self.experiment_runner = ExperimentRunner(
@@ -992,6 +1026,10 @@ class ReviewService:
                 progress_callback=(
                     progress.pipeline_event if progress is not None else None
                 ),
+                task_id=task_id,
+                # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
+                # 权威取消信号。
+                should_cancel=lambda: self.store.is_cancelled(task_id),
             )
         result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {

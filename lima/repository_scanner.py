@@ -12,10 +12,21 @@ from .cxx_memory import (
     REQUESTED_LAYERS,
     CxxAnalyzerProtocolError,
     CxxAnalyzerUnavailable,
+    CxxAnalysisResult,
     CxxMemoryAdapter,
 )
 from .adjudication import adjudicate_findings
+from .cxx_agent_models import SUPPORTED_CWES, to_agent_finding_payload
+from .cxx_agent_tools import CxxAgentBudget
+from .cxx_agents import (
+    LLM_ROLES,
+    SPECIALIST_ROLES,
+    CxxAgentCoordinator,
+)
+from .cxx_context import CxxContextIndex
+from .cxx_retrieval import RetrievalBudget, retrieve_repository
 from .diff_parser import parse_unified_diff
+from .metrics import metrics
 from .models import Finding, ReviewReport, Severity
 from .python_analyzer import PythonAstSecurityAnalyzer
 from .python_dataflow import PythonDataflowAnalyzer
@@ -103,6 +114,31 @@ def _full_file_diff(path: str, content: str) -> str:
     )
 
 
+class _AgentClientProbe:
+    """Recording proxy around one scan's agent client.
+
+    ``step`` 透传给真实 client（预算、门禁、验证都在 client/coordinator 内），
+    只记录成功返回的轮数：这是“LLM 是否真正可用”的权威信号——角色状态无法
+    区分“空分配跳过（ok）”与“真实分析成功（ok）”，而零成功轮次 + 任一角色
+    failed-replaced 即设计规定的 auto 降级/required 失败判据。
+    """
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+        self.succeeded_turns = 0
+
+    @property
+    def model(self) -> str:
+        return str(getattr(self._client, "model", ""))
+
+    def step(self, role, managed_context, tools, budget, read_paths=None):
+        step = self._client.step(
+            role, managed_context, tools, budget, read_paths=read_paths,
+        )
+        self.succeeded_turns += 1
+        return step
+
+
 class RepositoryScanner:
     """Run bounded local reviewers across a read-only repository snapshot."""
 
@@ -116,6 +152,12 @@ class RepositoryScanner:
         cxx_memory_mode: str = "off",
         cxx_memory_adapter: Optional[CxxMemoryAdapter] = None,
         cxx_requested_layers: tuple[str, ...] = REQUESTED_LAYERS,
+        cxx_agent_mode: str = "off",
+        cxx_agent_client_factory: Callable[[], object] | None = None,
+        cxx_agent_budget_factory: Callable[[], CxxAgentBudget] | None = None,
+        cxx_agent_max_candidates: int = 100,
+        should_cancel: Callable[[], bool] | None = None,
+        cxx_agent_store: object = None,
     ) -> None:
         self.reviewers = list(
             reviewers or [SecurityRuleReviewer()]
@@ -126,6 +168,15 @@ class RepositoryScanner:
             raise ValueError("sast_mode must be auto, off or required")
         if cxx_memory_mode not in {"auto", "off", "required"}:
             raise ValueError("cxx_memory_mode must be auto, off or required")
+        if cxx_agent_mode not in {"auto", "off", "required"}:
+            raise ValueError("cxx_agent_mode must be auto, off or required")
+        if (
+            isinstance(cxx_agent_max_candidates, bool)
+            or not isinstance(cxx_agent_max_candidates, int)
+            or cxx_agent_max_candidates <= 0
+        ):
+            raise ValueError("cxx_agent_max_candidates must be a positive integer")
+        self.cxx_agent_max_candidates = cxx_agent_max_candidates
         self.python_analyzer = PythonAstSecurityAnalyzer()
         self.python_dataflow = PythonDataflowAnalyzer()
         self.dataflow_enabled = bool(dataflow_enabled)
@@ -134,6 +185,11 @@ class RepositoryScanner:
         self.cxx_memory_mode = cxx_memory_mode
         self.cxx_memory_adapter = cxx_memory_adapter
         self.cxx_requested_layers = cxx_requested_layers
+        self.cxx_agent_mode = cxx_agent_mode
+        self.cxx_agent_client_factory = cxx_agent_client_factory
+        self.cxx_agent_budget_factory = cxx_agent_budget_factory
+        self.should_cancel = should_cancel
+        self.cxx_agent_store = cxx_agent_store
 
     @staticmethod
     def _semantic_key(finding: Finding) -> tuple[str, int, str]:
@@ -232,12 +288,204 @@ class RepositoryScanner:
         if SEVERITY_RANK[candidate.severity] > SEVERITY_RANK[existing.severity]:
             existing.severity = candidate.severity
 
+    def _agent_finding(
+        self, candidate, specialist_roles: dict[str, list[str]],
+    ) -> Finding:
+        payload = to_agent_finding_payload(candidate)
+        # 两来源并存红线：agent finding 不与 Sidecar merge，candidate_id 是
+        # 唯一身份键；报告以 source 区分来源。
+        payload["source"] = "cxx-agent"
+        payload["candidate_id"] = candidate.candidate_id
+        payload["agent_role"] = "+".join(
+            sorted(set(specialist_roles.get(candidate.candidate_id, ())))
+        )
+        payload["trigger_path"] = list(candidate.trigger_path)
+        return Finding(**payload)
+
+    def _cxx_agent_collaboration(
+        self,
+        mode: str,
+        status: str,
+        client: object,
+        review: object,
+        retrieval: object,
+        budget: CxxAgentBudget,
+    ) -> dict:
+        remaining = budget.remaining()
+        summary: dict = {
+            "mode": mode,
+            "model": getattr(client, "model", ""),
+            "status": status,
+            "budget": {
+                "max_calls": budget.max_calls,
+                "max_context_files": budget.max_context_files,
+                "max_context_lines": budget.max_context_lines,
+                "max_output_bytes": budget.max_output_bytes,
+                "remaining": {
+                    "calls": remaining.calls,
+                    "files": remaining.files,
+                    "lines": remaining.lines,
+                    "bytes_remaining": remaining.bytes_remaining,
+                },
+            },
+        }
+        if review is not None:
+            verification: dict[str, int] = {}
+            for candidate in review.candidates:
+                verification[candidate.verification_state] = (
+                    verification.get(candidate.verification_state, 0) + 1
+                )
+            verification["verified_only"] = len(review.verified_only)
+            summary.update({
+                "snapshot_sha256": review.snapshot_sha256,
+                "retrieval": {
+                    "candidates": len(retrieval.candidates),
+                    "context_files": len(retrieval.context_files),
+                    "context_lines": retrieval.context_lines,
+                    "uncovered_candidates": retrieval.uncovered_candidates,
+                },
+                "verification": verification,
+                "roles": [
+                    {
+                        "role": outcome.role,
+                        "status": outcome.status,
+                        **({"error": outcome.error[:300]}
+                           if outcome.error else {}),
+                    }
+                    for outcome in review.role_outcomes
+                ],
+                "arbiter_rejections": list(review.arbiter_rejections),
+                "message_count": review.message_count,
+                "tool_evidence_bound": any(
+                    candidate.verification_state in {
+                        "tool-corroborated", "runtime-confirmed",
+                    }
+                    for candidate in review.candidates
+                ),
+            })
+        return summary
+
+    def _run_cxx_agent_branch(
+        self,
+        workspace: RepositoryWorkspace,
+        inventory: WorkspaceInventory,
+        findings: list[Finding],
+        tool_analysis: CxxAnalysisResult | None,
+        task_id: str,
+        cancel_probe: Callable[[], bool] | None,
+    ) -> dict:
+        """Run the LLM agent pipeline over one indexed snapshot.
+
+        共享红线：inventory 来自本次 scan 的唯一一次 ``workspace.inventory()``，
+        索引在分支内只构建一次，传统扫描与 LLM 分支共享同一快照。
+        ``mode=off``（或未配置 client）时零 LLM 行为，等价既有管线。
+        """
+
+        mode = self.cxx_agent_mode
+        if mode == "off":
+            return {"mode": "off", "status": "disabled"}
+        if self.cxx_agent_client_factory is None:
+            if mode == "required":
+                raise RuntimeError(
+                    "required C++ agent pipeline has no configured LLM provider"
+                )
+            return {"mode": mode, "status": "llm-not-configured"}
+        has_cxx_source = any(
+            PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
+            for item in inventory.files
+        )
+        if not has_cxx_source:
+            return {"mode": mode, "status": "no-cxx-sources"}
+        budget = (
+            self.cxx_agent_budget_factory()
+            if self.cxx_agent_budget_factory is not None
+            else CxxAgentBudget()
+        )
+        retrieval_budget = RetrievalBudget(
+            max_candidates=self.cxx_agent_max_candidates,
+            max_context_files=budget.max_context_files,
+            max_context_lines=budget.max_context_lines,
+        )
+        try:
+            index = CxxContextIndex.build(workspace, inventory)
+            if not index.coverage.indexed:
+                return {"mode": mode, "status": "no-cxx-sources"}
+            retrieval = retrieve_repository(index, retrieval_budget)
+            probe = _AgentClientProbe(self.cxx_agent_client_factory())
+            coordinator = CxxAgentCoordinator(
+                client=probe,
+                index=index,
+                # SnapshotReader 协议要求 .read_text(path)；workspace 本身即实现。
+                reader=workspace,
+                store=self.cxx_agent_store,
+                task_id=task_id,
+                budget=budget,
+                tool_analysis=tool_analysis,
+                source_mode="repository",
+                should_cancel=cancel_probe,
+            )
+            review = coordinator.review_repository(retrieval)
+        except (RuntimeError, ValueError) as exc:
+            if mode == "required":
+                raise RuntimeError(
+                    f"C++ agent pipeline failed in required mode: {exc}"
+                ) from exc
+            metrics.inc("repository_scan_cxx_agent_unavailable_total")
+            return {
+                "mode": mode,
+                "model": "",
+                "status": "llm-unavailable",
+                "diagnostics": [str(exc)[:500]],
+            }
+        cancelled = bool(cancel_probe is not None and cancel_probe())
+        llm_failed = any(
+            outcome.role in LLM_ROLES and outcome.status == "failed-replaced"
+            for outcome in review.role_outcomes
+        )
+        if cancelled:
+            status = "cancelled"
+        elif probe.succeeded_turns == 0 and llm_failed:
+            # 零成功模型轮次且存在角色降级：设计规定的 auto 降级/required
+            # 失败判据（LLM 不可用导致验证无法完成）。
+            if mode == "required":
+                raise RuntimeError(
+                    "C++ agent pipeline failed in required mode: all agent "
+                    "roles failed: "
+                    + "; ".join(
+                        outcome.error[:120]
+                        for outcome in review.role_outcomes
+                        if outcome.error
+                    )[:500]
+                )
+            metrics.inc("repository_scan_cxx_agent_unavailable_total")
+            status = "llm-unavailable"
+        else:
+            status = "completed"
+        specialist_roles: dict[str, list[str]] = {}
+        for outcome in review.role_outcomes:
+            if outcome.role in SPECIALIST_ROLES:
+                for candidate in outcome.candidates:
+                    specialist_roles.setdefault(
+                        candidate.candidate_id, []
+                    ).append(outcome.role)
+        # 降级 passthrough（cwe=unreviewed 的种子壳）不是 LLM 断言，永不转成
+        # Finding；只有受支持 CWE 的候选进入报告，验证状态保持终态。
+        for candidate in review.candidates:
+            if candidate.cwe not in SUPPORTED_CWES:
+                continue
+            findings.append(self._agent_finding(candidate, specialist_roles))
+        return self._cxx_agent_collaboration(
+            mode, status, probe, review, retrieval, budget,
+        )
+
     def scan(
         self,
         workspace: RepositoryWorkspace,
         *,
         repository_key: str = "",
         progress_callback: ProgressCallback | None = None,
+        task_id: str = "",
+        should_cancel: Callable[[], bool] | None = None,
     ) -> RepositoryScanResult:
         _report(progress_callback, INVENTORY, "正在盘点工作区文件")
         inventory = workspace.inventory()
@@ -354,6 +602,7 @@ class RepositoryScanner:
             "coverage": {},
             "diagnostics": [],
         }
+        cxx_result: CxxAnalysisResult | None = None
         has_cxx_source = any(
             PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
             for item in inventory.files
@@ -395,6 +644,17 @@ class RepositoryScanner:
                 })
                 for finding in cxx_result.findings:
                     self._merge_cxx_finding(findings, cxx_finding_index, finding)
+
+        # LLM 分支在既有管线完成后、报告组装前运行：agent finding 与工具
+        # finding 融入同一份报告，audit 信息保存在 collaboration.cxx_agent。
+        cxx_agent_summary = self._run_cxx_agent_branch(
+            workspace,
+            inventory,
+            findings,
+            cxx_result,
+            task_id,
+            should_cancel if should_cancel is not None else self.should_cancel,
+        )
 
         findings.sort(
             key=lambda item: (
@@ -454,6 +714,7 @@ class RepositoryScanner:
                 ),
                 "sast": sast_summary,
                 "cxx_memory": cxx_summary,
+                "cxx_agent": cxx_agent_summary,
                 "skipped": dict(sorted(inventory.skipped.items())),
             },
             adjudication=adjudicate_findings(findings),

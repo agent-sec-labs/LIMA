@@ -672,6 +672,7 @@ class CxxAgentCoordinator:
         tool_analysis: CxxAnalysisResult | None = None,
         source_mode: str = "repository",
         human_confirmed_ids: frozenset[str] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         if (
             isinstance(max_assignment_candidates, bool)
@@ -705,6 +706,15 @@ class CxxAgentCoordinator:
         self._tool_analysis = tool_analysis
         self._source_mode = source_mode
         self._human_confirmed_ids = confirmed_ids
+        # Task-scoped cancellation probe (repository scans own the task
+        # lifecycle outside this module): checked at every LLM role entry so a
+        # cancelled task stops requesting model turns. A cancelled role
+        # degrades exactly like a hard failure (failed-replaced, deterministic
+        # passthrough); the arbiter still closes the pipeline.
+        self._should_cancel = should_cancel
+
+    def _cancelled(self) -> bool:
+        return bool(self._should_cancel is not None and self._should_cancel())
 
     def review_repository(
         self, retrieval_run: RetrievalRun, budget: CxxAgentBudget | None = None
@@ -767,6 +777,15 @@ class CxxAgentCoordinator:
     ) -> tuple[CxxRoleOutcome, tuple[CxxAgentCandidate, ...]]:
         if not anchors:
             return CxxRoleOutcome(ROLE_PLANNER, "ok", ()), ()
+        if self._cancelled():
+            shells = tuple(_seed_shell(anchor) for anchor in anchors)
+            return (
+                CxxRoleOutcome(
+                    ROLE_PLANNER, "failed-replaced", shells,
+                    "cancelled before the planner stage",
+                ),
+                shells,
+            )
         context = "\n\n".join([header, _anchor_block(anchors)])
         allowed = frozenset(anchor_by_key)
         last_error = ""
@@ -858,6 +877,11 @@ class CxxAgentCoordinator:
                 role, "failed-replaced", tuple(assignment),
                 "skipped: the agent tool budget was exhausted earlier in the pipeline",
             )
+        if self._cancelled():
+            return CxxRoleOutcome(
+                role, "failed-replaced", tuple(assignment),
+                f"cancelled before the {role} stage",
+            )
         if not assignment:
             return CxxRoleOutcome(role, "ok", ())
         last_error = ""
@@ -936,6 +960,12 @@ class CxxAgentCoordinator:
             outcome = CxxRoleOutcome(
                 role, "failed-replaced", tuple(incoming),
                 "skipped: the agent tool budget was exhausted earlier in the pipeline",
+            )
+            return outcome, tuple(incoming), ()
+        if self._cancelled():
+            outcome = CxxRoleOutcome(
+                role, "failed-replaced", tuple(incoming),
+                f"cancelled before the {role} stage",
             )
             return outcome, tuple(incoming), ()
         if not incoming:

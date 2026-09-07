@@ -803,19 +803,19 @@ git commit -s -m "feat: verify C++ agent memory findings"
 - Consumes: workspace inventory、CxxContextIndex、retriever、coordinator、Sidecar evidence。
 - Produces: 一个融合 ReviewReport；`collaboration.cxx_agent` 保存模式、模型、上下文、预算、coverage 和 Agent 统计。
 
-- [ ] **Step 1: RED Fake-LLM 端到端**
+- [x] **Step 1: RED Fake-LLM 端到端**
 
 构造整仓 UAF 与安全版本；断言真实代码片段进入模型、工具证据只在 Evidence 阶段、Finding 绑定快照、报告持久化且安全版本不被强行判漏洞。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.RepositoryAgentTests -v`
 
-- [ ] **Step 3: 接入扫描器**
+- [x] **Step 3: 接入扫描器**
 
 索引只构建一次；传统扫描与 LLM 分支共享同一 inventory；`off/auto/required` 按规范决定任务状态；取消任务时停止后续模型调用。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
 Run: `python -m unittest tests.test_cxx_agent_integration.RepositoryAgentTests tests.test_workspace tests.test_service -v`
 

@@ -7,6 +7,11 @@ inside a tracked function body. Calls record the callee exactly as written;
 no points-to resolution is attempted. Output ordering is fully deterministic
 so identical snapshots produce identical indexes.
 
+Line numbers count U+000A (LF) only -- matching unified-diff hunk and editor
+line numbering. Other Unicode separators such as form feed are ordinary
+in-line characters and never fabricate lines; a file's trailing newline does
+not create a phantom last line.
+
 Contract: the caller must pass an inventory captured from the same working
 tree at the same moment; every file is re-hashed during indexing and any
 drift becomes a coverage gap instead of an out-of-band record.
@@ -249,12 +254,17 @@ class _ParseFailure(Exception):
 
 
 def _strip_comments_and_strings(text: str) -> str:
-    """Blank out comment and string-literal bodies, preserving line structure."""
+    """Blank out comment and string bodies on U+000A line boundaries only.
+
+    The text is split on ``"\\n"`` (never ``str.splitlines``) so characters
+    such as form feed keep their in-line column and never fabricate lines;
+    a trailing newline survives as the empty final element.
+    """
 
     result: list[str] = []
     in_block_comment = False
     in_string: str | None = None
-    for line in text.splitlines():
+    for line in text.split("\n"):
         output: list[str] = []
         index = 0
         while index < len(line):
@@ -309,13 +319,13 @@ def _macro_gap(cleaned: str) -> str | None:
     names = [
         match.group("name")
         for match in (
-            _MULTI_LINE_DEFINE.match(raw) for raw in cleaned.splitlines()
+            _MULTI_LINE_DEFINE.match(raw) for raw in cleaned.split("\n")
         )
         if match
     ]
     for macro in names:
         pattern = re.compile(rf"\b{re.escape(macro)}\b")
-        for raw in cleaned.splitlines():
+        for raw in cleaned.split("\n"):
             if raw.lstrip().startswith("#"):
                 continue
             if pattern.search(raw):
@@ -414,7 +424,11 @@ def _index_file(
             f"untracked multi-line macro expansion: {offending_macro}"
         )
 
-    lines = cleaned.splitlines()
+    lines = cleaned.split("\n")
+    # A trailing newline leaves one phantom empty element; it is not a real
+    # source line and must never contribute records or line numbers.
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
     symbols: list[SymbolRecord] = []
     types: list[TypeRecord] = []
     calls: list[CallEdge] = []

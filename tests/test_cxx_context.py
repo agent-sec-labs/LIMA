@@ -1,10 +1,11 @@
 """Deterministic bounded context indexing over verified C/C++ snapshots."""
 
+import hashlib
 import unittest
 from pathlib import Path
 
 from lima.cxx_context import CxxContextIndex
-from lima.workspace import RepositoryWorkspace
+from lima.workspace import RepositoryWorkspace, WorkspaceFile, WorkspaceInventory
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cxx_agent_context"
 
@@ -159,6 +160,117 @@ class CxxContextIndexTests(unittest.TestCase):
 def build_index_inventory_files():
     workspace = RepositoryWorkspace(FIXTURES)
     return workspace.inventory().files
+
+
+class _InlineWorkspace:
+    """Minimal workspace stand-in over in-memory snapshot text."""
+
+    def __init__(self, files):
+        self.files = files
+
+    def read_text(self, path):
+        return self.files[path]
+
+
+def build_inline_index(files):
+    entries = []
+    for path, text in files.items():
+        raw = text.encode("utf-8")
+        entries.append(
+            WorkspaceFile(
+                path=path,
+                size=len(raw),
+                sha256=hashlib.sha256(raw).hexdigest(),
+                line_count=text.count("\n"),
+            )
+        )
+    inventory = WorkspaceInventory(root="<inline>", files=entries)
+    return CxxContextIndex.build(_InlineWorkspace(files), inventory)
+
+
+def real_line_count(text):
+    """Number of real lines under U+000A accounting (no phantom line)."""
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+FORM_FEED_SOURCE = (
+    "int before_form_feed(void) {\n"
+    "    return 1;\f\n"
+    "}\n"
+    "int after_form_feed(void) {\n"
+    "    return 2;\n"
+    "}\n"
+)
+
+FORM_FEED_CALL_SOURCE = (
+    "int first_user(void) {\n"
+    "    return helper(1);\f\n"
+    "}\n"
+    "int second_user(void) {\n"
+    "    return helper(2);\n"
+    "}\n"
+)
+
+TAIL_SOURCE = "int caller_fn(void) {\n    helper(1);\n}"
+
+
+class CxxContextLineAccountingTests(unittest.TestCase):
+    """Line numbers count U+000A only, matching unified-diff/editor numbering."""
+
+    def test_form_feed_does_not_shift_subsequent_line_numbers(self):
+        index = build_inline_index({"paged.c": FORM_FEED_SOURCE})
+        by_id = {symbol.qualified_name: symbol for symbol in index.symbols}
+        self.assertEqual((1, 3), (by_id["before_form_feed"].start_line,
+                                  by_id["before_form_feed"].end_line))
+        # splitlines() would treat the form feed as a line break and place
+        # this function at lines 5-7; U+000A accounting keeps it at 4-6.
+        self.assertEqual((4, 6), (by_id["after_form_feed"].start_line,
+                                  by_id["after_form_feed"].end_line))
+        self.assertEqual((1, 6), (min(s.start_line for s in index.symbols),
+                                  max(s.end_line for s in index.symbols)))
+
+    def test_call_lines_keep_newline_accounting_across_form_feed(self):
+        index = build_inline_index({"paged.c": FORM_FEED_CALL_SOURCE})
+        edges = {(edge.caller, edge.callee, edge.line) for edge in index.calls}
+        self.assertIn(("first_user", "helper", 2), edges)
+        # splitlines() would report this call at line 6.
+        self.assertIn(("second_user", "helper", 5), edges)
+        self.assertTrue(all(line <= 6 for _, _, line in edges))
+
+    def test_trailing_newline_phantom_line_is_never_indexed(self):
+        index = build_inline_index({"tail.c": TAIL_SOURCE + "\n"})
+        self.assertEqual((), index.coverage.parse_gaps)
+        by_id = {symbol.qualified_name: symbol for symbol in index.symbols}
+        self.assertEqual((1, 3), (by_id["caller_fn"].start_line,
+                                  by_id["caller_fn"].end_line))
+        self.assertEqual(
+            {("caller_fn", "helper", 2)}, {
+                (edge.caller, edge.callee, edge.line) for edge in index.calls
+            }
+        )
+        total = real_line_count(TAIL_SOURCE + "\n")
+        for record in index.symbols:
+            self.assertLessEqual(record.end_line, total)
+
+    def test_with_and_without_trailing_newline_agree(self):
+        without = build_inline_index({"tail.c": TAIL_SOURCE})
+        with_newline = build_inline_index({"tail.c": TAIL_SOURCE + "\n"})
+        self.assertEqual(without.symbols, with_newline.symbols)
+        self.assertEqual(without.calls, with_newline.calls)
+        self.assertEqual(without.types, with_newline.types)
+
+    def test_last_real_line_is_indexable_without_trailing_newline(self):
+        # The closing brace is the last real line; an unconditional phantom
+        # drop would swallow it and report end_line 2.
+        index = build_inline_index({"tail.c": TAIL_SOURCE})
+        by_id = {symbol.qualified_name: symbol for symbol in index.symbols}
+        self.assertEqual((1, 3), (by_id["caller_fn"].start_line,
+                                  by_id["caller_fn"].end_line))
+        self.assertEqual(
+            {("caller_fn", "helper", 2)}, {
+                (edge.caller, edge.callee, edge.line) for edge in index.calls
+            }
+        )
 
 
 if __name__ == "__main__":

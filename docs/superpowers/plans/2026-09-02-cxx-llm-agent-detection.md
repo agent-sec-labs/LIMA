@@ -673,21 +673,21 @@ git commit -s -m "feat: fetch pinned GitHub C++ context"
 **Interfaces:**
 - Produces spec 中七个 exact tool 名称；`CxxAgentBudget.consume_call/files/lines/bytes` 原子扣减；每个响应包含读取引用和 hash。
 
-- [ ] **Step 1: RED 安全测试**
+- [x] **Step 1: RED 安全测试**
 
 覆盖仓库外路径、未索引 symbol、反向行范围、单次/累计超限、并发扣减、阶段外 `get_tool_evidence`、提示词注入字符串。
 
-- [ ] **Step 2: RED**
+- [x] **Step 2: RED**
 
 Run: `python -m unittest tests.test_cxx_agent_tools -v`
 
-- [ ] **Step 3: 实现工具注册表**
+- [x] **Step 3: 实现工具注册表**
 
 为每一角色创建最小 ToolRegistry；所有路径通过 snapshot index 解析，不直接接受 `Path`；Evidence 工具只在 Evidence registry 注册。
 
-- [ ] **Step 4: GREEN 与提交**
+- [x] **Step 4: GREEN 与提交**
 
-Run: `python -m unittest tests.test_cxx_agent_tools tests.test_runtime -v`
+Run: `python -m unittest tests.test_cxx_agent_tools tests.test_runtime_memory_context -v  # tests.test_runtime 不存在，实际 runtime companion 为 test_runtime_memory_context`
 
 ```powershell
 git add lima/cxx_agent_tools.py tests/test_cxx_agent_tools.py

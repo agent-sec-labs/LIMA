@@ -489,9 +489,14 @@ class AgentStepTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not carry a tool call"):
             AgentStep(action="final", arguments=(("a", 1),))
 
-    def test_final_requires_candidates(self):
-        with self.assertRaisesRegex(ValueError, "requires at least one candidate"):
-            AgentStep(action="final")
+    def test_empty_final_is_the_no_findings_verdict(self):
+        # Contract change proven by real-code combat: providers answer
+        # {"candidates":[]} for clean code, so an empty final step is the
+        # explicit "no findings" verdict and must round-trip.
+        step = AgentStep(action="final")
+        self.assertEqual((), step.candidates)
+        step = AgentStep(action="final", candidates=())
+        self.assertEqual((), step.candidates)
 
     def test_reason_is_truncated_to_500(self):
         step = AgentStep(
@@ -673,6 +678,79 @@ class SharedChatTransportTests(unittest.TestCase):
     def test_max_bytes_must_be_positive(self):
         with self.assertRaises(ValueError):
             post_chat_completion_text(PROVIDER, BASE_URL, API_KEY, {}, 5, max_bytes=0)
+
+
+class FencedJsonUnwrapTests(unittest.TestCase):
+    """Provider convention: exactly one enclosing Markdown fence is unwrapped.
+
+    Anything looser (prose, multiple blocks, unterminated fences) must stay
+    rejected by the strict parser. Discovered on the real-repository combat
+    run: several providers fence JSON replies probabilistically.
+    """
+
+    def setUp(self):
+        self.tools = make_tools()
+
+    def step_with_content(self, content, read_paths=None, rounds=1):
+        transport = FakeTransport(*([content] * rounds))
+        client = CxxLLMClient(dict(RESOLVED))
+        budget = CxxAgentBudget(max_calls=4, max_output_bytes=100_000)
+        with patch("lima.cxx_llm.post_chat_completion_text", transport):
+            step = client.step(
+                "planner", "managed context body", self.tools, budget,
+                read_paths=read_paths,
+            )
+        return step, transport
+
+    def test_single_json_fence_is_unwrapped(self):
+        step, transport = self.step_with_content(
+            "```json\n" + FINAL_CONTENT + "\n```",
+            read_paths=frozenset({"src/session.cpp"}),
+        )
+        self.assertEqual("final", step.action)
+        self.assertEqual(1, len(transport.calls))
+
+    def test_bare_fence_is_unwrapped(self):
+        step, _ = self.step_with_content(
+            "```\n" + TOOL_CONTENT + "\n```",
+        )
+        self.assertEqual("tool", step.action)
+        self.assertEqual("read_code_snippet", step.tool)
+
+    def test_prose_around_json_is_still_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self.step_with_content(
+                "Here is my answer:\n```json\n" + FINAL_CONTENT
+                + "\n```\nHope this helps.",
+                read_paths=frozenset({"src/session.cpp"}), rounds=2,
+            )
+
+    def test_multiple_fences_are_still_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self.step_with_content(
+                "```json\n" + FINAL_CONTENT + "\n```\n```json\n"
+                + FINAL_CONTENT + "\n```",
+                read_paths=frozenset({"src/session.cpp"}), rounds=2,
+            )
+
+    def test_unterminated_fence_is_still_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self.step_with_content(
+                "```json\n" + FINAL_CONTENT,
+                read_paths=frozenset({"src/session.cpp"}), rounds=2,
+            )
+
+    def test_unfenced_payload_unchanged(self):
+        step, _ = self.step_with_content(TOOL_CONTENT)
+        self.assertEqual("tool", step.action)
+
+    def test_empty_final_round_trips_as_no_findings(self):
+        step, transport = self.step_with_content(
+            '{"action":"final","candidates":[]}',
+        )
+        self.assertEqual("final", step.action)
+        self.assertEqual((), step.candidates)
+        self.assertEqual(1, len(transport.calls))
 
 
 if __name__ == "__main__":

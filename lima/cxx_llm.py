@@ -59,8 +59,7 @@ _STEP_SCHEMA = (
     '{"cwe":"CWE-787|CWE-125|CWE-416|CWE-415","path":"...","line":1,'
     '"symbol":"...","title":"...","mechanism":"...",'
     '"trigger_path":["..."],"confidence":0.0}. The "path" must be a relative '
-    "POSIX path actually read in this task and you must provide 1 to 20 "
-    "candidates."
+    "POSIX path actually read in this task; provide 0 to 20 candidates where "
 )
 
 
@@ -111,8 +110,9 @@ class AgentStep:
             return
         if self.tool or self.arguments:
             raise ValueError("a final step must not carry a tool call")
-        if not self.candidates:
-            raise ValueError("a final step requires at least one candidate")
+        # An empty final step is the model's explicit "no findings" verdict;
+        # real-code combat showed providers answer [] for clean code, and the
+        # pipeline must be able to round-trip that judgement honestly.
         if len(self.candidates) > MAX_STEP_CANDIDATES:
             raise ValueError(
                 f"a final step carries at most {MAX_STEP_CANDIDATES} candidates"
@@ -130,6 +130,36 @@ def _require_text(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field_name} must be non-empty text")
     return value
+
+
+def _unwrap_fenced_json(raw: str) -> str:
+    """Unwrap exactly one enclosing Markdown code fence, nothing else.
+
+    Many OpenAI-compatible providers (and several Gemini/Claude tiers) wrap
+    JSON replies in a single `````json ... ````` block. That wrapper is a
+    well-defined provider convention, not model-authored ambiguity, so the
+    one-block form is unwrapped before the strict parser runs. Anything else
+    -- prose around JSON, several blocks, an unterminated fence -- is left
+    untouched and therefore still rejected by ``parse_untrusted_json``.
+    """
+    stripped = raw.strip()
+    if not stripped.startswith("```"):
+        return raw
+    first_newline = stripped.find("\n")
+    if first_newline < 0:
+        return raw
+    opening = stripped[:first_newline].strip()
+    if opening not in {"```", "```json", "```JSON"}:
+        return raw
+    if not stripped.endswith("```"):
+        return raw
+    inner = stripped[first_newline + 1:].strip()
+    if not inner.endswith("```"):
+        return raw
+    inner = inner[: inner.rfind("```")].strip()
+    if "```" in inner:
+        return raw
+    return inner
 
 
 def _tool_catalog(
@@ -318,7 +348,7 @@ class CxxLLMClient:
         read_paths: frozenset[str] | None,
     ) -> AgentStep:
         try:
-            data = parse_untrusted_json(raw)
+            data = parse_untrusted_json(_unwrap_fenced_json(raw))
         except ValueError as exc:
             raise _StepFormatError(str(exc) or "payload is not valid JSON", raw) from exc
         if type(data) is not dict:
@@ -350,10 +380,11 @@ class CxxLLMClient:
             raw_candidates = data["candidates"]
             if (
                 type(raw_candidates) is not list
-                or not 1 <= len(raw_candidates) <= MAX_STEP_CANDIDATES
+                or not 0 <= len(raw_candidates) <= MAX_STEP_CANDIDATES
             ):
                 raise _StepFormatError(
-                    f"candidates must be a list of 1 to {MAX_STEP_CANDIDATES} items",
+                    f"candidates must be a list of 0 to {MAX_STEP_CANDIDATES} "
+                    "items (empty means no findings)",
                     raw,
                 )
             candidates = []

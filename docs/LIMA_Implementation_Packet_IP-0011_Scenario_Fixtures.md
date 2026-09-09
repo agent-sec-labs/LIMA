@@ -244,6 +244,11 @@ VerifiedPatchTests(4)
   test_schema_structural_pass
 ```
 
+> 注（2026-09-09, DR-IP-0011-NAMING-01）：6 个状态类首方法在冻结基线中以共享基类
+> _StateTestBase.test_decode_and_markers 实现，经继承展开为各类有效测试 ID；
+> §17 所列状态特定变体名（outcome/failure/verdict/kind）指该方法的场景特定断言意图。
+> 运行时有效测试 ID 总数 32 不变。
+
 `test_schema_structural_pass` = PR3 mini-validator 对 bundle 内有对应 schema 的 payload 做结构校验(补充面,不作状态判定)。N = **32**。
 
 ---

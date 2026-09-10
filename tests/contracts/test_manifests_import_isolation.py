@@ -163,10 +163,31 @@ class ManifestsImportIsolationTests(unittest.TestCase):
             self.assertNotIn(module, lima_loaded)
 
     def test_in_process_import_leaves_domain_modules_unimported(self):
-        import lima.contracts.manifests  # noqa: F401 -- import side effect under test
-
+        # DR-3 D2: same-process sys.modules assertions are unreliable under
+        # pytest collection (module-level imports of sibling test modules
+        # pollute sys.modules), so this check runs in a child interpreter,
+        # structurally identical to test_clean_process_import_loads_no_domain_modules.
+        script = (
+            "import sys\n"
+            "import lima.contracts.manifests\n"
+            "loaded = sorted(sys.modules)\n"
+            "print(' '.join(loaded))\n"
+        )
+        # noqa justification: fixed interpreter with an inline constant script;
+        # no untrusted input reaches the command line.
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", script],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        loaded = set(result.stdout.split())
+        self.assertIn("lima.contracts.manifests", loaded)
         for module in DOMAIN_MODULES:
-            self.assertNotIn(module, sys.modules)
+            self.assertNotIn(module, loaded)
 
     def test_existing_twelve_modules_do_not_import_manifests(self):
         # Twelve-module reverse assertion: after importing each existing
@@ -218,7 +239,10 @@ class ManifestsImportIsolationTests(unittest.TestCase):
         import lima.contracts.manifests  # noqa: F401 -- import side effect under test
 
         after = {name for name in vars(contracts) if not name.startswith("_")}
-        self.assertEqual(before, after)
+        # DR-3 D3: importing the manifests submodule may bind the submodule
+        # name onto the parent package (importlib behavior, not public API);
+        # the frozen __all__ snapshots above cover the public API invariants.
+        self.assertLessEqual(set(after) - set(before), {"manifests"})
         self.assertEqual(list(contracts.__all__), IP_0001_TOP_LEVEL_API)
 
 

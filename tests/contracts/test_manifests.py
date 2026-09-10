@@ -15,7 +15,14 @@ import unittest
 from pathlib import Path
 
 from lima.contracts.codec import canonical_decode, compute_content_digest
-from lima.contracts.common import SchemaVersion
+from lima.contracts.common import (
+    ArtifactClassification,
+    ArtifactEnvelope,
+    ArtifactReference,
+    RetentionClass,
+    SchemaVersion,
+    encode_envelope,
+)
 from lima.contracts.errors import ContractError, ContractErrorCode
 from lima.contracts.execution import decode_run_manifest_payload
 
@@ -122,6 +129,50 @@ def _sb_wire(**overrides):
     }
     wire.update(overrides)
     return wire
+
+
+def _sb_ref(schema_name, artifact_id, content_digest):
+    return ArtifactReference(
+        schema_name=schema_name,
+        schema_version=V4,
+        artifact_id=artifact_id,
+        tenant_id="tenant-1",
+        repository_snapshot_digest="3" * 64,
+        content_digest=content_digest,
+    )
+
+
+def _sb_envelope_with_tampered_task_lineage(payload):
+    # Same construction shape as test_manifests_envelope.py's _sb_envelope /
+    # _ref / encode_envelope helpers; the task-manifest-0001 lineage digest is
+    # tampered to "9" * 64 while the payload-side task link keeps the golden
+    # FULL digest (D_TASK_FULL via the fixture itself).
+    lineage = [
+        _sb_ref("lima.task-manifest", "task-manifest-0001", "9" * 64),
+        _sb_ref("lima.tool-bundle", "tool-bundle-0001", D_TB_FULL),
+        _sb_ref("lima.stage-attempt", "log-0001", "1" * 64),
+        _sb_ref("lima.stage-attempt", "log-0002", "2" * 64),
+    ]
+    return ArtifactEnvelope(
+        schema_name="lima.sandbox-run",
+        schema_version=V4,
+        artifact_id="sandbox-run-0001",
+        tenant_id="tenant-1",
+        task_id="task-1",
+        workflow_id="workflow-0001",
+        stage_attempt_id="mine-emit-2",
+        repository_snapshot_digest="3" * 64,
+        producer="lima-planner",
+        created_at="2026-09-10T00:00:00Z",
+        policy_digest="5" * 64,
+        toolchain_digest="6" * 64,
+        content_digest=compute_content_digest(payload),
+        classification=ArtifactClassification.INTERNAL,
+        retention_class=RetentionClass.STANDARD,
+        payload=payload,
+        lineage=lineage,
+        supersedes=None,
+    )
 
 
 class _RejectionMixin:
@@ -518,11 +569,27 @@ class SandboxRunPayloadTests(_RejectionMixin, unittest.TestCase):
         encoded = self.manifests.encode_sandbox_run_payload(run)
         self.assertIs(encoded["exit_code"], None)
 
-    def test_network_policy_consistency_with_task_is_enforced(self):
-        wire = _sb_wire(network_policy="egress_allowlist")
+    def test_network_policy_vocabulary_enforced_and_task_binding_checked_at_envelope(self):
+        # `task.network_policy == network_policy` semantic-level consistency is
+        # a runtime check owned by Packet §8 #90; the contract layer expresses
+        # it via the vocabulary below plus the envelope digest binding (DR-2
+        # ruling; Not-covered per DR-1).
         self._assert_rejected(
-            lambda: self.manifests.decode_sandbox_run_payload(wire, schema_version=V4),
-            ContractErrorCode.INVALID_FIELD_VALUE,
+            lambda: self.manifests.decode_sandbox_run_payload(
+                _sb_wire(network_policy="allow_all"), schema_version=V4
+            ),
+            ContractErrorCode.UNKNOWN_ENUM_VALUE,
+            "$.network_policy",
+        )
+        envelope = _sb_envelope_with_tampered_task_lineage(
+            _wire("sandbox_run_full_v4_golden.json")
+        )
+        self._assert_rejected(
+            lambda: self.manifests.decode_sandbox_run_envelope(
+                encode_envelope(envelope)
+            ),
+            ContractErrorCode.DIGEST_MISMATCH,
+            "$.payload.task.content_digest",
         )
 
     def test_rejects_mount_vocabulary_violations(self):

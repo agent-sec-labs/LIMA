@@ -14,7 +14,11 @@ The module under test is imported in ``setUpClass`` so that in the RED state
 import unittest
 from pathlib import Path
 
-from lima.contracts.codec import canonical_decode, compute_content_digest
+from lima.contracts.codec import (
+    canonical_decode,
+    canonical_encode,
+    compute_content_digest,
+)
 from lima.contracts.common import (
     ArtifactClassification,
     ArtifactEnvelope,
@@ -33,6 +37,7 @@ D_TASK_FULL = "4f877245988a8fda3a4347e21f5c222960ea285a0c15ba35881ef4daf0bf6c7c"
 D_TB_FULL = "11d92b92c8da9ff61a4ebc8c65bcb26ad1c8f7d208074c0251910c215c327ccc"
 D_TB_MIN = "50b8e53b62946b5dcb01a972754aad4b1bf6c69f05bc9525c7e0ee6aa7490ff6"
 D_DEP_MIN = "eaab702a3530635dd7b096c93990d3bc76117f04b89dd2163a5c16bed6e70e61"
+D_DEP_FULL = "777741bef97042ea8e69d1c1483b796cfd42d5f6d427980a46232fcd7c79a511"
 D_SB_FULL = "398929c2277b99d45b30d28920921d787ee11112e44ec7b08e13bbb1ce8b066f"
 
 
@@ -66,7 +71,7 @@ def _sb_full_payload():
 def _task_lineage():
     return [
         _ref("lima.tool-bundle", "tool-bundle-0001", D_TB_FULL),
-        _ref("lima.dependency-manifest", "dependency-manifest-0001", D_DEP_MIN),
+        _ref("lima.dependency-manifest", "dependency-manifest-0001", D_DEP_FULL),
         _ref("lima.hypothesis", "hyp-0001", "7" * 64),
         _ref("lima.hypothesis", "hyp-0002", "8" * 64),
     ]
@@ -430,10 +435,15 @@ class ToolBundleAndDependencyEnvelopeTests(_RejectionMixin, unittest.TestCase):
                 decoded_envelope, decoded_manifest
             ),
         )
-        envelope = _dep_envelope(content_digest="0" * 64)
+        # DR-3 D1: tamper at the wire layer. ``first`` is the canonical wire
+        # encoding of a legal envelope; shallow-copy the decoded wire dict and
+        # overwrite only ``content_digest`` so the mismatch surfaces inside the
+        # decode path (ArtifactEnvelope reconstruction), not during arrange.
+        tampered = dict(canonical_decode(first))
+        tampered["content_digest"] = "0" * 64
         self._assert_rejected(
             lambda: self.manifests.decode_dependency_manifest_envelope(
-                encode_envelope(envelope)
+                canonical_encode(tampered)
             ),
             ContractErrorCode.DIGEST_MISMATCH,
             "$.content_digest",

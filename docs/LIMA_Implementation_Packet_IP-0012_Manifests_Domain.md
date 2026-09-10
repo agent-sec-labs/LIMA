@@ -192,6 +192,9 @@ tool_bundles: [ManifestLink kind=lima.tool-bundle](mining 深字段② tool refs
 dependencies: [ManifestLink kind=lima.dependency-manifest](cap 8;排序唯一)
 harness_commands: [[str]](mining 深字段③ harness plan;≤16 条命令、每条 ≤32 个 argv 词、
   每词 ≤512 UTF-8 字节;词必须匹配 [A-Za-z0-9_./:=,-]+——零绝对路径,零 shell 元字符)
+
+> 注（2026-09-11, DR-1 §3-C1 勘误）：词类字符集 `[A-Za-z0-9_./:=, -]` 明确包含 U+0020（空格）；裁定正本见 PKT-IP-0012_DR1_ADJUDICATION_RECORD_2026-09-10.md。冻结测试与实现（`80feaea`）均按此口径。
+
 oracle_kind: enum {deterministic_exit, differential_output, property_assertion}
   (mining 深字段④ oracle 的最小词表化)
 network_policy: enum {deny_all, egress_allowlist}(mining 深字段⑤ resource/network policy 的

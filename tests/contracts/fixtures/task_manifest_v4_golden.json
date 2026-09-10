@@ -1,0 +1,1 @@
+{"dependencies":[],"harness_commands":[["python","-m","lima.mine","--task","task-0001"]],"hypothesis_ids":["hyp-0001"],"network_policy":"deny_all","oracle_kind":"deterministic_exit","revision":1,"tool_bundles":[]}

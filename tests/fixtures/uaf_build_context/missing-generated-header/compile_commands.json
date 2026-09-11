@@ -1,0 +1,15 @@
+[
+  {
+    "directory": ".",
+    "file": "src/main.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-include",
+      "build/generated/config.h",
+      "src/main.c",
+      "-o",
+      "main.o"
+    ]
+  }
+]

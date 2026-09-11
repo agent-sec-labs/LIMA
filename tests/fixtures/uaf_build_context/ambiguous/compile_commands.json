@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "src/main.c",
+    "arguments": ["clang", "-c", "-DONE=1", "-std=c11", "src/main.c"]
+  },
+  {
+    "directory": ".",
+    "file": "src/main.c",
+    "arguments": ["clang", "-c", "-DTWO=2", "-std=c99", "src/main.c"]
+  }
+]

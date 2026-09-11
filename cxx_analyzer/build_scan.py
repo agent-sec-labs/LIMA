@@ -5,13 +5,20 @@ from __future__ import annotations
 import json
 import plistlib
 import re
-import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
 from . import trust
+from .build_context import (
+    MAX_DATABASE_BYTES,
+    MAX_DATABASE_ENTRIES,
+    compiler_command_to_argv,
+    find_compile_databases,
+    inside_snapshot,
+    validate_argument_paths,
+)
 from .config import MAX_ARGUMENT_BYTES, MAX_ARGUMENTS_PER_STEP, AnalyzerSettings
 from .deadline import AnalysisDeadline
 from .execution import (
@@ -56,8 +63,6 @@ _CWE_SLUG: Final = {
     "CWE-416": "use-after-free",
     "CWE-415": "double-free",
 }
-_MAX_DATABASE_BYTES: Final = 4 * 1024 * 1024
-_MAX_DATABASE_ENTRIES: Final = 2048
 _MAX_PLIST_BYTES: Final = 4 * 1024 * 1024
 _ANALYZER_TEMP_ROOT: Path | None = None
 MAX_COMPILATION_UNITS: Final = 256
@@ -66,68 +71,6 @@ MAX_DIAGNOSTICS: Final = 256
 MAX_TOOL_RUNS: Final = 320
 MAX_AGGREGATE_PLIST_BYTES: Final = 8 * 1024 * 1024
 _BUDGET_DIAGNOSTIC: Final = "analysis-budget-exhausted"
-_SUPPORTED_PATH_OPTIONS: Final = frozenset(
-    {
-        "-I",
-        "-F",
-        "-B",
-        "-include",
-        "-include-pch",
-        "-include-pth",
-        "-imacros",
-        "-isystem",
-        "-isysroot",
-        "-iquote",
-        "-idirafter",
-        "-iframework",
-        "-iframeworkwithsysroot",
-        "-iprefix",
-        "-iwithprefix",
-        "-iwithprefixbefore",
-        "-ivfsoverlay",
-        "-resource-dir",
-        "-stdlib++-isystem",
-        "--sysroot",
-        "--gcc-toolchain",
-        "-gcc-toolchain",
-        "-fmodule-file",
-        "-fmodule-map-file",
-        "-fprofile-use",
-        "-fprofile-instr-use",
-        "-fprofile-sample-use",
-        "-fprofile-list",
-        "-fmodules-cache-path",
-    }
-)
-_CONCATENATED_PATH_OPTIONS: Final = ("-I", "-F", "-B")
-_FORBIDDEN_PASSTHROUGH_OPTIONS: Final = frozenset(
-    {
-        "-cc1",
-        "-fplugin",
-        "-load",
-        "-mllvm",
-        "-plugin",
-        "-Xanalyzer",
-        "-Xassembler",
-        "-Xclang",
-        "-Xlinker",
-        "-Xpreprocessor",
-        "--config",
-    }
-)
-_FORBIDDEN_PASSTHROUGH_PREFIXES: Final = ("-Wa,", "-Wl,", "-Wp,")
-_FORBIDDEN_JOINED_PASSTHROUGH_PREFIXES: Final = (
-    "--config=",
-    "-fplugin=",
-    "-load=",
-    "-mllvm=",
-    "-plugin=",
-    "-Xanalyzer=",
-    "-Xassembler=",
-    "-Xclang=",
-    "-Xlinker=",
-    "-Xpreprocessor=",
-)
 
 
 @dataclass(frozen=True)
@@ -177,22 +120,6 @@ def select_build_steps(
     return settings.build_steps
 
 
-def _inside_snapshot(root: Path, value: Path) -> tuple[Path, str]:
-    resolved_root = root.resolve()
-    resolved = value.resolve()
-    try:
-        relative = resolved.relative_to(resolved_root)
-    except ValueError as exc:
-        raise ValueError("build path escapes the snapshot") from exc
-    relative_text = relative.as_posix()
-    if relative_text in {"", "."}:
-        return resolved, "."
-    parsed = PurePosixPath(relative_text)
-    if any(part in {"", ".", ".."} for part in parsed.parts):
-        raise ValueError("build path is not a safe snapshot-relative path")
-    return resolved, relative_text
-
-
 def _bounded_bytes(path: Path, maximum: int, label: str) -> bytes:
     try:
         with path.open("rb") as stream:
@@ -206,89 +133,9 @@ def _bounded_bytes(path: Path, maximum: int, label: str) -> bytes:
 
 def _bounded_json(path: Path) -> object:
     try:
-        return json.loads(_bounded_bytes(path, _MAX_DATABASE_BYTES, "compilation database"))
+        return json.loads(_bounded_bytes(path, MAX_DATABASE_BYTES, "compilation database"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("compilation database is unreadable") from exc
-
-
-def _validate_argument_paths(root: Path, working_directory: Path, arguments: list[str]) -> None:
-    if not arguments[0]:
-        raise ValueError("compilation database executable is empty")
-    expected_path_option: str | None = None
-    for argument in arguments[1:]:
-        if argument.startswith("@"):
-            raise ValueError("compilation database response files are forbidden")
-        if expected_path_option is not None:
-            if expected_path_option == "-fmodule-file" and "=" in argument:
-                argument = argument.rsplit("=", 1)[1]
-            if not argument:
-                raise ValueError("compilation database path option is empty")
-            _inside_snapshot(
-                root,
-                Path(argument) if Path(argument).is_absolute() else working_directory / argument,
-            )
-            expected_path_option = None
-            continue
-        if argument in _FORBIDDEN_PASSTHROUGH_OPTIONS or argument.startswith(
-            (*_FORBIDDEN_PASSTHROUGH_PREFIXES, *_FORBIDDEN_JOINED_PASSTHROUGH_PREFIXES)
-        ):
-            raise ValueError("compilation database passthrough options are forbidden")
-        if argument in _SUPPORTED_PATH_OPTIONS:
-            expected_path_option = argument
-            continue
-        option, separator, option_value = argument.partition("=")
-        if separator and option in _SUPPORTED_PATH_OPTIONS:
-            if option == "-fmodule-file" and "=" in option_value:
-                option_value = option_value.rsplit("=", 1)[1]
-            if not option_value:
-                raise ValueError("compilation database path option is empty")
-            _inside_snapshot(
-                root,
-                Path(option_value)
-                if Path(option_value).is_absolute()
-                else working_directory / option_value,
-            )
-            continue
-        concatenated_path = next(
-            (
-                argument[len(prefix) :]
-                for prefix in _CONCATENATED_PATH_OPTIONS
-                if argument.startswith(prefix) and len(argument) > len(prefix)
-            ),
-            None,
-        )
-        if concatenated_path is not None:
-            _inside_snapshot(
-                root,
-                Path(concatenated_path)
-                if Path(concatenated_path).is_absolute()
-                else working_directory / concatenated_path,
-            )
-            continue
-        if (
-            argument.startswith("-")
-            and not argument.startswith(("-D", "-U"))
-            and ("/" in argument or "\\" in argument)
-        ):
-            raise ValueError("unknown joined path-bearing option is forbidden")
-        if (
-            separator
-            and not option.startswith(("-D", "-U"))
-            and (
-                Path(option_value).is_absolute()
-                or "/" in option_value
-                or "\\" in option_value
-                or option_value.startswith(".")
-            )
-        ):
-            raise ValueError("unknown path-bearing compiler option is forbidden")
-        if not argument.startswith("-"):
-            _inside_snapshot(
-                root,
-                Path(argument) if Path(argument).is_absolute() else working_directory / argument,
-            )
-    if expected_path_option is not None:
-        raise ValueError("compilation database path option lacks a value")
 
 
 def load_compilation_database(
@@ -306,9 +153,9 @@ def load_compilation_database(
     """
 
     root = Path(snapshot.root).resolve()
-    database, _ = _inside_snapshot(root, Path(database_path))
+    database, _ = inside_snapshot(root, Path(database_path))
     document = _bounded_json(database)
-    if not isinstance(document, list) or len(document) > _MAX_DATABASE_ENTRIES:
+    if not isinstance(document, list) or len(document) > MAX_DATABASE_ENTRIES:
         raise ValueError("compilation database must be a bounded array")
     if len(document) > MAX_COMPILATION_UNITS:
         raise AnalysisBudgetExceeded("compilation unit budget exhausted")
@@ -320,13 +167,7 @@ def load_compilation_database(
             raise ValueError("compilation database entry is invalid")
         arguments = entry.get("arguments")
         if arguments is None and "command" in entry:
-            command = entry["command"]
-            if not isinstance(command, str) or not command:
-                raise ValueError("compilation database command is invalid")
-            try:
-                arguments = shlex.split(command, posix=True)
-            except ValueError as exc:
-                raise ValueError("compilation database command is invalid") from exc
+            arguments = compiler_command_to_argv(entry["command"])
         directory = entry.get("directory")
         file = entry.get("file")
         if (
@@ -346,14 +187,14 @@ def load_compilation_database(
             for argument in arguments
         ):
             raise ValueError("compilation database arguments are invalid")
-        working_directory, relative_directory = _inside_snapshot(
+        working_directory, relative_directory = inside_snapshot(
             root, Path(directory) if Path(directory).is_absolute() else root / directory
         )
-        _validate_argument_paths(root, working_directory, arguments)
+        validate_argument_paths(root, working_directory, arguments)
         source_path = Path(file)
         if not source_path.is_absolute():
             source_path = working_directory / source_path
-        _, relative_file = _inside_snapshot(root, source_path)
+        _, relative_file = inside_snapshot(root, source_path)
         if relative_file not in snapshot_files:
             raise ValueError("compilation database source is outside the snapshot inventory")
         units.append(CompilationUnit(relative_directory, relative_file, tuple(arguments)))
@@ -364,12 +205,12 @@ def _safe_plist_path(value: object, snapshot: PreparedSnapshot, relative_cwd: st
     if not isinstance(value, str) or not value or "\0" in value or "\\" in value:
         raise ValueError("Clang plist file path is invalid")
     root = Path(snapshot.root).resolve()
-    working_directory, _ = _inside_snapshot(root, root / relative_cwd)
+    working_directory, _ = inside_snapshot(root, root / relative_cwd)
     candidate = Path(value)
     if candidate.is_absolute():
-        _, relative = _inside_snapshot(root, candidate)
+        _, relative = inside_snapshot(root, candidate)
     else:
-        _, relative = _inside_snapshot(root, working_directory / value)
+        _, relative = inside_snapshot(root, working_directory / value)
     return relative if relative in set(snapshot.files) else None
 
 
@@ -694,13 +535,10 @@ def _extend_parsed_results(
 
 
 def _find_database(snapshot: PreparedSnapshot) -> Path | None:
-    root = Path(snapshot.root)
-    preferred = (root / "build" / "compile_commands.json", root / "compile_commands.json")
-    for candidate in preferred:
-        if candidate.is_file():
-            return candidate
-    candidates = sorted(root.glob("*/compile_commands.json"))
-    return candidates[0] if len(candidates) == 1 else None
+    """Select the highest-priority compilation database (extracted search)."""
+
+    databases = find_compile_databases(Path(snapshot.root))
+    return databases[0] if databases else None
 
 
 def _analyzer_argv(unit: CompilationUnit, output: Path) -> tuple[str, ...]:

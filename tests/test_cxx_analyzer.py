@@ -3401,5 +3401,462 @@ class SourceRuleTests(unittest.TestCase):
                 )
 
 
+class BuildContextResolverTests(unittest.TestCase):
+    """Task 3: the build context resolver pins compile semantics fail-closed.
+
+    Red lines under test: the default path never generates a compilation
+    database (no CMake/Make/script execution), trusted generation stays
+    configure-only and is unimplemented (``unavailable``), a heuristic
+    context is always ``incomplete`` and can never reach ``fact-verified``,
+    and repository compiler argv is filtered with explicit rejections
+    (response files, plugins, path escapes) instead of being trusted.
+    """
+
+    _FIXTURES = Path(__file__).parent / "fixtures" / "uaf_build_context"
+
+    # The five machine-provable capability names frozen by Task 0
+    # (cxx_analyzer.trust.build_generation_capabilities).
+    _CAPABILITY_NAMES = (
+        "landlock",
+        "process_isolation",
+        "non_root",
+        "network_isolated",
+        "snapshot_readonly",
+    )
+
+    def _settings(self, **changes: object) -> AnalyzerSettings:
+        values: dict[str, object] = {
+            "auto_cmake": True,
+            "build_steps": (),
+            "test_steps": (),
+            "max_memory_mb": 1024,
+            "max_processes": 32,
+            "max_output_bytes": 8192,
+            "step_timeout_seconds": 17,
+            "total_timeout_seconds": 90,
+            "repository_scan_max_files": 100,
+            "repository_scan_max_file_bytes": 4096,
+            "repository_scan_max_total_bytes": 16384,
+            "trusted_build_context_generation": False,
+        }
+        values.update(changes)
+        return AnalyzerSettings(**values)
+
+    def _fixture(self, name: str) -> Path:
+        """Copy a static fixture into a private temporary snapshot root."""
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "snapshot"
+        shutil.copytree(self._FIXTURES / name, root)
+        return root
+
+    @staticmethod
+    def _file_set(root: Path) -> list[str]:
+        return sorted(
+            path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
+        )
+
+    @staticmethod
+    def _expected_context_hash(
+        translation_unit: str, semantic_arguments: list[str], workdir: str = "."
+    ) -> str:
+        material = {
+            "tu": translation_unit,
+            "source_kind": "repository-compdb",
+            "args": semantic_arguments,
+            "workdir": workdir,
+        }
+        encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _all_capabilities(self) -> dict[str, bool]:
+        return {name: True for name in self._CAPABILITY_NAMES}
+
+    def test_default_paths_never_generate_compdb(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        cases = (
+            ("default settings", self._settings(), None),
+            (
+                "untrusted gate with full capabilities",
+                self._settings(trusted_build_context_generation=False),
+                self._all_capabilities(),
+            ),
+            (
+                "trusted gate without the cmake adapter selection",
+                self._settings(trusted_build_context_generation=True, auto_cmake=False),
+                self._all_capabilities(),
+            ),
+        )
+        for description, settings, capabilities in cases:
+            with self.subTest(case=description):
+                root = self._fixture("evil-cmake")
+                before = self._file_set(root)
+                resolution = resolve_build_context(root, "src/main.c", settings, capabilities)
+                self.assertEqual("incomplete", resolution.status)
+                self.assertEqual("heuristic", resolution.source_kind)
+                self.assertEqual(("heuristic-context",), resolution.diagnostics)
+                self.assertNotIn(
+                    "generation-not-implemented-in-this-task", resolution.diagnostics
+                )
+                self.assertEqual(before, self._file_set(root))
+                self.assertFalse((root / "pwned.txt").exists())
+
+    def test_trusted_generation_requires_all_capabilities(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        for missing in self._CAPABILITY_NAMES:
+            with self.subTest(missing_capability=missing):
+                capabilities = self._all_capabilities()
+                capabilities[missing] = False
+                root = self._fixture("evil-cmake")
+                resolution = resolve_build_context(
+                    root,
+                    "src/main.c",
+                    self._settings(trusted_build_context_generation=True),
+                    capabilities,
+                )
+                # Any missing capability fails closed: the generation path is
+                # not entered and the plain heuristic fallback applies.
+                self.assertEqual("incomplete", resolution.status)
+                self.assertEqual("heuristic", resolution.source_kind)
+                self.assertNotIn(
+                    "generation-not-implemented-in-this-task", resolution.diagnostics
+                )
+        root = self._fixture("evil-cmake")
+        resolution = resolve_build_context(
+            root,
+            "src/main.c",
+            self._settings(trusted_build_context_generation=True),
+            self._all_capabilities(),
+        )
+        self.assertEqual("unavailable", resolution.status)
+        self.assertEqual("cmake-export", resolution.source_kind)
+
+    def test_cmake_adapter_configures_only_no_build(self):
+        from cxx_analyzer import build_context
+        from cxx_analyzer.build_context import resolve_build_context
+
+        self.assertIs(True, build_context.GENERATION_CONFIGURE_ONLY)
+        self.assertIn(
+            "GENERATION_CONFIGURE_ONLY",
+            build_context.resolve_build_context.__doc__ or "",
+        )
+        self.assertIn("configure-only", build_context.resolve_build_context.__doc__ or "")
+
+        root = self._fixture("evil-cmake")
+        before = self._file_set(root)
+        resolution = resolve_build_context(
+            root,
+            "src/main.c",
+            self._settings(trusted_build_context_generation=True),
+            self._all_capabilities(),
+        )
+        self.assertEqual("unavailable", resolution.status)
+        self.assertEqual("cmake-export", resolution.source_kind)
+        self.assertIn("generation-not-implemented-in-this-task", resolution.diagnostics)
+        self.assertEqual("", resolution.context_hash)
+        self.assertEqual(before, self._file_set(root))
+        self.assertFalse((root / "pwned.txt").exists())
+
+        # Without CMakeLists.txt but with another build system present, the
+        # adapter tier is the build-adapter source kind; still unavailable.
+        (root / "CMakeLists.txt").unlink()
+        (root / "Makefile").write_text("all:\n\ttrue\n", encoding="utf-8")
+        adapter = resolve_build_context(
+            root,
+            "src/main.c",
+            self._settings(trusted_build_context_generation=True),
+            self._all_capabilities(),
+        )
+        self.assertEqual("unavailable", adapter.status)
+        self.assertEqual("build-adapter", adapter.source_kind)
+        self.assertIn("generation-not-implemented-in-this-task", adapter.diagnostics)
+
+    def test_root_and_build_dir_compdb_priority(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        root = self._fixture("ok")
+        baseline = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("resolved", baseline.status)
+
+        build_dir = root / "build"
+        build_dir.mkdir()
+        build_entry = {
+            "directory": ".",
+            "file": "src/main.c",
+            "arguments": [
+                "clang",
+                "-c",
+                "-DBUILD_LAYER=1",
+                "-std=c99",
+                "src/main.c",
+                "-o",
+                "build/main.o",
+            ],
+        }
+        (build_dir / "compile_commands.json").write_text(
+            json.dumps([build_entry]), encoding="utf-8"
+        )
+        with_build = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("resolved", with_build.status)
+        # build/compile_commands.json wins over the root database.
+        self.assertEqual(
+            self._expected_context_hash("src/main.c", ["-DBUILD_LAYER=1", "-std=c99"]),
+            with_build.context_hash,
+        )
+        self.assertNotEqual(baseline.context_hash, with_build.context_hash)
+
+        # Removing the losing root database does not change the resolution.
+        (root / "compile_commands.json").unlink()
+        without_root = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual(with_build.context_hash, without_root.context_hash)
+
+    def test_unique_subdirectory_compdb(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        root = self._fixture("nested-unique")
+        resolution = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("resolved", resolution.status)
+        self.assertEqual("repository-compdb", resolution.source_kind)
+        self.assertEqual(
+            self._expected_context_hash("src/main.c", ["-DNESTED=1"]),
+            resolution.context_hash,
+        )
+        self.assertEqual((), resolution.diagnostics)
+
+    def test_ambiguous_tu_entries_are_incomplete(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        root = self._fixture("ambiguous")
+        resolution = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("incomplete", resolution.status)
+        self.assertEqual("repository-compdb", resolution.source_kind)
+        self.assertIn("ambiguous-tu-entry", resolution.diagnostics)
+        self.assertEqual("", resolution.context_hash)
+
+    def test_response_file_and_escape_arguments_rejected(self):
+        from cxx_analyzer.build_context import resolve_build_context, validate_compiler_argv
+
+        root = self._fixture("escape-args")
+        cases = {
+            "src/a.c": "path-escapes-snapshot",
+            "src/b.c": "response-file-forbidden",
+            "src/c.c": "forbidden-passthrough-option",
+        }
+        for translation_unit, expected_rejection in cases.items():
+            with self.subTest(translation_unit=translation_unit):
+                resolution = resolve_build_context(root, translation_unit, self._settings())
+                self.assertEqual("incomplete", resolution.status)
+                self.assertEqual("repository-compdb", resolution.source_kind)
+                self.assertIn(expected_rejection, resolution.diagnostics)
+                self.assertEqual("", resolution.context_hash)
+
+        # The shared pure validator used by the build scan layer agrees.
+        normalized, rejections = validate_compiler_argv(
+            ["clang", "-c", "@resp.rsp", "src/b.c"]
+        )
+        self.assertEqual([], normalized)
+        self.assertIn("response-file-forbidden", rejections)
+        normalized, rejections = validate_compiler_argv(
+            ["clang", "-c", "../escape.h"],
+            root=root,
+            working_directory=root,
+        )
+        self.assertEqual([], normalized)
+        self.assertIn("path-escapes-snapshot", rejections)
+        normalized, rejections = validate_compiler_argv(["clang", "-c", "-Xclang", "-load"])
+        self.assertEqual([], normalized)
+        self.assertIn("forbidden-passthrough-option", rejections)
+
+    def test_missing_generated_header_is_incomplete(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        root = self._fixture("missing-generated-header")
+        resolution = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("incomplete", resolution.status)
+        self.assertEqual("repository-compdb", resolution.source_kind)
+        self.assertIn("missing-referenced-path", resolution.diagnostics)
+        self.assertEqual("", resolution.context_hash)
+
+    def test_heuristic_is_already_incomplete_and_forbids_fact_verified(self):
+        from cxx_analyzer.build_context import (
+            heuristic_compiler_argv,
+            resolve_build_context,
+        )
+        from lima.uaf_models import ExtractionCoverage, proof_readiness
+
+        root = self._fixture("evil-cmake")
+        resolution = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("incomplete", resolution.status)
+        self.assertEqual("heuristic", resolution.source_kind)
+        self.assertIn("heuristic-context", resolution.diagnostics)
+        self.assertEqual("", resolution.context_hash)
+        readiness = proof_readiness(
+            resolution,
+            ExtractionCoverage(ast_complete=True, cfg_complete=True),
+            False,
+        )
+        self.assertIs(False, readiness.complete)
+
+        self.assertEqual(
+            ("clang-14", "-fsyntax-only", "src/main.c"),
+            heuristic_compiler_argv("src/main.c"),
+        )
+        self.assertEqual(
+            ("clang++-14", "-fsyntax-only", "src/b.cpp"),
+            heuristic_compiler_argv("src/b.cpp"),
+        )
+
+    def test_context_hash_stable_and_sensitive_to_semantic_flags(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        root = self._fixture("ok")
+        database_path = root / "compile_commands.json"
+        document = json.loads(database_path.read_text(encoding="utf-8"))
+
+        def rewrite(arguments: list[str]) -> None:
+            document[0]["arguments"] = arguments
+            database_path.write_text(json.dumps(document), encoding="utf-8")
+
+        original = list(document[0]["arguments"])
+        first = resolve_build_context(root, "src/main.c", self._settings())
+        second = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("resolved", first.status)
+        self.assertEqual(first.context_hash, second.context_hash)
+        self.assertEqual(
+            self._expected_context_hash(
+                "src/main.c", ["-I", "include", "-DFOO=1", "-std=c11"]
+            ),
+            first.context_hash,
+        )
+
+        # Changing the language standard is a semantic change.
+        rewritten = list(original)
+        rewritten[rewritten.index("-std=c11")] = "-std=c99"
+        rewrite(rewritten)
+        changed_standard = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertNotEqual(first.context_hash, changed_standard.context_hash)
+
+        # Changing output artifacts is not.
+        rewrite(original)
+        output_only = list(original)
+        output_only[output_only.index("-o") + 1] = "build/other.o"
+        rewrite(output_only)
+        changed_output = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual(first.context_hash, changed_output.context_hash)
+
+        # Adding a non-semantic optimization flag is not either.
+        with_optimization = [*original, "-O2"]
+        rewrite(with_optimization)
+        unchanged = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual(first.context_hash, unchanged.context_hash)
+
+        # Macro vocabulary is semantic on both sides (-D/-U).
+        with_undefine = [*original, "-UFOO"]
+        rewrite(with_undefine)
+        changed_macro = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertNotEqual(first.context_hash, changed_macro.context_hash)
+
+    def test_command_string_form_parsed_via_shlex(self):
+        from cxx_analyzer.build_context import resolve_build_context
+
+        root = self._fixture("command-string")
+        resolution = resolve_build_context(root, "src/main.c", self._settings())
+        self.assertEqual("resolved", resolution.status)
+        self.assertEqual("repository-compdb", resolution.source_kind)
+        self.assertEqual(
+            self._expected_context_hash("src/main.c", ["-DFOO=1", "-std=c11"]),
+            resolution.context_hash,
+        )
+        self.assertEqual((), resolution.diagnostics)
+
+    def test_build_scan_behavior_unchanged_after_extraction(self):
+        from cxx_analyzer import build_context, build_scan
+
+        # The build scan layer reuses the extracted search verbatim.
+        self.assertIs(build_context.find_compile_databases, build_scan.find_compile_databases)
+
+        scenarios = (
+            # (description, with build/, with root database, extra subdirectories,
+            #  expected priority order)
+            (
+                "build-root-and-two-subdirs",
+                True,
+                True,
+                ("out1", "out2"),
+                ["build/compile_commands.json", "compile_commands.json"],
+            ),
+            (
+                "build-root-and-unique-subdir",
+                True,
+                True,
+                ("out1",),
+                [
+                    "build/compile_commands.json",
+                    "compile_commands.json",
+                    "out1/compile_commands.json",
+                ],
+            ),
+            (
+                "root-and-unique-subdir",
+                False,
+                True,
+                ("out1",),
+                ["compile_commands.json", "out1/compile_commands.json"],
+            ),
+            (
+                "root-and-two-subdirs-glob-ambiguous",
+                False,
+                True,
+                ("out1", "out2"),
+                ["compile_commands.json"],
+            ),
+            (
+                "build-and-root-only",
+                True,
+                True,
+                (),
+                ["build/compile_commands.json", "compile_commands.json"],
+            ),
+            (
+                "build-only-no-root-database",
+                True,
+                False,
+                (),
+                ["build/compile_commands.json"],
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, with_build, with_root, subdirectories, expected in scenarios:
+                with self.subTest(scenario=name):
+                    directories = (
+                        (*subdirectories, "build") if with_build else subdirectories
+                    )
+                    for directory in directories:
+                        (root / directory).mkdir(exist_ok=True)
+                        (root / directory / "compile_commands.json").write_text(
+                            "[]", encoding="utf-8"
+                        )
+                    if with_root:
+                        (root / "compile_commands.json").write_text("[]", encoding="utf-8")
+                    actual = build_context.find_compile_databases(root)
+                    self.assertEqual(
+                        expected,
+                        [path.relative_to(root).as_posix() for path in actual],
+                    )
+                    snapshot = Mock(root=root)
+                    self.assertEqual(
+                        actual[0] if actual else None,
+                        build_scan._find_database(snapshot),
+                    )
+                    for directory in dict.fromkeys(directories):
+                        shutil.rmtree(root / directory)
+                    if with_root:
+                        (root / "compile_commands.json").unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

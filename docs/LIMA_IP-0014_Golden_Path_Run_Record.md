@@ -16,7 +16,7 @@ python -B -m pytest tests/contracts -q
 
 ## 2. 执行基线与环境
 
-- 实现基线 commit SHA(实现 Final SHA):TBD(IMPL 转写)
+- 实现基线 commit SHA(实现 Final SHA):ce11cfd0cdeb29192cfdbd5b2089e7e4dc50855c
 - 环境:Windows 10 26200 + Git Bash;Python 3.12;pytest/ruff 经 `python -B -m`
 - Frozen Test Commit:`ef8c1f8b2ef8eecb9c60f1663246810fec40cb37`(parent = `669267ff…`)
 

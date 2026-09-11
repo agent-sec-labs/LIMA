@@ -161,9 +161,9 @@ eRST 式档案生成（基本信息/概览/技术分析/复现指南/影响/披�
 - Create: `tests/test_agent_report.py`
 
 **Steps:**
-- [ ] 6.1 RED：报告字段齐全/复现命令真实可粘贴/无实证不写"已确认"/CVE 匹配
+- [x] 6.1 RED：报告字段齐全/复现命令真实可粘贴/无实证不写"已确认"/CVE 匹配
   正反例（时间窗/组件/位置三键匹配；无匹配标注待评审）
-- [ ] 6.2 GREEN → 提交：`feat: generate dossier reports with CVE matching`
+- [x] 6.2 GREEN → 提交：`feat: generate dossier reports with CVE matching`
 
 ---
 

@@ -172,6 +172,36 @@ _UAF_UNIT_KEYS = {"translation_unit", "extraction", "build_context", "coverage",
 _UAF_BUILD_CONTEXT_KEYS = {"status", "source_kind", "context_hash", "diagnostics"}
 _UAF_COVERAGE_KEYS = {"ast_complete", "cfg_complete", "semantic_gaps"}
 
+# --- /v1/repro protocol (agent vuln platform plan Task 1: repro workbench) ---
+REPRO_SCHEMA_VERSION = 1
+REPRO_PATH = "/v1/repro"
+REPRO_STAGES = frozenset({"compile", "run"})
+REPRO_ACCESS_KINDS = frozenset({"READ", "WRITE"})
+REPRO_FRAME_KEYS = frozenset({"function", "file", "line", "column"})
+MAX_REPRO_SOURCES = 16
+MAX_REPRO_DRIVER_BYTES = 256 * 1024
+_REPRO_RESPONSE_KEYS = {
+    "schema_version",
+    "request_id",
+    "snapshot_sha256",
+    "stage",
+    "ok",
+    "exit_code",
+    "asan_report",
+    "diagnostics",
+    "experiment",
+}
+_REPRO_ASAN_REPORT_KEYS = {
+    "error_type",
+    "access",
+    "access_size",
+    "faulting_frame",
+    "freed_by_frame",
+    "allocated_by_frame",
+    "raw_report_sha256",
+}
+_REPRO_EXPERIMENT_KEYS = {"driver_sha256", "binary_sha256", "elapsed_seconds"}
+
 
 class CxxAnalyzerUnavailable(RuntimeError):
     """The configured analyzer could not be reached or read."""
@@ -208,6 +238,29 @@ class UafFactsResponse:
     translation_units: tuple[dict[str, Any], ...]
     bundle_sha256: str
     diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReproResponse:
+    """Strictly validated ``/v1/repro`` execution record.
+
+    ``asan_report`` stays a validated wire dict: the structured ASan
+    answer (error type, access, frames, raw-report digest) is consumed by
+    the agent loop as evidence, so this boundary certifies protocol
+    integrity (closed fields, echo identity, outcome consistency, audit
+    hashes) without reinterpreting the report.
+    """
+
+    request_id: str
+    snapshot_sha256: str
+    stage: str
+    ok: bool
+    exit_code: int | None
+    asan_report: dict[str, Any] | None
+    diagnostics: tuple[str, ...]
+    driver_sha256: str
+    binary_sha256: str
+    elapsed_seconds: float
 
 
 @dataclass(frozen=True)
@@ -304,6 +357,29 @@ def _validate_uaf_requested_units(units: object) -> tuple[str, ...]:
     ):
         raise CxxAnalyzerProtocolError("invalid C/C++ analyzer translation units")
     return tuple(_require_safe_relative_unit(unit) for unit in units)
+
+
+def _validate_repro_requested_sources(sources: object) -> tuple[str, ...]:
+    if (
+        type(sources) is not tuple
+        or not sources
+        or len(sources) > MAX_REPRO_SOURCES
+        or any(type(source) is not str for source in sources)
+        or len(set(sources)) != len(sources)
+    ):
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repro sources")
+    return tuple(_require_safe_relative_unit(source) for source in sources)
+
+
+def _validate_repro_driver_code(driver_code: object) -> str:
+    if (
+        not isinstance(driver_code, str)
+        or not driver_code
+        or "\x00" in driver_code
+        or len(driver_code.encode("utf-8")) > MAX_REPRO_DRIVER_BYTES
+    ):
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repro driver code")
+    return driver_code
 
 
 def _validate_bounded_strings(value: object, limit: int) -> None:
@@ -725,6 +801,60 @@ class CxxMemoryAnalyzerClient:
             diagnostics=tuple(payload["diagnostics"]),
         )
 
+    def repro_compile_run(
+        self,
+        repository_key: str,
+        snapshot_sha256: str,
+        source_files: tuple[str, ...],
+        driver_code: str,
+    ) -> ReproResponse:
+        """Request one sandboxed ASan compile-and-run under a strict contract.
+
+        Shares the ``analyze`` transport (timeouts, response cap, duplicate
+        JSON keys, error mapping) and then validates the response against
+        the closed ``/v1/repro`` schema: unknown fields, a wrong schema
+        version, an echo mismatch, an out-of-vocabulary stage, an outcome
+        that contradicts its own exit code or ASan report, or an audit
+        experiment block with malformed hashes all raise
+        :class:`CxxAnalyzerProtocolError`.
+        """
+
+        if not isinstance(repository_key, str) or not repository_key:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repository key")
+        if (
+            not isinstance(snapshot_sha256, str)
+            or len(snapshot_sha256) != 64
+            or any(character not in _HEX64 for character in snapshot_sha256)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer snapshot digest")
+        requested_sources = _validate_repro_requested_sources(source_files)
+        validated_driver = _validate_repro_driver_code(driver_code)
+        request_id = str(uuid.uuid4())
+        body = json.dumps(
+            {
+                "schema_version": REPRO_SCHEMA_VERSION,
+                "request_id": request_id,
+                "repository_key": repository_key,
+                "snapshot_sha256": snapshot_sha256,
+                "source_files": list(requested_sources),
+                "driver_code": validated_driver,
+            }
+        ).encode("utf-8")
+        payload = self._post_json(REPRO_PATH, body)
+        self._validate_repro_payload(payload, request_id, snapshot_sha256)
+        return ReproResponse(
+            request_id=payload["request_id"],
+            snapshot_sha256=payload["snapshot_sha256"],
+            stage=payload["stage"],
+            ok=payload["ok"],
+            exit_code=payload["exit_code"],
+            asan_report=payload["asan_report"],
+            diagnostics=tuple(payload["diagnostics"]),
+            driver_sha256=payload["experiment"]["driver_sha256"],
+            binary_sha256=payload["experiment"]["binary_sha256"],
+            elapsed_seconds=payload["experiment"]["elapsed_seconds"],
+        )
+
     def _post_json(self, path: str, body: bytes) -> Any:
         """POST one JSON request and return the parsed, size-capped response."""
 
@@ -750,6 +880,130 @@ class CxxMemoryAnalyzerClient:
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise CxxAnalyzerProtocolError("C/C++ analyzer returned invalid JSON") from exc
+
+    @classmethod
+    def _validate_repro_payload(
+        cls,
+        payload: Any,
+        request_id: str,
+        snapshot_sha256: str,
+    ) -> None:
+        if not isinstance(payload, dict) or set(payload) != _REPRO_RESPONSE_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer response fields")
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["schema_version"] != REPRO_SCHEMA_VERSION
+        ):
+            raise CxxAnalyzerProtocolError("unsupported C/C++ analyzer schema")
+        if payload["request_id"] != request_id:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer request identity mismatch")
+        if payload["snapshot_sha256"] != snapshot_sha256:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer snapshot identity mismatch")
+        stage = payload["stage"]
+        if not isinstance(stage, str) or stage not in REPRO_STAGES:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repro stage")
+        if type(payload["ok"]) is not bool:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repro flag")
+        exit_code = payload["exit_code"]
+        if exit_code is not None and (
+            type(exit_code) is not int or not -(2**31) <= exit_code < 2**31
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repro exit code")
+        asan_report = payload["asan_report"]
+        if stage == "compile" and (payload["ok"] or asan_report is not None):
+            raise CxxAnalyzerProtocolError(
+                "inconsistent compile C/C++ analyzer repro stage"
+            )
+        if stage == "run" and payload["ok"] is not (
+            asan_report is None and exit_code == 0
+        ):
+            raise CxxAnalyzerProtocolError(
+                "inconsistent run C/C++ analyzer repro outcome"
+            )
+        if asan_report is not None:
+            cls._validate_repro_asan_report(asan_report)
+        _validate_bounded_strings(payload["diagnostics"], MAX_DIAGNOSTICS)
+        cls._validate_repro_experiment(payload["experiment"])
+
+    @classmethod
+    def _validate_repro_asan_report(cls, report: object) -> None:
+        if type(report) is not dict or set(report) != _REPRO_ASAN_REPORT_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan report fields")
+        error_type = report["error_type"]
+        if not isinstance(error_type, str) or not error_type:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan error type")
+        access = report["access"]
+        if access is not None and (
+            not isinstance(access, str) or access not in REPRO_ACCESS_KINDS
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan access")
+        access_size = report["access_size"]
+        if access_size is not None and (
+            type(access_size) is not int or access_size < 1
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan access size")
+        if (access is None) != (access_size is None):
+            raise CxxAnalyzerProtocolError(
+                "inconsistent C/C++ analyzer ASan access pair"
+            )
+        for frame_key in ("faulting_frame", "freed_by_frame", "allocated_by_frame"):
+            frame = report[frame_key]
+            if frame is not None:
+                cls._validate_repro_frame(frame)
+        digest = report["raw_report_sha256"]
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in _HEX64 for character in digest)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan report digest")
+
+    @staticmethod
+    def _validate_repro_frame(frame: object) -> None:
+        if type(frame) is not dict or set(frame) != REPRO_FRAME_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan frame fields")
+        for key in ("function", "file"):
+            value = frame[key]
+            if (
+                not isinstance(value, str)
+                or not value
+                or "\\" in value
+                or "\x00" in value
+            ):
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan frame text")
+        if type(frame["line"]) is not int or frame["line"] < 1:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan frame line")
+        column = frame["column"]
+        if column is not None and (type(column) is not int or column < 1):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer ASan frame column")
+
+    @staticmethod
+    def _validate_repro_experiment(experiment: object) -> None:
+        if type(experiment) is not dict or set(experiment) != _REPRO_EXPERIMENT_KEYS:
+            raise CxxAnalyzerProtocolError(
+                "invalid C/C++ analyzer repro experiment fields"
+            )
+        for key in ("driver_sha256", "binary_sha256"):
+            digest = experiment[key]
+            if digest == "" and key != "driver_sha256":
+                continue
+            if (
+                type(digest) is not str
+                or len(digest) != 64
+                or any(character not in _HEX64 for character in digest)
+            ):
+                raise CxxAnalyzerProtocolError(
+                    "invalid C/C++ analyzer repro experiment digest"
+                )
+        elapsed = experiment["elapsed_seconds"]
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or elapsed < 0
+        ):
+            raise CxxAnalyzerProtocolError(
+                "invalid C/C++ analyzer repro experiment elapsed seconds"
+            )
 
     @classmethod
     def _validate_uaf_payload(

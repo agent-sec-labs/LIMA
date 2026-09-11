@@ -43,21 +43,21 @@ freed-by/allocated-by 栈、截断标记）。实验台账记录输入哈希/产
 - Create: `tests/test_repro_protocol.py`
 
 **Steps:**
-- [ ] 1.1 RED：`$PY -m unittest tests.test_repro_protocol -v`
+- [x] 1.1 RED：`$PY -m unittest tests.test_repro_protocol -v`
   - `ServerContractTests.test_unknown_request_field_rejected` /
     `test_driver_code_size_capped` / `test_response_carries_run_identity_and_hashes`
   - `ClientContractTests.test_malformed_asan_report_rejected` /
     `test_transport_error_maps_to_unavailable`
-- [ ] 1.2 RED（提取器）：`tests/test_cxx_analyzer.ReproTests`
+- [x] 1.2 RED（提取器）：`tests/test_cxx_analyzer.ReproTests`
   - `test_uaf_driver_produces_structured_asan_report`（faulting frame 行号命中）
   - `test_clean_driver_returns_zero_exit_without_report`
   - `test_compile_failure_returns_diagnostics_not_crash`
   - `test_driver_path_escape_rejected` / `test_timeout_kills_process_tree` /
     `test_oversized_output_truncated_flagged`
-- [ ] 1.3 GREEN（宿主协议 fake）
-- [ ] 1.4 容器实证：真实 clang-14 + ASan 三驱动正例 + 超时/输出爆炸负例
-- [ ] 1.5 里程碑全量（宿主 + 容器）
-- [ ] 1.6 提交：`feat: add reproducible ASan workbench endpoint`
+- [x] 1.3 GREEN（宿主协议 fake）
+- [x] 1.4 容器实证：真实 clang-14 + ASan 三驱动正例 + 超时/输出爆炸负例
+- [x] 1.5 里程碑全量（宿主 + 容器）
+- [x] 1.6 提交：`feat: add reproducible ASan workbench endpoint`
 
 ---
 
@@ -250,3 +250,9 @@ profile：快照限额放开参数组、tmpfs/内存加大、受信构建门禁�
 
 内存包（Task 5）+ 复现工作台（Task 1/2）+ eRST 报告（Task 6）+ 油气仓库验证
 （Task 10）= 论文实验章节主体；OpenHarmony 仅为仓库接入差异。
+
+---
+
+## 实施记录
+
+- **Task 1（提交见 git log）**：除计划内容外，容器实证发现 ASan 运行时在受限容器（drop ALL caps + 非 root + 只读根）下有 ~30% 概率渲染自身段错误（exit -11 无任何报告输出，clang-14 已知类问题）。产品修复：run_repro 运行阶段对 `SIGSEGV+无报告` 自动重试（最多 3 次尝试，共享 deadline），耗尽后 ok=False + `asan-runtime-segv-retried` 诊断。容器 3 连跑全 OK。全量 1462 OK (skipped 20) 双平台。

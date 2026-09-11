@@ -17,6 +17,7 @@ from .config import AnalyzerSettings
 from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
 from .languages import CXX_SOURCE_SUFFIXES
 from .normalizers import NormalizedFinding, fuse_findings
+from .repro import run_repro
 from .sanitizer_scan import run_sanitizer_scan
 from .snapshot import _normalize_repository_key, prepare_snapshot
 from .source_scan import run_source_scan
@@ -34,6 +35,7 @@ WORK_ROOT: Final = Path("/work/snapshots")
 
 _ANALYZE_PATH: Final = "/v1/analyze"
 _UAF_FACTS_PATH: Final = "/v1/uaf-facts"
+_REPRO_PATH: Final = "/v1/repro"
 _HEALTH_PATH: Final = "/health"
 _REQUEST_FIELDS: Final = frozenset(
     {"request_id", "repository_key", "snapshot_sha256", "requested_layers"}
@@ -55,6 +57,22 @@ _UAF_FACTS_TOOL: Final = "uaf-facts"
 _UAF_FACTS_BUILD_CONTEXT_FIELDS: Final = frozenset({"mode"})
 _UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset({"snapshot-compdb", "heuristic"})
 MAX_UAF_TRANSLATION_UNITS: Final = 16
+# The repro request carries the untrusted driver text, so its body cap is
+# deliberately wider than the legacy 64 KiB one; the old endpoints keep
+# MAX_REQUEST_BYTES unchanged.
+REPRO_MAX_REQUEST_BYTES: Final = 512 * 1024
+MAX_REPRO_SOURCES: Final = 16
+MAX_REPRO_DRIVER_BYTES: Final = 256 * 1024
+_REPRO_REQUEST_FIELDS: Final = frozenset(
+    {
+        "schema_version",
+        "request_id",
+        "repository_key",
+        "snapshot_sha256",
+        "source_files",
+        "driver_code",
+    }
+)
 
 def _bound_response_lists(
     findings: tuple[NormalizedFinding, ...], diagnostics: list[object],
@@ -574,6 +592,136 @@ def uaf_facts_request(payload: object, settings: AnalyzerSettings) -> dict[str, 
     }
 
 
+def _validate_repro_payload(payload: object) -> dict[str, object]:
+    """Validate a ``/v1/repro`` request against its closed field set."""
+
+    request_id = (
+        _canonical_request_id(payload.get("request_id"))
+        if isinstance(payload, dict)
+        else None
+    )
+    if type(payload) is not dict or set(payload) != _REPRO_REQUEST_FIELDS:
+        raise RequestError("invalid_request", request_id=request_id)
+
+    if request_id is None:
+        raise RequestError("invalid_request")
+
+    schema_version = payload["schema_version"]
+    if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
+        raise RequestError("unsupported_schema", request_id=request_id)
+
+    repository_key = payload["repository_key"]
+    try:
+        normalized_key = _normalize_repository_key(repository_key)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise RequestError("invalid_request", request_id=request_id) from exc
+    if normalized_key != repository_key:
+        raise RequestError("invalid_request", request_id=request_id)
+
+    snapshot_sha256 = payload["snapshot_sha256"]
+    if (
+        not isinstance(snapshot_sha256, str)
+        or len(snapshot_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in snapshot_sha256)
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+
+    source_files = _validate_uaf_translation_units(
+        payload["source_files"], request_id
+    )
+    if len(source_files) > MAX_REPRO_SOURCES:
+        raise RequestError("invalid_request", request_id=request_id)
+
+    driver_code = payload["driver_code"]
+    if (
+        not isinstance(driver_code, str)
+        or not driver_code
+        or "\x00" in driver_code
+        or len(driver_code.encode("utf-8")) > MAX_REPRO_DRIVER_BYTES
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+
+    return {
+        "request_id": request_id,
+        "repository_key": normalized_key,
+        "snapshot_sha256": snapshot_sha256,
+        "source_files": source_files,
+        "driver_code": driver_code,
+    }
+
+
+def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, object]:
+    """Serve one versioned reproduction-workbench request.
+
+    The verified snapshot is prepared exactly as for the other endpoints,
+    then the untrusted driver plus the requested source files are compiled
+    and run under AddressSanitizer by ``cxx_analyzer.repro.run_repro`` --
+    every execution step rides the fail-closed sandbox executor.  The
+    response is a bounded, self-describing experiment record: the deciding
+    stage, the exit code, the structured ASan report when one fired, and
+    the input/artifact audit hashes.
+    """
+
+    request = _validate_repro_payload(payload)
+    request_id = request["request_id"]
+    deadline = AnalysisDeadline.start(settings.total_timeout_seconds)
+    try:
+        prepared = prepare_snapshot(
+            IMPORT_ROOT,
+            request["repository_key"],  # type: ignore[arg-type]
+            request["snapshot_sha256"],  # type: ignore[arg-type]
+            WORK_ROOT,
+            deadline=deadline,
+        )
+    except AnalysisDeadlineExceeded as exc:
+        raise RequestError(
+            "analysis_timed_out", status=504, request_id=request_id
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise RequestError("snapshot_rejected", request_id=request_id) from exc
+
+    snapshot = prepared.__enter__()
+    try:
+        snapshot.verify_inventory(deadline)
+        execution = run_repro(
+            snapshot,
+            request["source_files"],
+            request["driver_code"],  # type: ignore[arg-type]
+            deadline=deadline,
+            timeout_seconds=settings.step_timeout_seconds,
+        )
+        snapshot.verify_inventory(deadline)
+    except AnalysisDeadlineExceeded as exc:
+        raise RequestError(
+            "analysis_timed_out", status=504, request_id=request_id
+        ) from exc
+    except ValueError as exc:
+        raise RequestError("snapshot_rejected", request_id=request_id) from exc
+    finally:
+        try:
+            prepared.cleanup(deadline=deadline)
+        except AnalysisDeadlineExceeded as exc:
+            raise RequestError(
+                "analysis_timed_out", status=504, request_id=request_id
+            ) from exc
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "request_id": request_id,
+        "snapshot_sha256": request["snapshot_sha256"],
+        "stage": execution.stage,
+        "ok": execution.ok,
+        "exit_code": execution.exit_code,
+        "asan_report": execution.asan_report,
+        "diagnostics": list(execution.diagnostics),
+        "experiment": {
+            "driver_sha256": execution.artifacts["driver_sha256"],
+            "binary_sha256": execution.artifacts["binary_sha256"],
+            "elapsed_seconds": execution.elapsed_seconds,
+        },
+    }
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -680,7 +828,7 @@ def dispatch_request(
 ) -> tuple[int, dict[str, object]]:
     """Handle an HTTP-shaped request without exposing server implementation details."""
 
-    if path not in {_ANALYZE_PATH, _UAF_FACTS_PATH, _HEALTH_PATH}:
+    if path not in {_ANALYZE_PATH, _UAF_FACTS_PATH, _REPRO_PATH, _HEALTH_PATH}:
         return 404, _error_payload("not_found")
     if path == _HEALTH_PATH:
         if method != "GET":
@@ -690,7 +838,10 @@ def dispatch_request(
         return 405, _error_payload("method_not_allowed")
     if content_type.split(";", 1)[0].strip().lower() != "application/json":
         return 415, _error_payload("unsupported_media_type")
-    if not isinstance(body, bytes) or len(body) > MAX_REQUEST_BYTES:
+    max_request_bytes = (
+        REPRO_MAX_REQUEST_BYTES if path == _REPRO_PATH else MAX_REQUEST_BYTES
+    )
+    if not isinstance(body, bytes) or len(body) > max_request_bytes:
         return 413, _error_payload("request_too_large")
 
     try:
@@ -705,6 +856,8 @@ def dispatch_request(
     try:
         if path == _UAF_FACTS_PATH:
             result = uaf_facts_request(payload, settings)
+        elif path == _REPRO_PATH:
+            result = repro_request(payload, settings)
         else:
             result = analyze_request(payload, settings)
         if not _response_fits(result):
@@ -770,7 +923,14 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
         if content_length < 0:
             self._send(400, _error_payload("invalid_request"))
             return
-        if content_length > MAX_REQUEST_BYTES:
+        # ``path`` is always present on real requests (BaseHTTPRequestHandler
+        # sets it before do_POST); the getattr default only serves synthetic
+        # handlers in the HTTP-boundary tests.
+        path = getattr(self, "path", "")
+        max_request_bytes = (
+            REPRO_MAX_REQUEST_BYTES if path == _REPRO_PATH else MAX_REQUEST_BYTES
+        )
+        if content_length > max_request_bytes:
             self._send(413, _error_payload("request_too_large"))
             return
         body = self.rfile.read(content_length)

@@ -16,12 +16,14 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
+import cxx_analyzer.repro as repro
 import cxx_analyzer.server as analyzer_server
 import cxx_analyzer.source_scan as source_scan
 from cxx_analyzer.config import AnalyzerSettings, parse_steps_json
-from cxx_analyzer.deadline import AnalysisDeadline
+from cxx_analyzer.deadline import AnalysisDeadline, AnalysisDeadlineExceeded
 from cxx_analyzer.execution import (
     CLEAN_ENVIRONMENT,
+    SANITIZER_ENVIRONMENT,
     StreamCapture,
     ToolExecution,
     _stream_process,
@@ -5432,6 +5434,769 @@ class UafFactExtractionContainerTests(unittest.TestCase):
         self.assertFalse(result["coverage"]["cfg_complete"])
         self.assertIn("cfg-loop", result["coverage"]["semantic_gaps"])
         self.assertIn("dereference", _fact_kinds(result))
+
+
+_REPRO_FIXTURES = Path(__file__).parent / "fixtures" / "repro"
+# Realistic AddressSanitizer stderr for a heap-use-after-free hit (matching
+# clang-14 output under the analyzer's SANITIZER_ENVIRONMENT: color=never,
+# abort_on_error=0, frames with -g).  Used as the parser's embedded fixture.
+_REPRO_UAF_STDERR = """\
+==4728==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010 at pc 0x561f7b3a2e61
+READ of size 4 at 0x602000000010 thread T0
+    #0 0x561f7b3a2e60 in use_after_free_read vuln_lib.cpp:8:12
+    #1 0x561f7b3a2f04 in main build/repro_driver_ab12cd34.cpp:6:28
+    #2 0x7f2c0e429d8f in __libc_start_main ../csu/libc-start.c:308
+
+0x602000000010 is located 0 bytes inside of 4-byte region [0x602000000010,0x602000000014)
+freed by thread T0 here:
+    #0 0x561f7b3a2c9d in free vuln_lib.cpp:7:5
+    #1 0x561f7b3a2e60 in use_after_free_read vuln_lib.cpp:7:5
+
+previously allocated by thread T0 here:
+    #0 0x561f7b3a2d31 in malloc vuln_lib.cpp:5:38
+    #1 0x561f7b3a2e60 in use_after_free_read vuln_lib.cpp:5:38
+
+SUMMARY: AddressSanitizer: heap-use-after-free vuln_lib.cpp:8 in use_after_free_read
+"""
+_REPRO_UAF_NO_COLUMN_STDERR = """\
+==9==ERROR: AddressSanitizer: heap-use-after-free on address 0x60200000fe10
+READ of size 4 at 0x60200000fe10 thread T0
+    #0 0x40098e in main src/driver.cpp:13
+freed by thread T0 here:
+    #0 0x4008ff in main src/driver.cpp:10
+previously allocated by thread T0 here:
+    #0 0x4008ca in main src/driver.cpp:9
+SUMMARY: AddressSanitizer: heap-use-after-free src/driver.cpp:13 in main
+"""
+
+
+def _repro_raw_report_digest(stderr_text):
+    """The raw-report digest rule: sha256 over the ERROR..SUMMARY block,
+    ending at (excluding) the newline after the SUMMARY line."""
+    start = stderr_text.index("==4728==ERROR: AddressSanitizer:")
+    summary = stderr_text.index("SUMMARY: AddressSanitizer:", start)
+    end = stderr_text.index("\n", summary)
+    return hashlib.sha256(stderr_text[start:end].encode("utf-8")).hexdigest()
+
+
+class ReproTests(unittest.TestCase):
+    """Host-side reproduction workbench units with mocked sandbox execution."""
+
+    def _settings(self):
+        return AnalyzerSettings(
+            auto_cmake=False,
+            build_steps=(),
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=90,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    def _prepared_snapshot(self, temporary, files):
+        from lima.workspace import RepositoryWorkspace
+
+        base = Path(temporary)
+        import_root = base / "imports"
+        repository = import_root / "team" / "project"
+        work_root = base / "snapshots"
+        repository.mkdir(parents=True)
+        work_root.mkdir()
+        for relative, content in files.items():
+            path = repository / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+        return prepare_snapshot(import_root, "team/project", fingerprint, work_root)
+
+    def _tool_execution(
+        self,
+        status="completed",
+        returncode=0,
+        stdout="",
+        stderr="",
+        output_truncated=False,
+        diagnostic="",
+    ):
+        return ToolExecution(
+            status=status,
+            returncode=None if status == "timed-out" else returncode,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_sha256=hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+            stderr_sha256=hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
+            output_sha256=hashlib.sha256(
+                (stdout + stderr).encode("utf-8")
+            ).hexdigest(),
+            output_truncated=output_truncated,
+            digests_complete=True,
+            diagnostic=diagnostic,
+        )
+
+    def _recorded_run_step(self, calls, responses, snapshot):
+        def execute(
+            argv,
+            step_snapshot,
+            cwd,
+            timeout_seconds,
+            max_output_bytes,
+            env,
+            *,
+            deadline=None,
+        ):
+            self.assertIs(snapshot, step_snapshot)
+            calls.append(
+                {
+                    "argv": list(argv),
+                    "cwd": cwd,
+                    "timeout_seconds": timeout_seconds,
+                    "max_output_bytes": max_output_bytes,
+                    "env": env,
+                    "deadline": deadline,
+                }
+            )
+            outcome = responses[len(calls) - 1]
+            if outcome.get("produce_binary"):
+                # Emulate the compiler writing its artifact into the
+                # snapshot's writable build root.
+                binary = snapshot.build_root / outcome["produce_binary"]
+                binary.write_bytes(b"\x7fELF fake repro binary")
+            return self._tool_execution(**outcome["execution"])
+
+        return execute
+
+    # ------------------------------------------------------- parser units
+
+    def test_parse_asan_report_heap_use_after_free(self):
+        report = repro.parse_asan_report(_REPRO_UAF_STDERR)
+        self.assertIsNotNone(report)
+        self.assertEqual("heap-use-after-free", report["error_type"])
+        self.assertEqual("READ", report["access"])
+        self.assertEqual(4, report["access_size"])
+        self.assertEqual(
+            {
+                "function": "use_after_free_read",
+                "file": "vuln_lib.cpp",
+                "line": 8,
+                "column": 12,
+            },
+            report["faulting_frame"],
+        )
+        self.assertEqual(
+            {"function": "free", "file": "vuln_lib.cpp", "line": 7, "column": 5},
+            report["freed_by_frame"],
+        )
+        self.assertEqual(
+            {"function": "malloc", "file": "vuln_lib.cpp", "line": 5, "column": 38},
+            report["allocated_by_frame"],
+        )
+        self.assertEqual(
+            _repro_raw_report_digest(_REPRO_UAF_STDERR), report["raw_report_sha256"]
+        )
+
+    def test_parse_asan_report_accepts_file_line_without_column(self):
+        report = repro.parse_asan_report(_REPRO_UAF_NO_COLUMN_STDERR)
+        self.assertIsNotNone(report)
+        self.assertEqual("heap-use-after-free", report["error_type"])
+        self.assertEqual("READ", report["access"])
+        self.assertEqual(4, report["access_size"])
+        self.assertEqual(
+            {"function": "main", "file": "src/driver.cpp", "line": 13, "column": None},
+            report["faulting_frame"],
+        )
+        self.assertEqual(10, report["freed_by_frame"]["line"])
+        self.assertEqual(9, report["allocated_by_frame"]["line"])
+
+    def test_parse_asan_report_returns_none_for_clean_output(self):
+        self.assertIsNone(repro.parse_asan_report("hello\nworld\n"))
+        self.assertIsNone(repro.parse_asan_report(""))
+        self.assertIsNone(repro.parse_asan_report(
+            "SUMMARY: AddressSanitizer: 0 byte(s) leaked in 0 allocation(s).\n"
+        ))
+
+    def test_parse_asan_report_returns_none_for_incomplete_report(self):
+        without_summary = "\n".join(
+            line
+            for line in _REPRO_UAF_STDERR.splitlines()
+            if not line.startswith("SUMMARY: AddressSanitizer:")
+        )
+        self.assertIsNone(repro.parse_asan_report(without_summary))
+        self.assertIsNone(
+            repro.parse_asan_report("==1==ERROR: AddressSanitizer: heap-use-after-free")
+        )
+        self.assertIsNone(repro.parse_asan_report("Segmentation fault (core dumped)"))
+
+        mismatched = _REPRO_UAF_STDERR.replace(
+            "SUMMARY: AddressSanitizer: heap-use-after-free",
+            "SUMMARY: AddressSanitizer: double-free",
+        )
+        self.assertIsNone(repro.parse_asan_report(mismatched))
+
+    def test_parse_asan_report_tolerates_stdout_noise(self):
+        noisy = "PoC stage one\nno crash yet\n" + _REPRO_UAF_STDERR
+        report = repro.parse_asan_report(noisy)
+        self.assertIsNotNone(report)
+        self.assertEqual("heap-use-after-free", report["error_type"])
+
+    # ------------------------------------------------------- argv builders
+
+    def test_compile_argv_is_pinned_and_deterministic(self):
+        argv = repro.build_compile_argv(
+            ("src/a.cpp", "src/b.cpp"), "build/d.cpp", "build/out"
+        )
+        self.assertEqual(
+            [
+                "clang++-14",
+                "-fsanitize=address",
+                "-g",
+                "-O1",
+                "src/a.cpp",
+                "src/b.cpp",
+                "build/d.cpp",
+                "-o",
+                "build/out",
+            ],
+            argv,
+        )
+        self.assertEqual(
+            argv,
+            repro.build_compile_argv(
+                ("src/a.cpp", "src/b.cpp"), "build/d.cpp", "build/out"
+            ),
+        )
+        self.assertEqual(
+            ["build/repro_bin_x"], repro.build_run_argv("build/repro_bin_x")
+        )
+
+    def test_driver_path_escape_rejected(self):
+        escapes = (
+            "../evil.cpp",
+            "/abs/driver.cpp",
+            "build\\driver.cpp",
+            "",
+            ".",
+            "build/./driver.cpp",
+            "a/\x00b.cpp",
+        )
+        for driver in escapes:
+            with self.subTest(path=driver):
+                with self.assertRaises(ValueError):
+                    repro.build_compile_argv(("v.cpp",), driver, "build/out")
+                with self.assertRaises(ValueError):
+                    repro.build_run_argv(driver)
+        for sources in ([], ("../evil.cpp",), ("/abs.cpp",), ("a\\b.cpp",)):
+            with self.subTest(sources=sources):
+                with self.assertRaises(ValueError):
+                    repro.build_compile_argv(sources, "build/d.cpp", "build/out")
+
+    # ------------------------------------------------------- run_repro flow
+
+    def test_run_repro_compiles_runs_and_parses_report(self):
+        driver_code = (_REPRO_FIXTURES / "driver_uaf.cpp").read_text(encoding="utf-8")
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        driver_relative = f"build/repro_driver_{tag}.cpp"
+        binary_relative = f"build/repro_bin_{tag}"
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {"vuln_lib.cpp": (_REPRO_FIXTURES / "vuln_lib.cpp").read_text(
+                    encoding="utf-8"
+                )},
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {
+                            "status": "failed",
+                            "returncode": 1,
+                            "stderr": _REPRO_UAF_STDERR,
+                        },
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+
+        self.assertEqual("run", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertEqual(1, result.exit_code)
+        self.assertIsNotNone(result.asan_report)
+        self.assertEqual("heap-use-after-free", result.asan_report["error_type"])
+        self.assertEqual(8, result.asan_report["faulting_frame"]["line"])
+        self.assertEqual((), result.diagnostics)
+        self.assertEqual(
+            {
+                "driver_path": driver_relative,
+                "binary_path": binary_relative,
+                "driver_sha256": hashlib.sha256(
+                    driver_code.encode("utf-8")
+                ).hexdigest(),
+                "binary_sha256": hashlib.sha256(
+                    b"\x7fELF fake repro binary"
+                ).hexdigest(),
+            },
+            result.artifacts,
+        )
+        self.assertGreaterEqual(result.elapsed_seconds, 0.0)
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual(
+            [
+                "clang++-14",
+                "-fsanitize=address",
+                "-g",
+                "-O1",
+                "vuln_lib.cpp",
+                driver_relative,
+                "-o",
+                binary_relative,
+            ],
+            calls[0]["argv"],
+        )
+        self.assertEqual([binary_relative], calls[1]["argv"])
+        for call in calls:
+            self.assertEqual(".", call["cwd"])
+            self.assertIs(SANITIZER_ENVIRONMENT, call["env"])
+            self.assertEqual(1024 * 1024, call["max_output_bytes"])
+            self.assertEqual(30, call["timeout_seconds"])
+            self.assertIs(deadline, call["deadline"])
+
+    def test_compile_failure_returns_diagnostics_not_crash(self):
+        driver_code = "#include <cstdio>\nint main() { missing(); }\n"
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary, {"vuln_lib.cpp": "extern \"C\" int f(void) { return 0; }\n"}
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {
+                            "status": "failed",
+                            "returncode": 1,
+                            "stderr": (
+                                f"build/repro_driver_{tag}.cpp:2:20: error: "
+                                "use of undeclared identifier 'missing'"
+                            ),
+                        }
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+
+        self.assertEqual("compile", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertEqual(1, result.exit_code)
+        self.assertIsNone(result.asan_report)
+        self.assertEqual("", result.artifacts["binary_sha256"])
+        self.assertTrue(
+            any("use of undeclared identifier" in item for item in result.diagnostics),
+            result.diagnostics,
+        )
+        self.assertEqual(1, len(calls))
+
+    def test_run_timeout_reports_no_exit_code(self):
+        driver_code = (_REPRO_FIXTURES / "driver_infinite_loop.cpp").read_text(
+            encoding="utf-8"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                calls = []
+                responses = (
+                    {"execution": {"status": "completed", "returncode": 0},
+                     "produce_binary": f"repro_bin_{tag}"},
+                    {"execution": {"status": "timed-out"}},
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=5,
+                    )
+
+        self.assertEqual("run", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertIsNone(result.exit_code)
+        self.assertIsNone(result.asan_report)
+        self.assertIn("repro-step-timed-out", result.diagnostics)
+
+    def test_run_repro_retries_asan_renderer_segv_and_recovers(self):
+        driver_code = (_REPRO_FIXTURES / "driver_uaf.cpp").read_text(encoding="utf-8")
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {"execution": {"status": "failed", "returncode": -11}},
+                    {"execution": {"status": "failed", "returncode": -11}},
+                    {
+                        "execution": {
+                            "status": "failed",
+                            "returncode": 1,
+                            "stderr": _REPRO_UAF_STDERR,
+                        }
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+
+        self.assertEqual("run", result.stage)
+        self.assertIsNotNone(result.asan_report)
+        self.assertEqual("heap-use-after-free", result.asan_report["error_type"])
+        self.assertEqual(1, result.exit_code)
+        self.assertIn("asan-runtime-segv-retried", result.diagnostics)
+        # One compile step plus three run attempts (two noise, one decisive).
+        self.assertEqual(4, len(calls))
+        for call in calls[1:]:
+            self.assertEqual([f"build/repro_bin_{tag}"], call["argv"])
+
+    def test_run_repro_all_segv_attempts_report_instrument_noise(self):
+        driver_code = "int main() { return 0; }\n"
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {"execution": {"status": "failed", "returncode": -11}},
+                    {"execution": {"status": "failed", "returncode": -11}},
+                    {"execution": {"status": "failed", "returncode": -11}},
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+
+        self.assertEqual("run", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertIsNone(result.asan_report)
+        self.assertEqual(-11, result.exit_code)
+        self.assertIn("asan-runtime-segv-retried", result.diagnostics)
+        # The retry budget is bounded: exactly first run + two retries.
+        self.assertEqual(4, len(calls))
+
+    def test_run_repro_segv_with_report_is_not_retried(self):
+        driver_code = "int main() { return 0; }\n"
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        deadline = AnalysisDeadline.start(90)
+        segv_report = _REPRO_UAF_STDERR.replace(
+            "==4728==ERROR: AddressSanitizer: heap-use-after-free",
+            "==4728==ERROR: AddressSanitizer: SEGV",
+        ).replace(
+            "SUMMARY: AddressSanitizer: heap-use-after-free",
+            "SUMMARY: AddressSanitizer: SEGV",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {
+                            "status": "failed",
+                            "returncode": -11,
+                            "stderr": segv_report,
+                        }
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+
+        self.assertIsNotNone(result.asan_report)
+        self.assertEqual("SEGV", result.asan_report["error_type"])
+        self.assertEqual(-11, result.exit_code)
+        self.assertNotIn("asan-runtime-segv-retried", result.diagnostics)
+        self.assertEqual(2, len(calls))
+
+    def test_oversized_output_truncated_flagged(self):
+        driver_code = "int main() { return 0; }\n"
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                responses = (
+                    {"execution": {"status": "completed", "returncode": 0},
+                     "produce_binary": f"repro_bin_{tag}"},
+                    {
+                        "execution": {
+                            "status": "completed",
+                            "returncode": 0,
+                            "stdout": "x" * 4096,
+                            "output_truncated": True,
+                        }
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step([], responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("vuln_lib.cpp",),
+                        driver_code,
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+
+        self.assertEqual("run", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertEqual(0, result.exit_code)
+        self.assertIsNone(result.asan_report)
+        self.assertIn("repro-output-truncated", result.diagnostics)
+
+    def test_source_file_must_be_in_snapshot_inventory(self):
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                with patch("cxx_analyzer.repro.run_step") as step:
+                    with self.assertRaises(ValueError):
+                        repro.run_repro(
+                            snapshot,
+                            ("absent.cpp",),
+                            "int main() { return 0; }\n",
+                            deadline=deadline,
+                            timeout_seconds=30,
+                        )
+        step.assert_not_called()
+
+    def test_driver_and_source_budgets_rejected(self):
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary, {"vuln_lib.cpp": "int x;\n", "src/other.cpp": "int y;\n"}
+            ) as snapshot:
+                bad_drivers = (
+                    "",
+                    "x" * (256 * 1024 + 1),
+                    "int\x00main() {}\n",
+                    42,
+                    None,
+                )
+                for driver in bad_drivers:
+                    with self.subTest(driver=repr(driver)[:24]):
+                        with self.assertRaises(ValueError):
+                            repro.run_repro(
+                                snapshot,
+                                ("vuln_lib.cpp",),
+                                driver,
+                                deadline=deadline,
+                                timeout_seconds=30,
+                            )
+                bad_sources = (
+                    (),
+                    [f"src/f{index}.cpp" for index in range(17)],
+                    ("vuln_lib.cpp", "vuln_lib.cpp"),
+                    ("../escape.cpp",),
+                    ("src/other.cpp", "../escape.cpp"),
+                    ("/abs/other.cpp",),
+                    ("src\\other.cpp",),
+                )
+                for sources in bad_sources:
+                    with self.subTest(sources=sources):
+                        with self.assertRaises(ValueError):
+                            repro.run_repro(
+                                snapshot,
+                                sources,
+                                "int main() { return 0; }\n",
+                                deadline=deadline,
+                                timeout_seconds=30,
+                            )
+
+    def test_deadline_exceeded_fails_before_execution(self):
+        expired = AnalysisDeadline(expires_at=time.monotonic() - 1.0)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(temporary, {"vuln_lib.cpp": "int x;\n"}) as snapshot:
+                with patch("cxx_analyzer.repro.run_step") as step:
+                    with self.assertRaises(AnalysisDeadlineExceeded):
+                        repro.run_repro(
+                            snapshot,
+                            ("vuln_lib.cpp",),
+                            "int main() { return 0; }\n",
+                            deadline=expired,
+                            timeout_seconds=30,
+                        )
+        step.assert_not_called()
+
+
+class ReproContainerTests(unittest.TestCase):
+    """Real clang-14 + AddressSanitor execution inside the analyzer container."""
+
+    def _repro_fixture(self, driver_name, *, timeout_seconds=30,
+                       source_name="vuln_lib.cpp"):
+        from lima.workspace import RepositoryWorkspace
+
+        if sys.platform != "linux":
+            self.skipTest("repro container regression requires Linux")
+        if shutil.which("clang-14") is None or shutil.which("clang++-14") is None:
+            self.skipTest("clang-14 and clang++-14 are required for repro fixtures")
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
+
+        with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
+            base = Path(temporary)
+            import_root = base / "imports"
+            repository = import_root / "team" / "project"
+            work_root = base / "snapshots"
+            repository.mkdir(parents=True)
+            work_root.mkdir()
+            shutil.copy2(_REPRO_FIXTURES / source_name, repository / source_name)
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", fingerprint, work_root
+            ) as snapshot:
+                return repro.run_repro(
+                    snapshot,
+                    (source_name,),
+                    (_REPRO_FIXTURES / driver_name).read_text(encoding="utf-8"),
+                    deadline=AnalysisDeadline.start(240),
+                    timeout_seconds=timeout_seconds,
+                )
+
+    def test_container_uaf_driver_hits_report(self):
+        # run_repro retries the run stage in place when the ASan runtime
+        # dies with SIGSEGV and no report (renderer noise under the
+        # restricted container), so this single experiment already covers
+        # the observed ~30% flake.
+        result = self._repro_fixture("driver_uaf.cpp")
+
+        self.assertEqual("run", result.stage)
+        self.assertIsNotNone(result.asan_report)
+        self.assertEqual("heap-use-after-free", result.asan_report["error_type"])
+        self.assertEqual("READ", result.asan_report["access"])
+        self.assertEqual(4, result.asan_report["access_size"])
+        faulting = result.asan_report["faulting_frame"]
+        self.assertIsNotNone(faulting)
+        self.assertEqual(8, faulting["line"])
+        self.assertTrue(faulting["file"].endswith("vuln_lib.cpp"))
+        freed = result.asan_report["freed_by_frame"]
+        self.assertIsNotNone(freed)
+        self.assertEqual(7, freed["line"])
+        self.assertTrue(freed["file"].endswith("vuln_lib.cpp"))
+        allocated = result.asan_report["allocated_by_frame"]
+        self.assertIsNotNone(allocated)
+        self.assertEqual(5, allocated["line"])
+        self.assertTrue(allocated["file"].endswith("vuln_lib.cpp"))
+        self.assertIs(False, result.ok)
+        self.assertNotEqual(0, result.exit_code)
+        self.assertEqual(64, len(result.artifacts["binary_sha256"]))
+
+    def test_container_clean_driver_no_report(self):
+        result = self._repro_fixture("driver_clean.cpp", source_name="unused_lib.cpp")
+        if (
+            result.asan_report is None
+            and result.exit_code is not None
+            and result.exit_code < 0
+        ):
+            # run_repro's internal retry budget was exhausted by
+            # renderer noise (SIGSEGV, empty stream): one fresh experiment
+            # re-judges the clean run instead of failing on the noise.
+            result = self._repro_fixture(
+                "driver_clean.cpp", source_name="unused_lib.cpp"
+            )
+
+        self.assertEqual("run", result.stage)
+        self.assertIs(True, result.ok)
+        self.assertEqual(0, result.exit_code)
+        self.assertIsNone(result.asan_report)
+        self.assertEqual((), result.diagnostics)
+        self.assertEqual(64, len(result.artifacts["binary_sha256"]))
+
+    def test_container_compile_failure_returns_diagnostics(self):
+        result = self._repro_fixture("driver_compile_error.cpp")
+
+        self.assertEqual("compile", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertIsNone(result.asan_report)
+        self.assertNotEqual(0, result.exit_code)
+        self.assertEqual("", result.artifacts["binary_sha256"])
+        self.assertTrue(
+            any("error" in item for item in result.diagnostics), result.diagnostics
+        )
+
+    def test_container_timeout_kills_run(self):
+        result = self._repro_fixture(
+            "driver_infinite_loop.cpp", source_name="unused_lib.cpp",
+            timeout_seconds=5,
+        )
+
+        self.assertEqual("run", result.stage)
+        self.assertIs(False, result.ok)
+        self.assertIsNone(result.exit_code)
+        self.assertIn("repro-step-timed-out", result.diagnostics)
 
 
 if __name__ == "__main__":

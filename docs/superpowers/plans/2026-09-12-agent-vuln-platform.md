@@ -89,9 +89,9 @@ freed-by/allocated-by 栈、截断标记）。实验台账记录输入哈希/产
 - Create: `tests/test_agent_scout.py`
 
 **Steps:**
-- [ ] 3.1 RED（Fake LLM）：循环推进/排除理由留痕/预算耗尽诚实降级/
+- [x] 3.1 RED（Fake LLM）：循环推进/排除理由留痕/预算耗尽诚实降级/
   线索零命中安静返回/伪造路径拒收
-- [ ] 3.2 GREEN → 回归 → 提交：`feat: add autonomous scout agent`
+- [x] 3.2 GREEN → 回归 → 提交：`feat: add autonomous scout agent`
 
 ---
 

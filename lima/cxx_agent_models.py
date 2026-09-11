@@ -5,6 +5,13 @@ validates field sets, types, bounds and value domains before any value
 reaches the collaboration pipeline. Unknown fields, duplicate keys,
 out-of-range numbers, unsafe paths and foreign verification states are
 rejected outright; nothing is accepted partially.
+
+The closed verification-state domain additionally carries the two UAF v2
+states (``semantic-supported`` and ``fact-verified``).  They are produced
+only by the UAF v2 pipeline (``lima.uaf_models`` and downstream), never by
+this legacy collaboration; UAF v2 in turn never produces
+``agent-corroborated``.  ``fact-verified`` is a verified state;
+``semantic-supported`` is not.
 """
 
 from __future__ import annotations
@@ -26,6 +33,12 @@ CXX_AGENT_VERIFICATION_STATES: Final = frozenset(
         "runtime-confirmed",
         "human-confirmed",
         "needs-human-review",
+        # UAF v2 states (design section 5): produced only by the UAF v2
+        # pipeline, never by the legacy agent collaboration.  UAF v2 does
+        # not produce ``agent-corroborated``, and ``semantic-supported``
+        # is deliberately not a verified state.
+        "semantic-supported",
+        "fact-verified",
     }
 )
 VERIFIED_STATES: Final = frozenset(
@@ -34,6 +47,7 @@ VERIFIED_STATES: Final = frozenset(
         "tool-corroborated",
         "runtime-confirmed",
         "human-confirmed",
+        "fact-verified",
     }
 )
 AGENT_CONSENSUS_KEYS: Final = (
@@ -502,9 +516,10 @@ def verified_only_gate(
 ) -> tuple[tuple[CxxAgentCandidate, ...], tuple[CxxAgentCandidate, ...]]:
     """Split candidates into (accepted, rejected) for the verified-only gate.
 
-    Exactly the four states in :data:`VERIFIED_STATES` pass; ``llm-candidate``
-    and ``needs-human-review`` never do.  Both halves are sorted by
-    ``(path, line, symbol, candidate_id)`` so the gate output is deterministic.
+    Exactly the states in :data:`VERIFIED_STATES` pass; ``llm-candidate``,
+    ``needs-human-review`` and ``semantic-supported`` never do.  Both halves
+    are sorted by ``(path, line, symbol, candidate_id)`` so the gate output
+    is deterministic.
     """
 
     def sort_key(item: CxxAgentCandidate) -> tuple[str, int, str, str]:

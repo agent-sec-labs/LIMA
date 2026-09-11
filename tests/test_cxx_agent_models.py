@@ -5,12 +5,14 @@ import unittest
 
 from lima.cxx_agent_models import (
     CXX_AGENT_VERIFICATION_STATES,
+    VERIFIED_STATES,
     ContextReference,
     CxxAgentCandidate,
     CxxAgentCoverage,
     CxxAgentDecision,
     parse_untrusted_json,
     to_agent_finding_payload,
+    verified_only_gate,
 )
 
 
@@ -194,6 +196,9 @@ class CxxAgentDecisionContractTests(unittest.TestCase):
                 "runtime-confirmed",
                 "human-confirmed",
                 "needs-human-review",
+                # UAF v2 states: only produced by the UAF v2 pipeline.
+                "semantic-supported",
+                "fact-verified",
             },
             CXX_AGENT_VERIFICATION_STATES,
         )
@@ -320,6 +325,70 @@ class FindingPayloadTests(unittest.TestCase):
         self.assertEqual("high", rendered["severity"])
         self.assertEqual("llm-agent", rendered["analysis_mode"])
         self.assertIs(False, rendered["automatic_repair"])
+
+
+class StateDomainTests(unittest.TestCase):
+    """UAF v2 vocabulary extension: gate semantics stay closed-domain."""
+
+    @staticmethod
+    def _candidate_with_state(state: str) -> CxxAgentCandidate:
+        candidate = CxxAgentCandidate.from_untrusted_json(
+            {
+                "cwe": "CWE-416",
+                "path": "src/session.cpp",
+                "line": 128,
+                "symbol": "Session::close",
+                "title": "t",
+                "mechanism": "m",
+                "trigger_path": ["a"],
+                "confidence": 0.5,
+            }
+        )
+        return dataclasses.replace(candidate, verification_state=state)
+
+    def test_fact_verified_enters_gate_and_semantic_supported_does_not(self):
+        self.assertIn("fact-verified", VERIFIED_STATES)
+        self.assertIn("fact-verified", CXX_AGENT_VERIFICATION_STATES)
+        self.assertIn("semantic-supported", CXX_AGENT_VERIFICATION_STATES)
+        # semantic-supported 不是 verified 状态（设计第 5 节）。
+        self.assertNotIn("semantic-supported", VERIFIED_STATES)
+
+        verified = self._candidate_with_state("fact-verified")
+        accepted, rejected = verified_only_gate((verified,))
+        self.assertEqual((verified,), accepted)
+        self.assertEqual((), rejected)
+
+        pending = self._candidate_with_state("semantic-supported")
+        accepted, rejected = verified_only_gate((pending,))
+        self.assertEqual((), accepted)
+        self.assertEqual((pending,), rejected)
+
+    def test_new_states_pass_the_decision_contract_but_legacy_default_is_untouched(self):
+        for state in ("fact-verified", "semantic-supported"):
+            with self.subTest(state=state):
+                decision = CxxAgentDecision.from_untrusted_json(
+                    {
+                        "decision": "accept",
+                        "verification_state": state,
+                        "rationale": "r",
+                        "corroborating_agent_roles": [],
+                    }
+                )
+                self.assertEqual(state, decision.verification_state)
+        # 未知状态依旧被闭域校验拒绝，legacy 默认值不变。
+        with self.assertRaises(ValueError):
+            CxxAgentDecision.from_untrusted_json(
+                {
+                    "decision": "accept",
+                    "verification_state": "definitely-fake",
+                    "rationale": "r",
+                    "corroborating_agent_roles": [],
+                }
+            )
+        self.assertEqual(
+            "llm-candidate",
+            self._candidate_with_state("llm-candidate").verification_state,
+        )
 
 
 if __name__ == "__main__":

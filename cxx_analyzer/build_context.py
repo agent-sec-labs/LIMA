@@ -60,6 +60,9 @@ __all__ = [
     "MAX_DATABASE_ENTRIES",
     "RESPONSE_FILE_PATTERN",
     "SEMANTIC_ARG_OPTIONS",
+    "WIRE_RESOLUTION_STATUSES",
+    "WIRE_SOURCE_KINDS",
+    "UnitBuildContext",
     "compiler_command_to_argv",
     "compute_context_hash",
     "find_compile_databases",
@@ -67,6 +70,8 @@ __all__ = [
     "inside_snapshot",
     "read_compilation_database",
     "resolve_build_context",
+    "resolve_build_context_execution",
+    "resolve_build_context_wire",
     "validate_argument_paths",
     "validate_compiler_argv",
 ]
@@ -184,6 +189,16 @@ _REJECTION_MESSAGES: Final = {
     "too-many-arguments": "compilation database arguments are invalid",
     "argument-invalid": "compilation database arguments are invalid",
 }
+
+# Frozen wire vocabulary of the ``/v1/uaf-facts`` build-context block.  It
+# mirrors ``lima.uaf_models`` (RESOLUTION_STATUSES / RESOLUTION_SOURCE_KINDS)
+# so the sidecar can project resolutions onto plain dicts without importing
+# the main-process package; a parity test keeps the two in lockstep.
+WIRE_RESOLUTION_STATUSES: Final = frozenset({"resolved", "incomplete", "unavailable"})
+WIRE_SOURCE_KINDS: Final = frozenset(
+    {"repository-compdb", "cmake-export", "build-adapter", "heuristic"}
+)
+_WIRE_MAX_DIAGNOSTIC_BYTES: Final = 2_048
 
 
 def _dedupe(items: Sequence[str]) -> tuple[str, ...]:
@@ -624,7 +639,7 @@ def _missing_referenced_paths(
 
 def _resolve_from_database(
     root: Path, translation_unit: str, database: Path
-) -> tuple[object | None, tuple[str, ...]]:
+) -> tuple[UnitBuildContext | None, tuple[str, ...]]:
     """Resolve against one database; ``None`` means "no entry for this TU"."""
 
     try:
@@ -641,29 +656,92 @@ def _resolve_from_database(
             invalid_match = True
         else:
             matched.append(parsed)
+    incomplete = _resolve_incomplete
     if not matched and not invalid_match:
         return None, ()
     if len(matched) > 1 or (matched and invalid_match):
-        return _resolution(
-            "incomplete", "repository-compdb", "", ("ambiguous-tu-entry",)
-        ), ()
+        return incomplete("repository-compdb", ("ambiguous-tu-entry",)), ()
     if invalid_match:
-        return _resolution(
-            "incomplete", "repository-compdb", "", ("compdb-entry-invalid",)
-        ), ()
+        return incomplete("repository-compdb", ("compdb-entry-invalid",)), ()
     entry = matched[0]
     if entry.rejections:
-        return _resolution(
-            "incomplete", "repository-compdb", "", _dedupe(entry.rejections)
-        ), ()
+        return incomplete("repository-compdb", _dedupe(entry.rejections)), ()
     if _missing_referenced_paths(entry.working_directory, entry.arguments):
-        return _resolution(
-            "incomplete", "repository-compdb", "", ("missing-referenced-path",)
-        ), ()
+        return incomplete("repository-compdb", ("missing-referenced-path",)), ()
     context_hash = compute_context_hash(
         translation_unit, "repository-compdb", entry.arguments, entry.relative_directory
     )
-    return _resolution("resolved", "repository-compdb", context_hash, ()), ()
+    return (
+        UnitBuildContext(
+            status="resolved",
+            source_kind="repository-compdb",
+            context_hash=context_hash,
+            diagnostics=(),
+            arguments=entry.arguments,
+            relative_directory=entry.relative_directory,
+        ),
+        (),
+    )
+
+
+def _resolve_incomplete(source_kind: str, diagnostics: Sequence[str]) -> UnitBuildContext:
+    return UnitBuildContext(
+        status="incomplete",
+        source_kind=source_kind,
+        context_hash="",
+        diagnostics=tuple(diagnostics),
+    )
+
+
+@dataclass(frozen=True)
+class UnitBuildContext:
+    """Internal per-unit resolution shared by every public projection.
+
+    ``status``/``source_kind``/``context_hash``/``diagnostics`` carry the
+    frozen resolution answer; ``arguments`` and ``relative_directory``
+    expose the pinned compiler argv and working directory to the extraction
+    stage only for ``resolved`` contexts (empty otherwise, so a non-resolved
+    context can never reach Clang).  This type is lima-free; the typed
+    contract object is built by :func:`resolve_build_context` and the plain
+    wire dict by :attr:`wire`.
+    """
+
+    status: str
+    source_kind: str = ""
+    context_hash: str = ""
+    diagnostics: tuple[str, ...] = ()
+    arguments: tuple[str, ...] = ()
+    relative_directory: str = ""
+
+    @property
+    def wire(self) -> dict[str, object]:
+        """Project the closed four-field ``/v1/uaf-facts`` wire dict."""
+
+        if self.status not in WIRE_RESOLUTION_STATUSES:
+            raise ValueError("resolution status is outside the closed domain")
+        if self.source_kind != "" and self.source_kind not in WIRE_SOURCE_KINDS:
+            raise ValueError("resolution source kind is outside the closed domain")
+        if self.context_hash != "" and (
+            not isinstance(self.context_hash, str)
+            or len(self.context_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.context_hash)
+        ):
+            raise ValueError("context hash is not a lowercase SHA-256 digest")
+        bounded: list[str] = []
+        for diagnostic in self.diagnostics:
+            if (
+                not isinstance(diagnostic, str)
+                or not diagnostic
+                or len(diagnostic.encode("utf-8")) > _WIRE_MAX_DIAGNOSTIC_BYTES
+            ):
+                raise ValueError("resolution diagnostic is outside the closed domain")
+            bounded.append(diagnostic)
+        return {
+            "status": self.status,
+            "source_kind": self.source_kind,
+            "context_hash": self.context_hash,
+            "diagnostics": bounded,
+        }
 
 
 def _resolution(
@@ -705,6 +783,106 @@ def _canonical_unit(root: Path, translation_unit: object) -> str | None:
     return relative_text
 
 
+def _resolve(
+    snapshot_root: Path,
+    translation_unit: str,
+    settings: AnalyzerSettings,
+    capabilities: Mapping[str, bool] | None,
+) -> UnitBuildContext:
+    """Shared decision core behind every public resolver projection."""
+
+    root = Path(snapshot_root).resolve()
+    unit = _canonical_unit(root, translation_unit)
+    if unit is None:
+        return UnitBuildContext(
+            status="unavailable",
+            diagnostics=("translation-unit-not-in-snapshot",),
+        )
+    try:
+        language_for_path(unit)
+    except ValueError:
+        return UnitBuildContext(
+            status="unavailable",
+            diagnostics=("unsupported-translation-unit",),
+        )
+
+    generation_enabled = False
+    if settings.trusted_build_context_generation:
+        probes = (
+            dict(capabilities)
+            if capabilities is not None
+            else trust.build_generation_capabilities()
+        )
+        generation_enabled = bool(probes) and all(probes.values())
+
+    pending: list[str] = []
+    for database in find_compile_databases(root):
+        outcome, diagnostics = _resolve_from_database(root, unit, database)
+        pending.extend(diagnostics)
+        if outcome is not None:
+            return outcome
+    pending = list(_dedupe(pending))
+
+    if generation_enabled:
+        source_kind = ""
+        if (root / "CMakeLists.txt").is_file():
+            # Adapter selection is not authorization: auto_cmake selects the
+            # CMake adapter inside the already-gated generation tier only.
+            if settings.auto_cmake:
+                source_kind = "cmake-export"
+        elif any((root / marker).is_file() for marker in _ADAPTER_MARKERS):
+            source_kind = "build-adapter"
+        if source_kind:
+            return UnitBuildContext(
+                status="unavailable",
+                source_kind=source_kind,
+                diagnostics=(*pending, GENERATION_NOT_IMPLEMENTED),
+            )
+
+    return UnitBuildContext(
+        status="incomplete",
+        source_kind="heuristic",
+        diagnostics=(*pending, HEURISTIC_DIAGNOSTIC),
+    )
+
+
+def resolve_build_context_execution(
+    snapshot_root: Path,
+    translation_unit: str,
+    settings: AnalyzerSettings,
+    capabilities: Mapping[str, bool] | None = None,
+) -> UnitBuildContext:
+    """Resolve one translation unit and keep the extraction-stage details.
+
+    This is the raw shared resolution: the closed wire dict (``.wire``),
+    the typed contract (via :func:`resolve_build_context`) and the plain
+    wire projection (via :func:`resolve_build_context_wire`) are all
+    projections of this one decision, so they can never disagree.
+    ``arguments`` and ``relative_directory`` are populated exactly when the
+    status is ``resolved``; every other status leaves them empty, so a
+    non-resolved context can never reach the compiler.
+    """
+
+    return _resolve(snapshot_root, translation_unit, settings, capabilities)
+
+
+def resolve_build_context_wire(
+    snapshot_root: Path,
+    translation_unit: str,
+    settings: AnalyzerSettings,
+    capabilities: Mapping[str, bool] | None = None,
+) -> dict[str, object]:
+    """Resolve one translation unit and project the closed wire dict.
+
+    The sidecar's ``/v1/uaf-facts`` endpoint serves this projection.  It is
+    a plain dict with exactly the frozen wire vocabulary and never imports
+    the main-process ``lima`` package; a parity test keeps the vocabulary
+    identical to ``lima.uaf_models``.
+    """
+
+    return _resolve(snapshot_root, translation_unit, settings, capabilities).wire
+
+
 def resolve_build_context(
     snapshot_root: Path,
     translation_unit: str,
@@ -736,44 +914,10 @@ def resolve_build_context(
     claims Clang parse success -- that is the extraction stage's answer.
     """
 
-    root = Path(snapshot_root).resolve()
-    unit = _canonical_unit(root, translation_unit)
-    if unit is None:
-        return _resolution("unavailable", "", "", ("translation-unit-not-in-snapshot",))
-    try:
-        language_for_path(unit)
-    except ValueError:
-        return _resolution("unavailable", "", "", ("unsupported-translation-unit",))
-
-    generation_enabled = False
-    if settings.trusted_build_context_generation:
-        probes = (
-            dict(capabilities)
-            if capabilities is not None
-            else trust.build_generation_capabilities()
-        )
-        generation_enabled = bool(probes) and all(probes.values())
-
-    pending: list[str] = []
-    for database in find_compile_databases(root):
-        outcome, diagnostics = _resolve_from_database(root, unit, database)
-        pending.extend(diagnostics)
-        if outcome is not None:
-            return outcome
-    pending = list(_dedupe(pending))
-
-    if generation_enabled:
-        source_kind = ""
-        if (root / "CMakeLists.txt").is_file():
-            # Adapter selection is not authorization: auto_cmake selects the
-            # CMake adapter inside the already-gated generation tier only.
-            if settings.auto_cmake:
-                source_kind = "cmake-export"
-        elif any((root / marker).is_file() for marker in _ADAPTER_MARKERS):
-            source_kind = "build-adapter"
-        if source_kind:
-            return _resolution(
-                "unavailable", source_kind, "", (*pending, GENERATION_NOT_IMPLEMENTED)
-            )
-
-    return _resolution("incomplete", "heuristic", "", (*pending, HEURISTIC_DIAGNOSTIC))
+    resolution = _resolve(snapshot_root, translation_unit, settings, capabilities)
+    return _resolution(
+        status=resolution.status,
+        source_kind=resolution.source_kind,
+        context_hash=resolution.context_hash,
+        diagnostics=resolution.diagnostics,
+    )

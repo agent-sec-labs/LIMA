@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
@@ -3856,6 +3857,1572 @@ class BuildContextResolverTests(unittest.TestCase):
                         shutil.rmtree(root / directory)
                     if with_root:
                         (root / "compile_commands.json").unlink()
+
+
+# --------------------------------------------------------------------------
+# UAF v2 Task 4: AST / restricted-CFG fact extraction
+# --------------------------------------------------------------------------
+# Host tests drive the pure extractor over minimal mock AST JSON built with
+# the ``_ast_*`` helpers (only the fields the extractor reads).  Clang is
+# never executed on the host: ``extract_ast_json`` is exercised against a
+# mocked ``execution.run_step``.  The container class at the end runs the
+# real clang-14 inside the analyzer container and asserts semantics only.
+
+_UAF_FIXTURES = Path(__file__).parent / "fixtures" / "uaf_v2"
+
+
+def _ast_loc(line, col, toklen=1):
+    return {
+        "offset": (line - 1) * 100 + col,
+        "line": line,
+        "col": col,
+        "tokLen": toklen,
+    }
+
+
+def _ast_range(begin, end=None):
+    end = end or begin
+    return {"begin": _ast_loc(*begin), "end": _ast_loc(*end)}
+
+
+def _ast_node(kind, inner=None, rng=None, **attrs):
+    node = {"kind": kind}
+    if rng is not None:
+        node["loc"] = dict(rng["begin"])
+        node["range"] = rng
+    node.update(attrs)
+    if inner is not None:
+        node["inner"] = list(inner)
+    return node
+
+
+def _ast_decl_ref(name, qual="int *", rng=None):
+    return _ast_node(
+        "DeclRefExpr",
+        rng=rng,
+        referencedDecl={"kind": "VarDecl", "name": name},
+        type={"qualType": qual},
+    )
+
+
+def _ast_new_expr(rng, *, array=False):
+    attrs = {"type": {"qualType": "int *"}}
+    if array:
+        attrs["isArray"] = True
+    return _ast_node("CXXNewExpr", rng=rng, **attrs)
+
+
+def _ast_delete_expr(name, rng):
+    return _ast_node(
+        "CXXDeleteExpr", rng=rng, inner=[_ast_decl_ref(name)], type={"qualType": "void"}
+    )
+
+
+def _ast_deref(name, rng):
+    return _ast_node(
+        "UnaryOperator",
+        rng=rng,
+        opcode="*",
+        type={"qualType": "int"},
+        inner=[_ast_decl_ref(name)],
+    )
+
+
+def _ast_member_arrow(name, rng):
+    return _ast_node(
+        "MemberExpr",
+        rng=rng,
+        isArrow=True,
+        type={"qualType": "int"},
+        inner=[_ast_decl_ref(name)],
+    )
+
+
+def _ast_call(callee_name, arguments, rng, *, callee_kind="FunctionDecl"):
+    if callee_name is None:
+        callee = _ast_node(
+            "DeclRefExpr", rng=rng, type={"qualType": "void (*())(int *)"}
+        )
+    else:
+        callee = _ast_node(
+            "DeclRefExpr",
+            rng=rng,
+            referencedDecl={"kind": callee_kind, "name": callee_name},
+            type={"qualType": "void (int *)"},
+        )
+    return _ast_node(
+        "CallExpr",
+        rng=rng,
+        type={"qualType": "void"},
+        inner=[_ast_node("ImplicitCastExpr", inner=[callee]), *arguments],
+    )
+
+
+def _ast_assign(lhs, rhs, rng):
+    return _ast_node(
+        "BinaryOperator",
+        rng=rng,
+        opcode="=",
+        type={"qualType": "int *"},
+        inner=[lhs, rhs],
+    )
+
+
+def _ast_decl_stmt(var_decls, rng):
+    return _ast_node("DeclStmt", rng=rng, inner=list(var_decls))
+
+
+def _ast_var_decl(name, qual, init=None, rng=None):
+    return _ast_node(
+        "VarDecl",
+        rng=rng or _ast_range((1, 5)),
+        name=name,
+        type={"qualType": qual},
+        inner=[init] if init is not None else None,
+    )
+
+
+def _ast_compound(stmts, rng=None):
+    return _ast_node("CompoundStmt", rng=rng, inner=list(stmts))
+
+
+def _ast_function(name, body, rng):
+    return _ast_node(
+        "FunctionDecl",
+        rng=rng,
+        name=name,
+        type={"qualType": "void ()"},
+        inner=[body],
+    )
+
+
+def _ast_if(cond, then_stmt, else_stmt=None, rng=None):
+    inner = [cond, then_stmt] + ([else_stmt] if else_stmt is not None else [])
+    return _ast_node("IfStmt", rng=rng, inner=inner)
+
+
+def _ast_binary(opcode, lhs, rhs, rng, qual="int"):
+    return _ast_node(
+        "BinaryOperator",
+        rng=rng,
+        opcode=opcode,
+        type={"qualType": qual},
+        inner=[lhs, rhs],
+    )
+
+
+def _ast_paren(expr, rng):
+    return _ast_node("ParenExpr", rng=rng, type={"qualType": "int *"}, inner=[expr])
+
+
+def _ast_translation_unit(decls, *, diagnostics=None):
+    unit = _ast_node("TranslationUnitDecl", inner=list(decls))
+    if diagnostics is not None:
+        unit["diagnostics"] = diagnostics
+    return unit
+
+
+def _fact_kinds(result):
+    return [fact["kind"] for fact in result["facts"]]
+
+
+def _facts_of_kind(result, kind):
+    return [fact for fact in result["facts"] if fact["kind"] == kind]
+
+
+def _walk_all(node):
+    yield node
+    for child in node.get("inner") or []:
+        yield from _walk_all(child)
+
+
+class _UafFakeResponse:
+    def __init__(self, stream):
+        self._stream = stream
+
+    def read(self, size=-1):
+        return self._stream.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
+REQUEST_ID_UAF = "00000000-0000-0000-0000-000000000004"
+
+
+class UafFactExtractionTests(unittest.TestCase):
+    """Task 4: UAF facts + restricted-CFG completeness over mock clang ASTs."""
+
+    _TU = "src/new_delete_deref.cpp"
+
+    def _extract(self, ast, tu=_TU, line_offsets=None):
+        from cxx_analyzer import uaf_scan
+
+        return uaf_scan.extract_uaf_facts(ast, tu, tu, line_offsets=line_offsets)
+
+    # ------------------------------------------------------------ positives
+
+    def test_new_delete_deref_facts(self):
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "use_after_free",
+                    _ast_compound(
+                        [
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "p",
+                                        "int *",
+                                        init=_ast_new_expr(_ast_range((2, 14))),
+                                        rng=_ast_range((2, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((2, 5)),
+                            ),
+                            _ast_delete_expr("p", _ast_range((3, 5))),
+                            _ast_deref("p", _ast_range((4, 5))),
+                        ],
+                        rng=_ast_range((1, 22), (5, 1)),
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ]
+        )
+        result = self._extract(ast)
+        self.assertTrue(result["coverage"]["ast_complete"])
+        self.assertTrue(result["coverage"]["cfg_complete"])
+        self.assertEqual(["usr-synthesized"], result["coverage"]["semantic_gaps"])
+
+        allocations = _facts_of_kind(result, "allocation")
+        self.assertEqual(1, len(allocations))
+        allocation = allocations[0]
+        self.assertEqual("new", allocation["allocation_api"])
+        self.assertEqual("p", allocation["pointer_id"])
+        self.assertEqual([2, 2], allocation["source_range"])
+        self.assertEqual(
+            "src/new_delete_deref.cpp#use_after_free@1", allocation["function_usr"]
+        )
+        self.assertEqual(self._TU, allocation["translation_unit"])
+        self.assertEqual(self._TU, allocation["canonical_path"])
+
+        releases = _facts_of_kind(result, "release")
+        self.assertEqual(1, len(releases))
+        release = releases[0]
+        self.assertEqual("delete", release["release_api"])
+        self.assertEqual("p", release["pointer_id"])
+        self.assertEqual([3, 3], release["source_range"])
+        self.assertEqual([allocation["fact_id"]], release["related_fact_ids"])
+
+        dereferences = _facts_of_kind(result, "dereference")
+        self.assertEqual(1, len(dereferences))
+        self.assertEqual("p", dereferences[0]["pointer_id"])
+        self.assertEqual([4, 4], dereferences[0]["source_range"])
+
+        self.assertEqual(
+            ["allocation", "points-to", "release", "dereference"],
+            _fact_kinds(result),
+        )
+        blocks = [fact["cfg_block"] for fact in result["facts"]]
+        self.assertEqual(blocks, sorted(blocks))
+        for fact in result["facts"]:
+            self.assertRegex(fact["fact_id"], r"^[0-9a-f]{64}$")
+        # Deterministic: identical ASTs produce identical fact ids.
+        again = self._extract(ast)
+        self.assertEqual(
+            [fact["fact_id"] for fact in result["facts"]],
+            [fact["fact_id"] for fact in again["facts"]],
+        )
+
+    def test_malloc_free_member_facts(self):
+        malloc_call = _ast_call(
+            "malloc", [_ast_decl_ref("item", qual="unsigned long")], _ast_range((8, 38))
+        )
+        cast = _ast_node(
+            "CStyleCastExpr",
+            rng=_ast_range((8, 21)),
+            type={"qualType": "struct item *"},
+            inner=[malloc_call],
+        )
+        member_read = _ast_assign(
+            _ast_member_arrow("p", _ast_range((9, 5))),
+            _ast_node(
+                "IntegerLiteral", rng=_ast_range((9, 16)), type={"qualType": "int"}
+            ),
+            _ast_range((9, 5)),
+        )
+        free_call = _ast_call("free", [_ast_decl_ref("p")], _ast_range((10, 5)))
+        member_write = _ast_assign(
+            _ast_member_arrow("p", _ast_range((11, 5))),
+            _ast_node(
+                "IntegerLiteral", rng=_ast_range((11, 16)), type={"qualType": "int"}
+            ),
+            _ast_range((11, 5)),
+        )
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "use_after_free",
+                    _ast_compound(
+                        [
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "p",
+                                        "struct item *",
+                                        init=cast,
+                                        rng=_ast_range((8, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((8, 5)),
+                            ),
+                            member_read,
+                            free_call,
+                            member_write,
+                        ],
+                        rng=_ast_range((7, 24), (12, 1)),
+                    ),
+                    rng=_ast_range((7, 1)),
+                )
+            ]
+        )
+        result = self._extract(ast, tu="src/malloc_free_member.c")
+
+        allocations = _facts_of_kind(result, "allocation")
+        self.assertEqual(1, len(allocations))
+        self.assertEqual("malloc", allocations[0]["allocation_api"])
+        self.assertEqual([8, 8], allocations[0]["source_range"])
+
+        releases = _facts_of_kind(result, "release")
+        self.assertEqual(1, len(releases))
+        self.assertEqual("free", releases[0]["release_api"])
+        self.assertEqual("p", releases[0]["pointer_id"])
+        self.assertEqual([allocations[0]["fact_id"]], releases[0]["related_fact_ids"])
+
+        accesses = _facts_of_kind(result, "member-access")
+        self.assertEqual(2, len(accesses))
+        self.assertEqual({"p"}, {fact["pointer_id"] for fact in accesses})
+        self.assertEqual([], _facts_of_kind(result, "dereference"))
+        self.assertTrue(result["coverage"]["cfg_complete"])
+
+    def test_alias_chain_facts(self):
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "alias_chain_use",
+                    _ast_compound(
+                        [
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "p",
+                                        "int *",
+                                        init=_ast_new_expr(_ast_range((2, 14))),
+                                        rng=_ast_range((2, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((2, 5)),
+                            ),
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "q",
+                                        "int *",
+                                        init=_ast_decl_ref("p"),
+                                        rng=_ast_range((3, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((3, 5)),
+                            ),
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "r",
+                                        "int *",
+                                        init=_ast_decl_ref("q"),
+                                        rng=_ast_range((4, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((4, 5)),
+                            ),
+                            _ast_delete_expr("p", _ast_range((5, 5))),
+                            _ast_deref("r", _ast_range((6, 5))),
+                        ],
+                        rng=_ast_range((1, 20), (7, 1)),
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ]
+        )
+        result = self._extract(ast, tu="src/alias_chain.cpp")
+
+        copies = _facts_of_kind(result, "alias-copy")
+        self.assertEqual(2, len(copies))
+        self.assertEqual(("q", "p"), (copies[0]["pointer_id"], copies[0]["source_pointer_id"]))
+        self.assertEqual(("r", "q"), (copies[1]["pointer_id"], copies[1]["source_pointer_id"]))
+        dereferences = _facts_of_kind(result, "dereference")
+        self.assertEqual(1, len(dereferences))
+        self.assertEqual("r", dereferences[0]["pointer_id"])
+        self.assertTrue(result["coverage"]["cfg_complete"])
+
+    def test_rebind_after_release_facts(self):
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "rebind_use",
+                    _ast_compound(
+                        [
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "p",
+                                        "int *",
+                                        init=_ast_new_expr(_ast_range((2, 14))),
+                                        rng=_ast_range((2, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((2, 5)),
+                            ),
+                            _ast_delete_expr("p", _ast_range((3, 5))),
+                            _ast_assign(
+                                _ast_decl_ref("p"),
+                                _ast_new_expr(_ast_range((4, 9))),
+                                _ast_range((4, 5)),
+                            ),
+                            _ast_deref("p", _ast_range((5, 5))),
+                        ],
+                        rng=_ast_range((1, 16), (6, 1)),
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ]
+        )
+        result = self._extract(ast, tu="src/rebind.cpp")
+
+        self.assertEqual(2, len(_facts_of_kind(result, "allocation")))
+        rebinds = _facts_of_kind(result, "rebind")
+        self.assertEqual(1, len(rebinds))
+        self.assertEqual("p", rebinds[0]["pointer_id"])
+        self.assertEqual([4, 4], rebinds[0]["source_range"])
+        self.assertEqual(1, len(_facts_of_kind(result, "dereference")))
+        self.assertTrue(result["coverage"]["cfg_complete"])
+
+    def test_guard_region_single_if_stays_complete(self):
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "guarded_use",
+                    _ast_compound(
+                        [
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "p",
+                                        "int *",
+                                        init=_ast_new_expr(_ast_range((2, 14))),
+                                        rng=_ast_range((2, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((2, 5)),
+                            ),
+                            _ast_if(
+                                _ast_decl_ref("flag", qual="bool"),
+                                _ast_compound(
+                                    [
+                                        _ast_delete_expr("p", _ast_range((4, 9))),
+                                        _ast_deref("p", _ast_range((5, 9))),
+                                    ],
+                                    rng=_ast_range((3, 15), (6, 5)),
+                                ),
+                                rng=_ast_range((3, 5)),
+                            ),
+                        ],
+                        rng=_ast_range((1, 24), (7, 1)),
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ]
+        )
+        result = self._extract(ast, tu="src/guard_region.cpp")
+        self.assertTrue(result["coverage"]["cfg_complete"])
+        self.assertEqual(["usr-synthesized"], result["coverage"]["semantic_gaps"])
+        releases = _facts_of_kind(result, "release")
+        self.assertEqual([4], [fact["source_range"][0] for fact in releases])
+        blocks = [fact["cfg_block"] for fact in result["facts"]]
+        self.assertEqual(blocks, sorted(blocks))
+
+    # ---------------------------------------------------------- CFG negatives
+
+    def test_loop_is_cfg_gap(self):
+        body = _ast_compound([_ast_deref("p", _ast_range((5, 9)))], rng=_ast_range((4, 30), (6, 5)))
+        loop = _ast_node(
+            "ForStmt",
+            rng=_ast_range((4, 5)),
+            inner=[
+                _ast_decl_stmt(
+                    [_ast_var_decl("i", "int", rng=_ast_range((4, 10)))],
+                    rng=_ast_range((4, 10)),
+                ),
+                _ast_binary(
+                    "<",
+                    _ast_decl_ref("i", qual="int"),
+                    _ast_decl_ref("n", qual="int"),
+                    _ast_range((4, 19)),
+                ),
+                _ast_node(
+                    "UnaryOperator",
+                    rng=_ast_range((4, 26)),
+                    opcode="++",
+                    type={"qualType": "int"},
+                    inner=[_ast_decl_ref("i", qual="int")],
+                ),
+                body,
+            ],
+        )
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "loop_use",
+                        _ast_compound(
+                            [
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "p",
+                                            "int *",
+                                            init=_ast_new_expr(_ast_range((2, 14))),
+                                            rng=_ast_range((2, 5)),
+                                        )
+                                    ],
+                                    rng=_ast_range((2, 5)),
+                                ),
+                                _ast_delete_expr("p", _ast_range((3, 5))),
+                                loop,
+                            ],
+                            rng=_ast_range((1, 19), (7, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/loop.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("cfg-loop", result["coverage"]["semantic_gaps"])
+        self.assertIn("dereference", _fact_kinds(result))
+
+    def test_switch_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "switch_use",
+                        _ast_compound(
+                            [
+                                _ast_node(
+                                    "SwitchStmt",
+                                    rng=_ast_range((3, 5)),
+                                    inner=[
+                                        _ast_decl_ref("n", qual="int"),
+                                        _ast_node(
+                                            "CaseStmt",
+                                            rng=_ast_range((4, 5)),
+                                            inner=[
+                                                _ast_node(
+                                                    "IntegerLiteral",
+                                                    rng=_ast_range((4, 10)),
+                                                    type={"qualType": "int"},
+                                                ),
+                                                _ast_deref("p", _ast_range((5, 9))),
+                                                _ast_node("BreakStmt", rng=_ast_range((6, 9))),
+                                            ],
+                                        ),
+                                        _ast_node("DefaultStmt", rng=_ast_range((7, 5)), inner=[]),
+                                    ],
+                                )
+                            ],
+                            rng=_ast_range((1, 20), (10, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/switch.c",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("cfg-switch", result["coverage"]["semantic_gaps"])
+
+    def test_goto_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "goto_use",
+                        _ast_compound(
+                            [
+                                _ast_if(
+                                    _ast_binary(
+                                        ">",
+                                        _ast_decl_ref("n", qual="int"),
+                                        _ast_node(
+                                            "IntegerLiteral",
+                                            rng=_ast_range((3, 15)),
+                                            type={"qualType": "int"},
+                                        ),
+                                        _ast_range((3, 13)),
+                                    ),
+                                    _ast_compound(
+                                        [
+                                            _ast_node(
+                                                "GotoStmt", rng=_ast_range((4, 9)), name="cleanup"
+                                            )
+                                        ],
+                                        rng=_ast_range((3, 21), (5, 5)),
+                                    ),
+                                    rng=_ast_range((3, 5)),
+                                ),
+                                _ast_deref("p", _ast_range((6, 5))),
+                                _ast_node(
+                                    "LabelStmt", rng=_ast_range((7, 1)), name="cleanup"
+                                ),
+                                _ast_call("free", [_ast_decl_ref("p")], _ast_range((8, 5))),
+                            ],
+                            rng=_ast_range((1, 19), (9, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/goto.c",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("cfg-goto", result["coverage"]["semantic_gaps"])
+
+    def test_short_circuit_side_effect_is_cfg_gap(self):
+        condition = _ast_binary(
+            "&&",
+            _ast_decl_ref("p"),
+            _ast_binary(
+                "!=",
+                _ast_paren(
+                    _ast_assign(
+                        _ast_decl_ref("q"),
+                        _ast_decl_ref("p"),
+                        _ast_range((3, 17)),
+                    ),
+                    _ast_range((3, 16)),
+                ),
+                _ast_node(
+                    "IntegerLiteral", rng=_ast_range((3, 27)), type={"qualType": "int"}
+                ),
+                _ast_range((3, 15)),
+            ),
+            _ast_range((3, 13)),
+        )
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "shortcircuit_use",
+                        _ast_compound(
+                            [
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "p",
+                                            "int *",
+                                            init=_ast_new_expr(_ast_range((2, 14))),
+                                            rng=_ast_range((2, 5)),
+                                        )
+                                    ],
+                                    rng=_ast_range((2, 5)),
+                                ),
+                                _ast_if(
+                                    condition,
+                                    _ast_compound(
+                                        [_ast_deref("q", _ast_range((4, 9)))],
+                                        rng=_ast_range((3, 32), (5, 5)),
+                                    ),
+                                    rng=_ast_range((3, 5)),
+                                ),
+                                _ast_delete_expr("p", _ast_range((6, 5))),
+                            ],
+                            rng=_ast_range((1, 28), (7, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/shortcircuit.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("short-circuit-side-effect", result["coverage"]["semantic_gaps"])
+
+    def test_try_catch_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "try_use",
+                        _ast_compound(
+                            [
+                                _ast_node(
+                                    "CXXTryStmt",
+                                    rng=_ast_range((3, 5)),
+                                    inner=[
+                                        _ast_compound(
+                                            [_ast_deref("p", _ast_range((4, 9)))],
+                                            rng=_ast_range((3, 9), (5, 5)),
+                                        ),
+                                        _ast_node(
+                                            "CXXCatchStmt",
+                                            rng=_ast_range((5, 7)),
+                                            inner=[
+                                                _ast_compound([], rng=_ast_range((5, 20), (5, 21)))
+                                            ],
+                                        ),
+                                    ],
+                                ),
+                                _ast_delete_expr("p", _ast_range((6, 5))),
+                            ],
+                            rng=_ast_range((1, 16), (7, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/try.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("cfg-exception", result["coverage"]["semantic_gaps"])
+
+    def test_raii_destructor_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "raii_use",
+                        _ast_compound(
+                            [
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "g", "Guard", rng=_ast_range((6, 5))
+                                        )
+                                    ],
+                                    rng=_ast_range((6, 5)),
+                                ),
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "p",
+                                            "int *",
+                                            init=_ast_new_expr(_ast_range((7, 14))),
+                                            rng=_ast_range((7, 5)),
+                                        )
+                                    ],
+                                    rng=_ast_range((7, 5)),
+                                ),
+                                _ast_delete_expr("p", _ast_range((8, 5))),
+                                _ast_deref("p", _ast_range((9, 5))),
+                            ],
+                            rng=_ast_range((5, 15), (10, 1)),
+                        ),
+                        rng=_ast_range((5, 1)),
+                    )
+                ]
+            ),
+            tu="src/raii.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("destructor-control-flow", result["coverage"]["semantic_gaps"])
+
+    def test_lambda_body_is_cfg_gap(self):
+        lambda_expr = _ast_node(
+            "LambdaExpr",
+            rng=_ast_range((3, 19)),
+            inner=[
+                _ast_compound(
+                    [_ast_deref("p", _ast_range((3, 27)))], rng=_ast_range((3, 25), (3, 29))
+                ),
+            ],
+        )
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "lambda_use",
+                        _ast_compound(
+                            [
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "p",
+                                            "int *",
+                                            init=_ast_new_expr(_ast_range((2, 14))),
+                                            rng=_ast_range((2, 5)),
+                                        )
+                                    ],
+                                    rng=_ast_range((2, 5)),
+                                ),
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "capture",
+                                            "(lambda at src/lambda.cpp:3:10)",
+                                            init=lambda_expr,
+                                            rng=_ast_range((3, 10)),
+                                        )
+                                    ],
+                                    rng=_ast_range((3, 10)),
+                                ),
+                                _ast_call("capture", [], _ast_range((4, 5)), callee_kind="VarDecl"),
+                                _ast_delete_expr("p", _ast_range((5, 5))),
+                            ],
+                            rng=_ast_range((1, 18), (6, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/lambda.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("lambda-body", result["coverage"]["semantic_gaps"])
+        # No facts may be extracted from inside the lambda body.
+        self.assertEqual([], _facts_of_kind(result, "dereference"))
+
+    def test_coroutine_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "coro_use",
+                        _ast_node(
+                            "CoroutineBodyStmt",
+                            rng=_ast_range((1, 1), (4, 1)),
+                            inner=[
+                                _ast_deref("p", _ast_range((2, 5))),
+                                _ast_node("ReturnStmt", rng=_ast_range((3, 5))),
+                            ],
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/coroutine.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("coroutine", result["coverage"]["semantic_gaps"])
+
+    def test_indirect_call_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "indirect_use",
+                        _ast_compound(
+                            [
+                                _ast_call(None, [_ast_decl_ref("p")], _ast_range((2, 5))),
+                            ],
+                            rng=_ast_range((1, 20), (3, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/indirect.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("indirect-call", result["coverage"]["semantic_gaps"])
+        self.assertNotIn("release", _fact_kinds(result))
+
+    def test_template_instantiation_is_cfg_gap(self):
+        pattern_body = _ast_compound(
+            [
+                _ast_decl_stmt(
+                    [
+                        _ast_var_decl(
+                            "p",
+                            "int *",
+                            init=_ast_new_expr(_ast_range((3, 14))),
+                            rng=_ast_range((3, 5)),
+                        )
+                    ],
+                    rng=_ast_range((3, 5)),
+                ),
+                _ast_deref("p", _ast_range((4, 5))),
+            ],
+            rng=_ast_range((2, 26), (5, 1)),
+        )
+        pattern = _ast_node(
+            "FunctionTemplateDecl",
+            rng=_ast_range((2, 1)),
+            inner=[
+                _ast_function("template_use", pattern_body, rng=_ast_range((2, 20))),
+            ],
+        )
+        instantiation = _ast_function(
+            "instantiate",
+            _ast_compound(
+                [
+                    _ast_call(
+                        "template_use",
+                        [_ast_decl_ref("value", qual="int")],
+                        _ast_range((8, 5)),
+                    )
+                ],
+                rng=_ast_range((7, 21), (9, 1)),
+            ),
+            rng=_ast_range((7, 1)),
+        )
+        result = self._extract(
+            _ast_translation_unit([pattern, instantiation]),
+            tu="src/template.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("template-instantiation", result["coverage"]["semantic_gaps"])
+
+    def test_macro_expansion_is_cfg_gap(self):
+        macro_range = _ast_range((6, 5), (6, 15))
+        function_body = _ast_compound(
+            [
+                _ast_decl_stmt(
+                    [
+                        _ast_var_decl(
+                            "p",
+                            "int *",
+                            init=_ast_new_expr(_ast_range((5, 14))),
+                            rng=_ast_range((5, 5)),
+                        )
+                    ],
+                    rng=_ast_range((5, 5)),
+                ),
+                _ast_node(
+                    "CXXDeleteExpr",
+                    rng=macro_range,
+                    inner=[_ast_decl_ref("p")],
+                    type={"qualType": "void"},
+                ),
+                _ast_deref("p", _ast_range((7, 5))),
+            ],
+            rng=_ast_range((4, 16), (8, 1)),
+        )
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_node(
+                        "MacroExpansion",
+                        rng=_ast_range((6, 5), (6, 15)),
+                        name="RELEASE",
+                    ),
+                    _ast_function("macro_use", function_body, rng=_ast_range((4, 1))),
+                ]
+            ),
+            tu="src/macro.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("macro-expansion", result["coverage"]["semantic_gaps"])
+
+    # -------------------------------------------------- fact-level semantics
+
+    def test_array_new_records_gap_without_allocation_fact(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "array_use",
+                        _ast_compound(
+                            [
+                                _ast_decl_stmt(
+                                    [
+                                        _ast_var_decl(
+                                            "p",
+                                            "int *",
+                                            init=_ast_new_expr(
+                                                _ast_range((2, 14)), array=True
+                                            ),
+                                            rng=_ast_range((2, 5)),
+                                        )
+                                    ],
+                                    rng=_ast_range((2, 5)),
+                                )
+                            ],
+                            rng=_ast_range((1, 17), (3, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/array.cpp",
+        )
+        self.assertEqual([], _facts_of_kind(result, "allocation"))
+        self.assertIn("array-new", result["coverage"]["semantic_gaps"])
+
+    def test_error_diagnostic_forces_ast_incomplete(self):
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "plain",
+                    _ast_compound(
+                        [_ast_deref("p", _ast_range((2, 5)))], rng=_ast_range((1, 14), (3, 1))
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ],
+            diagnostics=[{"severity": "error", "message": "unknown type name 'p'"}],
+        )
+        result = self._extract(ast, tu="src/broken.cpp")
+        self.assertFalse(result["coverage"]["ast_complete"])
+        self.assertIn("ast-error-diagnostic", result["coverage"]["semantic_gaps"])
+
+    def test_unsupported_statement_is_cfg_gap(self):
+        result = self._extract(
+            _ast_translation_unit(
+                [
+                    _ast_function(
+                        "exotic",
+                        _ast_compound(
+                            [_ast_node("StmtExpr", rng=_ast_range((2, 5)), inner=[])],
+                            rng=_ast_range((1, 14), (3, 1)),
+                        ),
+                        rng=_ast_range((1, 1)),
+                    )
+                ]
+            ),
+            tu="src/exotic.cpp",
+        )
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("cfg-unsupported", result["coverage"]["semantic_gaps"])
+
+    def test_line_offsets_fallback_derives_lines(self):
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "plain",
+                    _ast_compound(
+                        [_ast_deref("p", _ast_range((4, 5)))], rng=_ast_range((1, 20), (5, 1))
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ]
+        )
+        # Strip the "line" keys the primary path uses; offsets must recover them.
+        for node in _walk_all(ast):
+            node.get("range", {}).get("begin", {}).pop("line", None)
+            node.get("range", {}).get("end", {}).pop("line", None)
+            node.get("loc", {}).pop("line", None)
+        from cxx_analyzer import uaf_scan
+
+        # Lines of exactly 99 chars + newline: line k starts at (k-1)*100,
+        # matching the helper's offset scheme (line 4 -> offset 305).
+        offsets = uaf_scan.build_line_offsets((b"x" * 99 + b"\n") * 4)
+        result = self._extract(ast, tu="src/plain.cpp", line_offsets=offsets)
+        dereferences = _facts_of_kind(result, "dereference")
+        self.assertEqual(1, len(dereferences))
+        self.assertEqual([4, 4], dereferences[0]["source_range"])
+
+    # ------------------------------------------------- AST acquisition stage
+
+    def test_extract_ast_json_uses_managed_run_step_with_dump_argv(self):
+        from cxx_analyzer import uaf_scan
+        from cxx_analyzer.execution import ToolExecution
+
+        ast = _ast_translation_unit([])
+        stdout = json.dumps(ast)
+        digest = hashlib.sha256(stdout.encode()).hexdigest()
+        captured = {}
+
+        def fake_run_step(
+            argv, snapshot, cwd, timeout_seconds, max_output_bytes, env, *, deadline=None
+        ):
+            captured["argv"] = argv
+            captured["cwd"] = cwd
+            captured["timeout"] = timeout_seconds
+            captured["max_output_bytes"] = max_output_bytes
+            captured["env"] = env
+            return ToolExecution(
+                status="completed",
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+                stdout_sha256=digest,
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                output_sha256=digest,
+                output_truncated=False,
+            )
+
+        with patch("cxx_analyzer.uaf_scan.run_step", side_effect=fake_run_step):
+            parsed, diagnostics = uaf_scan.extract_ast_json(
+                Mock(),
+                "src/use_after_free.cpp",
+                ("clang++", "-c", "-std=c++17", "-I", "include", "-DFEATURE=1",
+                 "src/use_after_free.cpp", "-o", "build/obj.o"),
+                ".",
+                None,
+                timeout_seconds=17,
+            )
+        self.assertIsNone(diagnostics)
+        self.assertEqual("TranslationUnitDecl", parsed["kind"])
+        self.assertEqual(
+            [
+                "clang++-14",
+                "-fsyntax-only",
+                "-Xclang",
+                "-ast-dump=json",
+                "-Xclang",
+                "-detailed-preprocessing-record",
+                "-std=c++17",
+                "-I",
+                "include",
+                "-DFEATURE=1",
+                "src/use_after_free.cpp",
+            ],
+            captured["argv"],
+        )
+        self.assertEqual(".", captured["cwd"])
+        self.assertEqual(17, captured["timeout"])
+        self.assertEqual(uaf_scan.MAX_AST_JSON_BYTES, captured["max_output_bytes"])
+        self.assertIsNone(captured["env"])
+
+    def test_extract_ast_json_maps_failures_to_diagnostics(self):
+        from cxx_analyzer import uaf_scan
+        from cxx_analyzer.execution import ToolExecution
+
+        def execution(**overrides):
+            values = {
+                "status": "completed",
+                "returncode": 0,
+                "stdout": "{}",
+                "stderr": "",
+                "stdout_sha256": hashlib.sha256(b"{}").hexdigest(),
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                "output_sha256": "a" * 64,
+                "output_truncated": False,
+            }
+            values.update(overrides)
+            return ToolExecution(**values)
+
+        with patch("cxx_analyzer.uaf_scan.run_step", return_value=execution(status="timed-out")):
+            parsed, diagnostics = uaf_scan.extract_ast_json(
+                Mock(), "src/a.cpp", ("clang", "-c", "src/a.cpp"), ".", None, timeout_seconds=17
+            )
+        self.assertIsNone(parsed)
+        self.assertEqual(["ast-unavailable"], diagnostics)
+
+        with patch(
+            "cxx_analyzer.uaf_scan.run_step",
+            return_value=execution(
+                stdout="not json",
+                stdout_sha256=hashlib.sha256(b"not json").hexdigest(),
+            ),
+        ):
+            parsed, diagnostics = uaf_scan.extract_ast_json(
+                Mock(), "src/a.cpp", ("clang", "-c", "src/a.cpp"), ".", None, timeout_seconds=17
+            )
+        self.assertIsNone(parsed)
+        self.assertEqual(["ast-json-invalid"], diagnostics)
+
+        with patch("cxx_analyzer.uaf_scan.run_step", return_value=execution(output_truncated=True)):
+            parsed, diagnostics = uaf_scan.extract_ast_json(
+                Mock(), "src/a.cpp", ("clang", "-c", "src/a.cpp"), ".", None, timeout_seconds=17
+            )
+        self.assertIsNone(parsed)
+        self.assertEqual(["ast-output-limit"], diagnostics)
+
+    # ------------------------------------------------- wire build context
+
+    def test_wire_resolution_vocabulary_matches_typed_contract(self):
+        from cxx_analyzer import build_context
+        from lima.uaf_models import RESOLUTION_SOURCE_KINDS, RESOLUTION_STATUSES
+
+        self.assertEqual(set(RESOLUTION_STATUSES), set(build_context.WIRE_RESOLUTION_STATUSES))
+        self.assertEqual(
+            set(RESOLUTION_SOURCE_KINDS), set(build_context.WIRE_SOURCE_KINDS)
+        )
+
+    def test_resolve_build_context_wire_matches_typed_resolution(self):
+        from cxx_analyzer import build_context
+
+        settings = AnalyzerSettings(
+            auto_cmake=False,
+            build_steps=(),
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=90,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "snapshot"
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (root / "compile_commands.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "directory": ".",
+                            "file": "src/main.c",
+                            "arguments": [
+                                "clang",
+                                "-c",
+                                "-std=c11",
+                                "src/main.c",
+                                "-o",
+                                "build/main.o",
+                            ],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            typed = build_context.resolve_build_context(root, "src/main.c", settings)
+            wire = build_context.resolve_build_context_wire(root, "src/main.c", settings)
+            execution = build_context.resolve_build_context_execution(
+                root, "src/main.c", settings
+            )
+        self.assertEqual("resolved", typed.status)
+        self.assertEqual(
+            {
+                "status": typed.status,
+                "source_kind": typed.source_kind,
+                "context_hash": typed.context_hash,
+                "diagnostics": list(typed.diagnostics),
+            },
+            wire,
+        )
+        self.assertEqual(wire, execution.wire)
+        self.assertEqual("resolved", execution.status)
+        self.assertEqual(tuple(typed.diagnostics), execution.diagnostics)
+        self.assertEqual((".",), (execution.relative_directory,))
+        self.assertIn("src/main.c", execution.arguments)
+
+        missing = build_context.resolve_build_context_wire(
+            root, "src/other.c", settings
+        )
+        self.assertEqual("incomplete", missing["status"])
+        self.assertIn("heuristic-context", missing["diagnostics"])
+        self.assertEqual("", missing["context_hash"])
+
+    # ---------------------------------------------------- server integration
+
+    def _compdb_snapshot(self, tu_source, tu, argv):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "snapshot"
+        (root / "src").mkdir(parents=True)
+        (root / tu).parent.mkdir(parents=True, exist_ok=True)
+        (root / tu).write_text(tu_source, encoding="utf-8")
+        (root / "compile_commands.json").write_text(
+            json.dumps([{"directory": ".", "file": tu, "arguments": list(argv)}]),
+            encoding="utf-8",
+        )
+        return root
+
+    @staticmethod
+    def _settings():
+        return AnalyzerSettings(
+            auto_cmake=False,
+            build_steps=(),
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=8192,
+            step_timeout_seconds=17,
+            total_timeout_seconds=90,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    @staticmethod
+    def _fake_prepared(root):
+        snapshot = Mock()
+        snapshot.root = root
+        snapshot.verify_inventory = Mock()
+        prepared = Mock()
+        prepared.__enter__ = Mock(return_value=snapshot)
+        prepared.__exit__ = Mock(return_value=False)
+        prepared.cleanup = Mock()
+        return prepared
+
+    def test_server_completed_bundle_roundtrips_through_client(self):
+        from lima.cxx_memory import CxxMemoryAnalyzerClient
+
+        tu = "src/use_after_free.cpp"
+        root = self._compdb_snapshot(
+            "void use_after_free() {\n    int* p = new int(1);\n    delete p;\n    *p = 2;\n}\n",
+            tu,
+            ["clang++", "-std=c++17", "-c", tu, "-o", "build/obj.o"],
+        )
+        ast = _ast_translation_unit(
+            [
+                _ast_function(
+                    "use_after_free",
+                    _ast_compound(
+                        [
+                            _ast_decl_stmt(
+                                [
+                                    _ast_var_decl(
+                                        "p",
+                                        "int *",
+                                        init=_ast_new_expr(_ast_range((2, 14))),
+                                        rng=_ast_range((2, 5)),
+                                    )
+                                ],
+                                rng=_ast_range((2, 5)),
+                            ),
+                            _ast_delete_expr("p", _ast_range((3, 5))),
+                            _ast_deref("p", _ast_range((4, 5))),
+                        ],
+                        rng=_ast_range((1, 22), (5, 1)),
+                    ),
+                    rng=_ast_range((1, 1)),
+                )
+            ]
+        )
+        with (
+            patch(
+                "cxx_analyzer.server.prepare_snapshot",
+                return_value=self._fake_prepared(root),
+            ),
+            patch(
+                "cxx_analyzer.uaf_scan.extract_ast_json",
+                return_value=(ast, None),
+            ),
+        ):
+            response = analyzer_server.uaf_facts_request(
+                {
+                    "schema_version": 1,
+                    "request_id": REQUEST_ID_UAF,
+                    "repository_key": "team/project",
+                    "snapshot_sha256": "a" * 64,
+                    "translation_units": [tu],
+                    "build_context": {"mode": "snapshot-compdb"},
+                },
+                self._settings(),
+            )
+
+        self.assertEqual(1, len(response["tool_runs"]))
+        self.assertEqual("completed", response["tool_runs"][0]["status"])
+        self.assertEqual(1, len(response["translation_units"]))
+        entry = response["translation_units"][0]
+        self.assertEqual("completed", entry["extraction"])
+        self.assertEqual("resolved", entry["build_context"]["status"])
+        self.assertTrue(entry["coverage"]["ast_complete"])
+        self.assertTrue(entry["coverage"]["cfg_complete"])
+        self.assertIn("usr-synthesized", entry["coverage"]["semantic_gaps"])
+        self.assertEqual(
+            {"allocation", "points-to", "release", "dereference"},
+            {fact["kind"] for fact in entry["facts"]},
+        )
+        material = json.dumps(
+            {"translation_units": response["translation_units"]},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.assertEqual(hashlib.sha256(material).hexdigest(), response["bundle_sha256"])
+
+        # The strict main-process client must accept the served bundle.  The
+        # fake transport echoes the client's own fresh request_id (the
+        # bundle digest covers only the translation units, so it is stable).
+        class Opener:
+            def __call__(self, request, timeout):
+                served = json.loads(json.dumps(response))
+                requested = json.loads(request.data.decode("utf-8"))
+                served["request_id"] = requested["request_id"]
+                return _UafFakeResponse(io.BytesIO(json.dumps(served).encode("utf-8")))
+
+        client = CxxMemoryAnalyzerClient(
+            "http://cxx-analyzer:8090",
+            timeout_seconds=8,
+            max_response_bytes=1024 * 1024,
+            opener=Opener(),
+        )
+        result = client.analyze_uaf_facts("team/project", "a" * 64, (tu,), "snapshot-compdb")
+        self.assertEqual("completed", result.tool_runs[0]["status"])
+        self.assertEqual(4, len(result.translation_units[0]["facts"]))
+
+    def test_server_unresolved_context_stays_unavailable(self):
+        tu = "src/unlisted.cpp"
+        root = self._compdb_snapshot(
+            "int main(void) { return 0; }\n",
+            "src/listed.c",
+            ["clang", "-c", "src/listed.c", "-o", "build/obj.o"],
+        )
+        with patch(
+            "cxx_analyzer.server.prepare_snapshot",
+            return_value=self._fake_prepared(root),
+        ):
+            response = analyzer_server.uaf_facts_request(
+                {
+                    "schema_version": 1,
+                    "request_id": REQUEST_ID_UAF,
+                    "repository_key": "team/project",
+                    "snapshot_sha256": "a" * 64,
+                    "translation_units": [tu],
+                    "build_context": {"mode": "snapshot-compdb"},
+                },
+                self._settings(),
+            )
+        entry = response["translation_units"][0]
+        self.assertEqual("unavailable", entry["extraction"])
+        self.assertEqual("incomplete", entry["build_context"]["status"])
+        self.assertEqual([], entry["facts"])
+        self.assertFalse(entry["coverage"]["ast_complete"])
+        self.assertFalse(entry["coverage"]["cfg_complete"])
+        self.assertIn("heuristic-context", entry["coverage"]["semantic_gaps"])
+        self.assertEqual("unavailable", response["tool_runs"][0]["status"])
+
+    def test_server_snapshot_preparation_failure_maps_to_request_error(self):
+        with patch(
+            "cxx_analyzer.server.prepare_snapshot",
+            side_effect=OSError("repository is missing"),
+        ):
+            with self.assertRaises(analyzer_server.RequestError) as caught:
+                analyzer_server.uaf_facts_request(
+                    {
+                        "schema_version": 1,
+                        "request_id": REQUEST_ID_UAF,
+                        "repository_key": "team/project",
+                        "snapshot_sha256": "a" * 64,
+                        "translation_units": ["src/anything.cpp"],
+                        "build_context": {"mode": "heuristic"},
+                    },
+                    self._settings(),
+                )
+        self.assertEqual("snapshot_rejected", caught.exception.code)
+
+
+class UafFactExtractionContainerTests(unittest.TestCase):
+    """Real clang-14 extraction inside the analyzer container (semantic asserts)."""
+
+    def _settings(self):
+        return AnalyzerSettings(
+            auto_cmake=False,
+            build_steps=(),
+            test_steps=(),
+            max_memory_mb=1024,
+            max_processes=32,
+            max_output_bytes=1024 * 1024,
+            step_timeout_seconds=120,
+            total_timeout_seconds=300,
+            repository_scan_max_files=100,
+            repository_scan_max_file_bytes=4096,
+            repository_scan_max_total_bytes=16384,
+        )
+
+    def _extract_fixture(self, fixture_name, language_standard):
+        from cxx_analyzer import build_context, uaf_scan
+
+        if sys.platform != "linux":
+            self.skipTest("UAF fact extraction container regression requires Linux")
+        if shutil.which("clang-14") is None or shutil.which("clang++-14") is None:
+            self.skipTest("clang-14 and clang++-14 are required for UAF fixtures")
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
+
+        tu = f"src/{fixture_name}"
+        driver = "clang++" if fixture_name.endswith(".cpp") else "clang"
+        with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
+            base = Path(temporary)
+            import_root = base / "imports"
+            repository = import_root / "team" / "project"
+            work_root = base / "snapshots"
+            repository.mkdir(parents=True)
+            work_root.mkdir()
+            (repository / "src").mkdir()
+            shutil.copy2(_UAF_FIXTURES / fixture_name, repository / tu)
+            (repository / "compile_commands.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "directory": ".",
+                            "file": tu,
+                            "arguments": [
+                                driver,
+                                "-c",
+                                language_standard,
+                                tu,
+                                "-o",
+                                "build/obj.o",
+                            ],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with prepare_snapshot(
+                import_root, "team/project", fingerprint, work_root
+            ) as snapshot:
+                context = build_context.resolve_build_context_execution(
+                    snapshot.root, tu, self._settings()
+                )
+                self.assertEqual("resolved", context.status)
+                deadline = AnalysisDeadline.start(self._settings().total_timeout_seconds)
+                source_bytes = snapshot.root.joinpath(tu).read_bytes()
+                ast_json, diagnostics = uaf_scan.extract_ast_json(
+                    snapshot,
+                    tu,
+                    context.arguments,
+                    context.relative_directory,
+                    deadline,
+                    timeout_seconds=self._settings().step_timeout_seconds,
+                )
+                self.assertIsNone(
+                    diagnostics, f"unexpected extraction diagnostics: {diagnostics}"
+                )
+                offsets = uaf_scan.build_line_offsets(source_bytes)
+                return uaf_scan.extract_uaf_facts(ast_json, tu, tu, line_offsets=offsets)
+
+    def test_container_new_delete_deref_facts(self):
+        result = self._extract_fixture("new_delete_deref.cpp", "-std=c++17")
+        self.assertTrue(result["coverage"]["ast_complete"])
+        self.assertTrue(result["coverage"]["cfg_complete"])
+        self.assertIn("usr-synthesized", result["coverage"]["semantic_gaps"])
+        allocations = _facts_of_kind(result, "allocation")
+        self.assertEqual(1, len(allocations))
+        self.assertEqual("new", allocations[0]["allocation_api"])
+        self.assertEqual("p", allocations[0]["pointer_id"])
+        self.assertEqual(2, allocations[0]["source_range"][0])
+        releases = _facts_of_kind(result, "release")
+        self.assertEqual(1, len(releases))
+        self.assertEqual("delete", releases[0]["release_api"])
+        self.assertEqual(3, releases[0]["source_range"][0])
+        self.assertEqual([allocations[0]["fact_id"]], releases[0]["related_fact_ids"])
+        dereferences = _facts_of_kind(result, "dereference")
+        self.assertEqual(1, len(dereferences))
+        self.assertEqual(4, dereferences[0]["source_range"][0])
+
+    def test_container_malloc_free_member_facts(self):
+        result = self._extract_fixture("malloc_free_member.c", "-std=c11")
+        self.assertTrue(result["coverage"]["cfg_complete"])
+        allocations = _facts_of_kind(result, "allocation")
+        self.assertEqual(1, len(allocations))
+        self.assertEqual("malloc", allocations[0]["allocation_api"])
+        releases = _facts_of_kind(result, "release")
+        self.assertEqual(1, len(releases))
+        self.assertEqual("free", releases[0]["release_api"])
+        self.assertEqual(10, releases[0]["source_range"][0])
+        self.assertTrue(_facts_of_kind(result, "member-access"))
+
+    def test_container_loop_is_cfg_gap(self):
+        result = self._extract_fixture("loop.cpp", "-std=c++17")
+        self.assertFalse(result["coverage"]["cfg_complete"])
+        self.assertIn("cfg-loop", result["coverage"]["semantic_gaps"])
+        self.assertIn("dereference", _fact_kinds(result))
 
 
 if __name__ == "__main__":

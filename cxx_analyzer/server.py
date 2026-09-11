@@ -10,7 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
-from . import sandbox
+from . import sandbox, uaf_scan
+from .build_context import resolve_build_context_execution
 from .build_scan import run_build_scan
 from .config import AnalyzerSettings
 from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
@@ -53,7 +54,6 @@ _UAF_FACTS_REQUEST_FIELDS: Final = frozenset(
 _UAF_FACTS_TOOL: Final = "uaf-facts"
 _UAF_FACTS_BUILD_CONTEXT_FIELDS: Final = frozenset({"mode"})
 _UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset({"snapshot-compdb", "heuristic"})
-_UAF_FACTS_SKELETON_GAP: Final = "extraction-not-implemented"
 MAX_UAF_TRANSLATION_UNITS: Final = 16
 
 def _bound_response_lists(
@@ -417,46 +417,154 @@ def _validate_uaf_facts_payload(payload: object) -> dict[str, object]:
     }
 
 
+def _uaf_unit_entry(
+    translation_unit: str,
+    extraction: str,
+    build_context: dict[str, object],
+    coverage: dict[str, object],
+    facts: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "translation_unit": translation_unit,
+        "extraction": extraction,
+        "build_context": build_context,
+        "coverage": coverage,
+        "facts": facts,
+    }
+
+
+def _extract_uaf_unit(
+    snapshot: Any,
+    translation_unit: str,
+    settings: AnalyzerSettings,
+    deadline: AnalysisDeadline,
+) -> dict[str, object]:
+    """Resolve one unit's build context and extract facts when pinned.
+
+    Only ``resolved`` contexts reach Clang: heuristic, ``incomplete`` and
+    ``unavailable`` contexts keep the skeleton semantics (``extraction:
+    unavailable`` with the resolver's diagnostics as the coverage gaps),
+    because a heuristic context can never contribute to ``fact-verified``.
+    """
+
+    context = resolve_build_context_execution(snapshot.root, translation_unit, settings)
+    wire = context.wire
+    if context.status != "resolved":
+        return _uaf_unit_entry(
+            translation_unit,
+            "unavailable",
+            wire,
+            {
+                "ast_complete": False,
+                "cfg_complete": False,
+                "semantic_gaps": list(context.diagnostics) or ["context-not-resolved"],
+            },
+            [],
+        )
+
+    ast_json, diagnostics = uaf_scan.extract_ast_json(
+        snapshot,
+        translation_unit,
+        context.arguments,
+        context.relative_directory,
+        deadline,
+        timeout_seconds=settings.step_timeout_seconds,
+    )
+    if ast_json is None:
+        gaps = diagnostics if diagnostics else [uaf_scan.GAP_AST_UNAVAILABLE]
+        return _uaf_unit_entry(
+            translation_unit,
+            "unavailable",
+            wire,
+            {"ast_complete": False, "cfg_complete": False, "semantic_gaps": gaps},
+            [],
+        )
+    source_bytes = _read_snapshot_source(snapshot.root, translation_unit)
+    line_offsets = uaf_scan.build_line_offsets(source_bytes) if source_bytes is not None else None
+    extraction = uaf_scan.extract_uaf_facts(
+        ast_json, translation_unit, translation_unit, line_offsets=line_offsets
+    )
+    return _uaf_unit_entry(
+        translation_unit,
+        "completed",
+        wire,
+        extraction["coverage"],
+        extraction["facts"],
+    )
+
+
+def _read_snapshot_source(root: Path, translation_unit: str) -> bytes | None:
+    """Read one snapshot-relative TU for the offset-to-line fallback."""
+
+    try:
+        return (Path(root) / translation_unit).read_bytes()
+    except OSError:
+        return None
+
+
 def uaf_facts_request(payload: object, settings: AnalyzerSettings) -> dict[str, object]:
     """Serve one versioned UAF fact-bundle request.
 
-    Task 2 ships the protocol plus the pipeline skeleton: every requested
-    translation unit comes back as a legal empty bundle with
-    ``extraction: unavailable`` (AST/CFG incomplete, one explicit coverage
-    gap) until the extraction stage lands.  The wire contract -- closed
-    request fields, versioned schema, echo identity, the ``uaf-facts`` tool
-    run and the frozen bundle hash -- is already final; ``settings`` is kept
-    for the extraction stage's deadline and tool budgets.
+    The wire contract -- closed request fields, versioned schema, echo
+    identity, the ``uaf-facts`` tool run and the frozen bundle hash -- is
+    unchanged from Task 2; extraction is now real.  Each requested
+    translation unit is resolved against the verified snapshot and, when the
+    build context is ``resolved``, extracted with Clang through the managed
+    sandbox executor.  The tool run is ``completed`` only when every unit
+    was extracted; any other unit keeps it ``unavailable``.
     """
 
     request = _validate_uaf_facts_payload(payload)
+    request_id = request["request_id"]
+    deadline = AnalysisDeadline.start(settings.total_timeout_seconds)
+    try:
+        prepared = prepare_snapshot(
+            IMPORT_ROOT,
+            request["repository_key"],  # type: ignore[arg-type]
+            request["snapshot_sha256"],  # type: ignore[arg-type]
+            WORK_ROOT,
+            deadline=deadline,
+        )
+    except AnalysisDeadlineExceeded as exc:
+        raise RequestError(
+            "analysis_timed_out", status=504, request_id=request_id
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise RequestError("snapshot_rejected", request_id=request_id) from exc
+
+    all_completed = True
+    translation_units: list[dict[str, object]] = []
+    snapshot = prepared.__enter__()
+    try:
+        snapshot.verify_inventory(deadline)
+        for unit in request["translation_units"]:
+            entry = _extract_uaf_unit(snapshot, unit, settings, deadline)
+            translation_units.append(entry)
+            if entry["extraction"] != "completed":
+                all_completed = False
+        snapshot.verify_inventory(deadline)
+    except AnalysisDeadlineExceeded as exc:
+        raise RequestError(
+            "analysis_timed_out", status=504, request_id=request_id
+        ) from exc
+    except ValueError as exc:
+        raise RequestError("snapshot_rejected", request_id=request_id) from exc
+    finally:
+        try:
+            prepared.cleanup(deadline=deadline)
+        except AnalysisDeadlineExceeded as exc:
+            raise RequestError(
+                "analysis_timed_out", status=504, request_id=request_id
+            ) from exc
+
     tool_run = {
         "run_id": uuid.uuid4().hex,
         "tool": _UAF_FACTS_TOOL,
-        "status": "unavailable",
+        "status": "completed" if all_completed else "unavailable",
     }
-    translation_units = [
-        {
-            "translation_unit": unit,
-            "extraction": "unavailable",
-            "build_context": {
-                "status": "unavailable",
-                "source_kind": "",
-                "context_hash": "",
-                "diagnostics": [],
-            },
-            "coverage": {
-                "ast_complete": False,
-                "cfg_complete": False,
-                "semantic_gaps": [_UAF_FACTS_SKELETON_GAP],
-            },
-            "facts": [],
-        }
-        for unit in request["translation_units"]
-    ]
     return {
         "schema_version": SCHEMA_VERSION,
-        "request_id": request["request_id"],
+        "request_id": request_id,
         "repository_key": request["repository_key"],
         "snapshot_sha256": request["snapshot_sha256"],
         "tool_runs": [tool_run],

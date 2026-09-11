@@ -21,7 +21,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from .models import EvidenceRecord, Finding, Severity
-from .uaf_models import RESOLUTION_SOURCE_KINDS, RESOLUTION_STATUSES
+from .uaf_models import RESOLUTION_SOURCE_KINDS, RESOLUTION_STATUSES, UafFactKind
 from .workspace import WorkspaceInventory
 
 SUPPORTED_CWES = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
@@ -144,13 +144,17 @@ MAX_COVERAGE_FILES = 1_000_000
 MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 HEALTH_TIMEOUT_SECONDS = 2.0
 
-# --- /v1/uaf-facts protocol (UAF v2 plan Task 2) ---------------------------
+# --- /v1/uaf-facts protocol (UAF v2 plan Task 2; extraction from Task 4) ---
 UAF_FACTS_SCHEMA_VERSION = 1
 UAF_FACTS_PATH = "/v1/uaf-facts"
 UAF_FACTS_TOOL = "uaf-facts"
 UAF_FACTS_BUILD_CONTEXT_MODES = frozenset({"snapshot-compdb", "heuristic"})
 UAF_FACTS_TOOL_RUN_STATUSES = frozenset({"completed", "unavailable"})
-UAF_FACTS_EXTRACTIONS = frozenset({"unavailable"})
+UAF_FACTS_EXTRACTIONS = frozenset({"completed", "unavailable"})
+# The eleven frozen first-phase fact kinds (design section 7.2); the client
+# certifies only the kind vocabulary here -- full wire-fact field and
+# identity validation is the Fact Adapter's job (plan Task 5).
+UAF_FACT_KINDS = frozenset(kind.value for kind in UafFactKind)
 MAX_UAF_TRANSLATION_UNITS = 16
 MAX_UAF_TOOL_RUNS = 16
 _UAF_RESPONSE_KEYS = {
@@ -837,13 +841,15 @@ class CxxMemoryAnalyzerClient:
             if type(entry["facts"]) is not list:
                 raise CxxAnalyzerProtocolError("invalid C/C++ analyzer facts")
             # A not-extracted unit can never carry facts or claim extraction
-            # completeness; the vocabulary extension lands with real
-            # extraction and its own consistency rules.
-            coverage = entry["coverage"]
-            if entry["facts"] or coverage["ast_complete"] or coverage["cfg_complete"]:
+            # completeness; facts require a completed extraction and each
+            # fact kind must sit inside the frozen eleven-kind vocabulary.
+            if entry["facts"] and extraction != "completed":
                 raise CxxAnalyzerProtocolError(
                     "inconsistent unavailable C/C++ analyzer extraction"
                 )
+            for fact in entry["facts"]:
+                if type(fact) is not dict or fact.get("kind") not in UAF_FACT_KINDS:
+                    raise CxxAnalyzerProtocolError("invalid C/C++ analyzer fact kind")
         if tuple(served_units) != requested_units:
             raise CxxAnalyzerProtocolError("C/C++ analyzer translation unit echo mismatch")
 
@@ -876,7 +882,7 @@ class CxxMemoryAnalyzerClient:
         cfg_complete = coverage["cfg_complete"]
         if type(ast_complete) is not bool or type(cfg_complete) is not bool:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer coverage flags")
-        if extraction in UAF_FACTS_EXTRACTIONS and (ast_complete or cfg_complete):
+        if extraction == "unavailable" and (ast_complete or cfg_complete):
             raise CxxAnalyzerProtocolError(
                 "incomplete extraction cannot claim AST or CFG completeness"
             )

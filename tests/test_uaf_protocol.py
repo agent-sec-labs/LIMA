@@ -11,10 +11,12 @@ must remain byte-for-byte unchanged.
 import hashlib
 import io
 import json
+import tempfile
 import unittest
 import urllib.error
 from dataclasses import FrozenInstanceError
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import cxx_analyzer.server as analyzer_server
 from cxx_analyzer.config import AnalyzerSettings
@@ -91,6 +93,48 @@ def skeleton_unit_entry(translation_unit):
             "semantic_gaps": ["extraction-not-implemented"],
         },
         "facts": [],
+    }
+
+
+def wire_fact(fact_id, kind, **changes):
+    """One minimal legal wire fact of the given kind (server-side shape)."""
+
+    fact = {
+        "fact_id": fact_id,
+        "kind": kind,
+        "translation_unit": "src/a.cpp",
+        "canonical_path": "src/a.cpp",
+        "function_usr": "src/a.cpp#use@1",
+        "source_range": [2, 2],
+        "cfg_block": 1,
+    }
+    if kind == "allocation":
+        fact["allocation_api"] = "new"
+        fact["pointer_id"] = "p"
+    elif kind == "release":
+        fact["release_api"] = "delete"
+        fact["pointer_id"] = "p"
+        fact["related_fact_ids"] = []
+    fact.update(changes)
+    return fact
+
+
+def completed_unit_entry(translation_unit, facts):
+    return {
+        "translation_unit": translation_unit,
+        "extraction": "completed",
+        "build_context": {
+            "status": "resolved",
+            "source_kind": "repository-compdb",
+            "context_hash": "c" * 64,
+            "diagnostics": [],
+        },
+        "coverage": {
+            "ast_complete": True,
+            "cfg_complete": True,
+            "semantic_gaps": ["usr-synthesized"],
+        },
+        "facts": list(facts),
     }
 
 
@@ -199,9 +243,25 @@ class ServerContractTests(unittest.TestCase):
         self.assertEqual("request_too_large", response["error"])
 
     def test_response_carries_bundle_hash_and_tool_run(self):
-        status, response = analyzer_server.dispatch_request(
-            "POST", "/v1/uaf-facts", "application/json", uaf_request_body(), analyzer_settings()
-         )
+        # Extraction is real since Task 4: the request now prepares the
+        # snapshot.  The host fake pins an empty snapshot root, so both
+        # units fall back to the heuristic context and stay unavailable.
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Mock()
+            snapshot.root = Path(temporary)
+            snapshot.verify_inventory = Mock()
+            prepared = Mock()
+            prepared.__enter__ = Mock(return_value=snapshot)
+            prepared.__exit__ = Mock(return_value=False)
+            prepared.cleanup = Mock()
+            with patch("cxx_analyzer.server.prepare_snapshot", return_value=prepared):
+                status, response = analyzer_server.dispatch_request(
+                    "POST",
+                    "/v1/uaf-facts",
+                    "application/json",
+                    uaf_request_body(),
+                    analyzer_settings(),
+                 )
         self.assertEqual(200, status)
         self.assertEqual(
             {
@@ -242,13 +302,16 @@ class ServerContractTests(unittest.TestCase):
                 {"status", "source_kind", "context_hash", "diagnostics"},
                 set(entry["build_context"]),
              )
-            self.assertEqual("unavailable", entry["build_context"]["status"])
+            # No compilation database in the fake snapshot: the resolver's
+            # heuristic context is incomplete and Clang is never reached.
+            self.assertEqual("incomplete", entry["build_context"]["status"])
+            self.assertEqual("heuristic", entry["build_context"]["source_kind"])
             self.assertEqual(
                 {"ast_complete", "cfg_complete", "semantic_gaps"}, set(entry["coverage"])
              )
             self.assertIs(False, entry["coverage"]["ast_complete"])
             self.assertIs(False, entry["coverage"]["cfg_complete"])
-            self.assertEqual(["extraction-not-implemented"], entry["coverage"]["semantic_gaps"])
+            self.assertEqual(["heuristic-context"], entry["coverage"]["semantic_gaps"])
             self.assertEqual([], entry["facts"])
 
         # The bundle digest is the frozen canonical serialization of exactly
@@ -259,7 +322,16 @@ class ServerContractTests(unittest.TestCase):
 
         # Deterministic bundles: identical requests hash identically even
         # though each run carries a fresh run_id.
-        again = analyzer_server.uaf_facts_request(uaf_request(), analyzer_settings())
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Mock()
+            snapshot.root = Path(temporary)
+            snapshot.verify_inventory = Mock()
+            prepared = Mock()
+            prepared.__enter__ = Mock(return_value=snapshot)
+            prepared.__exit__ = Mock(return_value=False)
+            prepared.cleanup = Mock()
+            with patch("cxx_analyzer.server.prepare_snapshot", return_value=prepared):
+                again = analyzer_server.uaf_facts_request(uaf_request(), analyzer_settings())
         self.assertEqual(response["bundle_sha256"], again["bundle_sha256"])
         self.assertNotEqual(response["tool_runs"][0]["run_id"], again["tool_runs"][0]["run_id"])
 
@@ -299,9 +371,18 @@ class ServerContractTests(unittest.TestCase):
                 self.assertEqual("invalid_request", caught.exception.code)
 
         boundary = [f"src/file{index}.cpp" for index in range(16)]
-        result = analyzer_server.uaf_facts_request(
-            uaf_request(translation_units=boundary), analyzer_settings()
-         )
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Mock()
+            snapshot.root = Path(temporary)
+            snapshot.verify_inventory = Mock()
+            prepared = Mock()
+            prepared.__enter__ = Mock(return_value=snapshot)
+            prepared.__exit__ = Mock(return_value=False)
+            prepared.cleanup = Mock()
+            with patch("cxx_analyzer.server.prepare_snapshot", return_value=prepared):
+                result = analyzer_server.uaf_facts_request(
+                    uaf_request(translation_units=boundary), analyzer_settings()
+                 )
         self.assertEqual(16, len(result["translation_units"]))
 
     def test_existing_analyze_layers_unchanged(self):
@@ -427,6 +508,39 @@ class ClientContractTests(unittest.TestCase):
                 self.assertNotIsInstance(caught.exception, urllib.error.URLError)
 
     @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
+    def test_completed_extraction_with_facts_is_accepted(self, _uuid4):
+        facts = [
+            wire_fact("d" * 64, "allocation"),
+            wire_fact("e" * 64, "release", related_fact_ids=["d" * 64]),
+        ]
+        entries = [
+            completed_unit_entry(TRANSLATION_UNITS[0], facts),
+            skeleton_unit_entry(TRANSLATION_UNITS[1]),
+        ]
+        payload = {
+            "schema_version": 1,
+            "request_id": REQUEST_ID,
+            "repository_key": REPOSITORY_KEY,
+            "snapshot_sha256": SNAPSHOT_SHA256,
+            "tool_runs": [{"run_id": "run-uaf-1", "tool": "uaf-facts", "status": "unavailable"}],
+            "translation_units": entries,
+            "bundle_sha256": bundle_sha256(entries),
+            "diagnostics": [],
+        }
+        client = uaf_client(RecordingOpener(payload))
+
+        result = request_uaf_facts(client)
+
+        self.assertIsInstance(result, UafFactsResponse)
+        completed = result.translation_units[0]
+        self.assertEqual("completed", completed["extraction"])
+        self.assertEqual("resolved", completed["build_context"]["status"])
+        self.assertIs(True, completed["coverage"]["ast_complete"])
+        self.assertIs(True, completed["coverage"]["cfg_complete"])
+        self.assertEqual(facts, list(completed["facts"]))
+        self.assertEqual((), result.diagnostics)
+
+    @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
     def test_bundle_hash_mismatch_raises_protocol_error(self, _uuid4):
         mutations = (
             ("digest rewritten", lambda payload: payload.update({"bundle_sha256": "b" * 64})),
@@ -463,7 +577,7 @@ class ClientContractTests(unittest.TestCase):
             payload["tool_runs"][0]["command"] = "secret"
 
         def unknown_extraction(payload):
-            payload["translation_units"][0]["extraction"] = "completed"
+            payload["translation_units"][0]["extraction"] = "partial"
 
         def unknown_tool(payload):
             payload["tool_runs"][0]["tool"] = "clang"
@@ -485,6 +599,19 @@ class ClientContractTests(unittest.TestCase):
         def unavailable_with_ast(payload):
             payload["translation_units"][0]["coverage"]["ast_complete"] = True
 
+        def fact_kind_outside_vocabulary(payload):
+            entry = completed_unit_entry(
+                TRANSLATION_UNITS[0],
+                [wire_fact("d" * 64, "borrow")],
+            )
+            payload["translation_units"][0] = entry
+
+        def fact_kind_missing(payload):
+            entry = completed_unit_entry(
+                TRANSLATION_UNITS[0], [{"fact_id": "d" * 64}]
+            )
+            payload["translation_units"][0] = entry
+
         cases = (
             ("top-level extra field", top_level_extra),
             ("unit extra field", unit_extra_field),
@@ -496,6 +623,8 @@ class ClientContractTests(unittest.TestCase):
             ("unknown coverage field", unknown_coverage_field),
             ("unavailable extraction carries facts", unavailable_with_facts),
             ("unavailable extraction claims ast", unavailable_with_ast),
+            ("fact kind outside vocabulary", fact_kind_outside_vocabulary),
+            ("fact kind missing", fact_kind_missing),
          )
         for label, mutate in cases:
             with self.subTest(mutation=label):

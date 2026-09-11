@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import uuid
@@ -31,6 +32,7 @@ IMPORT_ROOT: Final = Path("/repositories")
 WORK_ROOT: Final = Path("/work/snapshots")
 
 _ANALYZE_PATH: Final = "/v1/analyze"
+_UAF_FACTS_PATH: Final = "/v1/uaf-facts"
 _HEALTH_PATH: Final = "/health"
 _REQUEST_FIELDS: Final = frozenset(
     {"request_id", "repository_key", "snapshot_sha256", "requested_layers"}
@@ -38,6 +40,21 @@ _REQUEST_FIELDS: Final = frozenset(
 _SUPPORTED_LAYERS: Final = frozenset(
     {"source-only", "build-backed", "sanitizer-confirmed"}
 )
+_UAF_FACTS_REQUEST_FIELDS: Final = frozenset(
+    {
+        "schema_version",
+        "request_id",
+        "repository_key",
+        "snapshot_sha256",
+        "translation_units",
+        "build_context",
+    }
+)
+_UAF_FACTS_TOOL: Final = "uaf-facts"
+_UAF_FACTS_BUILD_CONTEXT_FIELDS: Final = frozenset({"mode"})
+_UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset({"snapshot-compdb", "heuristic"})
+_UAF_FACTS_SKELETON_GAP: Final = "extraction-not-implemented"
+MAX_UAF_TRANSLATION_UNITS: Final = 16
 
 def _bound_response_lists(
     findings: tuple[NormalizedFinding, ...], diagnostics: list[object],
@@ -298,6 +315,157 @@ def analyze_request(payload: object, settings: AnalyzerSettings) -> dict[str, ob
     }
 
 
+def uaf_facts_bundle_sha256(translation_units: object) -> str:
+    """Hash the canonical serialization of a UAF fact bundle's units.
+
+    The digest is ``sha256`` over ``json.dumps({"translation_units": ...},
+    sort_keys=True, separators=(",", ":"), ensure_ascii=False)`` encoded as
+    UTF-8.  This algorithm is frozen: the strict main-process client
+    re-derives it independently over the received wire list, so any response
+    tampering breaks the hash.  Task 4 must not change the encoding.
+    """
+
+    material = json.dumps(
+        {"translation_units": translation_units},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _validate_uaf_translation_units(
+    value: object,
+    request_id: str | None,
+) -> tuple[str, ...]:
+    """Accept only a bounded, duplicate-free list of safe relative paths."""
+
+    if (
+        type(value) is not list
+        or not value
+        or len(value) > MAX_UAF_TRANSLATION_UNITS
+        or any(type(unit) is not str for unit in value)
+        or len(set(value)) != len(value)
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+    for unit in value:
+        parsed = PurePosixPath(unit)
+        if (
+            parsed.is_absolute()
+            or "\\" in unit
+            or "\x00" in unit
+            or any(segment in {"", ".", ".."} for segment in unit.split("/"))
+        ):
+            raise RequestError("invalid_request", request_id=request_id)
+    return tuple(value)
+
+
+def _validate_uaf_facts_payload(payload: object) -> dict[str, object]:
+    """Validate a ``/v1/uaf-facts`` request against its closed field set."""
+
+    request_id = (
+        _canonical_request_id(payload.get("request_id"))
+        if isinstance(payload, dict)
+        else None
+    )
+    if type(payload) is not dict or set(payload) != _UAF_FACTS_REQUEST_FIELDS:
+        raise RequestError("invalid_request", request_id=request_id)
+
+    if request_id is None:
+        raise RequestError("invalid_request")
+
+    schema_version = payload["schema_version"]
+    if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
+        raise RequestError("unsupported_schema", request_id=request_id)
+
+    repository_key = payload["repository_key"]
+    try:
+        normalized_key = _normalize_repository_key(repository_key)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise RequestError("invalid_request", request_id=request_id) from exc
+    if normalized_key != repository_key:
+        raise RequestError("invalid_request", request_id=request_id)
+
+    snapshot_sha256 = payload["snapshot_sha256"]
+    if (
+        not isinstance(snapshot_sha256, str)
+        or len(snapshot_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in snapshot_sha256)
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+
+    build_context = payload["build_context"]
+    if (
+        type(build_context) is not dict
+        or set(build_context) != _UAF_FACTS_BUILD_CONTEXT_FIELDS
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+    mode = build_context["mode"]
+    if not isinstance(mode, str) or mode not in _UAF_FACTS_BUILD_CONTEXT_MODES:
+        raise RequestError("invalid_request", request_id=request_id)
+
+    translation_units = _validate_uaf_translation_units(
+        payload["translation_units"], request_id
+    )
+
+    return {
+        "request_id": request_id,
+        "repository_key": normalized_key,
+        "snapshot_sha256": snapshot_sha256,
+        "translation_units": translation_units,
+        "build_context_mode": mode,
+    }
+
+
+def uaf_facts_request(payload: object, settings: AnalyzerSettings) -> dict[str, object]:
+    """Serve one versioned UAF fact-bundle request.
+
+    Task 2 ships the protocol plus the pipeline skeleton: every requested
+    translation unit comes back as a legal empty bundle with
+    ``extraction: unavailable`` (AST/CFG incomplete, one explicit coverage
+    gap) until the extraction stage lands.  The wire contract -- closed
+    request fields, versioned schema, echo identity, the ``uaf-facts`` tool
+    run and the frozen bundle hash -- is already final; ``settings`` is kept
+    for the extraction stage's deadline and tool budgets.
+    """
+
+    request = _validate_uaf_facts_payload(payload)
+    tool_run = {
+        "run_id": uuid.uuid4().hex,
+        "tool": _UAF_FACTS_TOOL,
+        "status": "unavailable",
+    }
+    translation_units = [
+        {
+            "translation_unit": unit,
+            "extraction": "unavailable",
+            "build_context": {
+                "status": "unavailable",
+                "source_kind": "",
+                "context_hash": "",
+                "diagnostics": [],
+            },
+            "coverage": {
+                "ast_complete": False,
+                "cfg_complete": False,
+                "semantic_gaps": [_UAF_FACTS_SKELETON_GAP],
+            },
+            "facts": [],
+        }
+        for unit in request["translation_units"]
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "request_id": request["request_id"],
+        "repository_key": request["repository_key"],
+        "snapshot_sha256": request["snapshot_sha256"],
+        "tool_runs": [tool_run],
+        "translation_units": translation_units,
+        "bundle_sha256": uaf_facts_bundle_sha256(translation_units),
+        "diagnostics": [],
+    }
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -404,7 +572,7 @@ def dispatch_request(
 ) -> tuple[int, dict[str, object]]:
     """Handle an HTTP-shaped request without exposing server implementation details."""
 
-    if path not in {_ANALYZE_PATH, _HEALTH_PATH}:
+    if path not in {_ANALYZE_PATH, _UAF_FACTS_PATH, _HEALTH_PATH}:
         return 404, _error_payload("not_found")
     if path == _HEALTH_PATH:
         if method != "GET":
@@ -427,7 +595,10 @@ def dispatch_request(
         return 400, _error_payload("invalid_json")
 
     try:
-        result = analyze_request(payload, settings)
+        if path == _UAF_FACTS_PATH:
+            result = uaf_facts_request(payload, settings)
+        else:
+            result = analyze_request(payload, settings)
         if not _response_fits(result):
             response_request_id = (
                 _canonical_request_id(payload.get("request_id"))

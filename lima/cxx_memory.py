@@ -11,6 +11,7 @@ versions, while consensus claims anchor on exact snapshot positions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from .models import EvidenceRecord, Finding, Severity
+from .uaf_models import RESOLUTION_SOURCE_KINDS, RESOLUTION_STATUSES
 from .workspace import WorkspaceInventory
 
 SUPPORTED_CWES = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
@@ -142,6 +144,30 @@ MAX_COVERAGE_FILES = 1_000_000
 MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 HEALTH_TIMEOUT_SECONDS = 2.0
 
+# --- /v1/uaf-facts protocol (UAF v2 plan Task 2) ---------------------------
+UAF_FACTS_SCHEMA_VERSION = 1
+UAF_FACTS_PATH = "/v1/uaf-facts"
+UAF_FACTS_TOOL = "uaf-facts"
+UAF_FACTS_BUILD_CONTEXT_MODES = frozenset({"snapshot-compdb", "heuristic"})
+UAF_FACTS_TOOL_RUN_STATUSES = frozenset({"completed", "unavailable"})
+UAF_FACTS_EXTRACTIONS = frozenset({"unavailable"})
+MAX_UAF_TRANSLATION_UNITS = 16
+MAX_UAF_TOOL_RUNS = 16
+_UAF_RESPONSE_KEYS = {
+    "schema_version",
+    "request_id",
+    "repository_key",
+    "snapshot_sha256",
+    "tool_runs",
+    "translation_units",
+    "bundle_sha256",
+    "diagnostics",
+}
+_UAF_TOOL_RUN_KEYS = {"run_id", "tool", "status"}
+_UAF_UNIT_KEYS = {"translation_unit", "extraction", "build_context", "coverage", "facts"}
+_UAF_BUILD_CONTEXT_KEYS = {"status", "source_kind", "context_hash", "diagnostics"}
+_UAF_COVERAGE_KEYS = {"ast_complete", "cfg_complete", "semantic_gaps"}
+
 
 class CxxAnalyzerUnavailable(RuntimeError):
     """The configured analyzer could not be reached or read."""
@@ -158,6 +184,26 @@ class CxxAnalysisResult:
     findings: list[Finding]
     coverage: dict[str, int]
     diagnostics: list[str]
+
+
+@dataclass(frozen=True)
+class UafFactsResponse:
+    """Strictly validated ``/v1/uaf-facts`` response.
+
+    This boundary certifies protocol integrity only: closed response fields,
+    schema version, echo identity, the ``uaf-facts`` tool run, and the bundle
+    digest re-derived over the received wire list.  Facts stay validated wire
+    dicts -- turning them into :class:`~lima.uaf_models.UafFact` records is
+    the Fact Adapter's job (plan Task 5), so no fact objects are built here.
+    """
+
+    request_id: str
+    repository_key: str
+    snapshot_sha256: str
+    tool_runs: tuple[dict[str, Any], ...]
+    translation_units: tuple[dict[str, Any], ...]
+    bundle_sha256: str
+    diagnostics: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -212,6 +258,62 @@ def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("duplicate JSON key")
         value[key] = item
     return value
+
+
+def uaf_facts_bundle_sha256(translation_units: object) -> str:
+    """Re-derive the frozen Sidecar bundle digest over the received units.
+
+    Same algorithm as the server's ``uaf_facts_bundle_sha256``:
+    ``sha256(json.dumps({"translation_units": ...}, sort_keys=True,
+    separators=(",", ":"), ensure_ascii=False).encode("utf-8"))``.  A
+    mismatch proves the bundle was tampered with in transit.
+    """
+
+    material = json.dumps(
+        {"translation_units": translation_units},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _require_safe_relative_unit(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or PurePosixPath(value).is_absolute()
+        or "\\" in value
+        or "\x00" in value
+        or any(segment in {"", ".", ".."} for segment in value.split("/"))
+    ):
+        raise CxxAnalyzerProtocolError("unsafe C/C++ analyzer translation unit")
+    return value
+
+
+def _validate_uaf_requested_units(units: object) -> tuple[str, ...]:
+    if (
+        type(units) is not tuple
+        or not units
+        or len(units) > MAX_UAF_TRANSLATION_UNITS
+        or any(type(unit) is not str for unit in units)
+        or len(set(units)) != len(units)
+    ):
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer translation units")
+    return tuple(_require_safe_relative_unit(unit) for unit in units)
+
+
+def _validate_bounded_strings(value: object, limit: int) -> None:
+    if (
+        type(value) is not list
+        or len(value) > limit
+        or any(
+            type(item) is not str
+            or not item
+            or len(item.encode("utf-8")) > MAX_DIAGNOSTIC_BYTES
+            for item in value
+        )
+    ):
+        raise CxxAnalyzerProtocolError("invalid C/C++ analyzer bounded text list")
 
 
 def _reject_non_json_number(value: str) -> None:
@@ -554,8 +656,76 @@ class CxxMemoryAnalyzerClient:
                 "requested_layers": list(requested_layers),
             }
         ).encode("utf-8")
+        payload = self._post_json("/v1/analyze", body)
+
+        self._validate_payload(payload, request_id, snapshot_sha256, inventory)
+        findings = [self._convert_finding(item) for item in payload["findings"]]
+        return CxxAnalysisResult(
+            status=payload["status"],
+            tool_runs=payload["tool_runs"],
+            findings=findings,
+            coverage=payload["coverage"],
+            diagnostics=payload["diagnostics"],
+        )
+
+    def analyze_uaf_facts(
+        self,
+        repository_key: str,
+        snapshot_sha256: str,
+        translation_units: tuple[str, ...],
+        build_context_mode: str,
+    ) -> UafFactsResponse:
+        """Request one versioned UAF fact bundle under a strict contract.
+
+        Shares the ``analyze`` transport (timeouts, response cap, duplicate
+        JSON keys, error mapping) and then validates the response against the
+        closed ``/v1/uaf-facts`` schema: unknown fields, a wrong schema
+        version, an echo mismatch, an out-of-vocabulary extraction, or a
+        bundle digest that fails local re-derivation all raise
+        :class:`CxxAnalyzerProtocolError`.
+        """
+
+        if not isinstance(repository_key, str) or not repository_key:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer repository key")
+        if (
+            not isinstance(snapshot_sha256, str)
+            or len(snapshot_sha256) != 64
+            or any(character not in _HEX64 for character in snapshot_sha256)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer snapshot digest")
+        if build_context_mode not in UAF_FACTS_BUILD_CONTEXT_MODES:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer build context mode")
+        requested_units = _validate_uaf_requested_units(translation_units)
+        request_id = str(uuid.uuid4())
+        body = json.dumps(
+            {
+                "schema_version": UAF_FACTS_SCHEMA_VERSION,
+                "request_id": request_id,
+                "repository_key": repository_key,
+                "snapshot_sha256": snapshot_sha256,
+                "translation_units": list(requested_units),
+                "build_context": {"mode": build_context_mode},
+            }
+        ).encode("utf-8")
+        payload = self._post_json(UAF_FACTS_PATH, body)
+        self._validate_uaf_payload(
+            payload, request_id, repository_key, snapshot_sha256, requested_units
+        )
+        return UafFactsResponse(
+            request_id=payload["request_id"],
+            repository_key=payload["repository_key"],
+            snapshot_sha256=payload["snapshot_sha256"],
+            tool_runs=tuple(payload["tool_runs"]),
+            translation_units=tuple(payload["translation_units"]),
+            bundle_sha256=payload["bundle_sha256"],
+            diagnostics=tuple(payload["diagnostics"]),
+        )
+
+    def _post_json(self, path: str, body: bytes) -> Any:
+        """POST one JSON request and return the parsed, size-capped response."""
+
         request = urllib.request.Request(  # noqa: S310 - Settings permits only HTTP(S).
-            self.base_url + "/v1/analyze",
+            self.base_url + path,
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -569,7 +739,7 @@ class CxxMemoryAnalyzerClient:
         if len(raw_response) > self.max_response_bytes:
             raise CxxAnalyzerProtocolError("C/C++ analyzer response exceeds size limit")
         try:
-            payload = json.loads(
+            return json.loads(
                 raw_response.decode("utf-8"),
                 object_pairs_hook=reject_duplicate_keys,
                 parse_constant=_reject_non_json_number,
@@ -577,15 +747,140 @@ class CxxMemoryAnalyzerClient:
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise CxxAnalyzerProtocolError("C/C++ analyzer returned invalid JSON") from exc
 
-        self._validate_payload(payload, request_id, snapshot_sha256, inventory)
-        findings = [self._convert_finding(item) for item in payload["findings"]]
-        return CxxAnalysisResult(
-            status=payload["status"],
-            tool_runs=payload["tool_runs"],
-            findings=findings,
-            coverage=payload["coverage"],
-            diagnostics=payload["diagnostics"],
-        )
+    @classmethod
+    def _validate_uaf_payload(
+        cls,
+        payload: Any,
+        request_id: str,
+        repository_key: str,
+        snapshot_sha256: str,
+        requested_units: tuple[str, ...],
+    ) -> None:
+        if not isinstance(payload, dict) or set(payload) != _UAF_RESPONSE_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer response fields")
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["schema_version"] != UAF_FACTS_SCHEMA_VERSION
+        ):
+            raise CxxAnalyzerProtocolError("unsupported C/C++ analyzer schema")
+        if payload["request_id"] != request_id:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer request identity mismatch")
+        if payload["repository_key"] != repository_key:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer repository identity mismatch")
+        if payload["snapshot_sha256"] != snapshot_sha256:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer snapshot identity mismatch")
+        cls._validate_uaf_tool_runs(payload["tool_runs"])
+        cls._validate_uaf_units_payload(payload["translation_units"], requested_units)
+        bundle_sha256 = payload["bundle_sha256"]
+        if (
+            type(bundle_sha256) is not str
+            or len(bundle_sha256) != 64
+            or any(character not in _HEX64 for character in bundle_sha256)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer bundle digest")
+        if bundle_sha256 != uaf_facts_bundle_sha256(payload["translation_units"]):
+            raise CxxAnalyzerProtocolError("C/C++ analyzer bundle digest mismatch")
+        _validate_bounded_strings(payload["diagnostics"], MAX_DIAGNOSTICS)
+
+    @staticmethod
+    def _validate_uaf_tool_runs(tool_runs: object) -> None:
+        if (
+            type(tool_runs) is not list
+            or not tool_runs
+            or len(tool_runs) > MAX_UAF_TOOL_RUNS
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool runs")
+        seen_run_ids: set[str] = set()
+        for run in tool_runs:
+            if type(run) is not dict or set(run) != _UAF_TOOL_RUN_KEYS:
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool run fields")
+            run_id = run["run_id"]
+            if (
+                type(run_id) is not str
+                or not run_id
+                or len(run_id.encode("utf-8")) > MAX_RUN_ID_BYTES
+                or run_id in seen_run_ids
+            ):
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer run identity")
+            seen_run_ids.add(run_id)
+            if run["tool"] != UAF_FACTS_TOOL:
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer facts tool")
+            if (
+                type(run["status"]) is not str
+                or run["status"] not in UAF_FACTS_TOOL_RUN_STATUSES
+            ):
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer tool status")
+
+    @classmethod
+    def _validate_uaf_units_payload(
+        cls,
+        translation_units: object,
+        requested_units: tuple[str, ...],
+    ) -> None:
+        if (
+            type(translation_units) is not list
+            or len(translation_units) != len(requested_units)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer translation units")
+        served_units: list[str] = []
+        for entry in translation_units:
+            if type(entry) is not dict or set(entry) != _UAF_UNIT_KEYS:
+                raise CxxAnalyzerProtocolError(
+                    "invalid C/C++ analyzer translation unit fields"
+                )
+            served_units.append(_require_safe_relative_unit(entry["translation_unit"]))
+            extraction = entry["extraction"]
+            if not isinstance(extraction, str) or extraction not in UAF_FACTS_EXTRACTIONS:
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer extraction")
+            cls._validate_uaf_build_context(entry["build_context"])
+            cls._validate_uaf_coverage(entry["coverage"], extraction)
+            if type(entry["facts"]) is not list:
+                raise CxxAnalyzerProtocolError("invalid C/C++ analyzer facts")
+            # A not-extracted unit can never carry facts or claim extraction
+            # completeness; the vocabulary extension lands with real
+            # extraction and its own consistency rules.
+            coverage = entry["coverage"]
+            if entry["facts"] or coverage["ast_complete"] or coverage["cfg_complete"]:
+                raise CxxAnalyzerProtocolError(
+                    "inconsistent unavailable C/C++ analyzer extraction"
+                )
+        if tuple(served_units) != requested_units:
+            raise CxxAnalyzerProtocolError("C/C++ analyzer translation unit echo mismatch")
+
+    @staticmethod
+    def _validate_uaf_build_context(build_context: object) -> None:
+        if type(build_context) is not dict or set(build_context) != _UAF_BUILD_CONTEXT_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer build context fields")
+        status = build_context["status"]
+        if not isinstance(status, str) or status not in RESOLUTION_STATUSES:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer build context status")
+        source_kind = build_context["source_kind"]
+        if source_kind != "" and (
+            not isinstance(source_kind, str) or source_kind not in RESOLUTION_SOURCE_KINDS
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer build context source kind")
+        context_hash = build_context["context_hash"]
+        if context_hash != "" and (
+            type(context_hash) is not str
+            or len(context_hash) != 64
+            or any(character not in _HEX64 for character in context_hash)
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer build context hash")
+        _validate_bounded_strings(build_context["diagnostics"], MAX_DIAGNOSTICS)
+
+    @staticmethod
+    def _validate_uaf_coverage(coverage: object, extraction: str) -> None:
+        if type(coverage) is not dict or set(coverage) != _UAF_COVERAGE_KEYS:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer coverage fields")
+        ast_complete = coverage["ast_complete"]
+        cfg_complete = coverage["cfg_complete"]
+        if type(ast_complete) is not bool or type(cfg_complete) is not bool:
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer coverage flags")
+        if extraction in UAF_FACTS_EXTRACTIONS and (ast_complete or cfg_complete):
+            raise CxxAnalyzerProtocolError(
+                "incomplete extraction cannot claim AST or CFG completeness"
+            )
+        _validate_bounded_strings(coverage["semantic_gaps"], MAX_DIAGNOSTICS)
 
     @classmethod
     def _validate_payload(

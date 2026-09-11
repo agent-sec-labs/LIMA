@@ -26,6 +26,9 @@ Frozen phase-1 semantics:
   use reaches an object when its pointer equals the allocation's pointer
   or connects to it over edges whose assignment line does not follow the
   use line (an assignment after the use cannot have aliased yet).  The
+  graph construction is public (:func:`build_alias_graph`,
+  :func:`alias_reaches`, :func:`alias_binding_facts`) so the Proof Engine
+  consumes the identical edges instead of rebuilding its own.  The
   generator applies no rebind filtering: chain cutting is Proof
   obligation P6's decision, this stage only widens recall.
 - "Syntactically later" is the lexicographic source-range comparison
@@ -57,7 +60,11 @@ from .uaf_models import (
 )
 
 __all__ = [
+    "AliasGraph",
     "CandidateGenerationStats",
+    "alias_binding_facts",
+    "alias_reaches",
+    "build_alias_graph",
     "generate_candidates",
     "generation_stats",
 ]
@@ -97,43 +104,91 @@ def _eligible_allocations(facts: tuple[UafFact, ...]) -> tuple[UafFact, ...]:
     )
 
 
-def _alias_edges(
-    facts: tuple[UafFact, ...], function_usr: str
-) -> tuple[tuple[str, str, int], ...]:
-    """Alias edges ``(source, target, line)`` inside one (TU, function) scope.
+@dataclass(frozen=True)
+class AliasGraph:
+    """The alias graph of one (translation unit, function USR) scope.
 
-    ``rebind`` facts build edges like any other alias assignment here: the
-    generator widens recall and leaves rebind refutation to P6.
+    ``edges`` are ``(source_pointer_id, pointer_id, line, fact_id)``
+    quads -- one per ``alias-copy``/``points-to``/``rebind`` fact with both
+    pointer anchors, edge line = fact range start.  ``rebind`` facts build
+    edges like any other alias assignment here: recall widening leaves
+    rebind refutation to Proof obligation P6.
+
+    ``complete`` is false when any alias-kind fact in the scope cannot
+    yield an edge (missing ``source_pointer_id`` or ``pointer_id``):
+    reachability may then silently miss a binding, so a *refuted*
+    conclusion may only be drawn on a complete graph.  Consumers that only
+    widen recall (the generator) ignore the flag.
     """
 
-    return tuple(
-        (fact.source_pointer_id, fact.pointer_id, fact.source_range[0])
-        for fact in facts
-        if fact.kind in _ALIAS_KINDS
-        and fact.function_usr == function_usr
-        and bool(fact.source_pointer_id)
-        and bool(fact.pointer_id)
-    )
+    function_usr: str
+    edges: tuple[tuple[str, str, int, str], ...]
+    complete: bool
 
 
-def _reaches(
-    root: str, target: str, edges: tuple[tuple[str, str, int], ...], use_line: int
-) -> bool:
-    """Whether ``target`` connects to ``root`` over edges not after ``use_line``.
+def build_alias_graph(facts: tuple[UafFact, ...], function_usr: str) -> AliasGraph:
+    """Build the public alias graph for one (TU, function) scope.
 
-    An alias assignment at a line after the use cannot have taken effect
-    yet, so only edges with ``line <= use_line`` participate.
+    Pure and deterministic; edges are emitted in input fact order.  This is
+    the single graph definition shared by the Candidate Generator (recall)
+    and the Proof Engine (P2/P6), so both never drift apart.
     """
 
-    seen = {root}
+    edges: list[tuple[str, str, int, str]] = []
+    complete = True
+    for fact in facts:
+        if fact.kind not in _ALIAS_KINDS:
+            continue
+        if not fact.source_pointer_id or not fact.pointer_id:
+            complete = False
+            continue
+        if fact.function_usr != function_usr:
+            continue
+        edges.append(
+            (fact.source_pointer_id, fact.pointer_id, fact.source_range[0], fact.fact_id)
+        )
+    return AliasGraph(function_usr=function_usr, edges=tuple(edges), complete=complete)
+
+
+def alias_binding_facts(
+    root: str, target: str, graph: AliasGraph, use_line: int
+) -> tuple[str, ...] | None:
+    """Fact ids of one alias path binding ``target`` to ``root``.
+
+    Returns ``()`` when ``target`` is ``root`` itself, the ``fact_id`` tuple
+    of one connecting path when reachable over edges whose assignment line
+    does not follow ``use_line`` (an assignment after the use cannot have
+    aliased yet), and ``None`` when unreachable over this graph.  The graph
+    is consumed in either traversal direction: only the per-edge line
+    budget carries the flow-ordering semantics.
+    """
+
+    if root == target:
+        return ()
+    parents: dict[str, tuple[str, str] | None] = {root: None}
     frontier = [root]
     while frontier:
         current = frontier.pop()
-        for source, destination, line in edges:
-            if source == current and line <= use_line and destination not in seen:
-                seen.add(destination)
-                frontier.append(destination)
-    return target in seen
+        for source, destination, line, fact_id in graph.edges:
+            if source != current or line > use_line or destination in parents:
+                continue
+            parents[destination] = (current, fact_id)
+            if destination == target:
+                path: list[str] = []
+                cursor = destination
+                while parents[cursor] is not None:
+                    previous, edge_fact_id = parents[cursor]
+                    path.append(edge_fact_id)
+                    cursor = previous
+                return tuple(reversed(path))
+            frontier.append(destination)
+    return None
+
+
+def alias_reaches(root: str, target: str, graph: AliasGraph, use_line: int) -> bool:
+    """Whether ``target`` connects to ``root`` over edges not after ``use_line``."""
+
+    return alias_binding_facts(root, target, graph, use_line) is not None
 
 
 def generate_candidates(bundle: UafFactBundle) -> tuple[UafCandidate, ...]:
@@ -154,7 +209,7 @@ def generate_candidates(bundle: UafFactBundle) -> tuple[UafCandidate, ...]:
             continue
         uses = tuple(fact for fact in unit.facts if fact.kind in _USE_KINDS)
         for allocation in allocations:
-            edges = _alias_edges(unit.facts, allocation.function_usr)
+            graph = build_alias_graph(unit.facts, allocation.function_usr)
             object_id = derive_object_id(
                 UAF_SCHEMA_VERSION,
                 allocation.canonical_path,
@@ -173,8 +228,8 @@ def generate_candidates(bundle: UafFactBundle) -> tuple[UafCandidate, ...]:
                         continue
                     if use.source_range <= release.source_range:
                         continue
-                    if use.pointer_id != allocation.pointer_id and not _reaches(
-                        allocation.pointer_id, use.pointer_id, edges, use.source_range[0]
+                    if use.pointer_id != allocation.pointer_id and not alias_reaches(
+                        allocation.pointer_id, use.pointer_id, graph, use.source_range[0]
                     ):
                         continue
                     candidates.append(

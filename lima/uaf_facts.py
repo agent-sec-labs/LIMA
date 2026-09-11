@@ -18,8 +18,10 @@ Validation chain (the order below is also the error-report order):
 2. Per translation unit: closed unit / build-context / coverage field
    sets, safe relative paths contained under
    ``expectation.repository_root`` (the root check is skipped when the
-   root is the empty string), a completed extraction must pin the
-   expected build context hash, and an ``unavailable`` extraction can
+   root is the empty string), a completed extraction must pin a build
+   context hash the expectation accepts (the single anchor hash or a
+   member of ``allowed_context_hashes`` -- multi-TU responses carry one
+   hash per compdb entry), and an ``unavailable`` extraction can
    carry neither facts nor AST/CFG completeness claims.
 3. Fact level: the per-kind closed field set (``FACT_FIELD_SETS``), then
    :class:`~lima.uaf_models.UafFact` construction; duplicate fact ids
@@ -346,9 +348,18 @@ def adapt_uaf_response(
     _bounded_strings(response.diagnostics, "response diagnostics")
 
     try:
+        # The multi-TU expectation carries an empty anchor plus a closed
+        # allowlist of per-unit hashes; the header then pins the
+        # deterministic first allowlisted hash as its provenance anchor.
+        # Provenance only -- every fact below is stamped with its own
+        # unit's verified hash.
+        meta_context_hash = (
+            expectation.build_context_hash
+            or min(expectation.allowed_context_hashes)
+        )
         meta = FactBundleMeta(
             snapshot_hash=response.snapshot_sha256,
-            build_context_hash=expectation.build_context_hash,
+            build_context_hash=meta_context_hash,
             producer_name=UAF_FACTS_TOOL,
             producer_version=str(UAF_FACTS_SCHEMA_VERSION),
             tool_run_id=run_id,
@@ -407,7 +418,11 @@ def adapt_uaf_response(
                 f"translation unit {unit!r}: unavailable extraction cannot claim AST or "
                 "CFG completeness"
             )
-        if extraction == "completed" and context_hash != expectation.build_context_hash:
+        if (
+            extraction == "completed"
+            and context_hash != expectation.build_context_hash
+            and context_hash not in expectation.allowed_context_hashes
+        ):
             raise FactBundleError(
                 f"translation unit {unit!r}: build_context.context_hash does not match "
                 "the expected build context hash"

@@ -137,6 +137,24 @@ def _raw_bundle(units=None, *, snapshot: str = SNAPSHOT, tool_runs=None, **chang
     return payload
 
 
+def _relocated_facts(unit: str) -> list[dict]:
+    """The unit-A fact chain retargeted onto another translation unit.
+
+    Fact ids are offset (related references remapped too) so the two units
+    keep globally unique ids inside one bundle.
+    """
+    relocated = []
+    for fact in _unit_a_facts():
+        shifted = dict(fact, translation_unit=unit, canonical_path=unit)
+        shifted["fact_id"] = _fid(int(fact["fact_id"], 16) + 1000)
+        if "related_fact_ids" in shifted:
+            shifted["related_fact_ids"] = [
+                _fid(int(item, 16) + 1000) for item in shifted["related_fact_ids"]
+            ]
+        relocated.append(shifted)
+    return relocated
+
+
 def _expectation(**overrides) -> FactBundleExpectation:
     fields = {
         "snapshot_hash": SNAPSHOT,
@@ -263,6 +281,45 @@ class ValidBundleTests(unittest.TestCase):
         from_load = load_fact_bundle(payload, _expectation())
         self.assertEqual(7, len(from_adapt.facts))
         self.assertEqual(from_load, from_adapt)
+
+    def test_unit_hash_must_be_in_allowed_set(self):
+        # 多 TU：各 completed 单元的 context hash 可各自不同（不同 compdb
+        # 条目），只要都命中期望允许集合即通过；每个事实仍以各自单元已
+        # 校验的哈希盖章。单哈希锚点路径的回归由
+        # test_valid_bundle_round_trips_all_fields 与
+        # test_build_context_hash_mismatch_rejected 覆盖。
+        expectation = _expectation(
+            build_context_hash="",
+            allowed_context_hashes=frozenset({CONTEXT, OTHER_CONTEXT}),
+        )
+        units = [
+            _unit_entry(UNIT_A, facts=_unit_a_facts(), context_hash=CONTEXT),
+            _unit_entry(
+                UNIT_B,
+                facts=_relocated_facts(UNIT_B),
+                context_hash=OTHER_CONTEXT,
+            ),
+        ]
+        bundle = load_fact_bundle(_raw_bundle(units=units), expectation)
+        self.assertEqual(2, len(bundle.per_unit))
+        self.assertEqual(CONTEXT, bundle.per_unit[0].build_context.context_hash)
+        self.assertEqual(
+            OTHER_CONTEXT, bundle.per_unit[1].build_context.context_hash
+        )
+        self.assertEqual(CONTEXT, bundle.facts[0].build_context_hash)
+        self.assertEqual(OTHER_CONTEXT, bundle.facts[-1].build_context_hash)
+        # bundle 头部钉住允许集合中确定性的首个哈希作为来源锚点。
+        self.assertEqual(CONTEXT, bundle.meta.build_context_hash)
+
+        # 集合外哈希照旧拒绝：身份链是成员判定，不放松为模糊匹配。
+        stray = [
+            _unit_entry(
+                UNIT_B, facts=_relocated_facts(UNIT_B), context_hash="e" * 64
+            )
+        ]
+        with self.assertRaises(FactBundleError) as caught:
+            load_fact_bundle(_raw_bundle(units=stray), expectation)
+        self.assertIn("build context hash", str(caught.exception))
 
     def test_rootless_expectation_skips_root_check_but_keeps_paths_safe(self):
         expectation = _expectation(repository_root="")

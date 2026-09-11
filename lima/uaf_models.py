@@ -339,16 +339,29 @@ class FactBundleExpectation:
     ``allowed_tool_runs`` is the closed allowlist of acceptable
     ``tool_run_id`` values.  This is the Task 1 / fact-phase contract; the
     candidate-scoped check happens after candidate generation.
+
+    Multi-TU responses: each completed translation unit may pin a distinct
+    ``build_context.context_hash`` (distinct compdb entries mean distinct
+    compile arguments and therefore distinct, individually correct hashes).
+    The expectation then carries the closed allowlist of those hashes in
+    ``allowed_context_hashes`` with an empty ``build_context_hash`` anchor,
+    and a completed unit is accepted only when its hash is the anchor or a
+    member of that allowlist.  ``build_context_hash`` keeps its single-hash
+    anchor semantics and may be empty if and only if ``allowed_context_hashes``
+    is non-empty -- at least one hash source must pin the bundle; both being
+    empty is refused.
     """
 
     snapshot_hash: str
     build_context_hash: str
     repository_root: str
     allowed_tool_runs: frozenset[str]
+    allowed_context_hashes: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         _hex_digest(self.snapshot_hash, "snapshot_hash")
-        _hex_digest(self.build_context_hash, "build_context_hash")
+        if self.build_context_hash != "":
+            _hex_digest(self.build_context_hash, "build_context_hash")
         if self.repository_root != "":
             _safe_relative_path(self.repository_root, "repository_root")
         if not isinstance(self.allowed_tool_runs, (frozenset, set)):
@@ -358,6 +371,20 @@ class FactBundleExpectation:
             for index, run in enumerate(sorted(self.allowed_tool_runs))
         )
         object.__setattr__(self, "allowed_tool_runs", normalized)
+        if not isinstance(self.allowed_context_hashes, frozenset | set):
+            raise ValueError(
+                "allowed_context_hashes must be a frozenset of SHA-256 digests"
+            )
+        normalized_hashes = frozenset(
+            _hex_digest(item, f"allowed_context_hashes[{index}]")
+            for index, item in enumerate(sorted(self.allowed_context_hashes))
+        )
+        object.__setattr__(self, "allowed_context_hashes", normalized_hashes)
+        if self.build_context_hash == "" and not normalized_hashes:
+            raise ValueError(
+                "build_context_hash may be empty only when allowed_context_hashes "
+                "carries at least one hash"
+            )
 
 
 @dataclass(frozen=True)

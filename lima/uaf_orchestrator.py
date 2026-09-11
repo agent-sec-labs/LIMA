@@ -405,10 +405,17 @@ def _expectation_for(
     per-unit build-context hash or the server-side tool-run id, so the
     expectation pins them from the response the strict client just
     certified (echo identity, closed schema, re-derived bundle digest):
-    every completed unit must agree on exactly one context hash, which is
-    then re-checked per unit by :func:`adapt_uaf_response`.  Units with
-    no completed extraction pin a review-identity digest instead -- they
-    carry no facts, so nothing can pass the completeness gate.
+
+    - one distinct hash over the completed units is the single anchor;
+    - distinct compdb entries give completed units legitimately distinct
+      context hashes, so the expectation carries the closed allowlist of
+      every observed hash with an empty anchor instead of failing the
+      identity chain -- each completed unit is still re-checked against
+      that allowlist by :func:`adapt_uaf_response` (invariant 8 is
+      membership, not uniformity);
+    - units with no completed extraction pin a review-identity digest
+      instead -- they carry no facts, so nothing can pass the
+      completeness gate.
     """
 
     completed: set[str] = set()
@@ -419,24 +426,27 @@ def _expectation_for(
             and isinstance(unit.get("build_context"), dict)
         ):
             completed.add(str(unit["build_context"].get("context_hash") or ""))
+    allowed_hashes: frozenset[str] = frozenset()
     if len(completed) == 1:
         context_hash = next(iter(completed))
+        allowed_hashes = frozenset(completed)
+    elif completed:
+        # Completed units legitimately disagree on their build context:
+        # allowlist every observed hash so the identity chain stays closed
+        # as a membership check, never a mixed or fuzzy context.
+        context_hash = ""
+        allowed_hashes = frozenset(completed)
     else:
-        if len(completed) > 1:
-            # Completed units disagree on their build context: fail the
-            # identity chain instead of mixing contexts (invariant 8).
-            context_hash = ""
-        else:
-            material = json.dumps(
-                {
-                    "snapshot": snapshot_hash,
-                    "mode": build_context_mode,
-                    "units": list(translation_units),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            context_hash = hashlib.sha256(material).hexdigest()
+        material = json.dumps(
+            {
+                "snapshot": snapshot_hash,
+                "mode": build_context_mode,
+                "units": list(translation_units),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        context_hash = hashlib.sha256(material).hexdigest()
     run_ids = frozenset(
         run["run_id"]
         for run in response.tool_runs
@@ -447,6 +457,7 @@ def _expectation_for(
         build_context_hash=context_hash,
         repository_root="",
         allowed_tool_runs=run_ids,
+        allowed_context_hashes=allowed_hashes,
     )
 
 

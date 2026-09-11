@@ -39,6 +39,7 @@ from lima.repository_scanner import RepositoryScanner
 from lima.reviewer import LLMTransportError
 from lima.uaf_orchestrator import (
     UAF_FINDING_STATES,
+    _expectation_for,
     arbiter_state,
     review_uaf,
 )
@@ -47,8 +48,10 @@ from lima.workspace import RepositoryWorkspace
 REPO_KEY = "team/project"
 SNAPSHOT = "a" * 64
 CONTEXT = "c" * 64
+CONTEXT_B = "d" * 64
 RUN_ID = "run-uaf-1"
 UNIT = "src/a.cpp"
+UNIT_B = "src/b.cpp"
 USR = "C::leak"
 
 RESOLVED_LLM = {
@@ -79,6 +82,7 @@ def _wire_fact(
     fact_id,
     line,
     *,
+    unit=UNIT,
     api=None,
     pointer=None,
     source_pointer=None,
@@ -87,8 +91,8 @@ def _wire_fact(
     fact = {
         "fact_id": fact_id,
         "kind": kind,
-        "translation_unit": UNIT,
-        "canonical_path": UNIT,
+        "translation_unit": unit,
+        "canonical_path": unit,
         "function_usr": USR,
         "source_range": [line, line],
         "cfg_block": 0,
@@ -133,7 +137,7 @@ def _two_release_facts():
     ]
 
 
-def _unit_entry(facts, *, build=None, cfg_complete=True, gaps=()):
+def _unit_entry(facts, *, unit=UNIT, build=None, cfg_complete=True, gaps=()):
     if build is None:
         build = {
             "status": "resolved",
@@ -142,7 +146,7 @@ def _unit_entry(facts, *, build=None, cfg_complete=True, gaps=()):
             "diagnostics": [],
         }
     return {
-        "translation_unit": UNIT,
+        "translation_unit": unit,
         "extraction": "completed",
         "build_context": build,
         "coverage": {
@@ -336,6 +340,7 @@ def _review(
     llm_config=None,
     tool_analysis=None,
     snapshot=SNAPSHOT,
+    units=(UNIT,),
     **params,
 ):
     """Run one review_uaf call over a temp workspace and the fake sidecar."""
@@ -349,7 +354,7 @@ def _review(
         workspace,
         repository_key=REPO_KEY,
         snapshot_hash=snapshot,
-        translation_units=(UNIT,),
+        translation_units=units,
         mode=mode,
         tool_analysis=tool_analysis,
         llm_config=llm_config,
@@ -593,6 +598,98 @@ class FactVerifiedZeroLLMTests(unittest.TestCase):
                 self.assertEqual(1, outcome.stats.tu_count)
         self.assertEqual([], guard.calls)
         self.assertEqual([((UNIT,), "snapshot-compdb")], analyzer.unit_calls)
+
+
+class MultiTuContextTests(unittest.TestCase):
+    """Multi-TU responses pin a closed allowlist of context hashes.
+
+    Real scans hand each translation unit its own compdb entry, so completed
+    units legitimately disagree on ``build_context.context_hash``.  The
+    expectation must carry the allowlist of all observed hashes instead of
+    one anchor; the identity chain stays closed by per-unit membership.
+    """
+
+    @staticmethod
+    def _response(payload):
+        return UafFactsResponse(
+            request_id=payload["request_id"],
+            repository_key=payload["repository_key"],
+            snapshot_sha256=payload["snapshot_sha256"],
+            tool_runs=tuple(payload["tool_runs"]),
+            translation_units=tuple(payload["translation_units"]),
+            bundle_sha256=payload["bundle_sha256"],
+            diagnostics=(),
+        )
+
+    def test_multiple_resolved_tus_with_distinct_contexts_do_not_crash(self):
+        unit_b_facts = [
+            _wire_fact("allocation", _fid(11), 10, unit=UNIT_B, pointer="q"),
+            _wire_fact(
+                "release", _fid(12), 20, unit=UNIT_B, pointer="q",
+                related=(_fid(11),),
+            ),
+            _wire_fact("dereference", _fid(13), 30, unit=UNIT_B, pointer="q"),
+        ]
+        payload = _payload(
+            _unit_entry(_straight_facts()),
+            _unit_entry(
+                unit_b_facts,
+                unit=UNIT_B,
+                build={
+                    "status": "resolved",
+                    "source_kind": "repository-compdb",
+                    "context_hash": CONTEXT_B,
+                    "diagnostics": [],
+                },
+            ),
+        )
+
+        # RED repro of the field crash: expectation construction used to pass
+        # context_hash="" into FactBundleExpectation and raised ValueError on
+        # any multi-TU response with distinct per-unit hashes.
+        expectation = _expectation_for(
+            self._response(payload), SNAPSHOT, "snapshot-compdb",
+            (UNIT, UNIT_B),
+        )
+        self.assertEqual("", expectation.build_context_hash)
+        self.assertEqual(
+            frozenset({CONTEXT, CONTEXT_B}),
+            expectation.allowed_context_hashes,
+        )
+
+        guard = GuardTransport()
+        with patch("lima.uaf_llm_branch.post_chat_completion_text", guard):
+            outcome, analyzer = _review(payload, units=(UNIT, UNIT_B))
+        self.assertEqual(2, outcome.stats.tu_count)
+        self.assertEqual(2, len(outcome.candidates))
+        self.assertEqual(
+            ["fact-verified", "fact-verified"],
+            [item.state for item in outcome.candidates],
+        )
+        self.assertEqual(2, outcome.stats.pass_count)
+        self.assertEqual(0, outcome.stats.llm_calls)
+        self.assertEqual([], guard.calls)
+        self.assertEqual([((UNIT, UNIT_B), "snapshot-compdb")],
+                         analyzer.unit_calls)
+
+    def test_expectation_for_pins_single_and_no_completed_decisions(self):
+        # One completed unit keeps the single-anchor behavior: the anchor is
+        # the observed hash and the allowlist contains exactly that hash.
+        single = _expectation_for(
+            self._response(_payload(_resolved_unit())),
+            SNAPSHOT, "snapshot-compdb", (UNIT,),
+        )
+        self.assertEqual(CONTEXT, single.build_context_hash)
+        self.assertEqual(frozenset({CONTEXT}), single.allowed_context_hashes)
+
+        # No completed unit keeps the review-identity digest: a deterministic
+        # 64-hex anchor with an empty allowlist (no completed hash exists).
+        empty = _expectation_for(
+            self._response(_payload(_unavailable_unit(UNIT))),
+            SNAPSHOT, "snapshot-compdb", (UNIT,),
+        )
+        self.assertRegex(empty.build_context_hash, r"^[0-9a-f]{64}$")
+        self.assertEqual(frozenset(), empty.allowed_context_hashes)
 
 
 class UnknownModeGateTests(unittest.TestCase):

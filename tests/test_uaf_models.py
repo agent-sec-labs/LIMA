@@ -314,6 +314,47 @@ class FactBundleExpectationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     FactBundleExpectation(**{**base, **mutation})
 
+    def test_expectation_accepts_hash_set_and_rejects_non_hex_member(self):
+        # 多 TU 响应里各 completed 单元可各持合法不同的 context hash
+        # （不同 compdb 条目 → 不同编译参数 → 不同哈希）：期望允许"空单哈希
+        # 锚点 + 非空允许集合"的组合；两者全空仍拒绝，至少要有一个哈希来源。
+        multi = FactBundleExpectation(
+            snapshot_hash=_A,
+            build_context_hash="",
+            repository_root="",
+            allowed_tool_runs=frozenset({"run"}),
+            allowed_context_hashes=frozenset({_B, _C}),
+        )
+        self.assertEqual(frozenset({_B, _C}), multi.allowed_context_hashes)
+        # 单哈希锚点路径不变：锚点与集合可并存（集合含锚点自身）。
+        anchored = FactBundleExpectation(
+            snapshot_hash=_A,
+            build_context_hash=_B,
+            repository_root="",
+            allowed_tool_runs=frozenset({"run"}),
+            allowed_context_hashes=frozenset({_B}),
+        )
+        self.assertEqual(frozenset({_B}), anchored.allowed_context_hashes)
+        base = {
+            "snapshot_hash": _A,
+            "build_context_hash": "",
+            "repository_root": "",
+            "allowed_tool_runs": frozenset({"run"}),
+        }
+        cases = (
+            ("non-hex member", {"allowed_context_hashes": frozenset({"z" * 64})}),
+            ("short member", {"allowed_context_hashes": frozenset({_B[:63]})}),
+            ("uppercase member", {"allowed_context_hashes": frozenset({_B.upper()})}),
+            ("non-string member", {"allowed_context_hashes": frozenset({7})}),
+            ("empty member", {"allowed_context_hashes": frozenset({""})}),
+            ("hashes not a set", {"allowed_context_hashes": [_B]}),
+            ("both anchor and set empty", {"allowed_context_hashes": frozenset()}),
+        )
+        for name, mutation in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    FactBundleExpectation(**{**base, **mutation})
+
     def test_bundle_meta_validates_producer_and_optional_hash(self):
         meta = FactBundleMeta(
             snapshot_hash=_A,

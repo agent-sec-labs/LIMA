@@ -73,9 +73,9 @@ freed-by/allocated-by 栈、截断标记）。实验台账记录输入哈希/产
 - Create: `tests/test_agent_repro_tools.py`
 
 **Steps:**
-- [ ] 2.1 RED：工具合同（schema 校验/预算/台账/结果转观察文本转义）
-- [ ] 2.2 RED：模板合同（每模板可编译占位展开、类型正确、无网络/文件副作用声明）
-- [ ] 2.3 GREEN → 目标回归 → 提交：`feat: expose ASan workbench to agents`
+- [x] 2.1 RED：工具合同（schema 校验/预算/台账/结果转观察文本转义）
+- [x] 2.2 RED：模板合同（每模板可编译占位展开、类型正确、无网络/文件副作用声明）
+- [x] 2.3 GREEN → 目标回归 → 提交：`feat: expose ASan workbench to agents`
 
 ---
 

@@ -406,6 +406,10 @@ class UafFact:
     object_id: str = ""
     pointer_id: str = ""
     related_fact_ids: tuple[str, ...] = ()
+    # Task 6 contract-gap closure: the wire api (allocation/release) and the
+    # alias source pointer are validated and kept, never dropped.
+    api: str = ""
+    source_pointer_id: str = ""
 
     def __post_init__(self) -> None:
         _hex_digest(self.fact_id, "fact_id")
@@ -423,6 +427,8 @@ class UafFact:
         object.__setattr__(
             self, "related_fact_ids", _hex_tuple(self.related_fact_ids, "related_fact_ids")
         )
+        _optional_text(self.api, "api")
+        _optional_text(self.source_pointer_id, "source_pointer_id")
 
 
 # ------------------------------------------------------------------ proof

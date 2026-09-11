@@ -220,6 +220,26 @@ class ValidBundleTests(unittest.TestCase):
         self.assertEqual(tuple(bundle.facts), unit.facts)
         self.assertEqual((), bundle.coverage_gaps)
 
+    def test_wire_api_and_source_pointer_fill_fact_fields(self):
+        # Task 6 contract-gap closure: the adapter must keep the Task 4 wire
+        # fields it previously dropped -- allocation/release api and the
+        # alias source pointer -- instead of discarding them at the boundary.
+        payload = _raw_bundle()
+        bundle = load_fact_bundle(payload, _expectation())
+        by_id = {fact.fact_id: fact for fact in bundle.facts}
+        allocation = by_id[ALLOC_ID]
+        self.assertEqual("new", allocation.api)
+        self.assertEqual("", allocation.source_pointer_id)
+        release = by_id[RELEASE_ID]
+        self.assertEqual("delete", release.api)
+        self.assertEqual("", release.source_pointer_id)
+        alias = by_id[_fid(13)]
+        self.assertEqual(POINTER, alias.source_pointer_id)
+        self.assertEqual("", alias.api)
+        deref = by_id[DEREF_ID]
+        self.assertEqual("", deref.api)
+        self.assertEqual("", deref.source_pointer_id)
+
     def test_coverage_gaps_aggregate_across_units(self):
         units = [
             _unit_entry(UNIT_A, facts=_unit_a_facts(), gaps=["macro-expansion"]),
@@ -277,6 +297,18 @@ class BundleRejectionTests(unittest.TestCase):
     def test_unknown_fact_field_rejected(self):
         fact = _wire_fact("allocation", ALLOC_ID, notes="extra")
         self._assert_rejected(units=[_unit_entry(facts=[fact])], keyword="unknown fact field")
+
+    def test_non_string_wire_api_rejected(self):
+        # The api and alias-source wire fields are kept now, so their value
+        # domain is enforced through UafFact construction instead of dropped.
+        fact = _wire_fact("allocation", ALLOC_ID, allocation_api=7)
+        self._assert_rejected(units=[_unit_entry(facts=[fact])], keyword="fact 0")
+        misphrased = _wire_fact("release", RELEASE_ID, release_api=True)
+        self._assert_rejected(units=[_unit_entry(facts=[misphrased])], keyword="fact 0")
+
+    def test_non_string_wire_source_pointer_rejected(self):
+        fact = _wire_fact("alias-copy", _fid(13), source_pointer_id=None)
+        self._assert_rejected(units=[_unit_entry(facts=[fact])], keyword="fact 0")
 
     def test_missing_fact_field_rejected(self):
         fact = _wire_fact("allocation", ALLOC_ID)

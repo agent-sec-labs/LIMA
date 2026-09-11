@@ -252,6 +252,29 @@ class FactModelTests(unittest.TestCase):
         self.assertEqual((_C, _D), linked.related_fact_ids)
         self.assertEqual("p-local-x", linked.pointer_id)
 
+    def test_fact_api_and_source_pointer_default_empty_and_round_trip(self):
+        # Task 6 contract-gap closure: wire facts carry the allocation or
+        # release api and the alias source pointer; both default to "" so
+        # pre-extension constructions stay valid.
+        fact = _fact()
+        self.assertEqual("", fact.api)
+        self.assertEqual("", fact.source_pointer_id)
+        alloc = _fact(api="new")
+        self.assertEqual("new", alloc.api)
+        self.assertEqual("", alloc.source_pointer_id)
+        alias = _fact(kind=UafFactKind.ALIAS_COPY, source_pointer_id="p-src")
+        self.assertEqual("p-src", alias.source_pointer_id)
+        self.assertEqual("", alias.api)
+        for name, mutation in (
+            ("non-string api", {"api": 7}),
+            ("oversized api", {"api": "x" * 2049}),
+            ("non-string source pointer", {"source_pointer_id": None}),
+            ("oversized source pointer", {"source_pointer_id": "x" * 2049}),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    _fact(**mutation)
+
 
 class FactBundleExpectationTests(unittest.TestCase):
     def test_expectation_validates_hashes_root_and_tool_runs(self):

@@ -263,6 +263,15 @@ def _build_fact(
         if type(related_raw) is not list:
             raise FactBundleError(f"{where}: related_fact_ids must be a list")
         related = tuple(related_raw)
+    # Task 4 carries the api on allocation/release and the alias source on
+    # points-to/alias-copy/rebind; UafFact keeps both instead of dropping
+    # them at the adapter boundary (the Candidate Generator consumes them).
+    api = ""
+    if kind_value == "allocation":
+        api = raw_fact["allocation_api"]
+    elif kind_value == "release":
+        api = raw_fact["release_api"]
+    source_pointer_id = raw_fact.get("source_pointer_id", "")
 
     try:
         return UafFact(
@@ -277,6 +286,8 @@ def _build_fact(
             cfg_block=raw_fact["cfg_block"],
             pointer_id=raw_fact.get("pointer_id", ""),
             related_fact_ids=related,
+            api=api,
+            source_pointer_id=source_pointer_id,
         )
     except ValueError as exc:
         raise FactBundleError(f"{where}: {exc}") from exc

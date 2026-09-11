@@ -52,7 +52,7 @@ from typing import Any, Final
 
 from .agent_scout import ScoutLead, ScoutReport, ScoutTarget, review_leads
 from .contracts.evidence import EvidenceLevel, EvidencePolarity
-from .cxx_agent_models import SUPPORTED_CWES, parse_untrusted_json
+from .cxx_agent_models import parse_untrusted_json
 from .cxx_agent_tools import AgentBudgetExceeded, CxxAgentBudget
 from .cxx_llm import unwrap_fenced_json
 from .cxx_memory import (
@@ -92,6 +92,7 @@ from .uaf_orchestrator import (
     instrument_facts,
     instrument_proof,
 )
+from .vuln_packs import MEMORY_PACK, runtime_markers
 from .workspace import RepositoryWorkspace
 
 __all__ = [
@@ -145,15 +146,11 @@ _MAX_DESIGN_CHARS: Final = 1000
 _MAX_LIST_ENTRIES: Final = 16
 _MAX_LIST_ITEM_CHARS: Final = 300
 
-# ASan error-type markers per hypothesized CWE bug class (substring match on
-# the escaped error type).  A crash in another class is evidence of *a* bug,
+# ASan/UBSan error-type markers per hypothesized CWE bug class (substring
+# match on the escaped error type), supplied by the memory vulnerability
+# pack (plan Task 5).  A crash in another class is evidence of *a* bug,
 # never of this hypothesis.
-_ASAN_CWE_MARKERS: Final = {
-    "CWE-416": ("use-after-free",),
-    "CWE-415": ("double-free",),
-    "CWE-787": ("buffer-overflow",),
-    "CWE-125": ("buffer-overflow",),
-}
+_ASAN_CWE_MARKERS: Final = dict(runtime_markers(MEMORY_PACK))
 
 # Positive states that diff-only mode caps at ``semantic-supported``.
 _DIFF_ONLY_CAP: Final = frozenset({
@@ -176,7 +173,7 @@ _PLATFORM_SCHEMA: Final = (
     'Return JSON only, exactly one JSON object with exactly these seven fields '
     'and no unknown fields: {"target_id":"<the target_id from the context>",'
     '"hypothesis":"...","trigger_path":["..."],'
-    '"cwe":"CWE-416|CWE-415|CWE-787|CWE-125",'
+    '"cwe":"CWE-416|CWE-415|CWE-787|CWE-125|CWE-476|CWE-190",'
     '"driver_code":"<complete C/C++ PoC driver source>",'
     '"experiment_design":"...","unresolved_assumptions":["..."]}. '
     "The driver_code must be a complete C or C++ translation unit with a "
@@ -189,6 +186,7 @@ _SYSTEM_PLATFORM_SPECIALIST: Final = (
     "Form one concrete vulnerability hypothesis for the target: state what is "
     "wrong, the trigger path, the CWE class, and write the PoC driver for the "
     f"reproduction workbench. {_UNTRUSTED_DATA_RULE} {_PLATFORM_SCHEMA}"
+    + MEMORY_PACK.specialist_prompt_addendum
 )
 _CRITIC_SCHEMA: Final = (
     'Return JSON only, exactly one JSON object with exactly these four fields '
@@ -310,7 +308,7 @@ def parse_hypothesis_reply(
             f"reply references target_id {target_id!r} not provided in the context"
         )
     cwe = data["cwe"]
-    if not isinstance(cwe, str) or cwe not in SUPPORTED_CWES:
+    if not isinstance(cwe, str) or cwe not in MEMORY_PACK.cwe_ids:
         raise PlatformFormatError("cwe is outside the closed CWE vocabulary")
     try:
         driver = _validated_driver(data["driver_code"])

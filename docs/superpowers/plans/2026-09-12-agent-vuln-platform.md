@@ -146,8 +146,8 @@ freed-by/allocated-by 栈、截断标记）。实验台账记录输入哈希/产
 - Modify: 分诊检索接入包种子（`lima/cxx_retrieval.py` 仅扩展不破坏）
 
 **Steps:**
-- [ ] 5.1 RED：包接口合同 + 新类型端到端（分诊→假设→实验命中）
-- [ ] 5.2 GREEN → 回归（旧四类行为不变）→ 提交：`feat: complete memory vulnerability pack`
+- [x] 5.1 RED：包接口合同 + 新类型端到端（分诊→假设→实验命中）
+- [x] 5.2 GREEN → 回归（旧四类行为不变）→ 提交：`feat: complete memory vulnerability pack`
 
 ---
 

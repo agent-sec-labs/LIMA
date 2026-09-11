@@ -122,7 +122,10 @@ def workbench_with(client, budget=None) -> ReproWorkbench:
 class TemplateContractTests(unittest.TestCase):
     def test_expected_template_catalog(self):
         self.assertEqual(
-            {"heap-uaf", "double-free", "heap-overflow", "null-deref", "generic-call"},
+            {
+                "heap-uaf", "double-free", "heap-overflow", "null-deref",
+                "integer-overflow", "generic-call",
+            },
             set(DRIVER_TEMPLATES),
         )
         self.assertEqual(frozenset(DRIVER_TEMPLATES), TEMPLATE_NAMES)

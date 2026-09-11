@@ -109,6 +109,38 @@ int main() {
 }
 """
 
+INTEGER_OVERFLOW_TEMPLATE = """\
+// PoC driver template: integer overflow to memory corruption (CWE-190).
+// Pattern: the target computes its allocation size as count * sizeof(T) in
+// a width-limited integer; a large count overflows that multiplication
+// first, malloc receives the wrapped small size, and the target then
+// writes the full logical count into the small buffer.  TARGET_ARGS: pass
+// poc_count (the oversized count) and poc_buffer to the target so it
+// repeats the overflowing size math on its own side.
+{{HEADER_DECL}}
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+int main() {
+    int poc_count = 1073741825;  // (INT_MAX / sizeof(int)) + 1: wraps
+    int total = poc_count * static_cast<int>(sizeof(int));  // overflows
+    if (total <= 0) {
+        return 1;
+    }
+    unsigned char *poc_buffer =
+        static_cast<unsigned char *>(std::malloc((size_t)total));
+    if (poc_buffer == nullptr) {
+        return 1;
+    }
+    std::memset(poc_buffer, 0, (size_t)total);
+    std::printf("calling target\\n");
+    {{TARGET_FUNC}}({{TARGET_ARGS}});  // target's size arithmetic overflows
+    std::free(poc_buffer);
+    return 0;
+}
+"""
+
 GENERIC_CALL_TEMPLATE = """\
 // PoC driver template: generic call (defect triggered inside the target).
 // Pattern: no caller-side memory orchestration -- just invoke the target
@@ -130,6 +162,7 @@ DRIVER_TEMPLATES: dict[str, str] = {
     "double-free": DOUBLE_FREE_TEMPLATE,
     "heap-overflow": HEAP_OVERFLOW_TEMPLATE,
     "null-deref": NULL_DEREF_TEMPLATE,
+    "integer-overflow": INTEGER_OVERFLOW_TEMPLATE,
     "generic-call": GENERIC_CALL_TEMPLATE,
 }
 

@@ -177,8 +177,8 @@ eRST 式档案生成（基本信息/概览/技术分析/复现指南/影响/披�
 - Create: `tests/test_impact_mining.py`（本地 fixture 仓库构造多分支历史）
 
 **Steps:**
-- [ ] 7.1 RED：引入提交/分支包含/版本范围三判定 + 行漂移边界
-- [ ] 7.2 GREEN → 提交：`feat: mine vulnerable version impact from git history`
+- [x] 7.1 RED：引入提交/分支包含/版本范围三判定 + 行漂移边界
+- [x] 7.2 GREEN → 提交：`feat: mine vulnerable version impact from git history`
 
 ---
 

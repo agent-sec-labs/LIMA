@@ -49,6 +49,35 @@ LIMA_CXX_TEST_STEPS_JSON=[["ctest","--test-dir","build","--output-on-failure"]]
 
 输出超限时只保留有界前缀、摘要和截断诊断；摘要不完整时不会提升 Finding。
 
+## 默认不执行 build system（受信构建生成门禁）
+
+快照里的 `CMakeLists.txt` 默认**永远不会被执行**：CMake configure 可以通过
+`execute_process()` 等产生任意副作用，因此 auto-CMake 不是默认行为。`LIMA_CXX_AUTO_CMAKE`
+只表示"总门禁开启后选择 CMake adapter"，本身不构成执行授权。只有管理员级总门禁
+`LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION=true` **且**下列两栏清单全部成立时，Sidecar 才
+会为含 `CMakeLists.txt` 的快照执行固定 CMake argv：
+
+| 机器可探测（执行时 fail-closed 探针，`cxx_analyzer/trust.py`） | Compose/部署静态保证（部署配置与启动契约测试承担） |
+|---|---|
+| Landlock ABI ≥ 3 | snapshot 与 import 目录只读挂载 |
+| seccomp 进程隔离可用 | 无 Docker socket / host path / credential 挂载 |
+| 非 root uid | scratch/build 目录为 ephemeral tmpfs（请求后销毁） |
+| network namespace 仅 loopback | CPU/memory/PID/输出/文件大小/绝对时间限额配置存在 |
+| WORK_ROOT 所在挂载只读 | |
+
+任一项缺失即 fail-closed：不运行 build context generation。总门禁是部署环境变量，分析
+请求、仓库内容和模型输出都无法设置或影响它。默认 `false`：不加任何环境变量时 auto-CMake
+永不执行，`select_build_steps` 对 CMake 快照返回空计划（诊断 `build-not-configured`），
+且不会回退到管理员 `build_steps`。管理员显式 argv 的 `build_steps` 路径行为零变化。
+这些探针是保守下界：默认 Compose 部署（内部网络仍有 eth0、`/work` tmpfs 可写）不会全部
+通过，需要专门的加固部署（例如无外联网络命名空间）才可能开启。
+
+`/health` 新增 `trusted_build_context_generation_available`：它是"管理员开关 + Landlock +
+进程隔离"的**下界**（uid/网络/挂载三项探针只在执行时运行，health 不做这些有副作用风险的
+判定），即使为真也不单独构成执行授权。主进程客户端对 health 键做精确集合匹配，因此混部
+会安全降级：旧 Sidecar 缺新键 → 客户端拒收（`CxxAnalyzerProtocolError`）→
+`invalid-response` → C/C++ 分析不可用；`schema_version` 保持 `1` 不变。
+
 ## Compose 部署与健康检查
 
 ```powershell

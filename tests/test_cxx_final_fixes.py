@@ -988,6 +988,7 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             "cmake_available": False,
             "landlock_available": True,
             "process_isolation_available": True,
+            "trusted_build_context_generation_available": False,
         }
         opener = mock.Mock(return_value=FakeResponse(payload))
         client = CxxMemoryAnalyzerClient("http://analyzer", 30, 1_000_000, opener)
@@ -1059,6 +1060,7 @@ class FinalProtocolAndEvidenceTests(unittest.TestCase):
             "cmake_available": True,
             "landlock_available": True,
             "process_isolation_available": True,
+            "trusted_build_context_generation_available": False,
         }
         client = CxxMemoryAnalyzerClient(
             "http://analyzer",

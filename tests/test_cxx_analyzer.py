@@ -189,7 +189,8 @@ class AnalyzerBoundaryTests(unittest.TestCase):
         with patch.dict(os.environ, {"LIMA_DATABASE_URL": "postgres://secret"}, clear=True):
             settings = AnalyzerSettings.from_env()
 
-        self.assertTrue(settings.auto_cmake)
+        self.assertFalse(settings.auto_cmake)
+        self.assertFalse(settings.trusted_build_context_generation)
         self.assertEqual((), settings.build_steps)
         self.assertEqual((), settings.test_steps)
         self.assertEqual(2048, settings.max_memory_mb)
@@ -207,6 +208,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
     def test_settings_parse_all_sidecar_limits_strictly(self):
         environment = {
             "LIMA_CXX_AUTO_CMAKE": "false",
+            "LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION": "true",
             "LIMA_CXX_BUILD_STEPS_JSON": '[["cmake", "--build", "build"]]',
             "LIMA_CXX_TEST_STEPS_JSON": '[["ctest", "--test-dir", "build"]]',
             "LIMA_CXX_MAX_MEMORY_MB": "1024",
@@ -222,6 +224,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             settings = AnalyzerSettings.from_env()
 
         self.assertFalse(settings.auto_cmake)
+        self.assertTrue(settings.trusted_build_context_generation)
         self.assertEqual((("cmake", "--build", "build"),), settings.build_steps)
         self.assertEqual((("ctest", "--test-dir", "build"),), settings.test_steps)
         self.assertEqual(1024, settings.max_memory_mb)
@@ -236,6 +239,7 @@ class AnalyzerBoundaryTests(unittest.TestCase):
     def test_settings_reject_invalid_boolean_and_nonpositive_limits(self):
         for name, value in (
             ("LIMA_CXX_AUTO_CMAKE", "sometimes"),
+            ("LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION", "sometimes"),
             ("LIMA_CXX_MAX_MEMORY_MB", "0"),
             ("LIMA_CXX_MAX_PROCESSES", "-1"),
             ("LIMA_CXX_MAX_OUTPUT_BYTES", "not-an-int"),
@@ -885,7 +889,7 @@ class AnalyzerServiceTests(unittest.TestCase):
     SNAPSHOT_SHA256 = "a" * 64
 
     @staticmethod
-    def _settings() -> AnalyzerSettings:
+    def _settings(*, trusted_build_context_generation: bool = False) -> AnalyzerSettings:
         return AnalyzerSettings(
             auto_cmake=True,
             build_steps=(),
@@ -898,6 +902,7 @@ class AnalyzerServiceTests(unittest.TestCase):
             repository_scan_max_files=100,
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
+            trusted_build_context_generation=trusted_build_context_generation,
         )
 
     def _payload(self, **changes):
@@ -1057,16 +1062,29 @@ class AnalyzerServiceTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "source_available": True,
-                "build_available": True,
+                "build_available": False,
                 "test_configured": False,
                 "clang_c_available": True,
                 "clang_cxx_available": True,
                 "cmake_available": True,
                 "landlock_available": True,
                 "process_isolation_available": True,
+                "trusted_build_context_generation_available": False,
             },
             payload,
         )
+
+        # With the admin gate enabled the same probes report a usable build.
+        status, payload = analyzer_server.dispatch_request(
+            "GET",
+            "/health",
+            "",
+            b"",
+            self._settings(trusted_build_context_generation=True),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(payload["build_available"])
+        self.assertTrue(payload["trusted_build_context_generation_available"])
 
     @patch("cxx_analyzer.server.run_build_scan")
     @patch("cxx_analyzer.server.run_source_scan")
@@ -1202,7 +1220,7 @@ class AnalyzerServiceTests(unittest.TestCase):
             self.assertEqual(200, response.status)
             self.assertEqual(1, health["schema_version"])
             capability_fields = set(health) - {"schema_version"}
-            self.assertEqual(8, len(capability_fields))
+            self.assertEqual(9, len(capability_fields))
             self.assertTrue(
                 all(type(health[field]) is bool for field in capability_fields)
             )
@@ -1701,7 +1719,13 @@ class BoundsDirectionTests(unittest.TestCase):
 
 class BuildScanTests(unittest.TestCase):
     @staticmethod
-    def _settings(*, auto_cmake=True, build_steps=(), total_timeout_seconds=90):
+    def _settings(
+        *,
+        auto_cmake=True,
+        build_steps=(),
+        total_timeout_seconds=90,
+        trusted_build_context_generation=False,
+    ):
         return AnalyzerSettings(
             auto_cmake=auto_cmake,
             build_steps=build_steps,
@@ -1714,6 +1738,7 @@ class BuildScanTests(unittest.TestCase):
             repository_scan_max_files=100,
             repository_scan_max_file_bytes=4096,
             repository_scan_max_total_bytes=16384,
+            trusted_build_context_generation=trusted_build_context_generation,
         )
 
     @staticmethod
@@ -1786,21 +1811,19 @@ class BuildScanTests(unittest.TestCase):
         from cxx_analyzer.build_scan import select_build_steps
 
         cmake_snapshot = Mock(files=("CMakeLists.txt", "src/main.cpp"))
-        self.assertEqual(
-            (
-                (
-                    "cmake",
-                    "-S",
-                    ".",
-                    "-B",
-                    "build",
-                    "-DCMAKE_BUILD_TYPE=Debug",
-                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        # Adapter selection is not authorization: without the admin trust
+        # gate the CMake plan is empty and never falls back to build_steps.
+        self.assertEqual((), select_build_steps(cmake_snapshot, self._settings()))
+        with patch(
+            "cxx_analyzer.build_scan.trust.generation_allowed", return_value=True
+        ):
+            self.assertEqual(
+                _expected_cmake_steps(),
+                select_build_steps(
+                    cmake_snapshot,
+                    self._settings(trusted_build_context_generation=True),
                 ),
-                ("cmake", "--build", "build", "--parallel", "2"),
-            ),
-            select_build_steps(cmake_snapshot, self._settings()),
-        )
+            )
 
         admin_steps = (("ninja", "-C", "out"),)
         script_snapshot = Mock(files=("src/main.cpp", "build.sh"))
@@ -1826,7 +1849,14 @@ class BuildScanTests(unittest.TestCase):
             with self.subTest(status=execution.status):
                 run_tool.reset_mock()
                 run_tool.return_value = execution
-                result = run_build_scan(snapshot, self._settings())
+                with patch(
+                    "cxx_analyzer.build_scan.trust.generation_allowed",
+                    return_value=True,
+                ):
+                    result = run_build_scan(
+                        snapshot,
+                        self._settings(trusted_build_context_generation=True),
+                    )
                 self.assertEqual((), result.findings)
                 self.assertEqual((expected_status,), result.diagnostics)
                 self.assertEqual(expected_status, result.tool_runs[0]["status"])
@@ -1841,7 +1871,14 @@ class BuildScanTests(unittest.TestCase):
         snapshot = Mock(files=("CMakeLists.txt", "src/main.cpp"))
         run_tool.return_value = self._execution("failed", 2)
 
-        result = run_build_scan(snapshot, self._settings(), sanitizer_enabled=True)
+        with patch(
+            "cxx_analyzer.build_scan.trust.generation_allowed", return_value=True
+        ):
+            result = run_build_scan(
+                snapshot,
+                self._settings(trusted_build_context_generation=True),
+                sanitizer_enabled=True,
+            )
 
         self.assertEqual(("build_failed",), result.diagnostics)
         self.assertEqual(SANITIZER_ENVIRONMENT, run_tool.call_args.kwargs["env"])
@@ -2401,7 +2438,14 @@ class BuildScanTests(unittest.TestCase):
 
             run_tool.side_effect = successful_tool
             with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", temp_root):
-                result = build_scan.run_build_scan(snapshot, self._settings())
+                with patch(
+                    "cxx_analyzer.build_scan.trust.generation_allowed",
+                    return_value=True,
+                ):
+                    result = build_scan.run_build_scan(
+                        snapshot,
+                        self._settings(trusted_build_context_generation=True),
+                    )
 
             self.assertEqual(3, run_tool.call_count)
             self.assertEqual(
@@ -2434,9 +2478,166 @@ class BuildScanTests(unittest.TestCase):
             run_tool.reset_mock()
             run_tool.side_effect = [self._execution(), self._execution()]
             with patch.object(build_scan, "_ANALYZER_TEMP_ROOT", temp_root):
-                rejected = build_scan.run_build_scan(snapshot, self._settings())
+                with patch(
+                    "cxx_analyzer.build_scan.trust.generation_allowed",
+                    return_value=True,
+                ):
+                    rejected = build_scan.run_build_scan(
+                        snapshot,
+                        self._settings(trusted_build_context_generation=True),
+                    )
             self.assertEqual(2, run_tool.call_count)
         self.assertEqual(("compile-commands-rejected",), rejected.diagnostics)
+
+
+class TrustedGenerationGateTests(unittest.TestCase):
+    """Task 0: untrusted CMake execution sits behind the admin trust gate."""
+
+    @staticmethod
+    def _settings(**changes: object) -> AnalyzerSettings:
+        values: dict[str, object] = {
+            "auto_cmake": True,
+            "build_steps": (),
+            "test_steps": (),
+            "max_memory_mb": 1024,
+            "max_processes": 32,
+            "max_output_bytes": 8192,
+            "step_timeout_seconds": 17,
+            "total_timeout_seconds": 90,
+            "repository_scan_max_files": 100,
+            "repository_scan_max_file_bytes": 4096,
+            "repository_scan_max_total_bytes": 16384,
+        }
+        values.update(changes)
+        return AnalyzerSettings(**values)  # type: ignore[arg-type]
+
+    @staticmethod
+    def _all_probes_true() -> list:
+        probes = (
+            "landlock_available",
+            "process_isolation_available",
+            "running_as_non_root",
+            "network_isolated",
+            "snapshot_mount_readonly",
+        )
+        return [
+            patch(f"cxx_analyzer.trust.{probe}", return_value=True)
+            for probe in probes
+        ]
+
+    def test_default_config_does_not_execute_cmake_for_cmake_lists_snapshot(self):
+        from cxx_analyzer.build_scan import run_build_scan, select_build_steps
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "execute_process(COMMAND touch pwned-marker.txt)\n",
+                encoding="utf-8",
+            )
+            snapshot = Mock(root=root, files=("CMakeLists.txt", "src/main.cpp"))
+
+            with patch.dict(os.environ, {}, clear=True):
+                settings = AnalyzerSettings.from_env()
+            self.assertFalse(settings.auto_cmake)
+            self.assertFalse(settings.trusted_build_context_generation)
+            self.assertEqual((), select_build_steps(snapshot, settings))
+
+            def hostile_side_effect(argv, *args, **kwargs):
+                (root / "pwned-marker.txt").write_text("side effect", encoding="utf-8")
+                return BuildScanTests._execution()
+
+            with patch(
+                "cxx_analyzer.build_scan.run_step",
+                side_effect=hostile_side_effect,
+            ) as run_tool:
+                result = run_build_scan(snapshot, settings)
+            self.assertEqual(("build-not-configured",), result.diagnostics)
+            self.assertEqual(0, run_tool.call_count)
+            self.assertFalse((root / "pwned-marker.txt").exists())
+
+            # Gate open (admin switch plus every probe mocked true) selects
+            # the fixed CMake argv adapter; nothing has executed yet here.
+            trusted = self._settings(trusted_build_context_generation=True)
+            with patch(
+                "cxx_analyzer.build_scan.trust.generation_allowed",
+                return_value=True,
+            ):
+                self.assertEqual(
+                    _expected_cmake_steps(), select_build_steps(snapshot, trusted)
+                )
+
+    def test_auto_cmake_true_alone_cannot_enable_generation(self):
+        from cxx_analyzer import trust
+        from cxx_analyzer.build_scan import select_build_steps
+
+        snapshot = Mock(files=("CMakeLists.txt", "src/main.cpp"))
+        settings = self._settings(
+            auto_cmake=True, trusted_build_context_generation=False
+        )
+        enabled = self._all_probes_true()
+        for active in enabled:
+            active.start()
+        try:
+            # Even with every machine capability present, the admin-level
+            # switch alone authorizes generation; auto_cmake never does.
+            self.assertFalse(trust.generation_allowed(settings))
+            self.assertEqual((), select_build_steps(snapshot, settings))
+        finally:
+            for active in enabled:
+                active.stop()
+
+    def test_missing_any_isolation_capability_fails_closed(self):
+        from cxx_analyzer import trust
+        from cxx_analyzer.build_scan import select_build_steps
+
+        probes = (
+            "landlock_available",
+            "process_isolation_available",
+            "running_as_non_root",
+            "network_isolated",
+            "snapshot_mount_readonly",
+        )
+        snapshot = Mock(files=("CMakeLists.txt",))
+        settings = self._settings(
+            auto_cmake=True, trusted_build_context_generation=True
+        )
+        for missing in probes:
+            with self.subTest(missing=missing):
+                active_patches = [
+                    patch(
+                        f"cxx_analyzer.trust.{probe}",
+                        return_value=probe != missing,
+                    )
+                    for probe in probes
+                ]
+                for active in active_patches:
+                    active.start()
+                try:
+                    self.assertFalse(trust.generation_allowed(settings))
+                    self.assertEqual((), select_build_steps(snapshot, settings))
+                finally:
+                    for active in active_patches:
+                        active.stop()
+
+    def test_compose_static_guarantees_documented(self):
+        from cxx_analyzer import trust
+
+        self.assertEqual(
+            frozenset(
+                {
+                    "snapshot-and-import-mounts-are-read-only",
+                    "no-docker-socket-host-path-or-credential-mounts",
+                    "scratch-and-build-directories-are-ephemeral-tmpfs",
+                    "cpu-memory-pid-output-filesize-and-wallclock-limits-configured",
+                }
+            ),
+            trust.COMPOSE_STATIC_GUARANTEES,
+        )
+        module_documentation = trust.__doc__ or ""
+        self.assertIn("machine-provable", module_documentation.lower())
+        for guarantee in trust.COMPOSE_STATIC_GUARANTEES:
+            self.assertIn(guarantee, module_documentation)
 
 
 class BuildScanContainerTests(unittest.TestCase):
@@ -2506,6 +2707,49 @@ class BuildScanContainerTests(unittest.TestCase):
                 for finding in result.findings
             )
         )
+
+
+class TrustedGenerationContainerTests(unittest.TestCase):
+    def test_default_container_runs_no_cmake(self):
+        if sys.platform != "linux":
+            self.skipTest("trusted-generation container regression requires Linux")
+        if shutil.which("cmake") is None or shutil.which("clang-14") is None:
+            self.skipTest("CMake and clang-14 are required for the container fixture")
+
+        import cxx_analyzer.build_scan as build_scan
+
+        try:
+            Path("/work/tmp").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.skipTest("requires a writable container work root")
+        with tempfile.TemporaryDirectory(dir="/work/tmp") as temporary:
+            base = Path(temporary)
+            import_root = base / "imports"
+            repository = import_root / "team" / "project"
+            work_root = base / "snapshots"
+            repository.mkdir(parents=True)
+            work_root.mkdir()
+            (repository / "src").mkdir()
+            (repository / "src" / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+            (repository / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "execute_process(COMMAND touch ${CMAKE_SOURCE_DIR}/pwned-marker.txt)\n",
+                encoding="utf-8",
+            )
+            fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
+            with patch.dict(os.environ, {}, clear=True):
+                settings = AnalyzerSettings.from_env()
+            with prepare_snapshot(
+                import_root, "team/project", fingerprint, work_root
+            ) as snapshot:
+                result = build_scan.run_build_scan(snapshot, settings)
+                marker = snapshot.root.joinpath("pwned-marker.txt")
+
+        self.assertEqual(("build-not-configured",), result.diagnostics)
+        self.assertEqual((), result.tool_runs)
+        self.assertFalse(marker.exists())
 
 
 class SanitizerScanTests(unittest.TestCase):

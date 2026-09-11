@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
+from . import trust
 from .config import MAX_ARGUMENT_BYTES, MAX_ARGUMENTS_PER_STEP, AnalyzerSettings
 from .deadline import AnalysisDeadline
 from .execution import (
@@ -155,10 +156,24 @@ class AnalysisBudgetExceeded(ValueError):
 def select_build_steps(
     snapshot: PreparedSnapshot, settings: AnalyzerSettings
 ) -> tuple[tuple[str, ...], ...]:
-    """Select only fixed CMake argv or administrator-provided argv arrays."""
+    """Select only fixed CMake argv or administrator-provided argv arrays.
+
+    Adapter selection is not execution authorization. A snapshot carrying
+    ``CMakeLists.txt`` is built with the fixed CMake argv only while the
+    admin-level ``trusted_build_context_generation`` gate is enabled and
+    every machine-provable isolation capability holds
+    (``cxx_analyzer.trust.generation_allowed``). Without that gate the plan
+    is empty — the snapshot is not built, and the empty plan deliberately
+    does not fall back to ``settings.build_steps`` because a CMake-driven
+    repository must not silently run an unrelated administrator command
+    either. Snapshots without ``CMakeLists.txt`` keep the exact
+    administrator ``build_steps`` semantics.
+    """
 
     if settings.auto_cmake and "CMakeLists.txt" in snapshot.files:
-        return _CMAKE_STEPS
+        if trust.generation_allowed(settings):
+            return _CMAKE_STEPS
+        return ()
     return settings.build_steps
 
 

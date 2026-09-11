@@ -346,6 +346,14 @@ def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
     level: per-snapshot step selection (auto-CMake versus explicit steps,
     CMakeLists presence) can still degrade individual runs to diagnostics,
     and rare subreaper or fork failures stay fail-closed at run time.
+
+    ``trusted_build_context_generation_available`` is a health-time lower
+    bound of the build-generation gate: the administrator switch combined
+    with the two sandbox probes that are cheap here. The remaining
+    capability probes (uid, network namespace, work-root mount) run only at
+    execution time in ``cxx_analyzer.trust``, so a true value still never
+    authorizes generation by itself. Mixed deployments degrade closed: a
+    sidecar without this key is rejected by the strict main-process client.
     """
 
     try:
@@ -358,7 +366,12 @@ def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
     clang_cxx_available = shutil.which("clang++-14") is not None
     cmake_available = shutil.which("cmake") is not None
     build_configured = bool(
-        (settings.auto_cmake and cmake_available) or settings.build_steps
+        (
+            settings.trusted_build_context_generation
+            and settings.auto_cmake
+            and cmake_available
+        )
+        or settings.build_steps
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -374,6 +387,11 @@ def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
         "cmake_available": cmake_available,
         "landlock_available": landlock_available,
         "process_isolation_available": process_isolation_available,
+        "trusted_build_context_generation_available": bool(
+            settings.trusted_build_context_generation
+            and landlock_available
+            and process_isolation_available
+        ),
     }
 
 

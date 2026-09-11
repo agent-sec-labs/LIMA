@@ -121,6 +121,7 @@ _HEALTH_KEYS = {
     "cmake_available",
     "landlock_available",
     "process_isolation_available",
+    "trusted_build_context_generation_available",
 }
 _HEALTH_CAPABILITY_KEYS = frozenset(_HEALTH_KEYS - {"schema_version"})
 _HEX64 = frozenset("0123456789abcdef")
@@ -172,6 +173,10 @@ class CxxAnalyzerHealth:
     cmake_available: bool
     landlock_available: bool
     process_isolation_available: bool
+    # Health-time lower bound of the untrusted build generation gate: the
+    # admin switch plus the two sandbox probes; execution-time probes
+    # (uid, network, mount) still run inside the Sidecar before any build.
+    trusted_build_context_generation_available: bool = False
 
     def capabilities(self) -> dict[str, bool]:
         return {
@@ -183,6 +188,9 @@ class CxxAnalyzerHealth:
             "cmake_available": self.cmake_available,
             "landlock_available": self.landlock_available,
             "process_isolation_available": self.process_isolation_available,
+            "trusted_build_context_generation_available": (
+                self.trusted_build_context_generation_available
+            ),
         }
 
 
@@ -510,6 +518,9 @@ class CxxMemoryAnalyzerClient:
             cmake_available=payload["cmake_available"],
             landlock_available=payload["landlock_available"],
             process_isolation_available=payload["process_isolation_available"],
+            trusted_build_context_generation_available=(
+                payload["trusted_build_context_generation_available"]
+            ),
         )
         self._health_cache = health
         return health

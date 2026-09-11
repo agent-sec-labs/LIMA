@@ -83,11 +83,16 @@ class AnalyzerSettings:
     repository_scan_max_files: int
     repository_scan_max_file_bytes: int
     repository_scan_max_total_bytes: int
+    # Admin-level master gate for executing CMake configure on untrusted
+    # snapshots. Deployment environment only: analysis requests, repository
+    # content and model output can never set or influence it. Default False,
+    # so a repository-provided CMakeLists.txt is never executed by default.
+    trusted_build_context_generation: bool = False
 
     @classmethod
     def from_env(cls) -> AnalyzerSettings:
         return cls(
-            auto_cmake=_strict_bool("LIMA_CXX_AUTO_CMAKE", True),
+            auto_cmake=_strict_bool("LIMA_CXX_AUTO_CMAKE", False),
             build_steps=parse_steps_json(
                 "LIMA_CXX_BUILD_STEPS_JSON",
                 os.getenv("LIMA_CXX_BUILD_STEPS_JSON", "[]"),
@@ -109,5 +114,8 @@ class AnalyzerSettings:
             ),
             repository_scan_max_total_bytes=_positive_int(
                 "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES", 20 * 1024 * 1024
+            ),
+            trusted_build_context_generation=_strict_bool(
+                "LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION", False
             ),
         )

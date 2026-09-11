@@ -25,6 +25,7 @@ def analyzer_settings(**changes: object) -> AnalyzerSettings:
         "repository_scan_max_files": 100,
         "repository_scan_max_file_bytes": 4096,
         "repository_scan_max_total_bytes": 16384,
+        "trusted_build_context_generation": False,
     }
     values.update(changes)
     return AnalyzerSettings(**values)  # type: ignore[arg-type]
@@ -38,6 +39,7 @@ def health_with(
     test_steps: tuple[tuple[str, ...], ...] = (),
     landlock_abi: int = 4,
     process_isolation: bool = True,
+    trusted_build_context_generation: bool = False,
 ) -> dict[str, object]:
     """Probe one health payload from the exact executability inputs."""
 
@@ -51,7 +53,10 @@ def health_with(
         {name: (value if value else None) for name, value in (tools or {}).items()}
     )
     settings = analyzer_settings(
-        auto_cmake=auto_cmake, build_steps=build_steps, test_steps=test_steps
+        auto_cmake=auto_cmake,
+        build_steps=build_steps,
+        test_steps=test_steps,
+        trusted_build_context_generation=trusted_build_context_generation,
     )
     with (
         mock.patch.object(server.shutil, "which", side_effect=paths.get),
@@ -73,6 +78,7 @@ _HEALTH_FIELDS = {
     "cmake_available",
     "landlock_available",
     "process_isolation_available",
+    "trusted_build_context_generation_available",
 }
 
 
@@ -106,9 +112,37 @@ class SidecarHealthCapabilityTests(unittest.TestCase):
                 self.assertEqual(process_isolation, health["process_isolation_available"])
 
     def test_source_requires_semgrep_independent_of_build(self):
-        health = health_with(tools={"semgrep": None})
+        health = health_with(
+            tools={"semgrep": None}, trusted_build_context_generation=True
+        )
         self.assertFalse(health["source_available"])
         self.assertTrue(health["build_available"])
+
+    def test_health_reports_trusted_generation_capability_false_by_default(self):
+        health = health_with(tools={})
+        self.assertFalse(health["trusted_build_context_generation_available"])
+        self.assertFalse(health["build_available"])
+
+        # The gate switch plus a ready sandbox is the health-time lower bound.
+        self.assertTrue(
+            health_with(tools={}, trusted_build_context_generation=True)[
+                "trusted_build_context_generation_available"
+            ]
+        )
+        for name, changes in (
+            ("landlock", {"landlock_abi": 2}),
+            ("process-isolation", {"process_isolation": False}),
+        ):
+            with self.subTest(name=name):
+                health = health_with(
+                    tools={},
+                    trusted_build_context_generation=True,
+                    **changes,
+                )
+                self.assertFalse(
+                    health["trusted_build_context_generation_available"]
+                )
+                self.assertFalse(health["build_available"])
 
     def test_test_steps_are_reported_as_configuration_only(self):
         self.assertFalse(health_with(tools={})["test_configured"])
@@ -159,11 +193,13 @@ class ClientHealthContractTests(unittest.TestCase):
                 "cmake_available": True,
                 "landlock_available": True,
                 "process_isolation_available": True,
+                "trusted_build_context_generation_available": False,
             }
         ).health()
         self.assertTrue(health.source_available)
         self.assertTrue(health.build_available)
         self.assertFalse(health.test_configured)
+        self.assertFalse(health.trusted_build_context_generation_available)
 
     def test_client_rejects_legacy_or_fuzzed_health_shapes(self):
         legacy = {
@@ -184,6 +220,7 @@ class ClientHealthContractTests(unittest.TestCase):
             "cmake_available": True,
             "landlock_available": True,
             "process_isolation_available": True,
+            "trusted_build_context_generation_available": False,
         }
         for name, mutate in (
             ("extra field", lambda value: value.update({"unexpected": True})),
@@ -194,6 +231,47 @@ class ClientHealthContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 import copy
 
+                payload = copy.deepcopy(base)
+                mutate(payload)
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    self._client(payload).health()
+
+    def test_client_rejects_health_with_unknown_keys_unchanged(self):
+        """Syncing the key set never weakens strict unknown-key rejection."""
+
+        base = {
+            "schema_version": 1,
+            "source_available": True,
+            "build_available": True,
+            "test_configured": False,
+            "clang_c_available": True,
+            "clang_cxx_available": True,
+            "cmake_available": True,
+            "landlock_available": True,
+            "process_isolation_available": True,
+            "trusted_build_context_generation_available": False,
+        }
+        health = self._client(dict(base)).health()
+        self.assertFalse(health.trusted_build_context_generation_available)
+
+        import copy
+
+        for name, mutate in (
+            ("unknown key", lambda value: value.update({"unexpected": True})),
+            (
+                "missing gate capability",
+                lambda value: value.pop(
+                    "trusted_build_context_generation_available"
+                ),
+            ),
+            (
+                "non-boolean gate capability",
+                lambda value: value.update(
+                    {"trusted_build_context_generation_available": "yes"}
+                ),
+            ),
+        ):
+            with self.subTest(name=name):
                 payload = copy.deepcopy(base)
                 mutate(payload)
                 with self.assertRaises(CxxAnalyzerProtocolError):

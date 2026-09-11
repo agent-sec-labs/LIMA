@@ -140,6 +140,11 @@ services:
     mem_limit: "${LIMA_CXX_MAX_MEMORY_MB:-2048}m"
     cpus: "2.0"
     environment:
+      # LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION is deliberately not set here:
+      # unset resolves to false inside the sidecar, so untrusted-repo CMake
+      # execution stays disabled. LIMA_CXX_AUTO_CMAKE only selects the CMake
+      # adapter once that admin gate is enabled in a hardened deployment; it
+      # never authorizes execution by itself.
       LIMA_CXX_AUTO_CMAKE: ${LIMA_CXX_AUTO_CMAKE:-true}
       LIMA_CXX_BUILD_STEPS_JSON: "${LIMA_CXX_BUILD_STEPS_JSON:-[]}"
       LIMA_CXX_TEST_STEPS_JSON: "${LIMA_CXX_TEST_STEPS_JSON:-[]}"

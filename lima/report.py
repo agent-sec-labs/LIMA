@@ -24,6 +24,13 @@ _VERIFICATION_STATE_LABELS = {
     "runtime-confirmed": "运行时证据已确认",
     "human-confirmed": "人工已确认",
     "needs-human-review": "证据不足或冲突 · 需人工复核",
+    # UAF v2 Arbiter 终态（设计第 5/14 节）：fact-verified 与
+    # semantic-supported 不再落入未知状态 fallback；rejected/abstain 是
+    # 仅存于审计载荷的非 Finding 状态，也各给诚实标签。
+    "fact-verified": "事实已验证",
+    "semantic-supported": "语义支持 · 需复核",
+    "rejected": "已反驳（审计保留，不输出 Finding）",
+    "abstain": "证据不足 · 放弃声明",
 }
 _DIAGNOSTIC_LABELS = {
     "BUILD_FAILED": "构建支持的静态验证未完成",
@@ -303,6 +310,99 @@ def _cxx_agent_section(agent: dict) -> Iterable[str]:
     return lines
 
 
+_UAF_BROKER_KEYS = ("support", "contradict", "no-evidence")
+
+
+def _uaf_v2_section(uaf: dict) -> Iterable[str]:
+    """Render the ``collaboration.uaf_v2`` audit payload (design §14).
+
+    覆盖载荷携带的全部审计字段：模式/状态/translation units、stats
+    （候选与 PASS/REFUTED/UNKNOWN 三态）、Arbiter 终态计数（中文徽标）、
+    broker 三态摘要、有界 diagnostics、逐候选审计行（身份/状态/证明/
+    拒绝原因）。``llm_invoked`` 只按真实调用计数渲染：零调用绝不显示
+    “已调用”；零调用且 PASS/REFUTED 全覆盖的运行必须显示设计原文
+    ``deterministic proof; LLM not required``。候选路径、diagnostics 与
+    rejected_reason 是不可信文本，一律经转义助手；哈希/状态/计数走内联码。
+    早期返回载荷（disabled/analyzer-not-configured 等）只有 mode/status，
+    按缺字段诚实渲染。C/C++ 结论永不自动修复（设计不变量 13）。
+    """
+
+    stats = uaf.get("stats") if isinstance(uaf.get("stats"), dict) else {}
+    lines = [
+        "## C/C++ UAF v2（确定性证明）",
+        "",
+        "- Status: `{status}` · mode `{mode}` · translation units `{units}`".format(
+            status=uaf.get("status", "unknown"),
+            mode=uaf.get("mode", "off"),
+            units=len(uaf.get("translation_units") or ()),
+        ),
+    ]
+    if stats:
+        lines.append(
+            "- Candidates: `{candidates}` · PASS `{p}` · REFUTED `{r}`"
+            " · UNKNOWN `{u}`".format(
+                candidates=stats.get("candidate_count", 0),
+                p=stats.get("pass", 0),
+                r=stats.get("refuted", 0),
+                u=stats.get("unknown", 0),
+            )
+        )
+    states = {
+        str(key): value
+        for key, value in (uaf.get("states") or {}).items()
+        if isinstance(value, int)
+    } if isinstance(uaf.get("states"), dict) else {}
+    if states:
+        rendered = " · ".join(
+            f"`{key}` {_verification_state_label(key)} × `{value}`"
+            for key, value in sorted(states.items())
+        )
+        lines.append(f"- States: {rendered}")
+    broker = uaf.get("broker") if isinstance(uaf.get("broker"), dict) else {}
+    lines.append(
+        "- Broker verdicts: " + " · ".join(
+            f"{key} `{broker.get(key, 0)}`" for key in _UAF_BROKER_KEYS
+        )
+    )
+    llm_calls = int(stats.get("llm_calls", 0) or 0)
+    llm_invoked = int(stats.get("llm_invoked", 0) or 0)
+    if llm_invoked > 0 or llm_calls > 0:
+        lines.append(f"- LLM 真实调用：是（provider 调用 `{llm_calls}` 次）")
+    else:
+        lines.append("- LLM 真实调用：否")
+        candidate_count = int(stats.get("candidate_count", 0) or 0)
+        covered = int(stats.get("pass", 0) or 0) + int(stats.get("refuted", 0) or 0)
+        if candidate_count > 0 and covered == candidate_count:
+            lines.append(
+                "- deterministic proof; LLM not required（确定性证明 · 未调用 LLM）"
+            )
+    diagnostics = uaf.get("diagnostics")
+    if isinstance(diagnostics, list):
+        for item in diagnostics[:_MAX_CXX_DIAGNOSTICS]:
+            message = _cxx_markdown_prose(item, 240)
+            lines.append(f"- Diagnostic: {message}")
+    audit = uaf.get("candidates")
+    if isinstance(audit, list):
+        for item in audit:
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state", ""))
+            row = "- Audit: `{id}` · {path} · `{state}` {label} · proof `{proof}`".format(
+                id=item.get("candidate_id", ""),
+                path=_cxx_inline_code(item.get("path", "")),
+                state=state,
+                label=_verification_state_label(state),
+                proof=item.get("proof", ""),
+            )
+            reason = _safe_diagnostic_message(item.get("rejected_reason") or "")
+            if reason:
+                row += f" · rejected: {_cxx_markdown_prose(reason, 240)}"
+            lines.append(row)
+    lines.append("- Automatic repair: **false**")
+    lines.append("")
+    return lines
+
+
 def to_markdown(report: Dict[str, Any]) -> str:
     if report.get("pull_request") is None:
         title = "# LIMA Repository Audit"
@@ -374,6 +474,9 @@ def to_markdown(report: Dict[str, Any]) -> str:
     cxx_agent = collaboration.get("cxx_agent")
     if isinstance(cxx_agent, dict):
         lines.extend(_cxx_agent_section(cxx_agent))
+    uaf_v2 = collaboration.get("uaf_v2")
+    if isinstance(uaf_v2, dict) and uaf_v2:
+        lines.extend(_uaf_v2_section(uaf_v2))
     semantic = collaboration.get("semantic_triage") or {}
     if semantic:
         retrieval = semantic.get("retrieval") or {}

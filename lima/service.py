@@ -85,6 +85,7 @@ from .repository_source import (
     RepositorySource,
     parse_repository_source,
 )
+from .uaf_orchestrator import UAF_FINDING_STATES
 from .repository_triage import (
     RepositorySemanticTriage,
     RepositorySemanticTriageError,
@@ -994,7 +995,32 @@ class ReviewService:
             "max_total_bytes": self.settings.repository_scan_max_total_bytes,
         })
         result["cxx_agent"] = self._cxx_agent_capabilities()
+        result["uaf_v2"] = self._uaf_v2_capabilities()
         return result
+
+    def _uaf_v2_capabilities(self) -> dict[str, Any]:
+        """Design §14: the additive ``uaf_v2`` capabilities object.
+
+        ``analyzer_configured`` 与 ``RepositoryScanner._run_uaf_v2_branch``
+        的判定同源——adapter 真的具备 ``analyze_uaf_facts`` 能力才算配置，
+        不看 URL 或 mode；``llm_configured`` 沿 ``resolved_llm()`` 判定，
+        只表示语义分支有可用 provider（不做可用性宣称）。全部走 getattr
+        兜底：测试 stub 缺字段时如实按未配置上报。
+        """
+
+        adapter = getattr(self.repository_scanner, "cxx_memory_adapter", None)
+        return {
+            "mode": str(
+                getattr(self.repository_scanner, "cxx_agent_mode", None)
+                or getattr(self.settings, "cxx_agent_mode", "off")
+                or "off"
+            ),
+            "analyzer_configured": callable(
+                getattr(adapter, "analyze_uaf_facts", None)
+            ),
+            "llm_configured": bool(self.llm_config),
+            "states": sorted(UAF_FINDING_STATES),
+        }
 
     def _cxx_agent_capabilities(self) -> dict[str, Any]:
         """Design §11: the ``cxx_agent`` capabilities object.

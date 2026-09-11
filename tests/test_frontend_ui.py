@@ -211,5 +211,74 @@ class CxxAgentWebContractTests(unittest.TestCase):
         self.assertIn("不支持自动修复", rendered)
 
 
+class UafV2WebContractTests(unittest.TestCase):
+    """Task 11：UAF v2 审计视图（report.collaboration.uaf_v2）的 Web 契约。
+
+    React 是唯一前端表面；本环境不装 node_modules，vitest 行为断言由
+    ``TaskDetail.report.test.tsx`` 携带，这里锚定跨栈结构不变量：
+
+    - 报告含 ``uaf_v2`` 时渲染折叠审计区，零调用 PASS 必须显示
+      「确定性证明 · 未调用 LLM」，调用计数来自实际调用；
+    - ``fact-verified`` / ``semantic-supported`` 有前端自有精确匹配徽标，
+      未知状态仍 fail-closed「候选 · 需复核」；
+    - UAF 审计区不含任何修复入口（任务级修复按钮数量不变）；
+    - ``uaf_v2`` 是可选键：旧报告无此键零影响。
+    """
+
+    def _uaf_card_source(self) -> str:
+        detail = _read("frontend", "src", "features", "tasks", "TaskDetailPage.tsx")
+        return detail.split("function UafV2Card", 1)[1].split(
+            "function ReportCard", 1
+        )[0]
+
+    def test_uaf_v2_audit_details_renders_summary_payload(self) -> None:
+        detail = _read("frontend", "src", "features", "tasks", "TaskDetailPage.tsx")
+        # 渐进读取：只有报告携带 uaf_v2 时才渲染审计区。
+        self.assertIn("report.collaboration?.uaf_v2", detail)
+        self.assertIn("C/C++ UAF v2（确定性证明）", detail)
+        card = self._uaf_card_source()
+        # llm_invoked 规则：零调用 PASS 全覆盖显示确定性证明注记。
+        self.assertIn("确定性证明 · 未调用 LLM", card)
+        self.assertIn("确定性证明 · 未调用 LLM", _read(
+            "frontend", "src", "features", "tasks", "TaskDetail.report.test.tsx",
+        ))
+        # 有调用时显示实际调用次数。
+        self.assertIn("LLM 调用：", card)
+        # broker 三态都渲染。
+        self.assertIn("broker.support", card)
+        self.assertIn("broker.contradict", card)
+        self.assertIn('broker["no-evidence"]', card)
+        self.assertIn("automatic_repair=false", card)
+
+    def test_uaf_v2_badges_use_frontend_label_map_fail_closed(self) -> None:
+        model = _read("frontend", "src", "features", "tasks", "model.ts")
+        # 两个新状态的精确匹配中文标签（前端自有 map，不依赖后端文本）。
+        self.assertIn('"fact-verified": "事实已验证"', model)
+        self.assertIn('"semantic-supported": "语义支持 · 需复核"', model)
+        # 精确匹配先于子串匹配，且未知状态 fallback 保持不变。
+        self.assertIn("EXACT_VERIFICATION_STATE_LABELS[state]", model)
+        self.assertIn('return "候选 · 需复核";', model)
+
+    def test_uaf_v2_audit_adds_no_repair_entry(self) -> None:
+        detail = _read("frontend", "src", "features", "tasks", "TaskDetailPage.tsx")
+        # 任务级修复入口数量与门禁保持 Task 18 契约。
+        self.assertEqual(1, detail.count("api.createRepairPreview("))
+        self.assertEqual(1, detail.count("api.createFix("))
+        card = self._uaf_card_source()
+        self.assertNotIn("api.", card)
+        self.assertNotIn("Button", card)
+        self.assertNotIn("onClick", card)
+
+    def test_uaf_v2_report_type_is_optional_and_legacy_safe(self) -> None:
+        types = _read("frontend", "src", "shared", "api", "types.ts")
+        self.assertIn("uaf_v2?: UafV2Summary", types)
+        self.assertIn("export interface UafV2Summary", types)
+        report_tests = _read(
+            "frontend", "src", "features", "tasks", "TaskDetail.report.test.tsx",
+        )
+        # 旧报告无 uaf_v2 键的兼容用例存在。
+        self.assertIn("renders legacy reports without the uaf_v2 key unchanged", report_tests)
+
+
 if __name__ == "__main__":
     unittest.main()

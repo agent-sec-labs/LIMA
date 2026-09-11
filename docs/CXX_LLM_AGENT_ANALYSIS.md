@@ -115,6 +115,117 @@ Provider 失败时保留传统扫描结果并记录 `llm-unavailable`。
   Semgrep 内置默认忽略表（`tests/`、`doc/` 等），使实际扫描集与已验证清单一致；
   该文件不计入快照清单与指纹（与 `build/` 目录同为运行时脚手架），对协议零影响。
 
+## UAF v2（确定性证明管线）
+
+CWE-416 的检测与验证不再走上述多 Agent 共识管线：扫描器把 CWE-416 路由到
+UAF v2 确定性证明管线（legacy Agent 合同对 CWE-416 已物理关闭，模型无法构造
+CWE-416 候选），CWE-787/125/415 行为不变。核心变化是把验证权从 Agent 共识移交给
+确定性程序分析——确定性证明能完成时 LLM 不是必经环节：
+
+```text
+Repository Snapshot
+      ↓
+Build Context Resolver（compdb 钉死，fallback 永不 fact-verified）
+      ↓
+Clang AST / 受限 CFG 事实提取（/v1/uaf-facts，bundle 哈希钉死）
+      ↓
+确定性 Candidate Generator（allocation + 可达 release + 语法后继 use）
+      ↓
+P1–P7 Proof Engine
+   ├─ PASS        → fact-verified（零 LLM）
+   ├─ REFUTED     → rejected（审计记录，永不成为 Finding）
+   └─ UNKNOWN     → Lifetime Specialist → Adversarial Critic
+                      └─ semantic-supported / abstain（封顶 (D1, SUPPORTS)）
+      ↓
+Evidence Binder + Evidence Broker（三态）
+      ↓
+确定性 Arbiter → Final Finding + 审计证据
+```
+
+**Proof-before-LLM** 是冻结决定：PASS/REFUTED 在任何模式下都不调用模型；只有
+UNKNOWN 候选进入 Specialist/Critic 分支。七状态与门禁：
+
+| 终态 | 证据要求 | verified 门禁 |
+|---|---|---|
+| `fact-verified` | build context 与 coverage 完整，P1–P7 全 satisfied（D2 SUPPORTS） | 是 |
+| `tool-corroborated` | 同一候选身份的工具证据达到 D2 | 是 |
+| `runtime-confirmed` | 同一候选的有效 ASan 报告达到 D3 | 是 |
+| `semantic-supported` | Proof UNKNOWN + 真实 fact id 支撑的 Specialist/Critic 共识 | 否 |
+| `human-confirmed` | 授权人工确认 | 是 |
+| `needs-human-review` | 强证据冲突（如 PASS + D2 REFUTES）或身份无法安全绑定 | 否 |
+| `rejected` / `abstain` | 确定性反证 / 无主张（仅审计，不输出 Finding） | 否 |
+
+零调用 PASS 的报告显示 `deterministic proof; LLM not required`；`llm_invoked` 永远
+由实际 Provider 调用记录计算。模式语义：
+
+| 模式 | PASS/REFUTED | UNKNOWN |
+|---|---|---|
+| `off` | 零 LLM | abstain，零调用 |
+| `auto` | 零 LLM | 调用 Specialist/Critic；Provider 失败降级为记录在案的 abstain |
+| `required` | 零 LLM | Provider 未配置或失败时任务失败，绝不静默跳过 |
+
+Evidence Broker 是严格三态：`support`（正向、同身份、可绑定证据）、`contradict`
+（只能是显式 REFUTES 记录 + refuted obligation 引用）、`no-evidence`。空结果、未
+覆盖、模糊绑定、异 CWE 永远是 `no-evidence`，不是安全证明也不是反证。所有内部
+查找/缓存/绑定使用复合身份 `(snapshot_hash, candidate_id)`；模型只能引用真实
+candidate/fact，不能创造身份或改变证据等级。
+
+### UAF v2 配对基准（Task 12）
+
+`evaluation_data/uaf_v2_cases.json` 固定 7 个 vulnerable/fixed 源码对
+（`tests/fixtures/uaf_v2_pairs/<case>/{vulnerable,fixed}/`，逐文件 SHA-256 钉死，
+Apache-2.0 合成样例），覆盖：直线 new/delete 与 malloc/free（`fact-verified`）、
+同块 delete+use（实测按 P5 白名单 (a) 判 PASS，已在 case 理由中注明）、rebind 反例
+与受限 CFG 不可达反例（`rejected` 审计）、x>10 / x<=10 双独立谓词（确定性 UNKNOWN，
+off 模式 abstain，诚实的 Specialist/Critic 也应 abstain）、以及设计 §16 硬性要求的
+**确定性 UNKNOWN 且确需 Specialist/Critic 的样例**（alias 链缺 source 锚点 →
+P2/P6 unknown → fake LLM 支撑后 `semantic-supported`；真实模型运行必须在该样例上
+产生非零调用证据，否则不得声称真实模型集成已验证）。
+
+评测器 `scripts/run_uaf_v2_evaluation.py`（合同测试
+`tests.test_uaf_v2_evaluation`）对每对两版本各跑一遍真实
+`review_uaf` 链：事实来源是按 case 形态罐装的 `/v1/uaf-facts` wire（真实 Clang
+提取由 Task 4 容器测试单独覆盖，真实环境验收单独分类），`--fake-llm` 注入脚本化
+Specialist/Critic 传输实现 CI 离线；省略 `--fake-llm` 时读取 `LIMA_LLM_BASE_URL` 等
+Provider 环境跑真实模型，未配置则在任何管线工作开始前以 `provider-not-configured`
+拒绝。**无标签红线**与 Task 20 相同：管线输入只有 fixture 工作区与事实 wire，
+case 标识、理由、许可证、expected 全部留在评测侧打分（测试录制了 Sidecar 入参与
+模型上下文逐项断言）。
+
+指标（全部从报告内嵌 records 可重算，零分母输出 `null` + diagnostic）：
+
+| 指标 | 定义 |
+|---|---|
+| Candidate Recall | 有 UAF 的 vulnerable 版产生 ≥1 候选的比例 |
+| Fact-verified Precision / Recall | PASS→`fact-verified` 的混淆矩阵派生 |
+| Abstention Correctness | expected 为 abstain/rejected/none 的版本精确保持原状态的比例 |
+| Vulnerable/Fixed Paired Accuracy | 对内双版本终态同时精确命中 expected 的比例 |
+| Coverage Gap Rate | 记录 coverage gap 的已计版本比例（逐 case 保留 gap 明细） |
+| LLM Calls / Bytes / Latency | 管线实际调用数、回复字节代理与真实耗时 |
+| **Proof Obligation Failure Distribution** | P1–P7 逐 obligation 的 unknown/refuted 计数与比例，按 case kind、build-context source、语言标准、项目切片——独立顶层结构，禁汇总单分 |
+
+Fake 全量基线（本仓库实测）：7 对全对正确（recall/precision/paired 均为 1.0），
+P5 unknown=1（谓词样例）、P5 refuted=1（不可达）、P2/P6 unknown 各 1（alias 样例）、
+P6 refuted=1（rebind 反例）。
+
+### UAF v2 限制与验证状态位
+
+- **第一阶段支持范围**：同函数、同 TU 的 new/delete 与 malloc/free、`*p`/`p->m`
+  后继使用、有限 alias-copy 链；受限 CFG 只覆盖直线与单层/嵌套 if/else。循环、
+  switch、goto、异常、lambda、协程、模板/宏命中关键范围、跨 TU、自定义
+  allocator、并发等一律 coverage gap 或 UNKNOWN，降级不隐瞒（`semantic_gaps`
+  逐项进报告）。
+- **lifetime-restart 反证未验证**：Task 4 提取器尚不产出受支持的
+  lifetime-restart 事实（记 gap → P7 unknown），因此配对集没有 lifetime-restart
+  refuted 样例，分布中 P7 refuted 恒为 0——这是如实的能力边界，不是遗漏。
+- **罐装 wire 与真实提取的分类**：配对基准的事实形态由评测器内按 case 罐装的
+  Sidecar wire 决定（unreachable 与 alias 样例的源码为示意，事实形态以 wire 为准）；
+  真实 Clang-14 提取行为由 Task 4 容器测试覆盖，两者分别标注、不互相冒充。
+- **验证状态位**：真实模型运行（用户端点 + UNKNOWN 样例非零调用证据）、
+  Docker/Clang/ASan 容器实证（D3 runtime-confirmed 路径与 ASan witness 绑定）
+  在未实际运行前一律标注“未验证”；运行后以报告 `identity`（模式、传输、管线
+  指纹、case 数据哈希）与 artifact 为“已验证”凭据。
+
 ## 固定版本对评测（无标签）
 
 `evaluation_data/cxx_llm_agent_cases.json` 为每个 CWE 固定一对合成 vulnerable/fixed
@@ -163,8 +274,8 @@ Agent Finding（含验证状态与 `automatic_repair`）、状态计数、usage�
 
 | 事件 | 执行内容 |
 |---|---|
-| `pull_request` / `push` | 仅既有测试与 Fake-LLM 合同测试（`tests.test_cxx_llm_agent_evaluation` 随全量执行），零真实模型调用 |
-| `workflow_dispatch` | `cxx-llm-agent-evaluation` job：按 case 矩阵各评一对固定版本，上传原始结构化报告与身份清单 artifact |
+| `pull_request` / `push` | 仅既有测试与 Fake-LLM 合同测试（`tests.test_cxx_llm_agent_evaluation`、`tests.test_uaf_v2_evaluation` 随全量执行），零真实模型调用 |
+| `workflow_dispatch` | `cxx-llm-agent-evaluation` job：按 case 矩阵各评一对固定版本，上传原始结构化报告与身份清单 artifact；`uaf-v2-evaluation` job：先离线 fake-LLM 跑全部 7 对 UAF v2 固定版本，再在 Provider 已接线时以 `required` 模式跑真实模型（含 UNKNOWN 样例非零调用红线），上传报告 artifact |
 | `schedule`（每周三） | 同上 |
 
 job 内所有评测步骤再挂 `if: github.event_name != 'pull_request'` 双保险。

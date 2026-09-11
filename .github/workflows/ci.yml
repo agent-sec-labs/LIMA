@@ -495,3 +495,66 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  uaf-v2-evaluation:
+    # UAF v2 配对基准（Task 12）：只在手动/定时任务运行，不进入 PR 路径；
+    # 普通 PR 的覆盖由 tests.test_uaf_v2_evaluation 的 Fake-LLM 合同测试
+    #（随 unit-tests 全量执行，零网络、零密钥）承担。
+    # 凭证接线说明：tests.test_ci_contract 要求 ci.yml 保持 secretless，本 job
+    # 出厂不带任何凭证；--fake-llm 步骤离线跑全部固定对，真实模型步骤在未配置
+    # LIMA_LLM_BASE_URL 时以 provider-not-configured 明确跳过（不静默降级）。
+    # 启用真实调用：仿照 cxx-llm-agent-evaluation 的接线说明，把与
+    # lima/config.py Provider 环境同名的密钥变量绑定到仓库 Secret，并同步
+    # 收窄 tests.test_ci_contract 的 secretless 断言范围。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run the offline fake-LLM evaluation over every committed pair
+        # 双保险之一：本步骤无条件离线，验证评测器、清单钉死与指标可重算。
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p output
+          python scripts/run_uaf_v2_evaluation.py \
+            --cases evaluation_data/uaf_v2_cases.json \
+            --fake-llm --mode auto \
+            --output output/uaf-v2-evaluation-fake.json
+      - name: Evaluate the pinned pairs against the configured provider
+        # 双保险之二：真实模型只在显式接线后运行；零配置时跳过并说明，
+        # 绝不产出静默的零调用报告。UNKNOWN 样例（semantic-unknown-alias-uaf、
+        # predicated-unknown-uaf）在 required 模式下必须产生非零真实调用，
+        # 否则任务失败——这是设计 §16 的真实模型验收红线。
+        if: github.event_name != 'pull_request'
+        env:
+          LIMA_LLM_PROVIDER: ${{ vars.LIMA_LLM_PROVIDER }}
+          LIMA_LLM_BASE_URL: ${{ vars.LIMA_LLM_BASE_URL }}
+          LIMA_CXX_AGENT_MODEL: ${{ vars.LIMA_CXX_AGENT_MODEL }}
+          LIMA_LLM_MODEL: ${{ vars.LIMA_LLM_MODEL }}
+        run: |
+          if [ -z "$LIMA_LLM_BASE_URL" ]; then
+            echo "provider-not-configured: no LIMA_LLM_BASE_URL repository variable is set;"
+            echo "the real-model UAF v2 evaluation stays skipped until the opt-in"
+            echo "provider wiring is applied (see docs/CXX_LLM_AGENT_ANALYSIS.md)."
+            exit 0
+          fi
+          python scripts/run_uaf_v2_evaluation.py \
+            --cases evaluation_data/uaf_v2_cases.json \
+            --mode required \
+            --output output/uaf-v2-evaluation-real.json
+      - name: Upload the UAF v2 evaluation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: uaf-v2-evaluation
+          path: output/uaf-v2-evaluation-*.json
+          if-no-files-found: warn
+          retention-days: 30
+

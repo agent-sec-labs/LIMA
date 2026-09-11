@@ -1,12 +1,13 @@
-"""UNKNOWN-only LLM semantic branch tests (plan Task 8, design sections 10/12.2/13).
+"""Semantic Specialist/Critic branch tests (plan Task 8; platform Task 4).
 
 Zero-network: the shared chat transport is replaced by a canned callable
 patched over ``lima.uaf_llm_branch.post_chat_completion_text`` (the name this
 module imported, mirroring the ``tests.test_cxx_llm`` style). Red lines
-pinned here:
+pinned here (updated by the platform retirement, design section 10):
 
-- PASS/REFUTED never reach the LLM in any mode; UNKNOWN + ``off`` abstains
-  with zero calls; UNKNOWN + ``required`` can never succeed with zero calls;
+- no proof gate: the branch runs with PASS/REFUTED/UNKNOWN ``proof`` inputs
+  and with ``proof=None`` -- the proof engine is a consultable instrument,
+  never a precondition; ``mode=off`` still abstains with zero calls;
 - forged fact ids / candidate ids reject the whole round (no partial
   acceptance, no repair for authorization failures);
 - consensus is capped at ``(D1, SUPPORTS)`` -- never D2 -- and a positive
@@ -249,23 +250,31 @@ def run_branch(
     return outcome, budget, transport
 
 
-class GateTests(unittest.TestCase):
-    """PASS/REFUTED never invoke the LLM; mode gates are honored."""
+class NoProofGateTests(unittest.TestCase):
+    """The branch runs without a proof and regardless of proof verdicts."""
 
-    def test_pass_proof_skips_llm_in_all_modes(self):
-        for proof in (PASS_PROOF, REFUTED_PROOF):
-            for mode in ("off", "auto", "required"):
-                with self.subTest(proof=proof.verdict, mode=mode):
-                    transport = GuardTransport()
-                    outcome, _, gated = run_branch(transport, mode=mode, proof=proof)
-                    self.assertFalse(outcome.invoked)
-                    self.assertEqual(0, outcome.calls)
-                    self.assertEqual("abstain", outcome.verdict)
-                    self.assertIsNone(outcome.level_polarity)
-                    self.assertTrue(outcome.degradation.startswith("proof-"))
-                    self.assertEqual([], gated.calls)
+    def test_branch_runs_without_any_proof(self):
+        # proof=None (no instrument consult): the Specialist/Critic dialogue
+        # runs directly on facts, coverage and snippet.
+        transport = FakeTransport(SP_SUPPORTS, CRITIC_SUPPORTS)
+        outcome, _, _ = run_branch(transport, mode="auto", proof=None)
+        self.assertEqual("supports-uaf", outcome.verdict)
+        self.assertTrue(outcome.invoked)
+        self.assertEqual(2, outcome.calls)
 
-    def test_unknown_plus_off_abstains_without_calls(self):
+        specialist_user = transport.calls[0]["payload"]["messages"][1]["content"]
+        self.assertIn("not consulted", specialist_user)
+
+    def test_branch_runs_regardless_of_proof_verdict(self):
+        for proof in (PASS_PROOF, REFUTED_PROOF, UNKNOWN_PROOF):
+            with self.subTest(proof=proof.verdict):
+                transport = FakeTransport(SP_SUPPORTS, CRITIC_SUPPORTS)
+                outcome, _, _ = run_branch(transport, mode="auto", proof=proof)
+                self.assertEqual("supports-uaf", outcome.verdict)
+                self.assertTrue(outcome.invoked)
+                self.assertEqual(2, outcome.calls)
+
+    def test_off_mode_still_abstains_without_calls(self):
         transport = GuardTransport()
         outcome, _, gated = run_branch(transport, mode="off")
         self.assertFalse(outcome.invoked)

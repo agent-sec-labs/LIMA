@@ -1,24 +1,27 @@
-"""Deterministic Orchestrator and Arbiter for the UAF v2 review pipeline.
+"""UAF v2 instruments and the frozen evaluation chain.
 
-Plan Task 10 (design sections 12.1/12.2/12.3,
-``docs/superpowers/specs/2026-09-10-cxx-uaf-v2-design.md``).
-:func:`review_uaf` chains the already-frozen pipeline stages over one
-snapshot -- strict ``/v1/uaf-facts`` client, Fact Adapter, deterministic
-Candidate Generator, P1-P7 Proof Engine, UNKNOWN-only LLM semantic branch,
-tool-evidence binder and three-state Evidence Broker -- and adjudicates
-every candidate with the pure :func:`arbiter_state` function.
+Production routing (agent-vuln-platform design section 10): the v2
+proof-first orchestration is **retired from the production path** -- the
+scanner runs the single agent chain in :mod:`lima.agent_orchestrator`.  This
+module now hosts two things:
 
-Frozen semantics implemented here:
+1. **Instruments** retained for agent consultation (design section 10
+   "保留为仪器"): :func:`instrument_facts` (strict ``/v1/uaf-facts`` client
+   call plus expectation pinning and adapter certification),
+   :func:`instrument_proof` (P1-P7 :func:`lima.uaf_proof.prove_candidate`
+   consult), :func:`instrument_broker` (tool-evidence binding plus
+   three-state broker per producer) and :func:`contract_evidence_record`
+   (models record -> contract evidence lift).  The pure
+   :func:`arbiter_state` state machine is unchanged.
+2. **The frozen v2 evaluation chain** :func:`review_uaf` -- kept verbatim in
+   behavior only because the pinned UAF v2 evaluation harness
+   (``scripts/run_uaf_v2_evaluation.py`` + ``tests/test_uaf_v2_evaluation.py``)
+   drives it; it is no longer imported by any production module and its
+   proof-before-LLM routing is scheduled for migration with the harness
+   (platform plan Task 10).  New code must not call it.
 
-- Proof before LLM: PASS/REFUTED candidates never touch the model in any
-  agent mode; only UNKNOWN candidates may reach the Specialist/Critic
-  branch, gated by ``mode`` exactly like ``run_semantic_branch`` (``off``
-  abstains without calls, ``auto`` degrades with a recorded abstention,
-  ``required`` fails the task).
-- The Arbiter (design 12.3) is a pure, deterministic function over
-  contract-validated inputs only -- the proof verdict, broker verdicts and
-  the semantic outcome.  It never reads free text, and confidence scores
-  cannot cross its discrete state gates:
+Frozen arbiter semantics (design 12.3), reused by both consumers:
+
     1. REFUTED proof + valid D2+ SUPPORTS, or PASS proof + valid D2+
        REFUTES evidence  -> ``needs-human-review``;
     2. valid D3 SUPPORTS runtime evidence -> ``runtime-confirmed``;
@@ -27,18 +30,6 @@ Frozen semantics implemented here:
     5. proof REFUTED -> ``rejected`` (audit record, never a finding);
     6. UNKNOWN + (D1, SUPPORTS) consensus -> ``semantic-supported``;
     7. everything else -> ``abstain``.
-- Diff-only source mode caps every positive outcome at
-  ``needs-human-review``: unread old code must never become verified
-  evidence, independent of the proof engine's answer.
-- Budget honesty: ``deadline`` (an absolute ``time.monotonic()`` second)
-  is checked before the facts request and before every candidate and LLM
-  turn; ``parallelism`` only widens the independent UNKNOWN LLM branches
-  while output order stays the deterministic candidate order;
-  ``dialogue_rounds`` is passed through to the branch as a real cap.
-- Rejected candidates stay in :class:`UafReviewOutcome.candidates` with
-  the refuted obligation summary as their audit reason, but they are not
-  members of :data:`UAF_FINDING_STATES`, so no scanner projects them as
-  vulnerability findings.
 """
 
 from __future__ import annotations
@@ -62,7 +53,7 @@ from .cxx_memory import (
 from .uaf_broker import broker_verdict
 from .uaf_candidates import generate_candidates
 from .uaf_evidence_binder import collect_bound_evidence
-from .uaf_facts import UnitFacts, adapt_uaf_response
+from .uaf_facts import UafFactBundle, UnitFacts, adapt_uaf_response
 from .uaf_llm_branch import (
     MODE_REQUIRED,
     SPECIALIST_ROLE,
@@ -85,6 +76,10 @@ __all__ = [
     "UafReviewOutcome",
     "UafReviewStats",
     "arbiter_state",
+    "contract_evidence_record",
+    "instrument_broker",
+    "instrument_facts",
+    "instrument_proof",
     "review_uaf",
 ]
 
@@ -303,7 +298,7 @@ def _completed_run_ids(tool_analysis: Any) -> frozenset[str]:
     )
 
 
-def _contract_record(record: Any, candidate_id: str) -> Any:
+def contract_evidence_record(record: Any, candidate_id: str) -> Any:
     """Lift one bound models record into the contract evidence domain.
 
     The level is the producer-documented assignment (design 5): a bound
@@ -346,7 +341,7 @@ def _contract_record(record: Any, candidate_id: str) -> Any:
     )
 
 
-def _broker_verdicts(
+def instrument_broker(
     identity: CandidateIdentity,
     candidate: UafCandidate,
     tool_analysis: Any,
@@ -375,7 +370,7 @@ def _broker_verdicts(
         for record in producer_records:
             try:
                 contract_records.append(
-                    _contract_record(record, candidate.candidate_id)
+                    contract_evidence_record(record, candidate.candidate_id)
                 )
             except (ContractError, ValueError) as exc:
                 diagnostics.append(
@@ -391,6 +386,80 @@ def _broker_verdicts(
             )
         )
     return tuple(verdicts), tuple(evidence_records)
+
+
+def instrument_facts(
+    analyzer_client: Any,
+    *,
+    repository_key: str,
+    snapshot_hash: str,
+    translation_units: tuple[str, ...],
+    build_context_mode: str = "snapshot-compdb",
+) -> UafFactBundle:
+    """Consult the facts instrument: analyzer call -> certified bundle.
+
+    One strict ``/v1/uaf-facts`` request whose response is pinned to the
+    review identity by :func:`_expectation_for` and certified by
+    :func:`adapt_uaf_response` (fail-closed).  Purely a tool for the
+    platform agents; it never produces a conclusion by itself.
+    """
+
+    if not callable(getattr(analyzer_client, "analyze_uaf_facts", None)):
+        raise ValueError(
+            "analyzer_client must expose analyze_uaf_facts "
+            "(CxxMemoryAnalyzerClient or a test double)"
+        )
+    if (
+        type(translation_units) is not tuple
+        or not translation_units
+        or len(translation_units) > MAX_UAF_TRANSLATION_UNITS
+        or any(not isinstance(unit, str) or not unit for unit in translation_units)
+    ):
+        raise ValueError(
+            f"translation_units must be a non-empty tuple of at most "
+            f"{MAX_UAF_TRANSLATION_UNITS} paths"
+        )
+    response = analyzer_client.analyze_uaf_facts(
+        repository_key,
+        snapshot_hash,
+        translation_units,
+        build_context_mode,
+    )
+    expectation = _expectation_for(
+        response, snapshot_hash, build_context_mode, translation_units
+    )
+    return adapt_uaf_response(response, expectation)
+
+
+def instrument_proof(
+    candidate: UafCandidate, bundle: UafFactBundle,
+) -> ProofResult:
+    """Consult the P1-P7 proof instrument for one candidate.
+
+    Pure and deterministic (:func:`lima_uaf_proof.prove_candidate`); the
+    candidate's allocation fact selects its unit inside the certified
+    bundle.  The verdict is evidence for the arbiter, never a gate.
+    """
+
+    if not isinstance(candidate, UafCandidate):
+        raise ValueError("candidate must be a UafCandidate")
+    if not isinstance(bundle, UafFactBundle):
+        raise ValueError("bundle must be a UafFactBundle")
+    unit = next(
+        (
+            unit
+            for unit in bundle.per_unit
+            for fact in unit.facts
+            if fact.fact_id == candidate.allocation_fact_id
+        ),
+        None,
+    )
+    if unit is None:
+        raise ValueError(
+            f"candidate {candidate.candidate_id} allocation fact is not in "
+            "the certified bundle"
+        )
+    return prove_candidate(candidate, bundle, unit.build_context, unit.coverage)
 
 
 def _expectation_for(
@@ -533,7 +602,17 @@ def review_uaf(
     source_mode: str = "repository",
     should_cancel: Any = None,
 ) -> UafReviewOutcome:
-    """Run one deterministic UAF v2 review over the requested TUs.
+    """Run the frozen v2 evaluation chain over the requested TUs.
+
+    **Retired from the production path**: no production module imports this
+    any more -- the scanner runs the single agent chain
+    (:func:`lima.agent_orchestrator.run_platform_review`).  This entry keeps
+    its exact historical behavior only because the pinned UAF v2 evaluation
+    harness (``scripts/run_uaf_v2_evaluation.py`` and
+    ``tests/test_uaf_v2_evaluation.py``) drives it; the harness migrates to
+    the platform chain with platform plan Task 10.  New code must consult
+    the instruments (:func:`instrument_facts`, :func:`instrument_proof`,
+    :func:`instrument_broker`) through the platform orchestrator instead.
 
     ``translation_units`` is the caller's TU selection (the scanner passes
     the snapshot's C/C++ sources); the request and the review stay bounded
@@ -645,7 +724,7 @@ def review_uaf(
         proof = prove_candidate(
             candidate, bundle, unit.build_context, unit.coverage
         )
-        verdicts, evidence = _broker_verdicts(
+        verdicts, evidence = instrument_broker(
             identity, candidate, tool_analysis, proof, diagnostics
         )
         prepared.append({

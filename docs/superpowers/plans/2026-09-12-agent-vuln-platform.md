@@ -115,7 +115,7 @@ freed-by/allocated-by 栈、截断标记）。实验台账记录输入哈希/产
   （仪器层用例保留，编排路由用例改写进平台测试）
 
 **Steps:**
-- [ ] 4.1 RED（Fake LLM + Fake repro）：
+- [x] 4.1 RED（Fake LLM + Fake repro）：
   - `test_hypothesis_experiment_revision_loop_converges`（首轮 PoC 不命中→修正→命中
     → runtime-confirmed，实验台账两次留痕）
   - `test_runtime_confirmed_requires_executed_asan_evidence`
@@ -126,10 +126,10 @@ freed-by/allocated-by 栈、截断标记）。实验台账记录输入哈希/产
   - `test_revision_rounds_bounded_by_dialogue_rounds_and_budget`
   - `test_fp_discipline_low_confidence_states_without_evidence`
   - `test_scanner_runs_single_agent_chain`（双链分支不复存在的源码级断言）
-- [ ] 4.2 GREEN（含 v2 退役与测试迁移）
-- [ ] 4.3 里程碑全量（宿主 + 容器）
-- [ ] 4.4 校准指纹最后刷新（repository_scanner 变更）
-- [ ] 4.5 提交：`feat: replace deterministic-first orchestration with agent loop`
+- [x] 4.2 GREEN（含 v2 退役与测试迁移）
+- [x] 4.3 里程碑全量（宿主 + 容器）
+- [x] 4.4 校准指纹最后刷新（repository_scanner 变更）
+- [x] 4.5 提交：`feat: replace deterministic-first orchestration with agent loop`
 
 ---
 
@@ -256,3 +256,9 @@ profile：快照限额放开参数组、tmpfs/内存加大、受信构建门禁�
 ## 实施记录
 
 - **Task 1（提交见 git log）**：除计划内容外，容器实证发现 ASan 运行时在受限容器（drop ALL caps + 非 root + 只读根）下有 ~30% 概率渲染自身段错误（exit -11 无任何报告输出，clang-14 已知类问题）。产品修复：run_repro 运行阶段对 `SIGSEGV+无报告` 自动重试（最多 3 次尝试，共享 deadline），耗尽后 ok=False + `asan-runtime-segv-retried` 诊断。容器 3 连跑全 OK。全量 1462 OK (skipped 20) 双平台。
+
+---
+
+## 实施记录
+
+- **Task 4（里程碑）**：v2 编排退役落地——proof-before-LLM 路由/UNKNOWN 门控/scanner 双链删除；仪器接口保留（instrument_facts/proof/broker、arbiter_state）；review_uaf 暂保留为冻结 v2 评测链（评测脚本耦合，Task 10 迁移）。平台编排单链：Scout→Specialist假设→实验→Critic修正→仪器咨询（非门禁）→Arbiter。校准指纹第 6 次刷新（c910ffa1…）。全量 1512 双平台 OK。镜像同步注意：删除的测试文件需在 mirror 手动 rm（tar 增量不删文件）。

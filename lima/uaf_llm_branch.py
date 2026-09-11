@@ -1,12 +1,19 @@
-"""UNKNOWN-only LLM semantic branch for the UAF v2 pipeline (design section 10).
+"""Semantic Specialist/Critic branch for UAF candidates (design section 10).
 
-When the deterministic P1-P7 proof engine ends ``UNKNOWN``, this branch asks
-exactly two roles -- ``memory-lifetime-specialist`` and
-``adversarial-critic`` -- for a structured semantic opinion over the frozen
-candidate. Security stance (design sections 10.2/13):
+Two roles -- ``memory-lifetime-specialist`` and ``adversarial-critic`` --
+produce a structured semantic opinion over a frozen candidate.  Since the
+platform retirement (agent-vuln-platform design section 10) the roles are
+directly usable: there is **no UNKNOWN-only proof gate** any more.  ``proof``
+is an optional informational input -- when provided, its obligation summary
+is rendered into the context; when ``None`` the roles run on facts, snippet
+and coverage alone.  The proof engine is a consultable instrument of the
+platform orchestrator (:mod:`lima.agent_orchestrator`), never a precondition
+for semantic analysis.
+
+Security stance (design sections 10.2/13, unchanged):
 
 * Input firewall: the model only ever receives the immutable candidate
-  contract, the verified fact summary, the current P1-P7 result, the
+  contract, the verified fact summary, the optional proof summary, the
   explicit coverage gaps and the budget-bound snapshot snippet. Labels,
   CVE identifiers, tool findings and ground truth have no path into the
   assembled context.
@@ -24,10 +31,9 @@ candidate. Security stance (design sections 10.2/13):
   Critic's non-supporting assessment vetoes the branch, and a positive
   judgement without a real supporting fact id stays an unresolved
   assumption (final abstain).
-* Mode semantics (design section 12.2): PASS/REFUTED proofs never call the
-  LLM in any mode; ``off`` abstains without calls; ``auto`` degrades to a
+* Mode semantics: ``off`` abstains without calls; ``auto`` degrades to a
   recorded abstention on provider/contract/budget failure; ``required``
-  fails the task instead of silently skipping the required fallback.
+  fails the task instead of silently skipping the required analysis.
 * Budget honesty: one call is charged through ``CxxAgentBudget.consume``
   before each wire round trip and the UTF-8 byte size of each completion is
   charged on arrival -- identical timing to ``CxxLLMClient.step``. Exactly
@@ -268,7 +274,11 @@ def _facts_preview(facts: tuple[UafFact, ...]) -> str:
     )
 
 
-def _proof_summary(proof: ProofResult) -> str:
+def _proof_summary(proof: ProofResult | None) -> str:
+    """Render the optional proof instrument summary (informational)."""
+
+    if proof is None:
+        return "- (proof instrument not consulted)"
     return "\n".join(
         f"- {item.obligation.value}: {item.verdict} "
         f"(facts: {','.join(item.fact_ids) if item.fact_ids else '-'})"
@@ -469,17 +479,6 @@ class SemanticBranchOutcome:
         ):
             raise ValueError("a supports-uaf verdict requires invoked calls and (D1, SUPPORTS)")
 
-    @classmethod
-    def skipped(cls, verdict: str) -> SemanticBranchOutcome:
-        """Gate outcome: the deterministic proof already concluded ``verdict``."""
-        if verdict not in {"PASS", "REFUTED", "UNKNOWN"}:
-            raise ValueError("verdict must be a proof verdict")
-        return cls(
-            invoked=False, calls=0, verdict="abstain", level_polarity=None,
-            specialist_reply=None, critic_reply=None,
-            degradation=f"proof-{verdict.lower()}",
-        )
-
 
 # --------------------------------------------------------------- branch core
 
@@ -526,27 +525,30 @@ def run_semantic_branch(
     resolved: Mapping[str, object],
     candidate: UafCandidate,
     bundle_facts: Iterable[UafFact],
-    proof: ProofResult,
-    coverage: ExtractionCoverage,
-    snippet: str,
-    budget: CxxAgentBudget,
-    mode: str,
+    proof: ProofResult | None = None,
+    coverage: ExtractionCoverage | None = None,
+    snippet: str = "",
+    budget: CxxAgentBudget | None = None,
+    mode: str = "",
     *,
     dialogue_rounds: int = 1,
     timeout: int = 60,
 ) -> SemanticBranchOutcome:
-    """Run the UNKNOWN-only Specialist/Critic dialogue for one candidate.
+    """Run the Specialist/Critic dialogue for one candidate (no proof gate).
 
     ``role`` anchors the Specialist turn and must be
     :data:`SPECIALIST_ROLE`; the adversarial-critic round is fixed by design
     section 10.1. ``bundle_facts`` are the verified facts of the candidate's
     bundle; their ids are the only fact ids the model may reference.
+    ``proof`` is optional and informational: when provided its obligation
+    summary enters the context, but no verdict gates the branch -- the
+    deterministic engine is an instrument the orchestrator consults, not a
+    precondition for semantic analysis.
 
-    Gates, in order: a non-``UNKNOWN`` proof verdict skips the branch with
-    zero calls in every mode, and ``mode == "off"`` abstains without calls.
-    Under ``required`` any provider, contract, reply-shape or budget failure
-    fails the task (``RuntimeError``); under ``auto`` the same failures
-    degrade to a recorded abstention.
+    Gate, in order: ``mode == "off"`` abstains without calls.  Under
+    ``required`` any provider, contract, reply-shape or budget failure fails
+    the task (``RuntimeError``); under ``auto`` the same failures degrade to
+    a recorded abstention.
     """
     if role != SPECIALIST_ROLE:
         raise ValueError(
@@ -556,8 +558,8 @@ def run_semantic_branch(
         raise ValueError("mode must be off, auto or required")
     if not isinstance(candidate, UafCandidate):
         raise ValueError("candidate must be a UafCandidate")
-    if not isinstance(proof, ProofResult):
-        raise ValueError("proof must be a ProofResult")
+    if proof is not None and not isinstance(proof, ProofResult):
+        raise ValueError("proof must be a ProofResult or None")
     if not isinstance(coverage, ExtractionCoverage):
         raise ValueError("coverage must be an ExtractionCoverage")
     _check_budget(budget)
@@ -572,8 +574,6 @@ def run_semantic_branch(
         raise ValueError("bundle_facts must be a non-empty tuple of UafFact records")
     known_fact_ids = frozenset(item.fact_id for item in facts)
 
-    if proof.verdict != "UNKNOWN":
-        return SemanticBranchOutcome.skipped(proof.verdict)
     if mode == MODE_OFF:
         return SemanticBranchOutcome(
             invoked=False, calls=0, verdict="abstain", level_polarity=None,

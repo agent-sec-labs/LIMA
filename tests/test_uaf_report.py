@@ -329,21 +329,23 @@ class UafFindingProjectionTests(unittest.TestCase):
         )
         return scanner.scan(RepositoryWorkspace(Path(root)))
 
-    def test_uaf_findings_keep_automatic_repair_false(self):
+    def test_platform_branch_without_llm_reports_honest_abstention(self):
+        # Platform retirement (single agent chain): without a configured
+        # provider the platform branch abstains honestly -- zero findings,
+        # no v2 payload, and the retired source name never resurfaces.
         result = self._scan()
         payload = result.report.to_dict()["findings"]
-        uaf_findings = [item for item in payload if item["source"] == "cxx-uaf-v2"]
-        self.assertEqual(1, len(uaf_findings))
-        self.assertFalse(uaf_findings[0]["automatic_repair"])
+        self.assertEqual(
+            [], [item for item in payload
+                 if item["source"] in ("cxx-uaf-v2", "cxx-agent-platform")],
+        )
+        self.assertEqual(
+            "llm-not-configured",
+            result.report.collaboration["platform"]["status"],
+        )
         rendered = to_markdown(result.report.to_dict())
-        self.assertIn("## C/C++ UAF v2", rendered)
-        # The straight-line proof passes with zero provider calls.
-        self.assertIn("deterministic proof; LLM not required", rendered)
-        self.assertIn("- LLM 真实调用：否", rendered)
-        # The finding detail keeps the no-repair red line.
-        self.assertIn("不支持自动修复", rendered)
-        self.assertIn("- Candidate: `", rendered)
-        self.assertIn("- Trigger path: ", rendered)
+        self.assertNotIn("## C/C++ UAF v2", rendered)
+        self.assertNotIn("cxx-uaf-v2", rendered)
 
     def test_legacy_reports_unchanged_without_uaf_key(self):
         legacy = _report()

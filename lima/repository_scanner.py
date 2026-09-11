@@ -8,15 +8,13 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable, Iterable, Optional
 
-from .cxx_memory import (
-    MAX_UAF_TRANSLATION_UNITS,
-    REQUESTED_LAYERS,
-    CxxAnalyzerProtocolError,
-    CxxAnalyzerUnavailable,
-    CxxAnalysisResult,
-    CxxMemoryAdapter,
-)
 from .adjudication import adjudicate_findings
+from .agent_orchestrator import (
+    PLATFORM_SOURCE_NAME,
+    platform_rule_id,
+    run_platform_review,
+)
+from .agent_repro_tools import ReproWorkbench
 from .cxx_agent_models import LEGACY_AGENT_CWES, to_agent_finding_payload
 from .cxx_agent_tools import CxxAgentBudget
 from .cxx_agents import (
@@ -25,6 +23,14 @@ from .cxx_agents import (
     CxxAgentCoordinator,
 )
 from .cxx_context import CxxContextIndex
+from .cxx_memory import (
+    MAX_UAF_TRANSLATION_UNITS,
+    REQUESTED_LAYERS,
+    CxxAnalysisResult,
+    CxxAnalyzerProtocolError,
+    CxxAnalyzerUnavailable,
+    CxxMemoryAdapter,
+)
 from .cxx_retrieval import RetrievalBudget, retrieve_repository
 from .diff_parser import parse_unified_diff
 from .metrics import metrics
@@ -39,16 +45,8 @@ from .task_progress import (
     INVENTORY,
     SAST_ANALYSIS,
 )
-from .uaf_orchestrator import (
-    UAF_FINDING_STATES,
-    UAF_REVIEW_CWE,
-    UAF_RULE_ID,
-    UAF_SOURCE_NAME,
-    UAF_STATE_CONFIDENCE,
-    review_uaf,
-)
+from .uaf_orchestrator import UAF_STATE_CONFIDENCE
 from .workspace import CXX_SOURCE_EXTENSIONS, RepositoryWorkspace, WorkspaceInventory
-
 
 SEVERITY_RANK = {
     Severity.LOW: 1,
@@ -500,78 +498,95 @@ class RepositoryScanner:
             mode, status, probe, review, retrieval, budget,
         )
 
-    def _uaf_finding(self, item) -> Finding:
-        """Project one UAF v2 outcome candidate onto the Finding shape.
+    _PLATFORM_TITLES = {
+        "CWE-416": "Use-after-free: pointer dereferenced after release",
+        "CWE-415": "Double free: object released twice",
+        "CWE-787": "Out-of-bounds write past the allocated region",
+        "CWE-125": "Out-of-bounds read past the allocated region",
+    }
 
-        ``candidate_id`` 与 ``trigger_path`` 携带不可变身份信息；验证状态
-        即 Arbiter 终态；C++ Finding 永不自动修复（设计不变量 13）。
+    def _platform_finding(self, item) -> Finding:
+        """Project one platform outcome target onto the Finding shape.
+
+        ``state`` 即 Arbiter 终态（冻结状态机复用）；C++ Finding 永不自动
+        修复（设计不变量）；candidate_id 与实验台账提供可审计身份。
         """
 
-        candidate = item.candidate
-        proof = item.proof
-        symbol = candidate.function_usr.rsplit("::", 1)[-1].rstrip("#") \
-            or candidate.function_usr
-        explanation = (
-            f"release of the object at {candidate.canonical_path}:"
-            f"{candidate.release_range[0]} precedes the use at "
-            f"{candidate.canonical_path}:{candidate.use_range[0]}"
+        title = self._PLATFORM_TITLES.get(
+            item.cwe, f"{item.cwe} suspected by agent analysis",
         )
-        if proof is not None:
-            explanation += f"; deterministic proof verdict {proof.verdict}"
+        explanation = item.hypothesis_reason
+        if item.experiment_log:
+            hits = sum(
+                1 for entry in item.experiment_log if entry.get("hit")
+            )
+            explanation += (
+                f"; reproduction experiments: {len(item.experiment_log)} "
+                f"run, {hits} hit"
+            )
+        if item.proof_verdict:
+            explanation += f"; deterministic proof verdict {item.proof_verdict}"
         finding = Finding(
-            rule_id=UAF_RULE_ID,
+            rule_id=platform_rule_id(item.cwe),
             severity=Severity.HIGH,
-            title="Use-after-free: pointer dereferenced after release",
-            explanation=explanation,
-            path=candidate.canonical_path,
-            line=candidate.use_range[0],
+            title=title,
+            explanation=explanation[:2000],
+            path=item.path,
+            line=item.line,
             evidence=(
-                f"allocation {candidate.allocation_fact_id} -> release "
-                f"{candidate.release_fact_id} at "
-                f"[{candidate.release_range[0]}, {candidate.release_range[1]}]"
-                f" -> use {candidate.use_fact_id} at "
-                f"[{candidate.use_range[0]}, {candidate.use_range[1]}]"
+                f"agent hypothesis at {item.path}:{item.line}; "
+                f"experiments {len(item.experiment_log)}; state {item.state}"
             ),
             fix="",
-            test="Exercise the witness path under AddressSanitizer.",
+            test="Run the recorded PoC driver under AddressSanitizer.",
             confidence=UAF_STATE_CONFIDENCE.get(item.state, 0.5),
-            cwe=UAF_REVIEW_CWE,
-            source=UAF_SOURCE_NAME,
-            evidence_kind="proof",
+            cwe=item.cwe,
+            source=PLATFORM_SOURCE_NAME,
+            evidence_kind=(
+                "runtime-asan"
+                if item.state == "runtime-confirmed"
+                else "proof"
+                if item.state == "fact-verified"
+                else "hypothesis"
+            ),
             verification_state=item.state,
-            evidence_records=list(item.evidence),
+            evidence_records=list(item.evidence_records),
             language="c++",
-            symbol=symbol,
-            analysis_mode=UAF_SOURCE_NAME,
+            symbol=item.symbol,
+            analysis_mode=PLATFORM_SOURCE_NAME,
             automatic_repair=False,
-            candidate_id=candidate.candidate_id,
-            trigger_path=[
-                f"{candidate.canonical_path}:{candidate.release_range[0]}",
-                f"{candidate.canonical_path}:{candidate.use_range[0]}",
-            ],
+            candidate_id=(
+                item.identity.candidate_id
+                if item.identity is not None
+                else ""
+            ),
+            trigger_path=[f"{item.path}:{item.line}"],
         )
         return finding
 
-    def _uaf_collaboration(self, mode: str, status: str, outcome) -> dict:
-        """The collaboration.uaf_v2 audit payload (design section 14 basis)."""
+    def _platform_collaboration(self, mode: str, status: str, outcome) -> dict:
+        """The collaboration.platform audit payload (platform design §6)."""
 
         states: dict[str, int] = {}
-        for item in outcome.candidates:
+        for item in outcome.targets:
             states[item.state] = states.get(item.state, 0) + 1
         broker_counts: dict[str, int] = {}
-        for item in outcome.candidates:
+        for item in outcome.targets:
             for verdict in item.broker_verdicts:
                 broker_counts[verdict.verdict] = (
                     broker_counts.get(verdict.verdict, 0) + 1
                 )
         stats = outcome.stats
         audit = []
-        for item in outcome.candidates[:32]:
+        for item in outcome.targets[:32]:
             audit.append({
-                "candidate_id": item.candidate.candidate_id,
-                "path": item.candidate.canonical_path,
+                "target_id": item.target_id,
+                "path": item.path,
+                "line": item.line,
                 "state": item.state,
-                "proof": item.proof.verdict if item.proof is not None else "",
+                "cwe": item.cwe,
+                "proof": item.proof_verdict,
+                "experiments": len(item.experiment_log),
                 "rejected_reason": item.rejected_reason,
             })
         return {
@@ -579,21 +594,21 @@ class RepositoryScanner:
             "status": status,
             "translation_units": list(outcome.translation_units),
             "stats": {
-                "tu_count": stats.tu_count,
-                "candidate_count": stats.candidate_count,
-                "pass": stats.pass_count,
-                "refuted": stats.refuted_count,
-                "unknown": stats.unknown_count,
-                "llm_invoked": stats.llm_invoked_count,
-                "llm_calls": stats.llm_calls,
+                "leads": stats.lead_count,
+                "targets": stats.target_count,
+                "findings": stats.finding_count,
+                "experiments": stats.experiment_count,
+                "specialist_calls": stats.specialist_calls,
+                "critic_calls": stats.critic_calls,
+                "scout_calls": stats.scout_calls,
             },
             "states": states,
             "broker": broker_counts,
             "diagnostics": list(outcome.diagnostics),
-            "candidates": audit,
+            "targets": audit,
         }
 
-    def _run_uaf_v2_branch(
+    def _run_platform_branch(
         self,
         workspace: RepositoryWorkspace,
         inventory: WorkspaceInventory,
@@ -603,12 +618,13 @@ class RepositoryScanner:
         repository_key: str,
         cancel_probe: Callable[[], bool] | None,
     ) -> dict:
-        """Run the deterministic UAF v2 review for the CWE-416 domain.
+        """Run the single agent platform chain for the facts domain.
 
-        与 legacy agent 分支并存（设计 12.1 路由）：legacy 执行边界已排除
-        CWE-416，本分支以确定性 Fact→Candidate→Proof→Broker→Arbiter 链
-        处理 CWE-416。analyzer client 缺失（cxx_memory off / 无 sidecar）
-        时没有事实就没有证明：分支跳过并如实记录。
+        设计（agent-vuln-platform §6/§10）：智能体是检测主体。线索由
+        analyzer facts 的 release 事件生成（platform 编排内部完成），Scout
+        升级目标，Specialist 假设 → 沙箱 ASan 实验 → Critic 修正循环，
+        事实/证明作为可咨询仪器进入冻结 Arbiter。legacy 分支域
+        （CWE-787/125/415）不受影响；analyzer client 缺失时如实跳过。
         """
 
         mode = self.cxx_agent_mode
@@ -634,8 +650,19 @@ class RepositoryScanner:
             if self.cxx_uaf_llm_factory is not None
             else {}
         )
+        if not llm_config:
+            if mode == "required":
+                raise RuntimeError(
+                    "required platform review has no configured LLM provider"
+                )
+            return {"mode": mode, "status": "llm-not-configured"}
+        workbench = (
+            ReproWorkbench(adapter, budget)
+            if callable(getattr(adapter, "repro_compile_run", None))
+            else None
+        )
         try:
-            outcome = review_uaf(
+            outcome = run_platform_review(
                 adapter,
                 workspace,
                 repository_key=repository_key,
@@ -643,16 +670,18 @@ class RepositoryScanner:
                 translation_units=translation_units,
                 mode=mode,
                 budget=budget,
-                tool_analysis=tool_analysis,
                 llm_config=llm_config,
+                repro_workbench=workbench,
+                tool_analysis=tool_analysis,
                 should_cancel=cancel_probe,
             )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             if mode == "required":
                 raise RuntimeError(
-                    f"required UAF v2 review failed on the C/C++ analyzer: {exc}"
+                    f"required platform review failed on the C/C++ analyzer: "
+                    f"{exc}"
                 ) from exc
-            metrics.inc("repository_scan_cxx_uaf_unavailable_total")
+            metrics.inc("repository_scan_platform_unavailable_total")
             return {
                 "mode": mode,
                 "status": "analyzer-unavailable",
@@ -661,26 +690,24 @@ class RepositoryScanner:
         except (RuntimeError, ValueError) as exc:
             if mode == "required":
                 raise RuntimeError(
-                    f"required UAF v2 review failed: {exc}"
+                    f"required platform review failed: {exc}"
                 ) from exc
-            metrics.inc("repository_scan_cxx_uaf_failed_total")
+            metrics.inc("repository_scan_platform_failed_total")
             return {
                 "mode": mode,
                 "status": "review-failed",
                 "diagnostics": [str(exc)[:500]],
             }
-        # rejected 保留在 outcome 审计记录里，不投影为 Finding；abstain
-        # 不作声明；needs-human-review/semantic-supported 等状态按设计第 5
-        # 节输出。合并键是不可变 finding 身份 (cwe, path, symbol, line)。
-        for item in outcome.candidates:
-            if item.state not in UAF_FINDING_STATES:
-                continue
-            candidate_finding = self._uaf_finding(item)
+        # rejected/abstain 保留在 outcome 审计记录里，不投影为 Finding；
+        # 正向状态按冻结状态机输出。合并键是不可变 finding 身份
+        # (cwe, path, symbol, line)。
+        for item in outcome.findings:
+            candidate_finding = self._platform_finding(item)
             candidate_finding.automatic_repair = False
             self._merge_cxx_finding(
                 findings, cxx_finding_index, candidate_finding
             )
-        return self._uaf_collaboration(mode, "completed", outcome)
+        return self._platform_collaboration(mode, "completed", outcome)
 
     def scan(
         self,
@@ -860,10 +887,10 @@ class RepositoryScanner:
             task_id,
             cancel_probe,
         )
-        # UAF v2 分支与 legacy agent 分支并存（设计 12.1 路由）：legacy
-        # 执行边界排除 CWE-416，CWE-416 域由确定性 Proof/Arbiter 链处理，
-        # 按 (cwe, path, symbol, line) 不可变身份合并进同一份报告。
-        uaf_summary = self._run_uaf_v2_branch(
+        # 平台分支是唯一的智能体检测链（设计 §10 单链）：legacy 分支域
+        # （CWE-787/125/415）不变，CWE-416 域由 Scout→假设→实验→修正循环
+        # 处理，按 (cwe, path, symbol, line) 不可变身份合并进同一份报告。
+        platform_summary = self._run_platform_branch(
             workspace,
             inventory,
             findings,
@@ -932,7 +959,7 @@ class RepositoryScanner:
                 "sast": sast_summary,
                 "cxx_memory": cxx_summary,
                 "cxx_agent": cxx_agent_summary,
-                "uaf_v2": uaf_summary,
+                "platform": platform_summary,
                 "skipped": dict(sorted(inventory.skipped.items())),
             },
             adjudication=adjudicate_findings(findings),

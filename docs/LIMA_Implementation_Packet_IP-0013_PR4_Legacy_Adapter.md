@@ -155,7 +155,7 @@ Coding Agent 必须:完整阅读稳定标准、lifecycle、Implementation Agent 
 
 - **单文件** `lima/contracts/compat.py`(映射表 + 三个转换函数 + 常量,量级远小于 evidence.py);
 - **payload 层单解**:adapter 全部操作 payload 层对象(Finding/ReviewReport ↔ EvidenceDomainBundle/WorkflowSummary),不构造 ArtifactEnvelope、不做 lineage 检查(§2 Rejected Inputs 第 8 条);
-- 公开面(**冻结 symbol 清单,恰 11 项**):
+- 公开面(**冻结 symbol 清单,恰 8 项**):
 
 ```text
 LEGACY_REASON_CODE: Final[str] = "LEGACY_MIGRATED"          # 迁移 reason code 哨兵
@@ -335,7 +335,7 @@ PI-DR3(scratch GREEN 门禁永久化):阶段二 RED 前必须先在 scratch 位�
 |---|---|---|
 | 1 | 实例化镜像 | 阶段二启用 |
 | 2 | 传输点零 PR | 阶段二启用(docs-only PR 即本轮先例) |
-| 3 | symbols 计数 | Packet 已冻结公开面清单(§7,恰 11 symbols);精确计数阶段二钉死 |
+| 3 | symbols 计数 | Packet 已冻结公开面清单(§7,恰 8 symbols);精确计数阶段二钉死 |
 | 4 | helper 忠实性 | 阶段二启用(identity 材料复用 legacy 算法——§8 已冻结逐字符口径) |
 | 5 | 调用点签名兼容 | 阶段二启用(新模块无既有调用点;domain_to_finding/finding_to_domain_bundle 签名已冻结) |
 | 6 | None 哨兵 | 阶段二启用(summary None/() 哨兵与 exit 无关面已在 §D5 冻结) |

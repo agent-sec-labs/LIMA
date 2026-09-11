@@ -1,7 +1,7 @@
 # LIMA C++ UAF v2 第一阶段设计
 
-日期：2026-09-10
-状态：设计已获用户确认，书面版本待用户复核
+日期：2026-09-10（2026-09-11 根据书面复审修订）
+状态：设计已获用户确认，复审修订版待用户复核
 目标分支：`codex/cxx-llm-agent-detection`
 实现目录：`D:\Projects\LIMA\.worktrees\cxx-llm-agent-detection`
 
@@ -70,6 +70,11 @@ Planner
 - UAF 的 `required` 模式只在 Proof 为 `UNKNOWN` 时要求 LLM 分支成功；
 - UAF 的 `fact-verified` 只由 coverage-complete 的确定性 P1–P7 证明产生。
 
+除一项共享安全修正外，非 UAF 行为保持不变：外部或待审计仓库不得再默认执行
+`CMakeLists.txt` 或其他 build scripts。当前 `LIMA_CXX_AUTO_CMAKE=true` 的默认行为必须由
+新的管理员级 trusted-generation 总门禁约束；这是 UAF v2 依赖共享 Sidecar 时不可绕过的
+安全前置条件，不是 CWE-415/125/787 检测语义重构。
+
 未被本文件明确覆盖的安全边界继续沿用旧设计，包括固定快照、严格 JSON、路径绑定、
 租户隔离、外部源码最小化发送、任务预算和 C/C++ 禁止自动修复。
 
@@ -117,8 +122,14 @@ Planner
 7. **Coverage fail-closed。** 任何关键 coverage gap 都阻止 `fact-verified`。
 8. **同一身份贯穿全链。** Build context、fact、candidate、proof、tool evidence 和报告
    必须绑定同一 snapshot/TU/object/candidate。
-9. **非 UAF 行为不变。** CWE-415/125/787 的已有流程必须通过快照和回归测试。
-10. **C/C++ 永不自动修复。** 所有 UAF 状态的 `automatic_repair` 恒为 `false`。
+9. **不可信仓库默认不执行。** 读取已有 compilation database 不授权运行 CMake、Make、
+   scripts 或 tests；trusted generation 必须由管理员显式开启并满足全部隔离能力。
+10. **运行身份是复合键。** 缓存、Broker、Arbiter、异步任务和数据库只能用
+    `(snapshot_hash, candidate_id)` 定位 UAF candidate。
+11. **证据强度与方向正交。** `EvidenceLevel` 与 `EvidencePolarity` 必须使用独立字段。
+12. **非 UAF 检测语义不变。** 除共享 build-execution 安全门禁外，CWE-415/125/787 的
+    已有流程必须通过快照和回归测试。
+13. **C/C++ 永不自动修复。** 所有 UAF 状态的 `automatic_repair` 恒为 `false`。
 
 ## 5. 证据等级与输出状态
 
@@ -132,6 +143,32 @@ LIMA 的 D0–D4 含义在 UAF v2 中固定为：
 | D3 | 受控运行真实执行并确认同一 candidate 的 UAF |
 | D4 | 影响、前置条件和 machine Oracle 的完整验证；不属于本阶段 |
 
+D-level 只表示证据深度，不能编码证据方向。UAF v2 必须直接复用现有
+`lima.contracts.evidence.EvidenceRecord` 的两个正交字段：
+
+```text
+level: EvidenceLevel.D0 | D1 | D2 | D3 | D4
+polarity: EvidencePolarity.SUPPORTS | REFUTES
+```
+
+规范示例：
+
+```text
+静态 UAF proof PASS:
+  level = D2
+  polarity = SUPPORTS
+
+静态 rebind proof REFUTED:
+  level = D2
+  polarity = REFUTES
+
+同一 candidate 的 ASan 复现:
+  level = D3
+  polarity = SUPPORTS
+```
+
+禁止建立 `D2-support`、`D2-refutes` 等混合枚举或依靠状态名称推断 polarity。
+
 UAF v2 使用以下最终状态：
 
 | 状态 | 证据要求 | CI 默认门禁 |
@@ -143,7 +180,7 @@ UAF v2 使用以下最终状态：
 | `human-confirmed` | 授权人工确认；本状态本身不自动等于 D4 | 是 |
 | `needs-human-review` | 强证据冲突、身份无法安全绑定或关键不确定性需要人工判断 | 否 |
 
-Proof 中任一 obligation 为 `refuted` 时，候选产生 D2 `REFUTES` evidence 并进入
+Proof 中任一 obligation 为 `refuted` 时，候选产生 `level=D2, polarity=REFUTES` evidence 并进入
 deterministic rejected disposition；它不作为漏洞 Finding 输出，但必须保留审计记录和
 拒绝原因。
 
@@ -172,15 +209,56 @@ argv 后逐项校验，不能作为 shell 命令直接执行。
 
 ### 6.2 解析优先级
 
+外部、PR 或待审计仓库的默认路径为：
+
 ```text
 1. 仓库快照中已有的 compile_commands.json
-2. 隔离 Sidecar 中通过受控 CMake adapter 导出的 compile_commands.json
-3. 隔离 Sidecar 中管理员允许的 build-system adapter
+2. 基于扩展名和最小参数的 fallback heuristic
+```
+
+默认路径不得为了生成 compilation database 而运行 CMake、Make、Ninja、Meson、Bazel、
+Autotools、仓库脚本或测试。允许执行 `cmake` 二进制不等于仓库 `CMakeLists.txt` 可信；
+`execute_process()`、`file()`、`configure_file()` 和自定义 command 都可能产生副作用。
+
+只有管理员在 Sidecar 部署配置中显式设置：
+
+```dotenv
+LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION=true
+```
+
+并且 Sidecar capability probe 证明下列隔离条件全部成立时，才启用扩展路径：
+
+```text
+1. 仓库快照中已有的 compile_commands.json
+2. 隔离 Sidecar 中受控 CMake configure 导出的 compile_commands.json
+3. 隔离 Sidecar 中管理员批准的 build-system adapter
 4. 基于扩展名和最小参数的 fallback heuristic
 ```
 
-CMake 与其他 adapter 只能在 Sidecar 的既有资源、网络和命令白名单边界内运行。主进程
-不得执行仓库提供的任意构建脚本。
+该开关只能由管理员部署配置设置，单次 API/PR/repository scan 请求、仓库文件、模型输出和
+compilation database 都不能开启它。旧的 `LIMA_CXX_AUTO_CMAKE` 只负责在总门禁开启后选择
+CMake adapter；它本身不构成执行授权，并且默认值必须改为 `false`。
+
+trusted generation 至少必须满足：
+
+- verified repository snapshot 只读；
+- 进程以非 root、`no-new-privileges` 身份运行；
+- 无外部网络；
+- 除只读 import/snapshot 与专用工具链外，不存在 host path、Docker socket 或 credential
+  mount；
+- 只有 ephemeral scratch/build directory 可写，请求结束后销毁；
+- CPU、memory、PID/process、输出、文件大小和绝对时间均有限制；
+- Landlock/namespace 与 seccomp 或等价 syscall restriction 均通过 capability probe；
+- 环境中不提供数据库、Git、LLM、云服务或包仓库凭据；
+- 任一隔离能力不可用时 fail closed，不运行 build context generation。
+
+Build Context Resolver 的 CMake adapter 只执行生成 compilation database 所需的 configure
+阶段，不隐式执行 `cmake --build`。编译、测试和 ASan reproduction 属于独立的显式受控
+工具阶段，不能继承 trusted-generation 的授权。
+
+消费仓库已有 compilation database 也不代表信任其中的任意 compiler argv。response file、
+compiler plugin、`-Xclang -load`、`-fplugin`、wrapper、路径逃逸和其他可执行扩展必须拒绝或
+安全过滤；一旦过滤可能改变 AST 语义，build context 为 `incomplete`。
 
 ### 6.3 完整性判定
 
@@ -191,6 +269,8 @@ source_kind:
   repository-compdb | cmake-export | build-adapter | heuristic
 status:
   complete | incomplete | unavailable
+generation_authorized
+isolation_capabilities
 translation_unit
 working_directory
 normalized_arguments
@@ -252,6 +332,30 @@ schema version
 因 ordinal 改变导致所有后续对象身份漂移。`snapshot_hash` 作为强制的独立 provenance 字段
 与 object/candidate 一起校验，但不混入稳定主键；跨 snapshot 证据不能因为主键相同而直接
 绑定。function USR 缺失时不生成替代字符串身份，而是记录 coverage gap 并禁止 PASS。
+
+`candidate_id` 是跨 snapshot 可稳定复现的局部 ID，不是全局唯一运行身份。内部正式类型为：
+
+```text
+CandidateIdentity {
+    snapshot_hash: LowercaseSha256,
+    candidate_id: CandidateId
+}
+```
+
+下列边界必须传递并使用完整 `CandidateIdentity`：
+
+- Candidate Generator 之后的 Proof Engine 输入输出；
+- Evidence Broker 的 lookup key；
+- Arbiter 输入、去重和冲突判断；
+- 内存 map/set key 与任务间 cache key；
+- 异步消息、持久化记录和数据库唯一约束；
+- API 中 UAF proof/evidence bundle 的主身份。
+
+禁止 `dict[candidate_id, ...]`、仅按 `candidate_id` 的数据库查询或跨 snapshot 缓存复用。
+wire format 必须使用包含两个命名字段的对象，不能依靠字符串拼接后再拆分。面向用户仍可
+单独显示短 `candidate_id`，但任何 evidence binding 必须同时验证 `snapshot_hash`。
+Candidate 生成前的 Fact Adapter 以 fact bundle 顶层 `snapshot_hash` 约束全部 facts；任何
+fact 一旦引用 candidate，同样必须携带完整 `CandidateIdentity`。
 
 ### 7.2 事实种类
 
@@ -329,8 +433,8 @@ satisfied | refuted | unknown
 2. **P2 Pointer/alias refers to object**：release/use 所用指针通过受支持 alias 链绑定该对象。
 3. **P3 Object is released**：witness path 上存在匹配该对象的有效 release。
 4. **P4 Post-release use exists**：同一对象在 release 后通过受支持操作被解引用或成员访问。
-5. **P5 Release-to-use path is reachable**：完整 CFG 中至少存在一条条件一致的 release→use
-   witness path。
+5. **P5 Release-to-use path is reachable**：完整 CFG 中存在 release→use structural path，
+   且第一阶段的有限规则能够证明该 path feasible。
 6. **P6 No pointer rebind on witness path**：选定 witness path 上，参与 use 的 pointer/alias
    未在 release 后被重新绑定到有效对象。
 7. **P7 No lifetime restart on witness path**：选定 witness path 上，在 use 前没有恢复该
@@ -339,6 +443,69 @@ satisfied | refuted | unknown
 P6/P7 针对具体 witness path，而不是所有 CFG 路径。如果存在一条无 rebind/restart 的可达
 路径即可支持 UAF；其他安全路径不消灭该漏洞。若路径枚举、条件一致性或 alias 状态不完整，
 结果必须为 `unknown`，不能选择性忽略未知路径。
+
+P5 内部必须显式保存两个子结果，而不是把 CFG reachability 当作 path feasibility：
+
+```text
+P5Detail {
+    structural_reachability: satisfied | refuted | unknown
+    path_feasibility: satisfied | refuted | unknown
+    witness_cfg_blocks
+    guard_facts
+    unresolved_constraints
+}
+```
+
+映射规则为：
+
+```text
+structural_reachability == refuted
+or path_feasibility == refuted
+    → P5 = refuted
+
+structural_reachability == satisfied
+and path_feasibility == satisfied
+    → P5 = satisfied
+
+otherwise
+    → P5 = unknown
+```
+
+第一阶段 `path_feasibility=satisfied` 只允许以下情形：
+
+- release 与 use 之间没有条件边的 straight-line path；
+- release 与 use 位于同一个、没有嵌套条件边的 guard region，二者共享完全相同的单一
+  guard polarity，guard 变量在该 region 内没有 redefinition，且 Clang 未将该 edge 判为
+  constant-unreachable；
+- Clang constant evaluation 明确证明 witness edge 可执行。
+
+第一阶段 `path_feasibility=refuted` 只允许 Clang constant evaluation 或完整 CFG 明确证明
+witness 不可执行。以下情况一律为 `unknown`，不在第一阶段引入 SAT/SMT、symbolic state 或
+启发式条件求解：
+
+- 两个或更多不同 branch predicates 需要联合满足；
+- 需要推导 `x > 10` 与 `x <= 10` 等谓词关系；
+- guard 变量在相关路径上被写入、alias 或来自未建模调用；
+- CFG merge、loop、exception edge 或 macro/template 使 guard provenance 不完整。
+
+例如：
+
+```cpp
+if (cond) {
+    delete p;
+    use(*p);
+}
+```
+
+在 `cond` 未被重定义且两个操作共享同一 guard region 时可以满足 P5；而：
+
+```cpp
+if (x > 10) delete p;
+if (x <= 10) use(*p);
+```
+
+即使 CFG 存在结构路径，第一阶段仍得到
+`structural_reachability=satisfied, path_feasibility=unknown`，因此 P5 为 `unknown`。
 
 ### 9.2 裁决规则
 
@@ -351,8 +518,8 @@ else:
     proof = UNKNOWN
 ```
 
-- `PASS` 直接产生 D2 support 和 `fact-verified`；
-- `REFUTED` 产生 D2 refutes 和 deterministic rejection；
+- `PASS` 直接产生 `level=D2, polarity=SUPPORTS` evidence 和 `fact-verified`；
+- `REFUTED` 产生 `level=D2, polarity=REFUTES` evidence 和 deterministic rejection；
 - `UNKNOWN` 才允许进入 LLM 分支；
 - coverage 不完整时，即使当前可见事实看似满足 P1–P7，也必须是 `UNKNOWN`。
 
@@ -415,9 +582,14 @@ Evidence Broker 对每个 candidate 和每个 producer 输出：
 support | contradict | no-evidence
 ```
 
-- `support`：存在同一 candidate 的有效正向支持记录；
-- `contradict`：存在同一 candidate 的有效、显式反驳记录；
+- `support`：存在同一 `CandidateIdentity` 的有效
+  `EvidencePolarity.SUPPORTS` 记录；
+- `contradict`：存在同一 `CandidateIdentity` 的有效、显式
+  `EvidencePolarity.REFUTES` 记录；
 - `no-evidence`：未运行、无 finding、路径未覆盖、身份不匹配或没有可用记录。
+
+Broker verdict 描述外部证据相对当前 hypothesis 的关系；`EvidenceRecord.level` 独立描述证据
+深度。Broker 不得把 `support` 自动等同 D2，也不得从 `contradict` 反推固定 D-level。
 
 ### 11.2 `contradict` 的严格条件
 
@@ -427,7 +599,7 @@ support | contradict | no-evidence
 exact candidate identity
 + completed producer run
 + valid provenance and hashes
-+ positive refuting record
++ positive EvidencePolarity.REFUTES record
 + refuted proof obligation and referenced facts
 ```
 
@@ -444,9 +616,10 @@ exact candidate identity
 这些情况输出 `no-evidence`，并可附带 `coverage_gap` 或 `binding_gap`。Broker 不把无命中
 解释为安全，也不因外部工具漏报降低 `fact-verified`。
 
-如果 Proof PASS 与有效 `contradict` 同时存在，Arbiter 输出 `needs-human-review` 并保留两侧
-证据，不能静默选择任一方。如果工具只提供 support，则按证据自身的 D-level 增强记录；不能
-仅因为 producer 名称是 Semgrep 或 Clang 就自动认为达到 D2。
+如果 Proof PASS 与有效 `level>=D2, polarity=REFUTES` evidence 同时存在，Arbiter 输出
+`needs-human-review` 并保留两侧证据，不能静默选择任一方。如果工具只提供 support，则按
+证据自身的 `EvidenceLevel` 增强记录；不能仅因为 producer 名称是 Semgrep 或 Clang 就自动
+认为达到 D2。
 
 ## 12. Orchestrator 与 Arbiter
 
@@ -484,13 +657,13 @@ UAF v2 对 `LIMA_CXX_AGENT_MODE` 的定义为：
 
 Arbiter 是纯确定性函数，按以下优先级裁决：
 
-1. 身份、provenance、Proof REFUTED 与强 support 并存，或 Proof PASS 与强 refutation
-   并存：`needs-human-review`；
-2. 有效 D3 runtime support：`runtime-confirmed`；
+1. 身份、provenance、Proof REFUTED 与有效 `level>=D2, polarity=SUPPORTS` 并存，或
+   Proof PASS 与有效 `level>=D2, polarity=REFUTES` 并存：`needs-human-review`；
+2. 有效 `level=D3, polarity=SUPPORTS` runtime evidence：`runtime-confirmed`；
 3. Proof PASS：`fact-verified`；
-4. 等价 D2 工具 support：`tool-corroborated`；
+4. 等价 `level=D2, polarity=SUPPORTS` 工具 evidence：`tool-corroborated`；
 5. Proof REFUTED：rejected；
-6. Proof UNKNOWN 且 LLM 语义支持：`semantic-supported`；
+6. Proof UNKNOWN 且 LLM 形成 `level=D1, polarity=SUPPORTS`：`semantic-supported`；
 7. 其余：abstain。
 
 Arbiter 不读取自由文本决定等级，只读取已经过合同验证的 enum、fact IDs、evidence level 和
@@ -539,6 +712,13 @@ API 扩展需保持旧字段向后兼容；新增结构化字段由前端渐进�
 
 ### 15.1 Build Context
 
+- 默认配置遇到 `CMakeLists.txt` 不执行 CMake 或任何 build script；
+- 恶意 `execute_process()` fixture 在默认配置下没有副作用；
+- `LIMA_CXX_AUTO_CMAKE=true` 单独存在仍不能越过 trusted-generation 总门禁；
+- trusted generation 只有在管理员开关与全部隔离 capability 同时成立时才能运行；
+- network、non-root、read-only snapshot、ephemeral scratch、resource limit、Landlock 或
+  seccomp 任一 capability 缺失时 fail closed；
+- trusted CMake generation 只 configure，不隐式 `cmake --build`；
 - 根目录与 `build/` compilation database 优先级；
 - 唯一子目录 database；
 - 重复/模糊 TU 条目；
@@ -556,6 +736,9 @@ API 扩展需保持旧字段向后兼容；新增结构化字段由前端渐进�
 - 一层和有限链式局部 alias；
 - 无关 allocation 插入后其他 object ID 保持稳定；
 - 同一 object 的多个 release/use pair 具有不同 candidate ID；
+- 相同 candidate ID 在两个 snapshot 中形成两个不同 `CandidateIdentity`；
+- cache、Broker、Arbiter 和持久化 lookup 缺少 snapshot hash 时合同拒绝；
+- snapshot A 的 ASan/Clang evidence 不能绑定 snapshot B 的同 candidate ID；
 - 路径、range、USR、hash、悬空 fact 引用的 fail-closed 校验。
 
 ### 15.3 Proof
@@ -565,6 +748,10 @@ API 扩展需保持旧字段向后兼容；新增结构化字段由前端渐进�
 - 有效 lifetime restart：P7 refuted；
 - release/use 不可达：P5 refuted；
 - 一个安全分支和一条 UAF witness path：可证明存在性；
+- straight-line path：structural reachability 与 path feasibility 均 satisfied；
+- 同一单 guard region 内的 release/use：在 guard provenance 完整时 satisfied；
+- `x > 10` release 与 `x <= 10` use：structural satisfied、feasibility unknown、P5 unknown；
+- Clang constant-unreachable edge：path feasibility refuted；
 - 路径条件或 CFG 不完整：P5 unknown；
 - alias 无法绑定：P2 unknown；
 - macro/template/cross-function/custom allocator/concurrency：unknown；
@@ -587,6 +774,8 @@ API 扩展需保持旧字段向后兼容；新增结构化字段由前端渐进�
 - ASan 未覆盖 witness path 为 no-evidence；
 - 同 candidate 的有效 support 保留；
 - 正向、同身份、可追溯 refutation 才是 contradict；
+- Broker verdict 与 `EvidenceLevel`/`EvidencePolarity` 分别序列化和校验；
+- snapshot hash 不同而 candidate ID 相同：no-evidence 加 binding gap；
 - 模糊位置或不同 CWE 不是 contradict；
 - PASS + no-evidence 仍为 fact-verified；
 - PASS + valid contradict 为 needs-human-review；
@@ -594,7 +783,9 @@ API 扩展需保持旧字段向后兼容；新增结构化字段由前端渐进�
 
 ### 15.6 兼容与端到端
 
-- CWE-415/125/787 输出快照保持不变；
+- CWE-415/125/787 的 schema、裁决和检测语义保持不变；
+- 使用已有 compilation database 或显式 trusted build 配置时，CWE-415/125/787 通过现有
+  输出快照回归；默认不可信模式不再自动构建，允许 coverage 下降但必须如实报告 incomplete；
 - 整仓与 PR 固定快照均可运行 UAF v2；
 - Diff-only 不得 fact-verified；
 - API 旧客户端可忽略新增字段；
@@ -626,13 +817,13 @@ API 扩展需保持旧字段向后兼容；新增结构化字段由前端渐进�
 
 实现计划必须按以下依赖顺序拆分为可独立测试和提交的任务：
 
-0. 安全材料清理、凭据轮换与当前基线重建；
-1. UAF contracts/models 与状态门禁；
+0. 安全材料清理、凭据轮换、trusted build-execution 总门禁与当前基线重建；
+1. UAF contracts/models、复合 CandidateIdentity、EvidenceLevel/Polarity 与状态门禁；
 2. Build Context Resolver；
 3. Clang UAF Fact Extractor；
 4. 主进程 Fact Adapter 与 provenance validation；
 5. Deterministic Candidate Generator；
-6. P1–P7 Proof Engine；
+6. P1–P7 Proof Engine，包括 P5 structural/feasibility 子结果；
 7. Lifetime Specialist 与 Adversarial Critic 的 UNKNOWN-only 路由；
 8. Evidence Broker 三态；
 9. UAF v2 Orchestrator 与 deterministic Arbiter；
@@ -659,10 +850,16 @@ Clang/ASan 结果和外部 benchmark 证据必须分别标注，不能互相替�
 12. P1–P7、witness path、coverage、Broker 和实际 LLM 调用完整进入报告/API/UI；
 13. 总 deadline、parallelism 和 dialogue rounds 对 UAF v2 真实生效；
 14. 报告不能在调用数为零时声称 LLM 已调用；
-15. CWE-415/125/787 通过行为与输出回归；
+15. CWE-415/125/787 的 schema、裁决和检测语义不变；已有 compilation database 或显式
+    trusted build 配置下通过行为与输出回归；
 16. C/C++ 自动修复继续被所有入口拒绝；
 17. Proof Obligation Failure Distribution 可按 P1–P7 重算；
 18. 真实模型、Docker/Clang/ASan 或外部 benchmark 未实际运行时明确标记“未验证”。
+19. 外部/待审计仓库默认不执行 CMake 或其他 build scripts；旧 auto-CMake 开关不能单独授权；
+20. 所有内部 candidate lookup、缓存、Broker、Arbiter 和数据库约束使用
+    `(snapshot_hash, candidate_id)`；
+21. P5 分别报告 structural reachability 与 path feasibility，复杂谓词关系直接 UNKNOWN；
+22. 所有 EvidenceRecord 独立保存并校验 `EvidenceLevel` 与 `EvidencePolarity`。
 
 ## 19. 冻结决定
 
@@ -677,8 +874,12 @@ Clang/ASan 结果和外部 benchmark 证据必须分别标注，不能互相替�
 - 空结果永远不是 contradiction；
 - 复杂和跨过程语义 abstain；
 - 稳定 AST identity，不使用 allocation ordinal 作为正式身份；
+- `candidate_id` 不是全局运行身份，所有内部绑定使用复合 `CandidateIdentity`；
+- 不可信仓库默认禁止执行 build system，trusted generation 是管理员级 fail-closed 门禁；
+- P5 分离 structural reachability 与 path feasibility，第一阶段不引入 SAT/SMT；
+- D-level 与 support/refute polarity 使用现有 EvidenceRecord 正交字段；
 - D2/D3/D4 边界保持不变；
-- 非 UAF 流程保持不变。
+- 除共享 build-execution 安全门禁外，非 UAF 检测语义保持不变。
 
 若实现发现上述决定与 Clang 能力、现有 wire contract 或兼容性要求冲突，必须先更新本设计并
 重新获得用户确认，不能通过扩大启发式、放宽 coverage 或增加 Agent 投票静默绕过。

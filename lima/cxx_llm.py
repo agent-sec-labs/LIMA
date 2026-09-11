@@ -132,7 +132,7 @@ def _require_text(value: Any, field_name: str) -> str:
     return value
 
 
-def _unwrap_fenced_json(raw: str) -> str:
+def unwrap_fenced_json(raw: str) -> str:
     """Unwrap exactly one enclosing Markdown code fence, nothing else.
 
     Many OpenAI-compatible providers (and several Gemini/Claude tiers) wrap
@@ -141,6 +141,10 @@ def _unwrap_fenced_json(raw: str) -> str:
     one-block form is unwrapped before the strict parser runs. Anything else
     -- prose around JSON, several blocks, an unterminated fence -- is left
     untouched and therefore still rejected by ``parse_untrusted_json``.
+
+    Public since the UAF semantic branch (plan Task 8) reuses this provider
+    convention for its own strict reply contract without adopting the
+    tool/final union schema.
     """
     stripped = raw.strip()
     if not stripped.startswith("```"):
@@ -348,7 +352,7 @@ class CxxLLMClient:
         read_paths: frozenset[str] | None,
     ) -> AgentStep:
         try:
-            data = parse_untrusted_json(_unwrap_fenced_json(raw))
+            data = parse_untrusted_json(unwrap_fenced_json(raw))
         except ValueError as exc:
             raise _StepFormatError(str(exc) or "payload is not valid JSON", raw) from exc
         if type(data) is not dict:
@@ -407,4 +411,4 @@ class CxxLLMClient:
         raise _StepFormatError("action must be 'tool' or 'final'", raw)
 
 
-__all__ = ["AgentStep", "CxxLLMClient", "MAX_STEP_CANDIDATES"]
+__all__ = ["AgentStep", "CxxLLMClient", "MAX_STEP_CANDIDATES", "unwrap_fenced_json"]

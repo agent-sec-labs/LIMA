@@ -122,7 +122,7 @@ HAPPY_KINDS = {
 }
 
 
-def make_candidate(path, line, symbol, title, confidence=0.8, cwe="CWE-416"):
+def make_candidate(path, line, symbol, title, confidence=0.8, cwe="CWE-415"):
     return CxxAgentCandidate.from_untrusted_json({
         "cwe": cwe,
         "path": path,
@@ -150,7 +150,7 @@ def make_claim(
     path,
     line,
     symbol,
-    cwe="CWE-416",
+    cwe="CWE-415",
     mechanism="callback retains an alias after owner deletion",
     trigger=("register_callback", "Session::close", "on_event"),
     confidence=0.8,
@@ -197,7 +197,7 @@ def tool_run(run_id, tool="semgrep", status="completed"):
 
 def tool_finding(
     source,
-    cwe="CWE-416",
+    cwe="CWE-415",
     path="src/session.cpp",
     line=6,
     symbol="Session::read",
@@ -318,7 +318,7 @@ def make_evidence_record():
         line=6,
         snippet="TOOL-EVIDENCE-MARKER memcpy(buf, src, n)",
         rule_id="cxx.uaf",
-        cwe="CWE-416",
+        cwe="CWE-415",
         confidence=0.9,
         language="c++",
         symbol="Session::read",

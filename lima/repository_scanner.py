@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from typing import Callable, Iterable, Optional
 
 from .cxx_memory import (
+    MAX_UAF_TRANSLATION_UNITS,
     REQUESTED_LAYERS,
     CxxAnalyzerProtocolError,
     CxxAnalyzerUnavailable,
@@ -16,7 +17,7 @@ from .cxx_memory import (
     CxxMemoryAdapter,
 )
 from .adjudication import adjudicate_findings
-from .cxx_agent_models import SUPPORTED_CWES, to_agent_finding_payload
+from .cxx_agent_models import LEGACY_AGENT_CWES, to_agent_finding_payload
 from .cxx_agent_tools import CxxAgentBudget
 from .cxx_agents import (
     LLM_ROLES,
@@ -38,6 +39,14 @@ from .task_progress import (
     INVENTORY,
     SAST_ANALYSIS,
 )
+from .uaf_orchestrator import (
+    UAF_FINDING_STATES,
+    UAF_REVIEW_CWE,
+    UAF_RULE_ID,
+    UAF_SOURCE_NAME,
+    UAF_STATE_CONFIDENCE,
+    review_uaf,
+)
 from .workspace import CXX_SOURCE_EXTENSIONS, RepositoryWorkspace, WorkspaceInventory
 
 
@@ -51,10 +60,19 @@ VERIFICATION_RANK = {
     "candidate": 0,
     "syntax-verified": 1,
     "corroborated": 2,
+    "tool-corroborated": 2,
     "dataflow-verified": 3,
     "build-verified": 3,
+    # UAF v2 states (design section 5).  No legacy path emits them, so the
+    # ranks only decide UAF-involving merges: D2 static proof ranks with
+    # the other build/dataflow-verified tiers, D3 runtime with "confirmed".
+    "fact-verified": 3,
+    "runtime-confirmed": 4,
     "confirmed": 4,
 }
+
+# Diff-only/降级语义沿用 legacy：needs-human-review 与 semantic-supported
+# 不是 verified 状态（rank 0），永不越过上面的离散门禁。
 
 # 冻结决策（Epic #33）：任何 coverage-affecting skip ≥ 1 即标记
 # completed_with_warnings，不做可配置阈值。ignored-directory 与
@@ -158,6 +176,7 @@ class RepositoryScanner:
         cxx_agent_max_candidates: int = 100,
         should_cancel: Callable[[], bool] | None = None,
         cxx_agent_store: object = None,
+        cxx_uaf_llm_factory: Callable[[], dict] | None = None,
     ) -> None:
         self.reviewers = list(
             reviewers or [SecurityRuleReviewer()]
@@ -190,6 +209,7 @@ class RepositoryScanner:
         self.cxx_agent_budget_factory = cxx_agent_budget_factory
         self.should_cancel = should_cancel
         self.cxx_agent_store = cxx_agent_store
+        self.cxx_uaf_llm_factory = cxx_uaf_llm_factory
 
     @staticmethod
     def _semantic_key(finding: Finding) -> tuple[str, int, str]:
@@ -469,14 +489,198 @@ class RepositoryScanner:
                         candidate.candidate_id, []
                     ).append(outcome.role)
         # 降级 passthrough（cwe=unreviewed 的种子壳）不是 LLM 断言，永不转成
-        # Finding；只有受支持 CWE 的候选进入报告，验证状态保持终态。
+        # Finding；只有 legacy CWE 域（787/125/415）的候选进入报告，验证状态
+        # 保持终态。CWE-416 属于 UAF v2 管线：合同层（from_untrusted_json）
+        # 已物理拒绝 legacy 候选携带 CWE-416，此处投影层再做一道防御纵深。
         for candidate in review.candidates:
-            if candidate.cwe not in SUPPORTED_CWES:
+            if candidate.cwe not in LEGACY_AGENT_CWES:
                 continue
             findings.append(self._agent_finding(candidate, specialist_roles))
         return self._cxx_agent_collaboration(
             mode, status, probe, review, retrieval, budget,
         )
+
+    def _uaf_finding(self, item) -> Finding:
+        """Project one UAF v2 outcome candidate onto the Finding shape.
+
+        ``candidate_id`` 与 ``trigger_path`` 携带不可变身份信息；验证状态
+        即 Arbiter 终态；C++ Finding 永不自动修复（设计不变量 13）。
+        """
+
+        candidate = item.candidate
+        proof = item.proof
+        symbol = candidate.function_usr.rsplit("::", 1)[-1].rstrip("#") \
+            or candidate.function_usr
+        explanation = (
+            f"release of the object at {candidate.canonical_path}:"
+            f"{candidate.release_range[0]} precedes the use at "
+            f"{candidate.canonical_path}:{candidate.use_range[0]}"
+        )
+        if proof is not None:
+            explanation += f"; deterministic proof verdict {proof.verdict}"
+        finding = Finding(
+            rule_id=UAF_RULE_ID,
+            severity=Severity.HIGH,
+            title="Use-after-free: pointer dereferenced after release",
+            explanation=explanation,
+            path=candidate.canonical_path,
+            line=candidate.use_range[0],
+            evidence=(
+                f"allocation {candidate.allocation_fact_id} -> release "
+                f"{candidate.release_fact_id} at "
+                f"[{candidate.release_range[0]}, {candidate.release_range[1]}]"
+                f" -> use {candidate.use_fact_id} at "
+                f"[{candidate.use_range[0]}, {candidate.use_range[1]}]"
+            ),
+            fix="",
+            test="Exercise the witness path under AddressSanitizer.",
+            confidence=UAF_STATE_CONFIDENCE.get(item.state, 0.5),
+            cwe=UAF_REVIEW_CWE,
+            source=UAF_SOURCE_NAME,
+            evidence_kind="proof",
+            verification_state=item.state,
+            evidence_records=list(item.evidence),
+            language="c++",
+            symbol=symbol,
+            analysis_mode=UAF_SOURCE_NAME,
+            automatic_repair=False,
+            candidate_id=candidate.candidate_id,
+            trigger_path=[
+                f"{candidate.canonical_path}:{candidate.release_range[0]}",
+                f"{candidate.canonical_path}:{candidate.use_range[0]}",
+            ],
+        )
+        return finding
+
+    def _uaf_collaboration(self, mode: str, status: str, outcome) -> dict:
+        """The collaboration.uaf_v2 audit payload (design section 14 basis)."""
+
+        states: dict[str, int] = {}
+        for item in outcome.candidates:
+            states[item.state] = states.get(item.state, 0) + 1
+        broker_counts: dict[str, int] = {}
+        for item in outcome.candidates:
+            for verdict in item.broker_verdicts:
+                broker_counts[verdict.verdict] = (
+                    broker_counts.get(verdict.verdict, 0) + 1
+                )
+        stats = outcome.stats
+        audit = []
+        for item in outcome.candidates[:32]:
+            audit.append({
+                "candidate_id": item.candidate.candidate_id,
+                "path": item.candidate.canonical_path,
+                "state": item.state,
+                "proof": item.proof.verdict if item.proof is not None else "",
+                "rejected_reason": item.rejected_reason,
+            })
+        return {
+            "mode": mode,
+            "status": status,
+            "translation_units": list(outcome.translation_units),
+            "stats": {
+                "tu_count": stats.tu_count,
+                "candidate_count": stats.candidate_count,
+                "pass": stats.pass_count,
+                "refuted": stats.refuted_count,
+                "unknown": stats.unknown_count,
+                "llm_invoked": stats.llm_invoked_count,
+                "llm_calls": stats.llm_calls,
+            },
+            "states": states,
+            "broker": broker_counts,
+            "diagnostics": list(outcome.diagnostics),
+            "candidates": audit,
+        }
+
+    def _run_uaf_v2_branch(
+        self,
+        workspace: RepositoryWorkspace,
+        inventory: WorkspaceInventory,
+        findings: list[Finding],
+        tool_analysis: CxxAnalysisResult | None,
+        cxx_finding_index: dict[tuple[str, str, str, int], Finding],
+        repository_key: str,
+        cancel_probe: Callable[[], bool] | None,
+    ) -> dict:
+        """Run the deterministic UAF v2 review for the CWE-416 domain.
+
+        与 legacy agent 分支并存（设计 12.1 路由）：legacy 执行边界已排除
+        CWE-416，本分支以确定性 Fact→Candidate→Proof→Broker→Arbiter 链
+        处理 CWE-416。analyzer client 缺失（cxx_memory off / 无 sidecar）
+        时没有事实就没有证明：分支跳过并如实记录。
+        """
+
+        mode = self.cxx_agent_mode
+        if mode == "off":
+            return {"mode": "off", "status": "disabled"}
+        adapter = self.cxx_memory_adapter
+        if not callable(getattr(adapter, "analyze_uaf_facts", None)):
+            return {"mode": mode, "status": "analyzer-not-configured"}
+        translation_units = tuple(sorted({
+            PurePosixPath(item.path).as_posix()
+            for item in inventory.files
+            if PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
+        }))[:MAX_UAF_TRANSLATION_UNITS]
+        if not translation_units:
+            return {"mode": mode, "status": "no-cxx-sources"}
+        budget = (
+            self.cxx_agent_budget_factory()
+            if self.cxx_agent_budget_factory is not None
+            else CxxAgentBudget()
+        )
+        llm_config = (
+            dict(self.cxx_uaf_llm_factory())
+            if self.cxx_uaf_llm_factory is not None
+            else {}
+        )
+        try:
+            outcome = review_uaf(
+                adapter,
+                workspace,
+                repository_key=repository_key,
+                snapshot_hash=inventory.fingerprint(),
+                translation_units=translation_units,
+                mode=mode,
+                budget=budget,
+                tool_analysis=tool_analysis,
+                llm_config=llm_config,
+                should_cancel=cancel_probe,
+            )
+        except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
+            if mode == "required":
+                raise RuntimeError(
+                    f"required UAF v2 review failed on the C/C++ analyzer: {exc}"
+                ) from exc
+            metrics.inc("repository_scan_cxx_uaf_unavailable_total")
+            return {
+                "mode": mode,
+                "status": "analyzer-unavailable",
+                "diagnostics": [str(exc)[:500]],
+            }
+        except (RuntimeError, ValueError) as exc:
+            if mode == "required":
+                raise RuntimeError(
+                    f"required UAF v2 review failed: {exc}"
+                ) from exc
+            metrics.inc("repository_scan_cxx_uaf_failed_total")
+            return {
+                "mode": mode,
+                "status": "review-failed",
+                "diagnostics": [str(exc)[:500]],
+            }
+        # rejected 保留在 outcome 审计记录里，不投影为 Finding；abstain
+        # 不作声明；needs-human-review/semantic-supported 等状态按设计第 5
+        # 节输出。合并键是不可变 finding 身份 (cwe, path, symbol, line)。
+        for item in outcome.candidates:
+            if item.state not in UAF_FINDING_STATES:
+                continue
+            candidate_finding = self._uaf_finding(item)
+            candidate_finding.automatic_repair = False
+            self._merge_cxx_finding(
+                findings, cxx_finding_index, candidate_finding
+            )
+        return self._uaf_collaboration(mode, "completed", outcome)
 
     def scan(
         self,
@@ -647,13 +851,26 @@ class RepositoryScanner:
 
         # LLM 分支在既有管线完成后、报告组装前运行：agent finding 与工具
         # finding 融入同一份报告，audit 信息保存在 collaboration.cxx_agent。
+        cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
         cxx_agent_summary = self._run_cxx_agent_branch(
             workspace,
             inventory,
             findings,
             cxx_result,
             task_id,
-            should_cancel if should_cancel is not None else self.should_cancel,
+            cancel_probe,
+        )
+        # UAF v2 分支与 legacy agent 分支并存（设计 12.1 路由）：legacy
+        # 执行边界排除 CWE-416，CWE-416 域由确定性 Proof/Arbiter 链处理，
+        # 按 (cwe, path, symbol, line) 不可变身份合并进同一份报告。
+        uaf_summary = self._run_uaf_v2_branch(
+            workspace,
+            inventory,
+            findings,
+            cxx_result,
+            cxx_finding_index,
+            repository_key,
+            cancel_probe,
         )
 
         findings.sort(
@@ -715,6 +932,7 @@ class RepositoryScanner:
                 "sast": sast_summary,
                 "cxx_memory": cxx_summary,
                 "cxx_agent": cxx_agent_summary,
+                "uaf_v2": uaf_summary,
                 "skipped": dict(sorted(inventory.skipped.items())),
             },
             adjudication=adjudicate_findings(findings),

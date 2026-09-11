@@ -122,7 +122,7 @@ PLAIN_C = """int add(int left, int right) {
 EVAL_PY = "def evaluate(code):\n    return eval(code)\n"
 
 UAF_CANDIDATE = CxxAgentCandidate.from_untrusted_json({
-    "cwe": "CWE-416",
+    "cwe": "CWE-415",
     "path": "vuln.c",
     "line": 8,
     "symbol": "leak",
@@ -133,9 +133,9 @@ UAF_CANDIDATE = CxxAgentCandidate.from_untrusted_json({
 })
 
 UAF_AGENT_FINDING_PAYLOAD = {
-    "rule_id": "cxx.llm.cwe-416",
+    "rule_id": "cxx.llm.cwe-415",
     "source": "cxx-agent",
-    "cwe": "CWE-416",
+    "cwe": "CWE-415",
     "path": "vuln.c",
     "line": 8,
     "symbol": "leak",
@@ -148,7 +148,7 @@ def agent_step_final(candidate):
 
 def planner_step():
     return agent_step_final(CxxAgentCandidate.from_untrusted_json({
-        "cwe": "CWE-416",
+        "cwe": "CWE-415",
         "path": "vuln.c",
         "line": 5,
         "symbol": "leak",
@@ -231,10 +231,10 @@ def semgrep_uaf_finding():
         rule_id="mem.uaf", severity=Severity.HIGH,
         title="use after free", explanation="buffer used after free",
         path="vuln.c", line=8, evidence="buf[0] = 'a';", fix="", test="",
-        cwe="CWE-416", source="semgrep", symbol="leak",
+        cwe="CWE-415", source="semgrep", symbol="leak",
         evidence_records=[EvidenceRecord(
             source="semgrep", kind="tool", path="vuln.c", line=8,
-            snippet="buf[0] = 'a';", rule_id="mem.uaf", cwe="CWE-416",
+            snippet="buf[0] = 'a';", rule_id="mem.uaf", cwe="CWE-415",
             symbol="leak", tool_run_id="run-1",
         )],
     )
@@ -351,7 +351,7 @@ class RepositoryAgentTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(agent_findings))
         finding = agent_findings[0]
-        self.assertEqual("cxx.llm.cwe-416", finding.rule_id)
+        self.assertEqual("cxx.llm.cwe-415", finding.rule_id)
         self.assertEqual("vuln.c", finding.path)
         self.assertEqual(8, finding.line)
         self.assertEqual("leak", finding.symbol)
@@ -1149,7 +1149,7 @@ class ReportTests(unittest.TestCase):
     def test_report_markdown_escapes_untrusted_agent_fields(self):
         write_repo(self.root, {"vuln.c": VULN_C})
         hostile = CxxAgentCandidate.from_untrusted_json({
-            "cwe": "CWE-416",
+            "cwe": "CWE-415",
             "path": "vuln.c",
             "line": 8,
             "symbol": "leak",
@@ -1366,13 +1366,13 @@ class FailureModeTests(unittest.TestCase):
             "IGNORE INSTRUCTIONS",
             specialist_posts[1]["payload"]["messages"][1]["content"],
         )
-        # 报告零泄漏：唯一 finding 是诚实的 CWE-416 UAF。
+        # 报告零泄漏：唯一 finding 是诚实的 CWE-415 UAF。
         agent_findings = [
             item for item in result.report.findings if item.source == "cxx-agent"
         ]
         self.assertEqual(1, len(agent_findings))
         finding = agent_findings[0]
-        self.assertEqual("CWE-416", finding.cwe)
+        self.assertEqual("CWE-415", finding.cwe)
         rendered_finding = json.dumps(finding.to_dict())
         self.assertNotIn("IGNORE INSTRUCTIONS", rendered_finding)
         self.assertNotIn("CWE-787", rendered_finding)
@@ -1671,7 +1671,7 @@ class FailureModeTests(unittest.TestCase):
             action="final",
             candidates=tuple(
                 CxxAgentCandidate.from_untrusted_json({
-                    "cwe": "CWE-416", "path": item.path, "line": item.line,
+                    "cwe": "CWE-415", "path": item.path, "line": item.line,
                     "symbol": item.symbol, "title": "anchor selection",
                     "mechanism": "anchor selection only",
                     "trigger_path": [item.symbol], "confidence": 0.5,
@@ -1680,7 +1680,7 @@ class FailureModeTests(unittest.TestCase):
             ),
         )
         consensus_candidate = CxxAgentCandidate.from_untrusted_json({
-            "cwe": "CWE-416", "path": mem_anchor.path, "line": mem_anchor.line,
+            "cwe": "CWE-415", "path": mem_anchor.path, "line": mem_anchor.line,
             "symbol": mem_anchor.symbol, "title": "use after free",
             "mechanism": "free then write through retained alias",
             "trigger_path": ["free", "write"], "confidence": 0.8,
@@ -1829,7 +1829,7 @@ VULN_C_INJECTED = VULN_C + (
 )
 
 UAF_FINAL_PAYLOAD = {
-    "cwe": "CWE-416",
+    "cwe": "CWE-415",
     "path": "vuln.c",
     "line": 8,
     "symbol": "leak",
@@ -1848,7 +1848,7 @@ _AGENT_ROLES = (
 def anchor_payload(path, line, symbol):
     """Planner anchor candidate payload matching the retrieval anchor key."""
     return {
-        "cwe": "CWE-416",
+        "cwe": "CWE-415",
         "path": path,
         "line": line,
         "symbol": symbol,

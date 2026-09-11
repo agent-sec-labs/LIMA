@@ -12,6 +12,11 @@ only by the UAF v2 pipeline (``lima.uaf_models`` and downstream), never by
 this legacy collaboration; UAF v2 in turn never produces
 ``agent-corroborated``.  ``fact-verified`` is a verified state;
 ``semantic-supported`` is not.
+
+The legacy candidate contract is likewise closed over
+:data:`LEGACY_AGENT_CWES` (CWE-787/125/415): the CWE-416 domain is owned by
+the UAF v2 pipeline, and a legacy role reply proposing CWE-416 is rejected
+at this contract boundary (design section 12.1, source-level exclusion).
 """
 
 from __future__ import annotations
@@ -59,6 +64,15 @@ AGENT_CONSENSUS_KEYS: Final = (
     "trigger-overlap",
 )
 SUPPORTED_CWES: Final = frozenset({"CWE-787", "CWE-125", "CWE-416", "CWE-415"})
+# Design section 12.1 (UAF v2 routing): the legacy agent pipeline executes
+# with CWE-416 excluded -- the CWE-416 domain belongs to the deterministic
+# UAF v2 pipeline (lima.uaf_models and downstream).  The exclusion is a
+# source-level contract closure, not a prompt instruction: any legacy role
+# reply proposing a CWE-416 candidate is a contract violation and is
+# rejected by :meth:`CxxAgentCandidate.from_untrusted_json`.  The full
+# supported domain stays available to non-legacy consumers (UAF v2,
+# evaluators).
+LEGACY_AGENT_CWES: Final = frozenset({"CWE-787", "CWE-125", "CWE-415"})
 AGENT_ROLES: Final = frozenset(
     {
         "planner",
@@ -239,8 +253,8 @@ class CxxAgentCandidate:
             ),
         )
         cwe = fields["cwe"]
-        if cwe not in SUPPORTED_CWES:
-            raise ValueError("candidate CWE is unsupported")
+        if cwe not in LEGACY_AGENT_CWES:
+            raise ValueError("candidate CWE is unsupported for the legacy pipeline")
         raw_steps = fields["trigger_path"]
         if (
             type(raw_steps) is not list
@@ -570,6 +584,7 @@ __all__: list[str] = [
     "CxxAgentCandidate",
     "CxxAgentCoverage",
     "CxxAgentDecision",
+    "LEGACY_AGENT_CWES",
     "SUPPORTED_CWES",
     "VERIFIED_STATES",
     "agent_consensus_state",

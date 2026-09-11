@@ -20,7 +20,7 @@ class CxxAgentCandidateContractTests(unittest.TestCase):
     def test_valid_candidate_is_immutable_and_derives_identity(self):
         candidate = CxxAgentCandidate.from_untrusted_json(
             {
-                "cwe": "CWE-416",
+                "cwe": "CWE-415",
                 "path": "src/session.cpp",
                 "line": 128,
                 "symbol": "Session::close",
@@ -30,7 +30,7 @@ class CxxAgentCandidateContractTests(unittest.TestCase):
                 "confidence": 0.78,
             }
         )
-        self.assertEqual("CWE-416", candidate.cwe)
+        self.assertEqual("CWE-415", candidate.cwe)
         self.assertEqual("llm-candidate", candidate.verification_state)
         self.assertTrue(candidate.candidate_id.startswith("sha256-"))
         self.assertEqual(64, len(candidate.candidate_id) - len("sha256-"))
@@ -307,7 +307,7 @@ class FindingPayloadTests(unittest.TestCase):
     def test_payload_constructs_a_finding_with_agent_fields(self):
         candidate = CxxAgentCandidate.from_untrusted_json(
             {
-                "cwe": "CWE-416",
+                "cwe": "CWE-415",
                 "path": "src/session.cpp",
                 "line": 128,
                 "symbol": "Session::close",
@@ -334,7 +334,7 @@ class StateDomainTests(unittest.TestCase):
     def _candidate_with_state(state: str) -> CxxAgentCandidate:
         candidate = CxxAgentCandidate.from_untrusted_json(
             {
-                "cwe": "CWE-416",
+                "cwe": "CWE-415",
                 "path": "src/session.cpp",
                 "line": 128,
                 "symbol": "Session::close",

@@ -11,7 +11,7 @@ from .agents import MultiAgentCoordinator
 from .auth import AuthManager
 from .config import Settings
 from .context_manager import ContextManager
-from .cxx_agent_models import SUPPORTED_CWES as CXX_AGENT_SUPPORTED_CWES
+from .cxx_agent_models import LEGACY_AGENT_CWES as CXX_AGENT_LEGACY_CWES
 from .cxx_agent_tools import CxxAgentBudget
 from .cxx_agents import (
     DIAGNOSTIC_CANCELLED,
@@ -396,6 +396,19 @@ class ReviewService:
             if settings.cxx_agent_mode != "off"
             else None
         )
+        # UAF v2 语义分支装配：与 legacy client 工厂同源（同一 resolved
+        # provider、同一 effective_cxx_agent_model 覆盖），单次调用方同样
+        # 不能覆盖模型或端点。resolved_llm() 为空时不提供——orchestrator
+        # 按 §12.2 模式矩阵处理（auto 降级 / required 失败）。
+        cxx_uaf_llm_factory = None
+
+        def _cxx_uaf_llm_factory():
+            resolved = dict(self.llm_config)
+            resolved["model"] = settings.effective_cxx_agent_model()
+            return resolved
+
+        if settings.cxx_agent_mode != "off" and self.llm_config:
+            cxx_uaf_llm_factory = _cxx_uaf_llm_factory
         # 报告身份（设计第 12 节）：provider/model 只在真的装配了 provider
         # 时非空；与 client 工厂同源，未配置即留空，绝不宣称。
         self.cxx_agent_provider = (
@@ -422,6 +435,7 @@ class ReviewService:
             cxx_agent_budget_factory=cxx_agent_budget_factory,
             cxx_agent_max_candidates=settings.cxx_agent_max_candidates,
             cxx_agent_store=self.store,
+            cxx_uaf_llm_factory=cxx_uaf_llm_factory,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
         self.experiment_runner = ExperimentRunner(
@@ -1666,12 +1680,13 @@ class ReviewService:
                     specialist_roles.setdefault(candidate.candidate_id, []).append(
                         outcome.role
                     )
-        # 降级壳（cwe=unreviewed）永不转 Finding；C++ Finding 绑定触发行与
-        # trigger_path（根因位置），gate 规则与仓库扫描完全一致。
+        # 降级壳（cwe=unreviewed）永不转 Finding；legacy 投影域是
+        # LEGACY_AGENT_CWES（CWE-416 归 UAF v2 管线）；C++ Finding 绑定
+        # 触发行与 trigger_path（根因位置），gate 规则与仓库扫描完全一致。
         findings = [
             scanner._agent_finding(candidate, specialist_roles)
             for candidate in review.candidates
-            if candidate.cwe in CXX_AGENT_SUPPORTED_CWES
+            if candidate.cwe in CXX_AGENT_LEGACY_CWES
         ]
         summary = scanner._cxx_agent_collaboration(
             mode, status, probe, review, retrieval, budget,

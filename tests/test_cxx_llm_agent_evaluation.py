@@ -323,7 +323,7 @@ class UnlabeledIsolationTests(unittest.TestCase):
         from lima.cxx_context import CxxContextIndex
 
         document = json.loads(CASES_PATH.read_text(encoding="utf-8"))
-        case = next(item for item in document["cases"] if item["cwe"] == "CWE-416")
+        case = next(item for item in document["cases"] if item["cwe"] == "CWE-415")
 
         built = []
 
@@ -643,7 +643,7 @@ class EndToEndTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_evaluation_module()
         cls.document = json.loads(CASES_PATH.read_text(encoding="utf-8"))
-        cls.case = next(item for item in cls.document["cases"] if item["cwe"] == "CWE-416")
+        cls.case = next(item for item in cls.document["cases"] if item["cwe"] == "CWE-415")
 
     def test_fake_llm_end_to_end_reports_the_full_metric_set(self):
         module = self.module

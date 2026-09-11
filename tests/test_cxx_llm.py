@@ -40,7 +40,7 @@ RESOLVED = {
 }
 
 VALID_CANDIDATE = {
-    "cwe": "CWE-416",
+    "cwe": "CWE-415",
     "path": "src/session.cpp",
     "line": 128,
     "symbol": "Session::close",
@@ -215,7 +215,7 @@ class CxxLLMClientTests(unittest.TestCase):
         self.assertEqual(1, len(step.candidates))
         candidate = step.candidates[0]
         self.assertIsInstance(candidate, CxxAgentCandidate)
-        self.assertEqual("CWE-416", candidate.cwe)
+        self.assertEqual("CWE-415", candidate.cwe)
         self.assertEqual("src/session.cpp", candidate.path)
         self.assertEqual(128, candidate.line)
         self.assertTrue(candidate.candidate_id.startswith("sha256-"))

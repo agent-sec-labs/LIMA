@@ -12,6 +12,10 @@ DEFAULT_EXTENSIONS = frozenset(
     {
         ".ac", ".am", ".c", ".cc", ".cmake", ".conf", ".cpp", ".css",
         ".cxx", ".go", ".h", ".hh", ".hpp", ".html", ".hxx", ".in",
+        # C++ inline-implementation headers; must mirror the sidecar
+        # inventory list so both fingerprints agree (real ResInsight
+        # finding: a missing cvfObject.inl broke every prepared TU)
+        ".inl", ".ipp", ".tpp",
         ".java", ".js", ".json", ".jsx", ".list", ".m4", ".php", ".po",
         ".pot", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
         ".yaml", ".yml",

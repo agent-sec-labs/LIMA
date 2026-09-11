@@ -258,6 +258,12 @@ class AnalyzerBoundaryTests(unittest.TestCase):
             import_root, repository, work_root = self._repository(temporary)
             files = {
                 "src/main.cpp": "int main() { return 0; }\n",
+                # Inline-implementation headers must be inventoried and
+                # copied into isolated snapshots (real ResInsight finding:
+                # a missing cvfObject.inl broke every prepared TU).
+                "src/detail.inl": "inline int f() { return 1; }\n",
+                "src/detail.ipp": "inline int g() { return 2; }\n",
+                "src/detail.tpp": "template <class T> int h() { return 3; }\n",
                 "CMakeLists.txt": "add_executable(app src/main.cpp)\n",
                 "cmake/toolchain.cmake": "set(CMAKE_CXX_STANDARD 17)\n",
                 "configure.ac": "AC_INIT([app], [1])\n",
@@ -320,6 +326,9 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                     "po/messages.pot",
                     "resources/app.css",
                     "resources/tpls.html",
+                    "src/detail.inl",
+                    "src/detail.ipp",
+                    "src/detail.tpp",
                     "src/main.cpp",
                 ],
                 sorted(snapshot.files),

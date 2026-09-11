@@ -17,6 +17,10 @@ DEFAULT_EXTENSIONS = frozenset(
     {
         ".ac", ".am", ".c", ".cc", ".cmake", ".conf", ".cpp", ".css",
         ".cxx", ".go", ".h", ".hh", ".hpp", ".html", ".hxx", ".in",
+        # C++ inline-implementation headers (cvf, boost and many others
+        # #include these directly; dropping them breaks every isolated
+        # snapshot of such codebases -- found on the real ResInsight run)
+        ".inl", ".ipp", ".tpp",
         ".java", ".js", ".json", ".jsx", ".list", ".m4", ".php", ".po",
         ".pot", ".py", ".rb", ".rs", ".sh", ".toml", ".ts", ".tsx",
         ".yaml", ".yml",

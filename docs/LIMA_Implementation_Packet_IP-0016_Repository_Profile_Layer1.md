@@ -1,7 +1,10 @@
 # LIMA Implementation Packet IP-0016：Repository Profile Layer 1（deterministic inventory adapter + typed coverage gap + #58 RepositoryProfile 契约编码）
 
-> Packet 版本：`IP-0016-PACKET/v1`
+> Packet 版本：`IP-0016-PACKET/v1.1`
 > 状态：`DESIGN-FROZEN / PENDING-MERGE`（Packet docs PR 合并进 `main` 后，由 Coordinator 标记 `PACKET-MERGED`，方可进入阶段二测试冻结）
+> 变更记录：
+>   v1.1 (2026-09-12): DR-IP-0016-01 勘误——policy_digest/toolchain_digest 空串默认改为 sentinel digest，空串入参改为非法
+>   v1 (2026-09-12): 阶段一定稿（PKT-IP-0016-D1）
 > 制作：LIMA Packet & Verification Agent（阶段一，Assignment `IP-0016-PV-P1/v1`，任务标识 `PKT-IP-0016-D1`，2026-09-12）
 > 阶段边界：本 Packet 只交付设计。验收测试文件、有效 RED、Frozen Test Commit 属阶段二，在 Packet 进 `main` 后另行执行（见 §14 阶段二执行计划）。
 
@@ -127,10 +130,10 @@ lima/audit/inventory.py     ← 全部实现，仅依赖 stdlib + lima.contracts
 | `ProfileBudgets` | frozen dataclass | `manifest_max_bytes: int = 262_144`、`max_manifest_files: int = 64`；`__post_init__` 校验正值，非法抛 `ValueError` |
 | `ProfileInventoryOptions` | frozen dataclass | `budgets: ProfileBudgets = ProfileBudgets()`、`schema_version: SchemaVersion = SchemaVersion(4, 0)` |
 | `ProfileBuildResult` | frozen dataclass | `profile: RepositoryProfile`、`envelope: ArtifactEnvelope`、`provenance_anchor_ids: tuple[str, ...]` |
-| `build_repository_profile` | `def build_repository_profile(workspace: RepositoryWorkspace, *, tenant_id: str, task_id: str, workflow_id: str, stage_attempt_id: str, artifact_id: str, repository_snapshot_digest: str, producer: str = "lima.audit.inventory", policy_digest: str = "", toolchain_digest: str = "", options: ProfileInventoryOptions \| None = None) -> ProfileBuildResult` | 唯一入口；语义见 D3–D8；任何入参类型不合法抛 `ContractError`/`ValueError`，绝不静默纠正 |
+| `build_repository_profile` | `def build_repository_profile(workspace: RepositoryWorkspace, *, tenant_id: str, task_id: str, workflow_id: str, stage_attempt_id: str, artifact_id: str, repository_snapshot_digest: str, producer: str = "lima.audit.inventory", policy_digest: str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", toolchain_digest: str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", options: ProfileInventoryOptions \| None = None) -> ProfileBuildResult` | 唯一入口；语义见 D3–D8；任何入参类型不合法抛 `ContractError`/`ValueError`，绝不静默纠正 |
 | `build_profile_envelope` | 内部函数（非 re-export，测试经 `build_repository_profile` 观察） | 组装 envelope 并过 `encode_profile_envelope` 全部校验 |
 
-不新增其他公共 symbol；内部辅助函数前缀 `_`。`policy_digest`/`toolchain_digest` 允许空串（`ArtifactEnvelope` 校验语义允许，阶段二以契约测试固化空串路径）。
+不新增其他公共 symbol；内部辅助函数前缀 `_`。`policy_digest`/`toolchain_digest` 必须为 64-hex digest；缺省时取 sentinel `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`（即 sha256(b"")），其语义为『无策略/工具链摘要』。传空串属非法入参，抛 `ContractError`，实现不做任何替换或纠正。阶段二以契约测试固化：(a) 省略参数 → envelope 字段值等于 sentinel；(b) 显式传空串 → `ContractError(INVALID_FIELD_VALUE)`。
 
 ## 7. 决策 D3：证据与 Provenance 编码（冻结单解）
 
@@ -149,7 +152,7 @@ lima/audit/inventory.py     ← 全部实现，仅依赖 stdlib + lima.contracts
 - **languages**：按 inventory 文件扩展聚合（`.py`→`Python`，`.js/.jsx/.ts/.tsx`→`JavaScript`/`TypeScript`，`.go`→`Go`，`.rs`→`Rust`，`.java`→`Java`，其他扩展不计）；manifest 声明的语言（pyproject `requires-python`、go.mod、Cargo.toml）以 DECLARED 加入。名称须过 `_TECHNOLOGY_NAME_PATTERN`。
 - **frameworks**：仅从 manifest/源文件 import 行的确定性子串线索推断（INFERRED）：`fastapi`、`flask`、`django`、`pytest`（pytest 记 framework）、`react`（package.json dependencies）；词表冻结如上，命中才输出，不做任何网络探测（V5-FR-04）。
 - **package_managers / build_systems**：`requirements*.txt`→`pip`；`pyproject.toml` 含 `[build-system]`→`build_systems` 增 `setuptools`/`hatchling`/`poetry-core`（按 `requires` 首个匹配，无匹配则不增）；`package.json`→`npm`；`go.mod`→`go-modules`；`Cargo.toml`→`cargo`。
-- **repository_kinds**（可多值，按 wire 值排序）：`pyproject/setup` 含 `project.scripts` 或根目录 `cli.py`/`__main__.py` → `cli`；存在 `src/`+`pyproject` 且无 scripts → `library`；有 `app/`、`main.py`、wsgi/asgi 线索 → `application`；无任何代码语言但 `.md/.rst` 占多数 → `docs_content`；一级子目录 ≥2 个各自含独立 manifest → `monorepo`；以上全不命中 → `unknown`（且仅此一种情况允许 `unknown`，遵守"UNKNOWN 不得与其他 kind 并存"）。
+- **repository_kinds**（可多值，按 wire 值排序）：`pyproject/setup` 含 `project.scripts` 或根目录 `cli.py`/`__main__.py` → `cli`；存在 `src/`+`pyproject` 且无 scripts → `library`；有 `app/`、`main.py`、wsgi/asgi 线索 → `application`；无任何代码语言但 `.md/.rst` 占多数 → `docs_content`；一级子目录 ≥2 个各自含独立 manifest → `monorepo`；以上全不命中 → `unknown`（且仅此一种情况允许 `unknown`，遵守"UNKNOWN 不得与其他 kind 并存"）。DR-IP-0016-01 附带裁定：docs_content 路径的验收测试允许以自定义 `extensions`（含 `.md`/`.rst`）构造 `RepositoryWorkspace`，属合法测试 arrange，不构成对 DEFAULT_EXTENSIONS 的修改。
 - **entrypoints**：manifest `project.scripts` 每个入口一条（path 为 manifest 所在 package 的 `__init__.py` 或最接近候选，symbol=入口名）；无 manifest 时根 `main.py`/`cli.py`/`__main__.py` 各一条（symbol=None）。
 - **execution_capability**（六布尔，全部由确定性规则给出，无默认猜值）：`buildable`=存在构建 manifest（pyproject[build-system]/setup.py/go.mod/Cargo/package.json）；`testable`=存在 tests/ 目录或 pytest 配置或 test-heavy kind；`requires_network`/`requires_services`/`requires_gpu`/`requires_external_credentials` 恒 `False`（清单层看不到运行时证据，宁可保守记 False 并由 gap 声明局限——False 表示"未发现证据要求"，不是安全结论）。
 - **support_level**：`languages` 含 Python 且 manifest 可读 → `supported`；Python 但 manifest 缺失/损坏 → `partial`（+对应 gap）；无 Python 但有其他受支持语言线索 → `partial` + `UNSUPPORTED_LANGUAGE` gap（本平台当前 Golden Path 仅 Python）；完全无语言 → `unsupported` + `NO_LANGUAGES_DETECTED` gap。注意：`unsupported` 是支持承诺声明，不是"安全停止"行为（后者 V5-FR-03 归后续 IP）。

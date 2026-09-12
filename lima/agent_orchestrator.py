@@ -36,9 +36,13 @@ Frozen semantics implemented here:
   experiments share one ``CxxAgentBudget``; exhaustion is a recorded
   degradation under ``auto`` and a task failure under ``required``.
 - Revisions are bounded: at most ``dialogue_rounds`` Critic-guided
-  re-experiments per target after the initial attempt; ``parallelism`` is
-  accepted for interface stability but the first version processes targets
-  sequentially (deterministic Scout order).
+  re-experiments per target after the initial attempt.  ``parallelism``
+  bounds how many independent targets run concurrently; results are always
+  aggregated in the deterministic Scout order (parallelism changes the wall
+  clock, never the output order), and ``parallelism=1`` keeps the strictly
+  sequential loop.  An optional :class:`~lima.agent_scale.ResultCache`
+  replays per-target outcomes (keyed by snapshot + full target + mode +
+  rounds) without re-running their LLM rounds or sandbox experiments.
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Final
 
+from .agent_scale import ResultCache, map_bounded
 from .agent_scout import ScoutLead, ScoutReport, ScoutTarget, review_leads
 from .contracts.evidence import EvidenceLevel, EvidencePolarity
 from .cxx_agent_models import parse_untrusted_json
@@ -66,7 +71,7 @@ from .reviewer import (
     LLMResponseTooLarge,
     LLMTransportError,
 )
-from .uaf_broker import broker_verdict
+from .uaf_broker import BrokerVerdict, broker_verdict
 from .uaf_candidates import UafCandidate, generate_candidates
 from .uaf_facts import UafFactBundle
 from .uaf_llm_branch import (
@@ -524,6 +529,97 @@ def platform_rule_id(cwe: str) -> str:
     return f"cxx.platform.{cwe.lower()}"
 
 
+# ------------------------------------------------------------------ cache
+#
+# Per-target outcome cache (plan Task 9): the payload is the full
+# PlatformFinding as a JSON-safe dict; the key folds in the snapshot hash,
+# every target field, both mode dimensions and the revision bound, so a hit
+# replays exactly this target journey for exactly this snapshot.
+
+_CACHE_PAYLOAD_VERSION: Final = "platform-target-outcome-v1"
+
+
+def _target_cache_fingerprints(
+    target: ScoutTarget,
+    *,
+    repository_key: str,
+    snapshot_hash: str,
+    mode: str,
+    source_mode: str,
+    dialogue_rounds: int,
+) -> tuple[str, ...]:
+    """The full semantic input set of one target outcome (cache key)."""
+
+    return (
+        f"payload-version={_CACHE_PAYLOAD_VERSION}",
+        f"repository-key={repository_key}",
+        f"snapshot-hash={snapshot_hash}",
+        f"mode={mode}",
+        f"source-mode={source_mode}",
+        f"dialogue-rounds={dialogue_rounds}",
+        f"lead-id={target.lead_id}",
+        f"path={target.path}",
+        f"line={target.line}",
+        f"reason={target.reason}",
+        f"confidence={target.confidence}",
+    )
+
+
+def _identity_from_payload(
+    value: Mapping[str, Any] | None,
+) -> CandidateIdentity | None:
+    if value is None:
+        return None
+    return CandidateIdentity(value["snapshot_hash"], value["candidate_id"])
+
+
+def _broker_verdict_from_payload(value: Mapping[str, Any]) -> BrokerVerdict:
+    level = value["evidence_level"]
+    polarity = value["evidence_polarity"]
+    return BrokerVerdict(
+        identity=_identity_from_payload(value["identity"]),
+        producer=value["producer"],
+        verdict=value["verdict"],
+        evidence_level=EvidenceLevel(level) if level is not None else None,
+        evidence_polarity=(
+            EvidencePolarity(polarity) if polarity is not None else None
+        ),
+        gap=value["gap"],
+    )
+
+
+def _finding_payload(finding: PlatformFinding) -> dict:
+    """JSON-safe payload of one per-target outcome."""
+
+    return asdict(finding)
+
+
+def _finding_from_payload(data: Mapping[str, Any]) -> PlatformFinding:
+    """Rebuild one cached :class:`PlatformFinding` (dataclass-equal)."""
+
+    return PlatformFinding(
+        target_id=data["target_id"],
+        path=data["path"],
+        line=data["line"],
+        symbol=data["symbol"],
+        cwe=data["cwe"],
+        state=data["state"],
+        hypothesis_reason=data["hypothesis_reason"],
+        poc_driver_code=data["poc_driver_code"],
+        experiment_log=tuple(dict(entry) for entry in data["experiment_log"]),
+        identity=_identity_from_payload(data["identity"]),
+        evidence_records=tuple(
+            EvidenceRecord(**entry) for entry in data["evidence_records"]
+        ),
+        broker_verdicts=tuple(
+            _broker_verdict_from_payload(entry)
+            for entry in data["broker_verdicts"]
+        ),
+        proof_verdict=data["proof_verdict"],
+        rejected_reason=data["rejected_reason"],
+    )
+
+
 # ----------------------------------------------------------------- helpers
 
 
@@ -961,6 +1057,7 @@ def run_platform_review(
     source_mode: str = MODE_REPOSITORY,
     should_cancel: Any = None,
     tool_analysis: Any = None,
+    cache: ResultCache | None = None,
 ) -> PlatformReviewOutcome:
     """Run one agent-first review over the leads (or facts-derived leads).
 
@@ -969,6 +1066,14 @@ def run_platform_review(
     (experiments unavailable: the loop degrades to the semantic track).
     Transport and protocol errors of the strict facts client propagate to
     the caller.
+
+    ``parallelism`` bounds how many independent targets are processed
+    concurrently; outcomes are always merged in the deterministic Scout
+    order, so the result equals the sequential run.  ``cache`` (optional
+    :class:`~lima.agent_scale.ResultCache`) replays per-target outcomes on
+    a key covering the snapshot hash, the full target, both mode dimensions
+    and ``dialogue_rounds``: a hit skips the target's LLM rounds and sandbox
+    experiments entirely, and its cached evidence travels with the finding.
     """
 
     if not isinstance(workspace, RepositoryWorkspace):
@@ -1014,6 +1119,8 @@ def run_platform_review(
         raise ValueError(
             "repro_workbench must expose run_experiment(...) or be None"
         )
+    if cache is not None and not isinstance(cache, ResultCache):
+        raise ValueError("cache must be a ResultCache or None")
     units = tuple(translation_units)
     if any(not isinstance(unit, str) or not unit for unit in units):
         raise ValueError("translation_units must be non-empty path strings")
@@ -1148,26 +1255,53 @@ def run_platform_review(
             rejected_reason=reason,
         )
 
-    stopped = False
-    for target in report.targets:
-        if stopped:
-            targets_out.append(_abstain(target, "budget-exhausted"))
-            continue
+    def _cache_key(target: ScoutTarget) -> str:
+        return cache.key_for(*_target_cache_fingerprints(
+            target,
+            repository_key=repository_key,
+            snapshot_hash=snapshot_hash,
+            mode=mode,
+            source_mode=source_mode,
+            dialogue_rounds=dialogue_rounds,
+        ))
+
+    def _review_target(
+        item: tuple[int, ScoutTarget],
+    ) -> tuple[PlatformFinding, str, bool, int, int, list[str]]:
+        """One target attempt (cache-first), never swallowing failures.
+
+        Returns ``(finding, diagnostic, stop_requested, specialist_calls,
+        critic_calls, worker_diagnostics)``.  Worker-private counters and
+        diagnostics keep parallel aggregation deterministic; the caller
+        merges them in target order.  Only the failures the sequential loop
+        also propagates (required-mode task failures) escape this function.
+        """
+
+        _index, target = item
         if _expired():
-            targets_out.append(_abstain(target, "deadline-exceeded"))
-            _note(
-                f"deadline-exceeded before target {target.lead_id}"
+            return (
+                _abstain(target, "deadline-exceeded"),
+                f"deadline-exceeded before target {target.lead_id}",
+                False, 0, 0, [],
             )
-            continue
         if _cancelled():
-            targets_out.append(_abstain(target, "cancelled"))
-            _note(f"cancelled before target {target.lead_id}")
-            continue
+            return (
+                _abstain(target, "cancelled"),
+                f"cancelled before target {target.lead_id}",
+                False, 0, 0, [],
+            )
+        if cache is not None:
+            cached = cache.get(_cache_key(target))
+            if cached is not None:
+                return (_finding_from_payload(cached), "", False, 0, 0, [])
         candidate = (
             _match_candidate(candidates, target)
             if candidates
             else None
         )
+        worker_diagnostics: list[str] = []
+        specialist_calls: list[int] = [0]
+        critic_calls: list[int] = [0]
         try:
             finding = _process_target(
                 target,
@@ -1184,9 +1318,9 @@ def run_platform_review(
                 source_mode=source_mode,
                 repro_workbench=repro_workbench,
                 tool_analysis=tool_analysis,
-                diagnostics=diagnostics,
-                specialist_calls=specialist_total,
-                critic_calls=critic_total,
+                diagnostics=worker_diagnostics,
+                specialist_calls=specialist_calls,
+                critic_calls=critic_calls,
             )
         except AgentBudgetExceeded as exc:
             if mode == MODE_REQUIRED:
@@ -1194,46 +1328,114 @@ def run_platform_review(
                     "platform review exhausted the agent budget in required "
                     f"mode at target {target.lead_id}"
                 ) from exc
-            targets_out.append(_abstain(target, "budget-exhausted"))
-            _note(f"budget-exhausted at target {target.lead_id}")
-            stopped = True
-            continue
+            return (
+                _abstain(target, "budget-exhausted"),
+                f"budget-exhausted at target {target.lead_id}",
+                True, specialist_calls[0], critic_calls[0], worker_diagnostics,
+            )
         except (LLMTransportError, LLMResponseTooLarge) as exc:
             if mode == MODE_REQUIRED:
                 raise RuntimeError(
                     "platform review required the LLM but the provider was "
                     f"unavailable: {exc}"
                 ) from exc
-            targets_out.append(_abstain(target, "llm-unavailable"))
-            _note(f"llm-unavailable at target {target.lead_id}")
-            continue
+            return (
+                _abstain(target, "llm-unavailable"),
+                f"llm-unavailable at target {target.lead_id}",
+                False, specialist_calls[0], critic_calls[0], worker_diagnostics,
+            )
         except PlatformContractError as exc:
             if mode == MODE_REQUIRED:
                 raise RuntimeError(
                     "platform review rejected a contract violation (forged "
                     f"reference) at target {target.lead_id}: {exc}"
                 ) from exc
-            targets_out.append(_abstain(target, "contract-violation"))
-            _note(f"contract-violation at target {target.lead_id}")
-            continue
+            return (
+                _abstain(target, "contract-violation"),
+                f"contract-violation at target {target.lead_id}",
+                False, specialist_calls[0], critic_calls[0], worker_diagnostics,
+            )
         except (PlatformFormatError, LLMResponseFormatError) as exc:
             if mode == MODE_REQUIRED:
                 raise RuntimeError(
                     "platform review received an invalid reply after one "
                     f"format repair at target {target.lead_id}: {exc}"
                 ) from exc
-            targets_out.append(_abstain(target, "invalid-reply"))
-            _note(f"invalid-reply at target {target.lead_id}")
-            continue
+            return (
+                _abstain(target, "invalid-reply"),
+                f"invalid-reply at target {target.lead_id}",
+                False, specialist_calls[0], critic_calls[0], worker_diagnostics,
+            )
         except ValueError as exc:
             if mode == MODE_REQUIRED:
                 raise RuntimeError(
                     f"platform review failed at target {target.lead_id}: {exc}"
                 ) from exc
-            targets_out.append(_abstain(target, "llm-unavailable"))
-            _note(f"llm-unavailable at target {target.lead_id}: {exc}")
-            continue
+            return (
+                _abstain(target, "llm-unavailable"),
+                f"llm-unavailable at target {target.lead_id}: {exc}",
+                False, specialist_calls[0], critic_calls[0], worker_diagnostics,
+            )
+        if cache is not None:
+            cache.put(_cache_key(target), _finding_payload(finding))
+        return (
+            finding,
+            "",
+            False,
+            specialist_calls[0],
+            critic_calls[0],
+            worker_diagnostics,
+        )
+
+    def _merge_target(
+        finding: PlatformFinding,
+        note: str,
+        specialist_used: int,
+        critic_used: int,
+        worker_notes: list[str],
+    ) -> None:
+        """Merge one finished target into the run-wide audit state."""
+
         targets_out.append(finding)
+        diagnostics.extend(worker_notes)
+        specialist_total[0] += specialist_used
+        critic_total[0] += critic_used
+        if note:
+            diagnostics.append(note)
+
+    if parallelism == 1:
+        stopped = False
+        for target in report.targets:
+            if stopped:
+                targets_out.append(_abstain(target, "budget-exhausted"))
+                continue
+            finding, note, stop, specialist_used, critic_used, worker_notes = (
+                _review_target((0, target))
+            )
+            _merge_target(
+                finding, note, specialist_used, critic_used, worker_notes,
+            )
+            stopped = stop
+    else:
+        indexed = [
+            (index, target)
+            for index, target in enumerate(report.targets)
+        ]
+        outcomes, failures = map_bounded(
+            _review_target, indexed, parallelism,
+            order_key=lambda item: item[0],
+        )
+        if failures:
+            # Deterministic propagation: the first failure in target order
+            # (required-mode task failure or an unexpected internal error).
+            raise failures[0].exception
+        for outcome, (_index, _target) in zip(outcomes, indexed, strict=True):
+            finding, note, _stop, specialist_used, critic_used, worker_notes = (
+                outcome
+            )
+            _merge_target(
+                finding, note, specialist_used, critic_used, worker_notes,
+            )
 
     findings = tuple(
         item for item in targets_out if item.state in UAF_FINDING_STATES

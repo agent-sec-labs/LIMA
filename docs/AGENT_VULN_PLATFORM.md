@@ -57,3 +57,24 @@ PoC 驱动模板 + ASan/UBSan 判读规则 + CWE 映射。
 - 沙箱只调房间大小不松锁：模型生成代码与被测仓库代码同狱。
 - 快照身份贯穿：分诊、事实、实验、报告绑定同一 snapshot_hash。
 - 全程可审计：智能体每次行动有预算、台账与降级记录。
+
+## 5. 规模化与性能采集
+
+三个独立设施（`lima/agent_scale.py`），由 `run_platform_review` 接入：
+
+- **并行**：`parallelism` 让独立目标在受控线程内并行假设/实验；结果恒按
+  确定性 Scout 序聚合——并行只影响墙钟，不改输出序。服务侧由
+  `LIMA_CXX_AGENT_PARALLELISM` 注入。
+- **缓存**：`ResultCache` 按快照指纹 + 目标全字段 + 模式 + 对话轮数复用每
+  目标完整结果；命中即零 LLM 调用、零沙箱实验。键必须含 snapshot_hash
+  （快照身份贯穿）；坏条目按未命中自愈。`cache=None`（默认）行为与无缓存
+  完全一致。
+- **增量**：`detect_changed_files` 对两份 `{path: sha256}` 清单做
+  新增/修改/删除三方差异，是"仅变更文件重跑"的数据基础；按文件粒度的自动
+  增量重跑为接口预留（缓存键锚定整快照指纹，见部署指引 §6）。
+
+**性能采集**：耗时/内存/并行度随 `PlatformReviewStats`（目标数/实验数/
+Specialist/Critic/Scout 调用数）与实验台账（每轮 stage/exit/error_type）
+自动入报告（交付件 5 的数据来源）；大规模跑批的部署参数组——快照限额放
+开、tmpfs/内存、受信构建门禁、离线依赖预处理、OpenHarmony 注意事项——见
+`deploy/competition/README.md` 与 `.env.competition.example`。

@@ -209,8 +209,8 @@ profile：快照限额放开参数组、tmpfs/内存加大、受信构建门禁�
 - Create: `tests/test_agent_scale.py`
 
 **Steps:**
-- [ ] 9.1 RED：缓存键/失效/并行确定性（结果按目标序聚合）/增量变更检测
-- [ ] 9.2 GREEN → 提交：`feat: scale agent scans with caching and parallelism`
+- [x] 9.1 RED：缓存键/失效/并行确定性（结果按目标序聚合）/增量变更检测
+- [x] 9.2 GREEN → 提交：`feat: scale agent scans with caching and parallelism`
 
 ---
 

@@ -1,6 +1,7 @@
 # LIMA Implementation Packet IP-0015：Evidence Privacy Core（Feature Slice S1-Core：分类/策略核心 + 租户隔离 HMAC 指纹 + fail-closed 统一入口）
 
 - Packet 版本：1.0（2026-09-12，P&V 起草，状态 DESIGN-FROZEN / PENDING-MERGE）
+- 版本历史：1.1（2026-09-12，NUM-ERRATUM-01 编号勘误——未来切片引用由预占的 IP-0016/IP-0017 统一改为 #94-S2/#94-S3 本地阶段名；不改变本 IP 范围、接口、断言或文件边界，不触发重新冻结）
 - 制作：LIMA Packet & Verification Agent（运行模型：无法核验——本环境未提供可验证的运行元数据）
 - 依据：Coordinator 裁定 COORD-IP94-R1（`.pv_tmp/COORD-IP94-RECOVERY_AND_SLICING_2026-09-12.md` §A–§F，Maintainer 授权）
 
@@ -10,8 +11,8 @@
 |---|---|
 | Source Issue | agent-sec-labs/LIMA #94 `[V5-N05][P0] 敏感 Evidence 脱敏、分级、保留与导出治理`（远程正文亲验 2026-09-12，updated_at **2026-09-12T12:02:54Z**，已含 Delivery Ledger） |
 | spec revision | Issue 正文 2026-09-12T12:02:54Z 版 + kickoff checklist `docs/LIMA_Issue_94_Coding_Agent_Kickoff_Checklist.md`（sha256 `e86e17935bf3e0d51707b661378095ab7fb3bf642fcfa31947342c719e2707ac`，PR #148 已合并，亲验一致） |
-| Covered requirements | FR-N05-01；FR-N05-02（仅接口面与 fail-closed 拒绝语义）；FR-N05-03；FR-N05-07；NFR-N05-01；NFR-N05-02（骨架）；NFR-N05-03；NFR-N05-04（digest 部分）；AC/T-N05-02；AC/T-N05-04；AC/T-N05-03 核心子集（短值/Unicode/二进制/Base64/URL credential/私钥的指纹-分类核心处理；全量文本/二进制扫描适配留 IP-0016）；SEC-N05-01..04（正文 Security/reliability/observability/compatibility 区段命名锚点，语义不改，仅命名） |
-| Not covered | FR-N05-04 vault adapter（IP-0017 仅定 port，本 IP 完全不做）；FR-N05-05/FR-N05-06（IP-0016/0017）；AC/T-N05-01 全量（多 sink 场景）、AC/T-N05-05（API/export/UI fixture）、AC/T-N05-06（历史审计）；一切生产接线（#66/#68/#70 集成）；`scripts/audit_sensitive_artifacts.py` |
+| Covered requirements | FR-N05-01；FR-N05-02（仅接口面与 fail-closed 拒绝语义）；FR-N05-03；FR-N05-07；NFR-N05-01；NFR-N05-02（骨架）；NFR-N05-03；NFR-N05-04（digest 部分）；AC/T-N05-02；AC/T-N05-04；AC/T-N05-03 核心子集（短值/Unicode/二进制/Base64/URL credential/私钥的指纹-分类核心处理；全量文本/二进制扫描适配留 #94-S2 Content Conformance，编号待分配）；SEC-N05-01..04（正文 Security/reliability/observability/compatibility 区段命名锚点，语义不改，仅命名） |
+| Not covered | FR-N05-04 vault adapter（#94-S3 Vault/Audit，编号待分配，仅定 port，本 IP 完全不做）；FR-N05-05/FR-N05-06（#94-S2/#94-S3，编号待分配）；AC/T-N05-01 全量（多 sink 场景）、AC/T-N05-05（API/export/UI fixture）、AC/T-N05-06（历史审计）；一切生产接线（#66/#68/#70 集成）；`scripts/audit_sensitive_artifacts.py` |
 | Delivery role | Feature Slice S1-Core |
 | Issue closure impact | **PARTIAL**（#94 关闭需 S1+S2+S3 全部完成，见 Ledger gates G1–G4） |
 | Upstream | #58 终态 merge commit `7734e585ec0b3a10873f58c917fd134c12e6e8a1`；统一开发基线 origin/main = **`1358e85c2fec9db4bfb2ff2f679f4e237e79104a`**（PR #148 合并后，亲验 `git rev-parse origin/main`） |
@@ -49,7 +50,7 @@
 
 ## 3. Iteration Hypothesis 与 Measurement
 
-- Hypothesis：在 #58 冻结契约（classification/envelope/codec/typed error）之上，可以用一个纯标准库、无 IO 的 `lima/evidence_privacy/` 核心模块交付"分类 + 租户隔离指纹 + fail-closed 统一入口"，使 AC/T-N05-02、AC/T-N05-04 与 AC/T-N05-03 核心子集在 contract 层可测，并为 IP-0016 的内容适配提供唯一依赖原语。
+- Hypothesis：在 #58 冻结契约（classification/envelope/codec/typed error）之上，可以用一个纯标准库、无 IO 的 `lima/evidence_privacy/` 核心模块交付"分类 + 租户隔离指纹 + fail-closed 统一入口"，使 AC/T-N05-02、AC/T-N05-04 与 AC/T-N05-03 核心子集在 contract 层可测，并为 #94-S2 Content Conformance（编号待分配）的内容适配提供唯一依赖原语。
 - Measurement：冻结测试全绿（含 tests/contracts 617 回归）；`sanitize_for_sink` 对全部负例（未知 sink/缺 key/策略异常/超限）均以 stable PrivacyError 拒绝且错误对象序列化后不含原值子串；同租户指纹逐字节稳定、跨租户指纹不同（≥1000 随机值对零碰撞之外的统计断言退化为确定性断言：同 key 同值恒等、异 key 同值必不等）。
 
 ## 4. Goal
@@ -64,7 +65,7 @@
 
 ## 5. Non-goals
 
-- 不做任何 sink 适配（store/log/Prompt/API/export 的实际拦截）；不做 vault_port（IP-0017）；不做内容扫描器全量实现（嵌套 JSON 递归 redaction 的**扫描策略接口**在本 IP 定义，深度遍历器实现与文本/日志/diff/Prompt 适配在 IP-0016）；不做审计脚本；不改任何既有产品文件；不做生产接线；不引入第三方依赖。
+- 不做任何 sink 适配（store/log/Prompt/API/export 的实际拦截）；不做 vault_port（#94-S3 Vault/Audit，编号待分配）；不做内容扫描器全量实现（嵌套 JSON 递归 redaction 的**扫描策略接口**在本 IP 定义，深度遍历器实现与文本/日志/diff/Prompt 适配在 #94-S2 Content Conformance，编号待分配）；不做审计脚本；不改任何既有产品文件；不做生产接线；不引入第三方依赖。
 
 ## 6. 工作树与分支前置条件
 
@@ -97,7 +98,7 @@
 
 ```python
 EvidencePayload:
-    payload_kind: str            # "structured_json" | "text" | "bytes"（IP-0015 必须接受三者；扫描深度仅 IP-0016 全量）
+    payload_kind: str            # "structured_json" | "text" | "bytes"（IP-0015 必须接受三者；扫描深度仅 #94-S2（编号待分配）全量）
     value: JSONValue | str | bytes
     media_type: str = ""         # 信息性，不参与指纹
 SinkContext:
@@ -181,7 +182,7 @@ PrivacyLimits:                # 全部正 int，构造即校验
 
 - IP-0015 冻结"最小可信缺省"：`classify_payload` 对显式标记字段（payload 顶层键名匹配策略保留列表外的 `secret/token/key/password/credential/private_key` 模式，大小写不敏感）判 `SENSITIVE`；含私钥 PEM 头 `-----BEGIN ... PRIVATE KEY-----` 或 URL credential（`scheme://user:pass@`）形态的文本值判 `RESTRICTED`；其余按 policy 缺省 `INTERNAL`；整体 classification 取 entries 最高级（public<internal<sensitive<restricted，序即 #58 枚举定义序）。
 - 枚举值、顺序、wire 值一律来自 `lima.contracts.common.ArtifactClassification`（DI-001 L309-315），本包不定义平行枚举（FR-N05-01）。
-- 完整内容扫描（嵌套遍历策略钩子已在本 IP 预留 `TenantPolicy` 扩展点之外的实现细节不冻结）属 IP-0016；本 IP 的扫描深度受 `PrivacyLimits` 约束并对超出者 fail-closed。
+- 完整内容扫描（嵌套遍历策略钩子已在本 IP 预留 `TenantPolicy` 扩展点之外的实现细节不冻结）属 #94-S2 Content Conformance（编号待分配）；本 IP 的扫描深度受 `PrivacyLimits` 约束并对超出者 fail-closed。
 
 ### 8.8 兼容契约（SEC-N05-04）
 
@@ -267,7 +268,7 @@ Python 解释器：`python`（3.12.x，基线亲测可用）。
 | AC/T-N05-03 核心子集 | test_value_kinds.py（6 类值各至少 1 正例 1 边界） | contract |
 | SEC-N05-01 | test_error_hygiene.py + §8.5 禁全局/日志/环境变量（静态断言：模块源码不含 `logging`/`os.environ`/`open(`，用 inspect 源码扫描测试） | contract |
 | SEC-N05-02 | test_limits.py 超时用例 + test_port_sanitize.py 包裹用例 | contract |
-| SEC-N05-03 | test_error_hygiene.py（本 IP 无 vault；锚点以"错误/事件不含原值"统一覆盖，vault disabled 合同测试在 IP-0017） | contract |
+| SEC-N05-03 | test_error_hygiene.py（本 IP 无 vault；锚点以"错误/事件不含原值"统一覆盖，vault disabled 合同测试在 #94-S3 Vault/Audit（编号待分配）） | contract |
 | SEC-N05-04 | test_policy.py + compatibility 命令（零 schema 接触由 Read-only 边界与 diff 审计保证） | contract |
 
 ## 13. Stop Conditions
@@ -286,16 +287,16 @@ Python 解释器：`python`（3.12.x，基线亲测可用）。
 - 实际测试命令与输出摘要（§11 全表逐行）；
 - 关键 digest：policy digest 示例值、指纹示例（脱敏展示）、tests 文件 sha256 清单；
 - 文件边界确认：仅 7 个新增产品文件 + 0 个修改；`git diff --stat` 附上；
-- 已知限制（本 IP 未做内容扫描全量等）与 follow-up（IP-0016/0017）；
+- 已知限制（本 IP 未做内容扫描全量等）与 follow-up（#94-S2/#94-S3，编号待分配）；
 - 确认未修改 Read-only/Forbidden 文件、未引入新依赖、未写任何 IO。
 
 ## 15. Packet completion definition
 
-本 Packet 达成：覆盖裁定 §E 全部指定需求且零 TBD；两份矩阵（附录 A/B）覆盖开工清单要求格点并标注 IP-0015/0016 归属；测试冻结计划含最小用例数、RED 形态、PI-DR2 scratch 步骤、回归命令；验收命令全部钉死 cwd；交接书（`docs/LIMA_Coding_Agent_IP-0015_正式开发任务交接.md`）就绪。Packet PR 合并后由 Coordinator 标记 PACKET-MERGED，方可进入阶段二（测试冻结）。
+本 Packet 达成：覆盖裁定 §E 全部指定需求且零 TBD；两份矩阵（附录 A/B）覆盖开工清单要求格点并标注 IP-0015/#94-S2 归属；测试冻结计划含最小用例数、RED 形态、PI-DR2 scratch 步骤、回归命令；验收命令全部钉死 cwd；交接书（`docs/LIMA_Coding_Agent_IP-0015_正式开发任务交接.md`）就绪。Packet PR 合并后由 Coordinator 标记 PACKET-MERGED，方可进入阶段二（测试冻结）。
 
 ## 附录 A：敏感数据类型矩阵（开工清单首轮交付）
 
-| 数据类型 | 典型形态 | 默认 classification | IP-0015 处理（指纹/分类核心） | IP-0016 处理（内容适配） |
+| 数据类型 | 典型形态 | 默认 classification | IP-0015 处理（指纹/分类核心） | #94-S2（编号待分配）处理（内容适配） |
 |---|---|---|---|---|
 | 短 secret（<8 字符） | `"pk_live_1A"` | SENSITIVE | 指纹+类型+长度；preview 强制 None（length<8） | 短值上下文检测 |
 | 普通 secret/token | `"ghp_xxxx…"` | SENSITIVE | 指纹+类型+长度；preview 可选 ≤2 字符 | 嵌套 JSON 递归扫描 |
@@ -310,17 +311,25 @@ Python 解释器：`python`（3.12.x，基线亲测可用）。
 | diff 中的秘密 | +/- 行 | RESTRICTED | 同上 | diff hunk 适配 |
 | Prompt/LLM evidence 中的秘密 | 对话片段 | RESTRICTED | 同上 | Prompt 段适配 |
 
-"保守整体指纹"指 IP-0015 对无法结构化定位的文本输入，缺省将可疑整段按敏感处理并指纹化（宁可过度脱敏，不漏）；精确分段留 IP-0016。
+"保守整体指纹"指 IP-0015 对无法结构化定位的文本输入，缺省将可疑整段按敏感处理并指纹化（宁可过度脱敏，不漏）；精确分段留 #94-S2 Content Conformance（编号待分配）。
 
 ## 附录 B：输出场景矩阵
 
-| 场景（sink_kind 冻结值） | IP-0015 | IP-0016 | 说明 |
+| 场景（sink_kind 冻结值） | IP-0015 | #94-S2（编号待分配） | 说明 |
 |---|---|---|---|
 | `storage`（入库/持久化前） | 接口+fail-closed | conformance suite + 接线指南 | 生产接线归 #66 |
 | `log`（日志） | 接口+fail-closed | 行级适配 | |
 | `prompt`（LLM 输入） | 接口+fail-closed | Prompt 适配 | 禁 raw 例外通道 |
 | `api`（API 响应） | 接口+fail-closed | API fixture 无泄漏验证 | 接线归 #68/#70 |
 | `export`（导出） | 接口+fail-closed | 导出 fixture 验证 | |
-| `vault`（raw 保留） | **不设**（IP-0017 定义 port，默认 disabled） | — | FR-N05-04 归 IP-0017 |
+| `vault`（raw 保留） | **不设**（port 由 #94-S3 Vault/Audit 定义，编号待分配，默认 disabled） | — | FR-N05-04 归 #94-S3 Vault/Audit（编号待分配） |
 
 `SINK_KINDS = frozenset({"storage","log","prompt","api","export"})` 为 IP-0015 冻结集合；未知值一律 `UNKNOWN_SINK` 拒绝。
+
+## 编号勘误记录（NUM-ERRATUM-01，2026-09-12，Maintainer 裁定）
+
+- 裁定内容：全局编号正式固定——IP-0015 = #94 S1-Core、IP-0016 = #60 Repository Profile Layer 1。本 Packet 原将未来内容适配预写为 IP-0016、vault/审计预写为 IP-0017，属提前占号的规划性编号错误；现统一为本地阶段名：#94-S2 Content Conformance（编号待分配）、#94-S3 Vault/Audit（编号待分配）。
+- 规则：未来 IP 不得在路线图阶段预占全局编号；新 Packet 正式启动时由 Coordinator 检查 #60/#94 两边 Registry 与远端分支后原子分配下一个空闲编号。
+- 性质：记录性勘误——不改变 IP-0015 当前范围、接口、断言或文件边界，不触发重新冻结（冻结测试不受影响）。
+- 保留的合法引用：§"Explicitly Rejected Inputs"中"#60 轨道（…IP-0016 起编号归属）"指 #60 轨道占用 IP-0016，为正确陈述，未改动。
+- 对应 Issue Ledger 勘误：#94 正文 Delivery Ledger（NUM-ERRATUM-01 条目，同日执行）。

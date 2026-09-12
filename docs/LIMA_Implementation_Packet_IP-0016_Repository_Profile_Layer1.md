@@ -1,8 +1,9 @@
 # LIMA Implementation Packet IP-0016：Repository Profile Layer 1（deterministic inventory adapter + typed coverage gap + #58 RepositoryProfile 契约编码）
 
-> Packet 版本：`IP-0016-PACKET/v1.1`
+> Packet 版本：`IP-0016-PACKET/v1.2`
 > 状态：`DESIGN-FROZEN / PENDING-MERGE`（Packet docs PR 合并进 `main` 后，由 Coordinator 标记 `PACKET-MERGED`，方可进入阶段二测试冻结）
 > 变更记录：
+>   v1.2 (2026-09-12): DR-IP-0016-02 勘误——冻结测试 fixture 口径改为 LF-only，golden 重生成（见文末 Decision Record 附录）
 >   v1.1 (2026-09-12): DR-IP-0016-01 勘误——policy_digest/toolchain_digest 空串默认改为 sentinel digest，空串入参改为非法
 >   v1 (2026-09-12): 阶段一定稿（PKT-IP-0016-D1）
 > 制作：LIMA Packet & Verification Agent（阶段一，Assignment `IP-0016-PV-P1/v1`，任务标识 `PKT-IP-0016-D1`，2026-09-12）
@@ -274,3 +275,12 @@ Implementation Agent Completion Summary 至少含：base/final commit、修改�
 - 交付对象：Implementation Agent（由 Coordinator 指派）；分支拓扑按 lifecycle §9.1（integration → Frozen Test Commit → implementation）。
 - 交接内容清单：Packet 本文档（merge commit）、Frozen Test Commit（SHA+digests+required test count）、product allowlist = §12 恰好 2 文件、预期 RED 结果、§15 全部命令、§16 Stop Conditions、§17 模板。
 - 硬性约束复述：只改 allowlist；不重设计公共 API；不新增依赖/网络/文件系统/凭据权限；冻结测试/fixture/Packet 只读；Contract 不足立即停止提 Decision Request；不碰 Issue/Ledger/PR/PROGRESS；完成后交 final commit + Completion Summary 给 P&V。
+
+## 附录 A：DR-IP-0016-02 Decision Record（v1.2，2026-09-12）
+
+- **缺陷定性**：Frozen Test Commit `310c5ba` 的测试 arrange 存在平台依赖缺陷——`tests/audit/fixtures/repo_shapes.py` 文本分支 `write_text(content, encoding="utf-8")` 未钉死换行口径，Windows 平台落盘为 CRLF、Linux 为 LF；golden fixture（`library_profile_golden.json` 的 `total_bytes=173`/`max_file_bytes=139`/`code_density_bp=1966`）因此绑定 Windows CRLF 口径，Linux LF 口径下应为 `164`/`132`/`1952`，golden 用例在 Linux 必然失败。**属冻结测试 arrange 缺陷，非实现缺陷**；产品代码（bdcd7517）按字节如实计算，无需修改。
+- **Coordinator 裁定（选项 A）**：fixture 口径钉死为 **LF-only**——文本分支改为 `write_text(content, encoding="utf-8", newline="\n")`（bytes 分支本已平台中立，不动）；golden 以 LF 口径重新生成，两次独立运行（不同 TEMP、各自干净进程）逐字节一致后冻结。
+- **重冻结范围（F2）**：恰好 3 文件——`tests/audit/fixtures/repo_shapes.py`（口径）、`tests/audit/fixtures/library_profile_golden.json`（LF 新值）、本附录与头部版本行。用例数仍 32，用例名与断言结构不变；其余 31 用例经平台依赖审计确认无换行敏感断言（size 类断言中仅 golden 绑定字节数；`code_density_bp==10000` 为自比率、`==0` 为空分子、`binary_ratio_bp==5000` 为计数比率，均口径无关）。
+- **LF golden 复算式（P&V 手算亲验）**：fixture 三文件 LF 落盘尺寸 = `pyproject.toml` 132 字节、`src/golden/__init__.py` 0 字节、`src/golden/core.py` 32 字节；`total_bytes = 132+0+32 = 164`，`max_file_bytes = 132`，代码扩展（.py）字节 = 0+32 = 32，`code_density_bp = ceil(32/164 × 10000) = ceil(1951.22) = 1952`。两次独立生成 SHA-256 一致（`b590fff631edfb230f8dcf8bc4dc265a54dd7361c3f936d2a6107c970c0935ea`）。
+- **PI-DR6（本 DR 沉淀为新常态规则）**：重冻结后的测试集在冻结前必须至少在一个非 Windows 平台完整跑过一次（临时验证分支触发 CI 或等价 scratch 均可），记录运行基线 SHA 与结论。
+- **旧链处置**：`310c5ba → bdcd7517` 与 PR #156 保留为证据；#156 保持 open 至新 PR 就绪。

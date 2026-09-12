@@ -78,3 +78,21 @@ Specialist/Critic/Scout 调用数）与实验台账（每轮 stage/exit/error_ty
 自动入报告（交付件 5 的数据来源）；大规模跑批的部署参数组——快照限额放
 开、tmpfs/内存、受信构建门禁、离线依赖预处理、OpenHarmony 注意事项——见
 `deploy/competition/README.md` 与 `.env.competition.example`。
+
+## 6. 评测
+
+平台配对基准与比赛指标映射由 `scripts/run_platform_evaluation.py`
+承载（计划 Task 10，设计 §11）：`evaluation_data/platform_cases/` 提供
+6 组源码级 vulnerable/fixed 对（SHA-256 钉死），覆盖 direct、需修正假设
+才命中的 revisable（实验闭环）、clean 误报纪律与非安全类过滤样例。评测
+无标签：`run_platform_review` 的输入只有 workspace、事实 wire 与分诊
+线索，标签只在评测侧。
+
+指标全部由内嵌 records 可重算，零分母输出 `null` + diagnostic：
+**检测率**（vulnerable 侧期望正向状态的精确达成）、**误报率**（fixed/
+clean/非安全侧出现任何 Finding 即误报——对应赛题误报扣分）、**非安全
+过滤率**（赛题备注 3：假设合同用内存包封闭 CWE 词表拒绝非内存安全
+缺陷）、**实验收敛**（revisable 案例 ≤2 轮命中）、**PoC 稳定性**（同
+PoC 重复 3 次全触发）、LLM 调用/时延采集。双仓库（ResInsight/OPM/
+OpenHarmony）的论文侧运行记录与验证状态表见
+`docs/COMPETITION_VALIDATION.md`。

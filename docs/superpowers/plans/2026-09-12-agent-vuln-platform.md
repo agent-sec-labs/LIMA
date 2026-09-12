@@ -225,7 +225,7 @@ profile：快照限额放开参数组、tmpfs/内存加大、受信构建门禁�
 - Create: `tests/test_platform_evaluation.py`
 
 **Steps:**
-- [ ] 10.1 RED → GREEN → 提交：`test: benchmark the agent vulnerability platform`
+- [x] 10.1 RED → GREEN → 提交：`test: benchmark the agent vulnerability platform`
 
 ---
 

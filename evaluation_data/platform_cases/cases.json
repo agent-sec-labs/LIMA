@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "uaf-direct",
+      "title": "Direct heap use-after-free pair confirmed by the sandbox experiment",
+      "vuln_pack": "memory",
+      "cwe": "CWE-416",
+      "kind": "direct",
+      "requires_experiment": true,
+      "non_security": false,
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {
+          "final_state": "runtime-confirmed",
+          "findings": 1
+        },
+        "fixed": {
+          "final_state": "none",
+          "findings": 0
+        }
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/buffer.cpp": "aa06ebe9e1a5d4a84d5af116b472f9b320385ddb31cacd606c5bfe424be42b72"
+        },
+        "driver_hint": "heap-uaf"
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/buffer.cpp": "1bfac0ffda44249bf72e3c18c589c439de2083dc839b10bbdfbbb34271786820"
+        },
+        "driver_hint": "generic"
+      },
+      "selection_rationale": "Straight-line new/delete UAF pair: the vulnerable revision reads p->size after delete p on one unconditional block, and the fixed revision removes the post-release read so no release/use candidate exists. This is the runtime-confirmation baseline of the memory pack.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      },
+      "notes": "Leads are derived by the platform from the facts instrument (release-event candidates); the fixed side serves no candidate and therefore no lead."
+    },
+    {
+      "id": "null-deref-direct",
+      "title": "Null pointer dereference pair confirmed by a sandbox SEGV report",
+      "vuln_pack": "memory",
+      "cwe": "CWE-476",
+      "kind": "direct",
+      "requires_experiment": true,
+      "non_security": false,
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {
+          "final_state": "runtime-confirmed",
+          "findings": 1
+        },
+        "fixed": {
+          "final_state": "none",
+          "findings": 0
+        }
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/session.cpp": "d3bf0a1132fb86ef7dd13fd0d809913c944cf6856b5890bdc3d183444f1628f2"
+        },
+        "driver_hint": "null-deref"
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/session.cpp": "272384a1139c9cecd8493508374cc773c9a490adf1e99a844e8180b03757702a"
+        },
+        "driver_hint": "generic"
+      },
+      "selection_rationale": "Unguarded null-path dereference pair: the vulnerable revision dereferences s->id when no session exists and ASan reports SEGV on address zero, while the fixed revision adds the missing null guard. No release fact exists, so no deterministic UAF candidate is available and the runtime experiment alone decides.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      },
+      "notes": "The canned triage serves the unguarded dereference site as a lead; the guarded fixed shape has no unguarded dereference to flag, so its lead list is empty."
+    },
+    {
+      "id": "overflow-direct",
+      "title": "Heap buffer overflow write pair confirmed by the sandbox experiment",
+      "vuln_pack": "memory",
+      "cwe": "CWE-787",
+      "kind": "direct",
+      "requires_experiment": true,
+      "non_security": false,
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {
+          "final_state": "runtime-confirmed",
+          "findings": 1
+        },
+        "fixed": {
+          "final_state": "none",
+          "findings": 0
+        }
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/frame.cpp": "149d976bfb16b64adb8abb883cc41edee5c32b8ad365835bee630683562efc17"
+        },
+        "driver_hint": "heap-overflow"
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/frame.cpp": "a3b371253414334405ea0046f03b9b87e290c5637ffa14a8f0a34ee51cabd10e"
+        },
+        "driver_hint": "generic"
+      },
+      "selection_rationale": "Bounded new[] buffer overflow pair: the vulnerable revision writes up to count bytes into a four-byte allocation and ASan reports a heap-buffer-overflow, while the fixed revision rejects out-of-range counts before allocating. The use precedes the release, so no release/use candidate is generated and the experiment decides.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      },
+      "notes": "The canned triage serves the unbounded write site as a lead; the fixed shape bounds the loop before the allocation and serves no lead."
+    },
+    {
+      "id": "rebind-revisable",
+      "title": "Conditional rebind use-after-free pair that only confirms after the experiment revision",
+      "vuln_pack": "memory",
+      "cwe": "CWE-416",
+      "kind": "revisable",
+      "requires_experiment": true,
+      "non_security": false,
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {
+          "final_state": "runtime-confirmed",
+          "findings": 1
+        },
+        "fixed": {
+          "final_state": "none",
+          "findings": 0
+        }
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/cursor.cpp": "05d716856f839429d3d020c841a42e4b4cef3c8020ea51f9d26297a2451d4ab9"
+        },
+        "driver_hint": "heap-uaf"
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/cursor.cpp": "88edf0231a75faf59ec05429b51ee57ec272d8039225054e11333e17e018ab82"
+        },
+        "driver_hint": "generic"
+      },
+      "selection_rationale": "Revisable pair for the experiment closed loop: the vulnerable revision rebinds the freed pointer to a fresh object only on one path and reads the freed object on the other. The first PoC driver deliberately exercises the rebind path and runs clean; the Critic-guided revision drives the alternate path and the second experiment hits. This validates design section 11's hypothesis-experiment-revision sample.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      },
+      "notes": "The canned extraction certifies only the p-object lifetime (allocation, release, post-release use); the conditional rebind is not certified, mirroring the honest coverage behavior of the real extractor for unsupported alias syntax. The scripted workbench judges each driver by its content hash, so the wrong first driver runs clean on every repeat."
+    },
+    {
+      "id": "clean-function",
+      "title": "Guarded clean pair that must abstain on both sides (false-positive discipline)",
+      "vuln_pack": "memory",
+      "cwe": "none",
+      "kind": "clean",
+      "requires_experiment": false,
+      "non_security": false,
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {
+          "final_state": "abstain",
+          "findings": 0
+        },
+        "fixed": {
+          "final_state": "abstain",
+          "findings": 0
+        }
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/label.cpp": "832440873cc95599611e2b3bbe8456b3fc716c659793799be951fc3a87c611d3"
+        },
+        "driver_hint": "generic"
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/label.cpp": "b25f81a5ecbea86a879fa3c3100eaf7b2e3dd61ee2eceef8bfc75b62c79ad197"
+        },
+        "driver_hint": "generic"
+      },
+      "selection_rationale": "False-positive discipline sample: both revisions are the same guarded clean function, but a pattern-based triage fires on the null-check shape and the Specialist is scripted to hypothesize a null dereference. The experiment runs clean and the Critic vetoes the hypothesis, so the platform must abstain and project zero Findings on both sides.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      },
+      "notes": "The lead simulates a benign triage seed firing on the null-guard pattern; the honest outcome is an audited abstention with zero Findings."
+    },
+    {
+      "id": "non-security-filter",
+      "title": "Plain functional bug pair that must never become a security Finding",
+      "vuln_pack": "memory",
+      "cwe": "none",
+      "kind": "clean",
+      "requires_experiment": false,
+      "non_security": true,
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {
+          "final_state": "abstain",
+          "findings": 0
+        },
+        "fixed": {
+          "final_state": "abstain",
+          "findings": 0
+        }
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/ratio.cpp": "972a41a4641cda46b3c638dee0cf29b58b76c6e42e07293e0e4bb5eb1170e622"
+        },
+        "driver_hint": "generic"
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/ratio.cpp": "b6df3d98d012b794a8a5046d7f38f06f7ea705b25e42551526dc8d055cd59724"
+        },
+        "driver_hint": "generic"
+      },
+      "selection_rationale": "Non-security filter sample (competition note 3): the vulnerable revision computes the percentage with the wrong operand order, a plain functional bug with no memory-safety dimension. The scripted Specialist proposes a CWE outside the memory pack's closed vocabulary and the hypothesis contract rejects the reply (one repair, then an audited abstention), so no Finding can ever be projected on either revision.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      },
+      "notes": "Mechanizes the non-memory rejection path: the Specialist contract vocabulary (MEMORY_PACK.cwe_ids) is the filter; the fact wire for this case is intentionally empty because the function holds no memory facts."
+    }
+  ]
+}

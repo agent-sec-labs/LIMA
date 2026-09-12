@@ -24,6 +24,7 @@ RUN apt-get update \
         "llvm-14" \
         make \
         pkg-config \
+        qtbase5-dev \
         zlib1g-dev \
     && cmake --version | grep --quiet "^cmake version 3\." \
     && mkdir --parents /usr/local/share/lima \

@@ -28,6 +28,13 @@ __all__ = ["sanitize_for_sink"]
 _TIME_CHECKPOINT_ITEMS: Final[int] = 256
 _MS_PER_SECOND: Final[float] = 1000.0
 _MAX_TENANT_ID_BYTES: Final[int] = 128
+# Stack-safe effective depth cap (Packet IP-0017 §8.3.3): prescan rejects any
+# container nesting beyond min(max_depth, this cap) with MAX_DEPTH_EXCEEDED so
+# that the classifier/redaction second walk -- which recurses once per level --
+# can never overflow the interpreter stack on prescan-admitted inputs. The cap
+# is far above the frozen depth-matrix maximum (33) and far below CPython's
+# default recursion limit even with test-harness frames in place.
+_SAFE_RECURSIVE_DEPTH: Final[int] = 300
 
 
 def _require_type(obj: object, expected: type, field_path: str) -> None:
@@ -69,8 +76,19 @@ def _validate_tenant(sink: SinkContext) -> tuple[str, bytes]:
 def _prescan(
     value: object, limits: PrivacyLimits, started_monotonic: float
 ) -> None:
-    """Enforce size/depth/item budgets with 256-entry time checkpoints (§8.2 steps 4-5)."""
+    """Enforce size/depth/item budgets with 256-entry time checkpoints (§8.2 steps 4-5).
+
+    IP-0017 (D-1, Packet §8.3): dict/list containers are cycle-checked through
+    an on-path ``id()`` set, so direct or indirect self-references raise
+    MAX_DEPTH_EXCEEDED under any legal ``PrivacyLimits`` -- before the item
+    budget can mask the unbounded walk. The depth guard uses the effective cap
+    ``min(max_depth, _SAFE_RECURSIVE_DEPTH)``, keeping both this walk and the
+    later classifier/redaction recursion stack-safe. Error context carries only
+    ``{"limit", "actual"}``-style metadata, never cycle members (§8.3.4).
+    """
     state = {"items": 0}
+    effective_max_depth = min(limits.max_depth, _SAFE_RECURSIVE_DEPTH)
+    on_path: set[int] = set()
 
     def _check_budget() -> None:
         if state["items"] > limits.max_items:
@@ -121,17 +139,29 @@ def _prescan(
             _check_budget()
             return
         if isinstance(node, (dict, list)):
-            if depth > limits.max_depth:
+            node_id = id(node)
+            if node_id in on_path:
+                # D-1: a direct or indirect self-reference is unbounded depth.
                 raise PrivacyError(
                     PrivacyErrorCode.MAX_DEPTH_EXCEEDED,
                     field_path="value",
                     context={"limit": limits.max_depth, "actual": depth},
                 )
-            children = node.values() if isinstance(node, dict) else node
-            for child in children:
-                state["items"] += 1
-                _check_budget()
-                _walk(child, depth + 1)
+            if depth > effective_max_depth:
+                raise PrivacyError(
+                    PrivacyErrorCode.MAX_DEPTH_EXCEEDED,
+                    field_path="value",
+                    context={"limit": limits.max_depth, "actual": depth},
+                )
+            on_path.add(node_id)
+            try:
+                children = node.values() if isinstance(node, dict) else node
+                for child in children:
+                    state["items"] += 1
+                    _check_budget()
+                    _walk(child, depth + 1)
+            finally:
+                on_path.discard(node_id)
             return
         raise PrivacyError(
             PrivacyErrorCode.UNSUPPORTED_PAYLOAD_KIND,

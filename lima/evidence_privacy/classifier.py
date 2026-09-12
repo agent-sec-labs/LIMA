@@ -32,6 +32,10 @@ from typing import Final
 
 from lima.contracts.codec import JSONValue, canonical_encode
 from lima.contracts.common import ArtifactClassification, RetentionClass
+from lima.evidence_privacy.content_scan import (
+    is_bare_base64_secret,
+    redact_text_segments,
+)
 from lima.evidence_privacy.errors import PrivacyError, PrivacyErrorCode
 from lima.evidence_privacy.fingerprint import compute_fingerprint
 from lima.evidence_privacy.models import (
@@ -147,6 +151,36 @@ def _merge_severity(
     return current
 
 
+def _scan_string_severity(
+    text: str,
+    policy: TenantPolicy,
+    entries: list[FingerprintRecord],
+    *,
+    tenant_id: str,
+    tenant_key: bytes,
+) -> ArtifactClassification:
+    """IP-0017 bare-Base64 judgement for string positions (Packet §8.4).
+
+    Runs strictly after the frozen RESTRICTED-shape and sensitive-key rules,
+    so only positions those rules leave unflagged reach here. A whole-value
+    candidate yields one position record; a longer string with embedded
+    candidate spans yields one record per replaced span (§8.4.4); everything
+    else stays INTERNAL.
+    """
+    if is_bare_base64_secret(text):
+        entries.append(
+            _make_record(text, policy, tenant_id=tenant_id, tenant_key=tenant_key)
+        )
+        return ArtifactClassification.SENSITIVE
+    _, records = redact_text_segments(
+        text, policy, tenant_id=tenant_id, tenant_key=tenant_key
+    )
+    if records:
+        entries.extend(records)
+        return ArtifactClassification.SENSITIVE
+    return ArtifactClassification.INTERNAL
+
+
 def _collect_entries(
     value: JSONValue | str | bytes,
     policy: TenantPolicy,
@@ -174,6 +208,15 @@ def _collect_entries(
                         item, policy, entries, tenant_id=tenant_id, tenant_key=tenant_key
                     ),
                 )
+            elif isinstance(item, str):
+                # IP-0017 (Packet §8.4): bare-Base64 refinement for string
+                # positions the frozen rules leave unflagged.
+                severity = _merge_severity(
+                    severity,
+                    _scan_string_severity(
+                        item, policy, entries, tenant_id=tenant_id, tenant_key=tenant_key
+                    ),
+                )
     elif isinstance(value, list):
         for item in value:
             if isinstance(item, str) and _is_restricted_text(item):
@@ -188,11 +231,28 @@ def _collect_entries(
                         item, policy, entries, tenant_id=tenant_id, tenant_key=tenant_key
                     ),
                 )
+            elif isinstance(item, str):
+                # IP-0017 (Packet §8.4): bare-Base64 refinement for list items.
+                severity = _merge_severity(
+                    severity,
+                    _scan_string_severity(
+                        item, policy, entries, tenant_id=tenant_id, tenant_key=tenant_key
+                    ),
+                )
     elif isinstance(value, str) and _is_restricted_text(value):
         entries.append(
             _make_record(value, policy, tenant_id=tenant_id, tenant_key=tenant_key)
         )
         severity = _merge_severity(severity, ArtifactClassification.RESTRICTED)
+    elif isinstance(value, str):
+        # IP-0017 (Packet §8.4): bare-Base64 refinement for a top-level string
+        # value under structured_json.
+        severity = _merge_severity(
+            severity,
+            _scan_string_severity(
+                value, policy, entries, tenant_id=tenant_id, tenant_key=tenant_key
+            ),
+        )
     return severity
 
 
@@ -222,7 +282,18 @@ def classify_payload(
                 _make_record(text, policy, tenant_id=tenant_id, tenant_key=tenant_key)
             )
         else:
-            severity = ArtifactClassification.INTERNAL
+            # IP-0017 (Packet §8.5.2): paragraph-scan branch. Runs only after
+            # the frozen whole-value rules (PEM / URL credential -> RESTRICTED,
+            # sensitive keyword -> SENSITIVE) leave the text INTERNAL; each
+            # satisfying bare-Base64 span contributes one record.
+            replaced, records = redact_text_segments(
+                text, policy, tenant_id=tenant_id, tenant_key=tenant_key
+            )
+            if records:
+                severity = ArtifactClassification.SENSITIVE
+                entries.extend(records)
+            else:
+                severity = ArtifactClassification.INTERNAL
     elif payload.payload_kind == "bytes":
         severity = ArtifactClassification.SENSITIVE
         entries.append(
@@ -282,6 +353,16 @@ def _redact_node(
     if isinstance(value, str):
         if _is_restricted_text(value):
             return _make_record(value, policy, tenant_id=tenant_id, tenant_key=tenant_key)
+        if is_bare_base64_secret(value):
+            # IP-0017 (Packet §8.4.2): whole-value bare-Base64 candidate.
+            return _make_record(value, policy, tenant_id=tenant_id, tenant_key=tenant_key)
+        replaced, records = redact_text_segments(
+            value, policy, tenant_id=tenant_id, tenant_key=tenant_key
+        )
+        if records:
+            # IP-0017 (Packet §8.4.4): span-level replacement keeps the
+            # non-candidate surroundings and returns the placeholder string.
+            return replaced
         return unicodedata.normalize("NFC", value)
     return value
 
@@ -310,4 +391,12 @@ def build_redacted_value(
     text = payload.value if isinstance(payload.value, str) else ""
     if _is_restricted_text(text) or _has_sensitive_token(text):
         return _make_record(text, policy, tenant_id=tenant_id, tenant_key=tenant_key)
+    # IP-0017 (Packet §8.5.2): span replacement keeps redacted_value a str;
+    # text the whole-value rules and the paragraph scan leave untouched stays
+    # the NFC-normalized original.
+    replaced, records = redact_text_segments(
+        text, policy, tenant_id=tenant_id, tenant_key=tenant_key
+    )
+    if records:
+        return replaced
     return unicodedata.normalize("NFC", text)

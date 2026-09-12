@@ -31,3 +31,25 @@ __all__ = [
     "ProfileInventoryOptions",
     "build_repository_profile",
 ]
+from lima.audit.ram import (
+    GAP_AMBIGUOUS_DISPATCH,
+    GAP_DYNAMIC_IMPORT,
+    RAM_PROVENANCE_ANCHOR,
+    PythonRamFacts,
+    RamBudgets,
+    RamFactsBuildResult,
+    RamKeyFlow,
+    build_python_ram_facts,
+    ram_facts_digest,
+)
+__all__ += [
+    "GAP_AMBIGUOUS_DISPATCH",
+    "GAP_DYNAMIC_IMPORT",
+    "PythonRamFacts",
+    "RAM_PROVENANCE_ANCHOR",
+    "RamBudgets",
+    "RamFactsBuildResult",
+    "RamKeyFlow",
+    "build_python_ram_facts",
+    "ram_facts_digest",
+]

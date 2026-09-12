@@ -262,3 +262,12 @@ profile：快照限额放开参数组、tmpfs/内存加大、受信构建门禁�
 ## 实施记录
 
 - **Task 4（里程碑）**：v2 编排退役落地——proof-before-LLM 路由/UNKNOWN 门控/scanner 双链删除；仪器接口保留（instrument_facts/proof/broker、arbiter_state）；review_uaf 暂保留为冻结 v2 评测链（评测脚本耦合，Task 10 迁移）。平台编排单链：Scout→Specialist假设→实验→Critic修正→仪器咨询（非门禁）→Arbiter。校准指纹第 6 次刷新（c910ffa1…）。全量 1512 双平台 OK。镜像同步注意：删除的测试文件需在 mirror 手动 rm（tar 增量不删文件）。
+
+---
+
+## 平台实施记录
+
+- **全部 12 任务完成（2026-09-12）**。提交序列：fe50ad8(设计)→[Task 1]8031289(复现工作台)→00e0593(工具封装)→60fe43d(Scout)→40c5430(闭环编排+v2退役,里程碑)→5f78e8f(内存包)→94a2279(报告+CVE)→ce2394c(git影响)→f75d74d/12a2bf6(补丁验证,里程碑)→7a45bbd(规模化)→99a0697(平台评测)→[Task 11]交付件。
+- 实战发现的 3 个真实产品问题全部处理：.inl 清单缺失(0ca7d13)、多 TU 哈希崩溃(756c985)、AST 规模边界(backlog)。
+- 最终基线：**1609 tests OK (skipped 23)** 宿主；容器 OK。
+- 诚实标注：真实模型平台链端到端未验证（脚本双模式就绪）；ASan D3 真实容器运行未验证；OpenHarmony 全仓性能未验证。DEMO 命令全部实跑验证。

@@ -3,7 +3,7 @@
 - DR 编号：DR-IP-0022-01（Contract Gap 裁定 + 冻结测试面修订授权，随 IP-0022 Packet v1 同批）
 - 提出人：lima-packet-verification（PKT-IP-0022-D1，2026-09-13，Assignment `IP-0022-PV-P1/v1`）
 - 上游裁定：COORD `ENTRY60-CLOSURE-1/v1`（方案 α：IP-0022=Fix IP，F1 路由=准入期拒绝；已否决：prompt/wire 层掩码 path）
-- 状态：PROPOSED（待 Coordinator/Maintainer 复核；Packet IP-0022-PACKET/v1 §3/§7 为其执行面）
+- 状态：REOPENED（由 DR-IP-0022-02 于 2026-09-13 重开；原 PROPOSED 于 ENTRY60 复审期生效为 RESOLVED，因合并驳回发现 F1/F2 缺口重开；存活条款见 DR-IP-0022-02 §4）
 
 ## 1. 裁定对象
 

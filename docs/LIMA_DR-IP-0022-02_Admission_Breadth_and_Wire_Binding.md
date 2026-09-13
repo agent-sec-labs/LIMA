@@ -3,7 +3,7 @@
 - DR 编号：DR-IP-0022-02（2026-09-13，PKT-IP-0022-D1R2，Assignment `IP-0022-PV-P1R2/v1`；Coordinator 裁定 DR-IP-0022-02/v1 经主会话转达授权）
 - 触发事件：Maintainer 驳回 PR #180；驳回面（经 Coordinator 复核）含 F1 拦截口径不足（`token_FAKESECRET123.py`、`sk_live_ABC123xyztoken.py` 不被五 token 形状口径命中）与 F2 wire 校验未绑定载荷内容
 - 上游关系：重开 DR-IP-0022-01（其状态行已同步改写为 REOPENED，存活/被替代条款见 §4）；Packet 升版 `IP-0022-PACKET/v2`
-- 状态：RESOLVED-COORDINATOR（两项子提案——§3.5 残余风险记录口径与 §5 R1 内部留痕方案——标注**提案待 Maintainer 终裁**）
+- 状态：REOPENED（by DR-IP-0022-03，2026-09-13，Maintainer 二次驳回 G1/G2 后重开；原 RESOLVED-COORDINATOR 的 §3 R1 方案被部分 SUPERSEDED——redact:sha8 内部标识与公开面家族计数经 Maintainer 终裁否决，改由 DR-IP-0022-03 §3 落地；§1 启发式口径〔含 id_ 族补录〕、§2 B' 路线与三 helper、M17 双负例、已否决路线清单继续存活并经 DR-03 §2/§4 增补）
 
 ## 1. F1 契约修订：拦截口径改为启发式超集
 

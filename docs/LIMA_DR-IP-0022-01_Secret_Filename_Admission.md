@@ -32,7 +32,7 @@
 - 产品：`lima/audit/inventory.py`（pattern/helper/入口过滤/词汇表）、`lima/audit/ram.py`（候选过滤）、`lima/audit/__init__.py`（导出）；`semantic_prioritizer`/`ram_schema` digest 语义/schema 文件零改动（F2 校验器加固为独立条目，不依赖本 DR，但同 IP 交付）。
 - 冻结测试面（本 DR 授权范围，D2 随 Frozen Test Commit 落地）：
   - **缺口 2 查证结论：词汇表为封闭冻结枚举**——`tests/audit/test_fr05_gap_encoding.py:43-53` `FROZEN_SKIP_REASONS`（10 词）+ `:135` 集合等值断言；产品侧 `inventory.py:95-105` 同集合。授权：双侧同步增 `"sensitive-filename"`（第 11 词），detail 模板复用 `_SKIP_DETAIL_TEMPLATE`，`_skip_reason_gaps` 分流逻辑零改动。断言强度不降（仍为全量集合等值断言）。
-  - **缺口 1 查证结论：存在 1 处宽松接受冻结断言**——`tests/audit/test_ram_schema.py::test_minimal_payload_validates`（@:232-233，`MINIMAL_PAYLOAD` identity 六 digest 全为占位 HEX64）依赖"校验器不重算比对"的宽松行为，与 F2(ii) 冲突。授权：D2 修订该用例 arrange——校验前将 `identity.wire_digest` 回填为 `ram_wire_digest(payload)` 重算值（其余占位 digest 保持，断言语义不变：合法结构 payload 通过）。真实链/golden/e2e 正例不受影响（均携带真实 digest，`test_golden_matrix.py:150` 已断言一致性）；既有正例无绝对路径/traversal 断言，F2(i) 零冲突。
+  - **缺口 1 查证结论：存在 1 处宽松接受冻结断言**——`tests/audit/test_ram_schema.py::test_minimal_payload_validates`（用例 @:223-224；`MINIMAL_PAYLOAD` 定义 @:79，identity 占位 digest @:128-135，其中 `wire_digest` @:134，六 digest 全为占位 HEX64）依赖"校验器不重算比对"的宽松行为，与 F2(ii) 冲突。授权：D2 修订该用例 arrange——校验前将 `identity.wire_digest` 回填为 `ram_wire_digest(payload)` 重算值（其余占位 digest 保持，断言语义不变：合法结构 payload 通过）。**附加约束：`identity.wire_digest` 与 `ram_wire_digest(payload)` 重算一致性校验须置于 `validate_ram_wire_payload` 校验序列末位**，确保形状/词表/rank 类既有负例仍因预期原因失败。真实链/golden/e2e 正例不受影响（均携带真实 digest，`test_golden_matrix.py:150` 已断言一致性）；既有正例无绝对路径/traversal 断言，F2(i) 零冲突。
 - 消费方：#64/#68（Mining）无接口变化（wire 字段集不变）。
 
 ## 5. 已否决路线（不得重试）

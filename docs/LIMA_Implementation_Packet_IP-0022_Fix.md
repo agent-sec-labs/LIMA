@@ -108,6 +108,7 @@ def is_secret_shaped_path(path: str) -> bool:
 3. `build_python_ram_facts` 的 `candidates`（@ram.py:364-365）：过滤后进入 RAM 派生，五清单与 key_flows/labels 全部不含命中路径。
 - 三点均保持 sorted 次序，过滤不得重排（ordinal 属 candidate_id，禁止漂移）。
 - **v4 跨命中去重（DR-04 §1.2）**：同一 repo-relative path 在同一 build result 内只计一次 `sensitive-filename`（entrypoint 过滤与 code role 过滤共享去重集）；Profile 与 RAM 两个 build result 各自独立计数（语义=各自候选集的拒绝数）。**RAM-only 构建**（不经 Profile）同样过滤并留痕（§3.3）。
+- **【DR-04-A' 门控】第四过滤点（manifest 候选）**：`_manifest_candidates`/`_load_manifests` 命名判定后对整条候选路径执行段级 `is_secret_shaped_path`，命中即跳过并计入 sensitive-filename skip 通道——统一闭合 MANIFEST_PARSE_ERROR / 读取失败 / 超限三类 detail 的文件名携带面（I3/I4a/I5，矩阵一）；零 IP-0016 冻结模板改动、零测试锚定修订（三处锚定清单见 DR-04 §2-A，A' 不触碰）、零 golden 影响；取舍=敏感命名 manifest 声明整体丢失（与代码文件同口径，损失经 skip 计数可观测）。未获批前不实施。
 
 ### 3.3 F1 — skip 汇总与内部留痕（R1 终案，DR-03 §3）
 
@@ -182,7 +183,7 @@ RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''
 | G2-P | minimal_payload_self_consistent_migration_validates | **五 digest** 自洽迁移正例通过（D2 迁移后既有正例改造，基线与实现后均绿——迁移兼容锚，非 RED；X6 已在 D1''' 预证） |
 | X1 | sensitive_directory_segment_excluded_from_code_roles | 敏感**目录段**（tests/secrets/anything.py）不入 code_roles（v4） |
 | X2 | sensitive_directory_segment_excluded_from_ram | 敏感目录段（secrets/danger.py）不入 RAM 任何清单（v4） |
-| X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径（**【DR-04-A 门控】**，获批后 mandatory；RED 已证 main 泄漏） |
+| X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径（**【DR-04-A'/A 门控】**，A'=manifest 候选准入过滤为建议优先项（零冻结面触碰），A=detail 脱敏为备选；获批任一后 mandatory；RED 已证 main 泄漏，X3-2 经 XAUDIT-FIX 勘正为目标缺失签名） |
 | X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B 门控】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
 | X4-4/5/6 | wire_path_segment_rules | 空段（a//b）、`.` 段（./x）、Cc 控制字符 path 拒绝（v4 补齐 #58 契约两处弱于） |
 | X5-1 | admission_skip_counted_once_per_path | 同一 path 命中 entrypoint+code role 只计一次（count=1、恰一个 typed gap） |
@@ -195,7 +196,8 @@ RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''
 
 ## 9.4 RED 证明（D1'''，v4）
 
-- 测试文件：`_red_proof/test_ip_0022_xaudit_red.py`（X 系）+ 既有 `_red_proof/test_ip_0022_fix_red.py`（v3 的 23 例，签名复验不变）。命令：`python -m pytest _red_proof -q` @main 等同代码。结果：**34 failed / 3 passed**——X 系新签名：X1 `sensitive directory segment leaked into code_roles: ['tests/secrets/anything.py']`；X2 `['danger.py', 'secrets/danger.py']`（RAM sinks）；X3-1 `manifest parse-error detail carries the raw path: [... 'manifest=token/pyproject.toml; error=UnicodeDecodeError']`；X4 系 `ContractError not raised`（candidate_id 三字段不设防 + path 段级规则缺位）；X5-1 `expected exactly one gap: []`；X5-2 `admission_skips` 缺失。3 个通过项均为锚（X4-0 冻结模式锚、X6 两迁移兼容锚），非 RED。无 arrange 型失败（全部 arrange 路径与冻结套件同 shape）。
+- 测试文件：`_red_proof/test_ip_0022_xaudit_red.py`（X 系）+ 既有 `_red_proof/test_ip_0022_fix_red.py`（v3 的 23 例，签名复验不变）。命令：`python -m pytest _red_proof -q` @main 等同代码。结果：**34 failed / 3 passed**——X 系新签名：X1 `sensitive directory segment leaked into code_roles: ['tests/secrets/anything.py']`；X2 `['danger.py', 'secrets/danger.py']`（RAM sinks）；X3-1 `manifest parse-error detail carries the raw path: [… 'manifest=token/pyproject.toml; error=UnicodeDecodeError']`；X3-2 `manifest budget detail carries a secret-shaped basename: ['manifest=requirements-ghp_aaa….txt; bytes=8; limit=1']`；X4 系 `ContractError not raised`；X5-1 `expected exactly one gap: []`；X5-2 `admission_skips` 缺失。3 个通过项均为锚（X4-0 冻结模式锚、X6 两迁移兼容锚），非 RED。
+- **勘正（PKT-IP-0022-XAUDIT-FIX，Coordinator 独立证伪轮）**：X3-2 首版有两处 arrange 缺陷（不存在的 kwarg `profile_budgets`，正确入参 `options=ProfileInventoryOptions(budgets=ProfileBudgets(manifest_max_bytes=1))`；`GHP_BASENAME[12:]` 切片切失 `ghp_` 前缀、敏感子串未进断言面），首版"无 arrange 型失败"表述对 X3-2 不成立、曾致全量短暂 33 failed / 4 passed。已修正并重跑：34 failed / 3 passed、X3-2 签名为目标缺失型（与 Coordinator 独立复现一致）。其余 33 例经本轮复跑确认无 arrange 型失败。
 - **五项探针独立复验**（矩阵一附注）：第 2 项结论勘正——`secrets/pyproject.toml` 坏 TOML 的目录段 **"secrets" 实际泄漏**于 MANIFEST_PARSE_ERROR detail（哨兵口径假阴性），系 IP-0016 冻结模板泄漏面（DR-04-A）；`requirements-ghp_*.txt` 坏内容不触发 parse error 属构造性事实（无内容校验器），但**读取失败路径泄漏全文件名**（`manifest=requirements-ghp_AAAA….txt; error=UnicodeDecodeError`）。
 - **goldens 零命中（v4 段级口径）**：fixtures 全量 JSON 路径值与 tests 源文件路径对段级启发式零命中（v3 已知 `ram/shapes.py:192 secret.py` 字面量命中维持既有结论：语义即秘密命名，IP-0018 冻结用例绿）。
 - **新 wire 检查零误伤**：段级 path 规则 + candidate_id 一致性（ordinal ≥ 0）对 3 种 real-chain wire payload 零违例，且既有 `validate_ram_wire_payload` 全绿。

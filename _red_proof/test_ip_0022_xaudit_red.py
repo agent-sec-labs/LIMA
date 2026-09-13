@@ -117,16 +117,18 @@ class X3ManifestErrorDetailRedactionTests(unittest.TestCase):
     def test_oversized_manifest_budget_detail_free_of_sensitive_path(self):
         inv = inv_module()
         kwargs = profile_kwargs()
+        options = inv.ProfileInventoryOptions(
+            budgets=inv.ProfileBudgets(manifest_max_bytes=1)
+        )
         with workspace_with(
             {
                 "pkg/__init__.py": "x = 1\n",
-                f"requirements-{GHP_BASENAME[12:]}": "os==1.0\n",
+                # full ghp_ token (v1 of this test sliced it off -- arrange
+                # defect 4b found in the XAUDIT-FIX falsification round)
+                f"requirements-{GHP_BASENAME[:-3]}.txt": "os==1.0\n",
             }
         ) as ws:
-            kwargs_budget = dict(
-                kwargs, profile_budgets=inv.ProfileBudgets(manifest_max_bytes=1)
-            )
-            result = inv.build_repository_profile(ws, **kwargs_budget)
+            result = inv.build_repository_profile(ws, options=options, **kwargs)
         details = [g.detail for g in result.profile.coverage_gaps]
         self.assertFalse(
             any("ghp_" in detail for detail in details),

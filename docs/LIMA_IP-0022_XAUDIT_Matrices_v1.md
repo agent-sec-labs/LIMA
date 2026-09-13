@@ -27,6 +27,7 @@
 | I9 | 自由文本：模型 rationale、manifest/源码内容关键词（frameworks 声明）、model_id | S6/S8、S4、S8 build | rationale 有 `_bounded_rationale` 三重防线（NFC+去控制字符+`_SECRET_TOKEN_PATTERN`+代码片段模式+512B 截断，malformed 回落 fallback）；frameworks 关键词与 model_id 无秘密筛 | 同 main（rationale 防线属 IP-0018/0019 冻结面，本 IP 不改） | 同 main；**范围外声明**：`_SECRET_TOKEN_PATTERN` 是五 token 形状冻结子集，非启发式超集——模型把秘密文本写进 rationale 且非五形状时可能通过；model_id 为配置面非仓库输入。NFR-01 保持 PARTIAL 的依据之一 | 无新负例（DR-04 §范围外清单） |
 | I10 | Profile 声明面（languages/package_managers/frameworks/kinds） | S4 | 值均为封闭词表或常量锚（`pip`、`go-modules` 等），不携带文件名/路径；frameworks 关键词见 I9 | 同 main | 同 main | 无（结构性事实） |
 | I11 | Profile entrypoints（root-convention 固定名 `cli.py/main.py/__main__.py`） | S1 | **结构性不含敏感命名**：候选集是固定名常量，敏感命名文件进不了 root-convention（probe P5 实测 `cli_ghp_*.py` → entrypoints 空）；但**目录段**可经 script 解析进入（I8） | 同 main（结构性）+ I8 过滤 | 同 v3 | M7（script 路径）、无 root-convention 负例（结构性） |
+| I12 | RAM 候选**读取失败**通道（ram.py:300 `_GAP_INVENTORY_SKIPPED detail=reason=read-failed; file={relative_path}`） | S5 coverage_gaps → S8 | detail 模板携带不可读 .py 的**全路径**——但非 UTF-8 文件在 workspace 层已被排除（reason=non-utf8，不进 `inventory.files`），read-failed 仅剩枚举后 OSError 窗口，实测不可达（P3b：非 UTF-8 敏感命名 .py → RAM gaps 为空、路径零出现） | **闭合依据**：v4 过滤在 `candidates` 枚举处（§3.2.3），敏感形态候选在读循环**之前**即被剔除——`_read_python_text` 仅作用于过滤后候选，故 read-failed 模板永无敏感命名路径可携带（结构性前置，非巧合） | 同 v3 + RAM-only 构建同样前置（X5-2） | P3b 探针（记录性事实）；M2（前置过滤正例） |
 
 矩阵一附注（主会话五项探针观察的独立复验与解释）：
 
@@ -110,7 +111,7 @@
 2. **R-2 rationale/内容自由文本**（I9）：`_SECRET_TOKEN_PATTERN` 五形状子集非启发式超集；模型生成文本中的新形态秘密可过 malformed 回落之外的筛；frameworks 关键词、model_id 同属自由文本配置面。
 3. **R-3 防恶意重签**：摘要自洽比对非认证（§3.5 定位声明；持有 canonical 编码者可整体重算）。
 4. **R-4 直调内部 API**：`build_semantic_top_n` 处理已构造 facts 不设防（Known Gap §2）。
-5. **R-5 启发式非穷尽**：新形态文件名/目录段可漏检（§2 残余风险声明，NFR-01 PARTIAL 依据）。
+5. **R-5 启发式非穷尽**：新形态文件名/目录段可漏检（§2 残余风险声明，NFR-01 PARTIAL 依据）。**显式例证（Coordinator 证伪探针）**：Unicode 同形/组合字符变体不命中——如西里尔 е（U+0435）的 `sеcrets/`（关键词族大小写不敏感但对 ASCII 字面量锚定，非 NFC 归一化比对），本轮亲验 `re.search` 不命中；`is_secret_shaped_path` 不做 Unicode 同形折叠，此类变体属范围外漏检面。
 6. **R-6 wire path 无长度 cap**（矩阵二附注）：与 #58 契约的宽度差异，结构性 cap 已限列表项数。
 7. **R-7 FR-01 PARTIAL**：`admission_skips` 内部留痕首版仅覆盖 `sensitive-filename` 一类 reason。
 8. **R-8 workspace 遍历层**：`DEFAULT_IGNORED_DIRECTORIES` 不含敏感目录名（事实维持）；防御位置在 lima/audit 准入层（v4 段级），非遍历层（否决路线 §12.3）。

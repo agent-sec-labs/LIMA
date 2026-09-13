@@ -2,7 +2,7 @@
 
 > 文档类型：Decision Record（P&V 呈报，Coordinator/Maintainer 裁定）
 >
-> 状态：**OPEN**（本 DR 自身记录的 v4 修订已按 Assignment 授权落 Packet；A/B 两项冻结面变更**待裁定，未获批不实施**）
+> 状态：**OPEN**（本 DR 自身记录的 v4 修订已按 Assignment 授权落 Packet；A'（建议优先）/A（备选）/B 三项**待裁定，未获批不实施**；含 XAUDIT-FIX 轮勘正——见 §4）
 >
 > 关联：DR-IP-0022-01/-02/-03；Packet `IP-0022-PACKET/v4`；`LIMA_IP-0022_XAUDIT_Matrices_v1.md`；Assignment `IP-0022-PV-XAUDIT/v1`（PKT-IP-0022-XAUDIT，2026-09-13）
 >
@@ -25,10 +25,20 @@ Maintainer 驳回 PR #180 第二次并指令"不要只针对上一条反馈打�
 
 ## 2. 冻结面变更请求（待裁定，未获批前不实施、不暗改）
 
-### DR-04-A：manifest gap detail 模板脱敏（触碰 IP-0016 冻结面）
+### DR-04-A'：manifest 候选准入过滤（**建议优先项**，Coordinator 证伪产出的最小替代）
+
+- **方案**：在 `_manifest_candidates`/`_load_manifests` 的 manifest 命名判定后，对整条候选路径执行段级 `is_secret_shaped_path`；命中即跳过该 manifest（不解析、不进 gap）并计入 `sensitive-filename` skip 通道（复用 §3.4 词汇表与 §3.3 留痕）。
+- **统一闭合 I3/I4a/I5 三面**（parse-error detail / read-failure detail / 超限 detail 均不再有机会携带敏感命名路径——候选在 detail 生成点之前被剔除）。
+- **零冻结面触碰**：不改 IP-0016 detail 模板、零测试锚定修订、零 golden 影响（fixtures golden 对 `manifest=` 模板零锚定，Coordinator 全树 grep 亲验）；只改 `inventory.py`（已在 Packet Modify 集）。
+- **取舍（如实声明）**：敏感命名 manifest 整体不解析——其 languages/package_managers/frameworks 声明随之丢失，与敏感命名代码文件同口径（宁可少声明不泄漏）；skip 计数使损失可观测。
+- **呈 Maintainer 裁定**。
+
+### DR-04-A：manifest gap detail 模板脱敏（备选，触碰 IP-0016 冻结面）
 
 - **证据**：main 实测（probe P2/P2e/P2f、X3-1/X3-2 RED）——`MANIFEST_PARSE_ERROR` detail=`manifest={relative_path}; error=<ErrType>` 与 `BUDGET_EXHAUSTED` manifest 超限 detail 同模板，把**含敏感目录段/敏感 basename 的完整仓库相对路径**写入公开 Profile coverage_gaps（→ to_dict → wire）。主会话"未泄漏"结论系 FAKESECRET 哨钉口径假阴性（其样本 `secrets/pyproject.toml` 的目录段 "secrets" 实际已公开）。
-- **请求**：授权将 `_record_manifest_error` 与 manifest 超限分支的 detail 改为不携带原文路径（建议：`manifest=<redacted:sensitive-shaped>` 命中启发式时替换，未命中保留原文；或统一 `manifest-index=<i>; error=<ErrType>`）。同步修订 IP-0016 冻结测试中锚定该模板字面量的断言与（若存在）profile golden——**需先核 golden 命中清单再定影响面**。
+- **请求**：授权将 `_record_manifest_error` 与 manifest 超限分支的 detail 改为不携带原文路径（建议：`manifest=<redacted:sensitive-shaped>` 命中启发式时替换，未命中保留原文；或统一 `manifest-index=<i>; error=<ErrType>`）。
+- **影响面（Coordinator 全树 grep 亲验的完整清单）**：`manifest=` detail 模板被三处冻结测试锚定——`tests/audit/test_budget_exhaustion_e2e.py`、`tests/audit/test_fr05_gap_encoding.py`、`tests/evidence_privacy/test_models.py`；fixtures golden **零锚定**。获批需同步修订上述三处断言。
+- **与 A' 的关系**：A' 为零冻结面触碰的最小替代、建议优先；A 保留为备选（若 Maintainer 认为敏感命名 manifest 的声明信息不应整体丢弃，可选 A 的精准脱敏）。两者均呈 Maintainer 裁定，未获批前不实施、不暗改。
 - **不批的影响**：R-1 残余风险维持，NFR-01 维持 PARTIAL（现有口径本就如此记账，不额外恶化）。
 
 ### DR-04-B：wire 校验序列扩第七项 candidate_id 一致性（触碰 IP-0021 冻结校验序列）
@@ -44,11 +54,11 @@ Maintainer 驳回 PR #180 第二次并指令"不要只针对上一条反馈打�
 
 ## 4. 验证证据（摘要，全文见 Packet v4 §9 与矩阵文档）
 
-- RED D1'''：`_red_proof` 34 failed（v3 的 23 例 + 新 X 系 11 例）全部目标缺失签名、无 arrange 型失败；3 锚通过（X4-0 模式锚、X6 两迁移兼容锚）。
-- 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed（@main 等同代码）。
+- RED D1'''：`_red_proof` 34 failed（v3 的 23 例 + 新 X 系 11 例）+ 3 锚通过。**勘正（PKT-IP-0022-XAUDIT-FIX，Coordinator 独立证伪）**：X3-2 首版存在两处 arrange 缺陷（不存在的 kwarg `profile_budgets`；`GHP_BASENAME[12:]` 切片把 `ghp_` 前缀切失、敏感子串从未进入断言面）——首版"无 arrange 型失败"表述不实。已修正为 `options=ProfileInventoryOptions(budgets=ProfileBudgets(manifest_max_bytes=1))` + 完整 token 文件名，重跑后 X3-2 失败签名=目标缺失型（`manifest budget detail carries a secret-shaped basename: ['manifest=requirements-ghp_aaa….txt; bytes=8; limit=1']`，与 Coordinator 独立复现一致），全量恢复 34 failed / 3 passed。
+- 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed（@main 等同代码；FIX 轮复跑记录在案）。
 - goldens 零命中：v4 段级启发式对 fixtures 全量 JSON 路径值与 tests 源文件路径零命中；新 wire 检查（段级 path 规则 + candidate_id 一致性）对 real-chain payload 零违例（3 repo 形态）。
 - 双平台：Windows 本机 + PI-DR6 预演（见 Packet v4 §9.4）。
 
 ## 5. 裁定请求
 
-请 Coordinator/Maintainer 对 §2 A/B 两项作出 获批/否决 裁定；获批则并入 Packet v4 对应条目的 mandatory 集（当前标【DR-04-A/B】），否决则维持残余风险记账。其余 §1 项已按 Assignment 授权落 Packet v4，无需另行裁定。
+请 Coordinator/Maintainer 对 §2 **A'（建议优先）/ A（备选）** 与 **B** 作出 获批/否决 裁定；B 维持建议获批（必要且充分已证：`_result_digest` 不含 kind/path/symbol 的绑定缺口 + real-chain 零误伤）。获批则并入 Packet v4 对应条目的 mandatory 集（当前标【DR-04-A/B】），否决则维持残余风险记账。其余 §1 项已按 Assignment 授权落 Packet v4，无需另行裁定。

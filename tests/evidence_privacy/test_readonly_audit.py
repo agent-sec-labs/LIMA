@@ -201,11 +201,11 @@ class AuditTextTests(unittest.TestCase):
         # source_path, field_path None for text, and half-open spans that
         # point at predicate-satisfying base64 spans. D2' §18 #11: context
         # call form (old keyword-only tenant_id=/tenant_key= removed).
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
         self.assertGreaterEqual(len(findings), 3)
         for finding in findings:
             self.assertIsInstance(finding.location, AuditLocation)
-            self.assertEqual(finding.location.source_path, "log_excerpt.txt")
+            self.assertEqual(finding.location.source_path, "a0")
             self.assertIsNone(finding.location.field_path)
             start, end = finding.location.span
             self.assertGreaterEqual(start, 0)
@@ -217,7 +217,7 @@ class AuditTextTests(unittest.TestCase):
 
     def test_audit_text_findings_match_find_base64_spans(self) -> None:
         # §8.2.4: text detection consumes find_base64_spans semantics.
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
         spans = {finding.location.span for finding in findings}
         expected = {
             span
@@ -248,7 +248,7 @@ class AuditStructuredTests(unittest.TestCase):
         # in document order, [n] array elements); deep/whole-value behaviour
         # is preserved (deep multi-segment paths exist; whole-value candidates
         # use span (0, len)). Plaintext key names never appear.
-        findings = audit_structured("sample.json", SAMPLE_STRUCT, POLICY, context=make_context())
+        findings = audit_structured("a1", SAMPLE_STRUCT, POLICY, context=make_context())
         paths = {finding.location.field_path for finding in findings}
         deep = [p for p in paths if p is not None and p.count(".") + p.count("[") >= 2]
         self.assertTrue(deep, f"missing deep ordinal field_path in {paths}")
@@ -264,9 +264,7 @@ class AuditStructuredTests(unittest.TestCase):
         # D1'/D1'.2 §18 #2: a fixture whose *key* is a known secret still
         # produces findings, but no carrier surface (field_path, repr) ever
         # contains the plaintext key name.
-        findings = audit_structured(
-            "secret_keyname.json", KEYNAME_STRUCT, POLICY, context=make_context()
-        )
+        findings = audit_structured("a2", KEYNAME_STRUCT, POLICY, context=make_context())
         self.assertTrue(findings)
         for finding in findings:
             if finding.location.field_path is not None:
@@ -278,9 +276,7 @@ class AuditStructuredTests(unittest.TestCase):
     def test_audit_structured_scalar_root_field_path_none(self) -> None:
         # D1' §17.D1'.1: scalar roots (str/int/bool/null) have field_path=None
         # and are located by span alone (text-mode parity).
-        findings = audit_structured(
-            "scalar.txt", KNOWN_SECRET_VALUES[0], POLICY, context=make_context()
-        )
+        findings = audit_structured("a3", KNOWN_SECRET_VALUES[0], POLICY, context=make_context())
         self.assertTrue(findings)
         self.assertIsNone(findings[0].location.field_path)
 
@@ -289,7 +285,7 @@ class AuditStructuredTests(unittest.TestCase):
         import copy
 
         snapshot = copy.deepcopy(SAMPLE_STRUCT)
-        audit_structured("sample.json", SAMPLE_STRUCT, POLICY, context=make_context())
+        audit_structured("a1", SAMPLE_STRUCT, POLICY, context=make_context())
         self.assertEqual(SAMPLE_STRUCT, snapshot)
 
 
@@ -299,7 +295,7 @@ class ValueFreeTests(unittest.TestCase):
     def test_finding_repr_and_fields_zero_secret(self) -> None:
         # §8.2.3/§9 T2 (§18 #2): no preview attribute; repr carries no values
         # and no key names.
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
         self.assertTrue(findings)
         names = {f.name for f in dataclasses.fields(AuditFinding)}
         # D2' §18 #4: _tenant_tag is the one sanctioned internal field.
@@ -313,8 +309,8 @@ class ValueFreeTests(unittest.TestCase):
     def test_report_json_zero_secret_and_parseable(self) -> None:
         # §8.2.3/AC/T-N05-06 + D1'.2 §18 #2: canonical JSON output parses and
         # leaks neither values nor key names nor file names.
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
-        report = build_audit_report(make_context(), {"log_excerpt.txt": findings}, POLICY)
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
+        report = build_audit_report(make_context(), {"a0": findings}, POLICY)
         payload = audit_report_to_json(report)
         assert_zero_secret(self, payload, "report json")
         assert_zero_identifier(self, payload, "report json")
@@ -362,14 +358,14 @@ class TenantContextTests(unittest.TestCase):
     def test_internal_tenant_tag_never_rendered(self) -> None:
         # D2' §18 #4: _tenant_tag is repr-excluded AND serialization-excluded
         # (double leak prevention); it never appears in repr or report JSON.
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
         self.assertTrue(findings)
         tag = getattr(findings[0], "_tenant_tag", None)
         self.assertIsInstance(tag, str)
         self.assertRegex(tag, r"^[0-9a-f]{64}$")
         rendered = "".join(repr(f) for f in findings)
         self.assertNotIn(tag, rendered)
-        report = build_audit_report(make_context(), {"log_excerpt.txt": findings}, POLICY)
+        report = build_audit_report(make_context(), {"a0": findings}, POLICY)
         payload = audit_report_to_json(report)
         self.assertNotIn(tag, payload)
         self.assertNotIn("_tenant_tag", payload)
@@ -380,8 +376,8 @@ class TenantContextTests(unittest.TestCase):
         # report must fail closed with POLICY_ERROR at report.tenant_mixing.
         context_a = make_context("t-a", b"k-a" * 16)
         context_b = make_context("t-b", b"k-b" * 16)
-        findings_a = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=context_a)
-        findings_b = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=context_b)
+        findings_a = audit_text("a0", LOG_TEXT, POLICY, context=context_a)
+        findings_b = audit_text("a0", LOG_TEXT, POLICY, context=context_b)
         self.assertTrue(findings_a and findings_b)
         with self.assertRaises(PrivacyError) as ctx:
             build_audit_report(context_a, {"mixed": findings_a + findings_b}, POLICY)
@@ -402,9 +398,9 @@ class TenantContextTests(unittest.TestCase):
     def test_build_audit_report_old_signature_rejected(self) -> None:
         # D2' §18 #11: the old positional (findings, policy) form is removed;
         # context is the first parameter.
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
         with self.assertRaises(TypeError):
-            build_audit_report({"log_excerpt.txt": findings}, POLICY)
+            build_audit_report({"a0": findings}, POLICY)
 
 
 class TenantIsolationTests(unittest.TestCase):
@@ -413,22 +409,18 @@ class TenantIsolationTests(unittest.TestCase):
     def test_different_tenant_key_changes_all_fingerprints(self) -> None:
         # §9 T4: same input, different tenant_key -> every fingerprint
         # changes while positions stay identical.
-        first = audit_text(
-            "log_excerpt.txt", LOG_TEXT, POLICY, context=make_context("t-a", b"k-a" * 16)
-        )
-        second = audit_text(
-            "log_excerpt.txt", LOG_TEXT, POLICY, context=make_context("t-b", b"k-b" * 16)
-        )
+        first = audit_text("a0", LOG_TEXT, POLICY, context=make_context("t-a", b"k-a" * 16))
+        second = audit_text("a0", LOG_TEXT, POLICY, context=make_context("t-b", b"k-b" * 16))
         self.assertEqual([f.location for f in first], [f.location for f in second])
         self.assertNotEqual([f.fingerprint for f in first], [f.fingerprint for f in second])
 
     def test_same_tenant_key_fingerprint_stable(self) -> None:
         # §9 T4: same credentials -> identical fingerprints on repeat calls.
         first = audit_structured(
-            "sample.json", SAMPLE_STRUCT, POLICY, context=make_context("t-a", b"k-a" * 16)
+            "a1", SAMPLE_STRUCT, POLICY, context=make_context("t-a", b"k-a" * 16)
         )
         second = audit_structured(
-            "sample.json", SAMPLE_STRUCT, POLICY, context=make_context("t-a", b"k-a" * 16)
+            "a1", SAMPLE_STRUCT, POLICY, context=make_context("t-a", b"k-a" * 16)
         )
         self.assertEqual([f.fingerprint for f in first], [f.fingerprint for f in second])
 
@@ -447,7 +439,7 @@ class BudgetLimitTests(unittest.TestCase):
             cursor = cursor["child"]
         cursor["child"] = KNOWN_SECRET_VALUES[0]
         with self.assertRaises(PrivacyError) as ctx:
-            audit_structured("deep.json", nested, POLICY, context=make_context())
+            audit_structured("a4", nested, POLICY, context=make_context())
         self.assertIs(ctx.exception.code, PrivacyErrorCode.MAX_DEPTH_EXCEEDED)
         context = ctx.exception.context
         self.assertEqual(context.get("max_depth"), 32)
@@ -458,7 +450,7 @@ class BudgetLimitTests(unittest.TestCase):
         # RESOURCE_LIMIT_EXCEEDED error with field_path "findings".
         payload = [KNOWN_SECRET_VALUES[0]] * 10_001
         with self.assertRaises(PrivacyError) as ctx:
-            audit_structured("many.json", payload, POLICY, context=make_context())
+            audit_structured("a5", payload, POLICY, context=make_context())
         self.assertIs(ctx.exception.code, PrivacyErrorCode.RESOURCE_LIMIT_EXCEEDED)
         self.assertEqual(ctx.exception.field_path, "findings")
         self.assertEqual(ctx.exception.context.get("max_items"), 10_000)
@@ -472,8 +464,8 @@ class ReportPolicyEvidenceTests(unittest.TestCase):
         # recommended_action is the frozen constant string.
         from lima.evidence_privacy.policy import policy_digest
 
-        findings = audit_text("log_excerpt.txt", LOG_TEXT, POLICY, context=make_context())
-        report = build_audit_report(make_context(), {"log_excerpt.txt": findings}, POLICY)
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context())
+        report = build_audit_report(make_context(), {"a0": findings}, POLICY)
         self.assertEqual(report.policy_version, POLICY.policy_version)
         self.assertEqual(report.policy_digest, policy_digest(POLICY))
         self.assertEqual(report.recommended_action, "manual-review-and-approved-migration-issue")
@@ -841,21 +833,31 @@ class ScriptReadBudgetTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(report.get("status"), "complete")
 
-    def test_file_count_budget_exceeded(self) -> None:
-        # R2 (RED on c5b375e): 10_001 files -> files past the 10_000 budget
-        # are identifiably skipped (resource-limit), scan:file-budget is
-        # recorded, status incomplete, exit 3, and the report is still
-        # produced and parseable (never aborts).
+    def test_file_budget_truncation_bounded_output(self) -> None:
+        # R8 §18 #23 (revised from the v1.3 per-file semantics, which is
+        # [v1.3-replaced]): 10_005 files -> enumeration and per-file
+        # processing stop at the 10_000-file budget; incomplete_reasons
+        # carries EXACTLY ONE "scan:file-budget:truncated-at=a<n>" summary,
+        # no per-file a10000+ entries, a single stderr summary line, and the
+        # report stays parseable with bounded size.
         with tempfile.TemporaryDirectory() as tmp:
             target = pathlib.Path(tmp)
-            for index in range(10_001):
+            for index in range(10_005):
                 (target / f"f{index:05d}.txt").write_text(f"file {index}\n", encoding="utf-8")
             result = run_script(str(target), timeout=600)
             self.assertEqual(result.returncode, 3, result.stderr)
-            self.assertIn("resource-limit", result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(report.get("status"), "incomplete")
-            self.assertIn("scan:file-budget", report.get("incomplete_reasons", []))
+            reasons = report.get("incomplete_reasons", [])
+            summaries = [r for r in reasons if r.startswith("scan:file-budget")]
+            self.assertEqual(len(summaries), 1, reasons)
+            self.assertRegex(summaries[0], r"^scan:file-budget:truncated-at=a(0|[1-9][0-9]{0,3})$")
+            self.assertEqual([r for r in reasons if ":resource-limit" in r], [])
+            budget_lines = [line for line in result.stderr.splitlines() if "file-budget" in line]
+            self.assertEqual(len(budget_lines), 1, result.stderr)
+            # R8: bounded output -- stderr carries no per-file truncation spam.
+            self.assertLessEqual(len(result.stderr.strip().splitlines()), 2)
+            self.assertLessEqual(len(report.get("findings", [])), 10_000)
 
     def test_byte_budget_exceeded_report_still_written(self) -> None:
         # R2 (RED on c5b375e): cumulative handle-read bytes past
@@ -874,7 +876,13 @@ class ScriptReadBudgetTests(unittest.TestCase):
             self.assertTrue(report_path.is_file())
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report.get("status"), "incomplete")
-            self.assertIn("scan:byte-budget", report.get("incomplete_reasons", []))
+            # R8 §18 #23: byte budget overage records EXACTLY ONE bounded
+            # truncated-at summary (never per-file entries), report written.
+            reasons = report.get("incomplete_reasons", [])
+            summaries = [r for r in reasons if r.startswith("scan:byte-budget")]
+            self.assertEqual(len(summaries), 1, reasons)
+            self.assertRegex(summaries[0], r"^scan:byte-budget:truncated-at=a(0|[1-9][0-9]{0,3})$")
+            self.assertNotIn("scan:file-budget", reasons, "no file-budget trip in this scenario")
 
 
 class SecureReadVerificationTests(unittest.TestCase):
@@ -985,8 +993,10 @@ class SourcePathWhitelistTests(unittest.TestCase):
     """R4 §17.D1'.3 / §18 #20: library-side artifact-id whitelist."""
 
     def test_valid_source_paths_accepted(self) -> None:
-        # R4: artifact indices and stable safe IDs pass the whitelist.
-        for good in ("a0", "artifact.main-2", "log_excerpt.txt", "sample.json"):
+        # R6 §18 #20 (revised): the ONLY legal form is ^a(0|[1-9][0-9]{0,3})$
+        # (a0..a9999). The v1.3 "artifact.main-2 / sample.json legal"
+        # assertions are remapped below into the illegal list (not deleted).
+        for good in ("a0", "a123", "a9999"):
             with self.subTest(good=good):
                 findings = audit_text(good, LOG_TEXT, POLICY, context=make_context())
                 self.assertTrue(findings)
@@ -997,6 +1007,12 @@ class SourcePathWhitelistTests(unittest.TestCase):
         # values raise INVALID_FIELD_VALUE at field_path "source_path" with
         # value-free context; str(exc) never echoes the raw value.
         bad_values = [
+            "sk_live_ABC123xyztoken",
+            "artifact.main-2",
+            "sample.json",
+            "log_excerpt.txt",
+            "a10000",
+            "a01",
             "/etc/passwd",
             "C:\\secrets\\token.json",
             "../x",
@@ -1041,9 +1057,7 @@ class TenantTagFormulaTests(unittest.TestCase):
         from lima.evidence_privacy.fingerprint import _derive_tenant_key
 
         tenant_id, tenant_key = "t-a", b"k-a" * 16
-        findings = audit_text(
-            "log_excerpt.txt", LOG_TEXT, POLICY, context=make_context(tenant_id, tenant_key)
-        )
+        findings = audit_text("a0", LOG_TEXT, POLICY, context=make_context(tenant_id, tenant_key))
         self.assertTrue(findings)
         derived = _derive_tenant_key(tenant_key, tenant_id)
         expected = hmac_mod.new(
@@ -1064,6 +1078,75 @@ class TenantTagFormulaTests(unittest.TestCase):
                     "过程性证据" in line or "非权威" in line,
                     f"unmarked .pv_tmp authority reference: {line[:80]}",
                 )
+
+
+class SameHandleReadTests(unittest.TestCase):
+    """R7 §17.F5'-R2.1' / §18 #22: one open per file, no re-open, no builtins."""
+
+    def _load_script_module(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "audit_sensitive_artifacts_under_test", SCRIPT_PATH
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_source_open_forms_whitelisted(self) -> None:
+        # R7 (RED on c5b375e): every reading-related open( in the script
+        # must be an os.open( or os.fdopen( form -- no builtins
+        # open(path, "rb"), no re-open after verification, no read_bytes(),
+        # no st_size precheck.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("read_bytes", source)
+        self.assertNotIn("st_size", source)
+        self.assertIn("os.fdopen", source)
+        for match in re.finditer(r"open\(", source):
+            prefix = source[max(0, match.start() - 3) : match.start()]
+            self.assertIn(prefix, ("os.", "fd."), f"non-whitelisted open at {match.start()}")
+
+    def test_single_os_open_per_file_zero_builtin_open(self) -> None:
+        # R7 (RED on c5b375e): wrapping builtins.open and os.open with
+        # counters over one scan (clean file + over-limit file) shows at
+        # most one os.open per artifact and zero builtins.open calls --
+        # including the resource-limit skip path.
+        import contextlib
+        import io as _io
+
+        module = self._load_script_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            (target / "clean.txt").write_text("plain note\n", encoding="utf-8")
+            (target / "big.txt").write_text("x" * (1_048_576 + 1), encoding="utf-8")
+            counters = {"os_open": 0, "builtin_open": 0}
+            real_os_open, real_builtin_open = os.open, open
+
+            def counting_os_open(*args, **kwargs):
+                counters["os_open"] += 1
+                return real_os_open(*args, **kwargs)
+
+            def counting_builtin_open(*args, **kwargs):
+                counters["builtin_open"] += 1
+                return real_builtin_open(*args, **kwargs)
+
+            out, err = _io.StringIO(), _io.StringIO()
+            try:
+                import builtins as _builtins
+
+                os.open = counting_os_open
+                _builtins.open = counting_builtin_open
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = module.main([str(target)])
+            finally:
+                os.open = real_os_open
+                import builtins as _builtins
+
+                _builtins.open = real_builtin_open
+            self.assertEqual(code, 3, err.getvalue())
+            self.assertEqual(counters["builtin_open"], 0, "builtins.open used for reading")
+            # Two artifacts, each opened exactly once via os.open.
+            self.assertEqual(counters["os_open"], 2, counters)
 
 
 if __name__ == "__main__":  # pragma: no cover

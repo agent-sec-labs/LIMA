@@ -2,17 +2,17 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0022-PACKET/v4`
+> Packet 版本：`IP-0022-PACKET/v5`
 >
-> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；**v4（2026-09-13，PKT-IP-0022-XAUDIT，DR-IP-0022-04：Maintainer 四项核清——段级检测（§3.1）、AdmissionSkip 语义定稿（§3.2/§3.3）、wire path 规则补齐两处弱于 + candidate_id 一致性【DR-04-B 门控】（§3.5）、MINIMAL_PAYLOAD 五摘要全真值定稿（§3.5）+ X 系负例（§6）+ RED D1'''（§9）+ 两张可核查矩阵（随批文档）**。
+> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；v4（PKT-IP-0022-XAUDIT，DR-IP-0022-04）；**v5（2026-09-13，PKT-IP-0022-R4，Assignment `IP-0022-PV-R4/v1`：Maintainer 复审三问题一次性修订——①DR-04-B 公式重写（symbol `'-'` 槽位消歧，§3.5）+ 生产链定源（§3.5 附源追踪）+ X4-7 负例；②`_red_proof` 全量底稿纳入提交（§4a，可从 PR 原样复现，RED D1'''' = 37 failed / 3 passed，§9.5）；③script **名称**准入过滤（entrypoints.symbol 出口，§3.2.4）+ X7 负例 + X5-2 补公开 coverage gap 计数断言；DR-04-A' 撤回落 Packet（§3.2 删第四过滤点，X3 锚定 A 定稿版）**。
 >
-> 状态：`READY-FOR-CODE`（TBD = 0；DR-04-A/B 两项**冻结面变更请求待裁定**，未获批前不实施且不属 mandatory——见 DR-IP-0022-04 §2）
+> 状态：`READY-FOR-CODE`（TBD = 0；DR-04-A（定稿版）与 DR-04-B（重写版）两项冻结面变更请求**待重审**，未获批前不实施且不属 mandatory——见 DR-IP-0022-04 §2）
 >
 > Exact base：`30bdfaa13ac72572d65ccb2567ae8702923c4187`（origin/main，IP-0021 merge）
 >
-> 制作人：lima-packet-verification（Assignment `IP-0022-PV-P1/v1` → `P1R2/v1` → `P1R3/v1`，任务标识 `PKT-IP-0022-D1` / `D1R2` / `D1R3`，2026-09-13）
+> 制作人：lima-packet-verification（Assignment `IP-0022-PV-P1/v1` → `P1R2/v1` → `P1R3/v1` → `IP-0022-PV-XAUDIT/v1` → `IP-0022-PV-R4/v1`，任务标识 `PKT-IP-0022-D1` / `D1R2` / `D1R3` / `XAUDIT` / `R4`，2026-09-13）
 >
-> 上游决策：COORD `ENTRY60-CLOSURE-1/v1`（拆分方案 α）；DR-IP-0022-01（REOPENED）；DR-IP-0022-02（REOPENED-by-03 / 部分 SUPERSEDED）；DR-IP-0022-03（RESOLVED-MAINTAINER）；**DR-IP-0022-04（OPEN，v4 执行依据；A/B 冻结面请求待裁定）**；PI-DR1..PI-DR6 全部生效
+> 上游决策：COORD `ENTRY60-CLOSURE-1/v1`（拆分方案 α）；DR-IP-0022-01（REOPENED）；DR-IP-0022-02（REOPENED-by-03 / 部分 SUPERSEDED）；DR-IP-0022-03（RESOLVED-MAINTAINER）；**DR-IP-0022-04（OPEN，R4 修订版：A' 撤回 / A 定稿版与 B 重写版待重审）**；PI-DR1..PI-DR6 全部生效
 >
 > 随批文档：DR-IP-0022-01、DR-IP-0022-02、DR-IP-0022-03、**DR-IP-0022-04**、C1 勘误（`LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md`）、**`LIMA_IP-0022_XAUDIT_Matrices_v1.md`（两张可核查矩阵 + 探针复验 + 残余风险清单）**
 
@@ -101,20 +101,21 @@ def is_secret_shaped_path(path: str) -> bool:
 - 断言口径：**超集断言**（五 token 形状全命中 + 两驳回样本 + `id_rsa.pem`/`id_ed25519` 命中 + §6 M1' 误伤负例集不命中 + **段级形态**：`tests/secrets/anything.py` 命中、`tests/tokenizer/anything.py` 不命中）；不与 `_SECRET_TOKEN_PATTERN` 等值。
 - shape 家族归类仅用于内部留痕 `family` 字段（§3.3），不入公开输出。
 
-### 3.2 F1 — 准入过滤点（v3：三处）
+### 3.2 F1 — 准入过滤点（v5：四点 = v3 三点 + v5 script 名称点）
 
-1. `_build_entrypoints(summary, inventoried)`：命中者不生成 entrypoint（script-declared 与 root-convention 同滤）。
+1. `_build_entrypoints(summary, inventoried)`：**path 面**——script-declared 的解析目标与 root-convention 命中者不生成 entrypoint；**名称面（v5 新增，X7）**——script-declared 分支对 script **名称**（manifest scripts 键）执行 `is_secret_shaped_path(name)`（同一启发式作用于名称字符串——名称无 `/`，语义等同单段检测），命中即跳过该 entrypoint 生成并计入 `sensitive-filename` skip（`inventory.skipped["sensitive-filename"]` → `_skip_reason_gaps` 通道）。依据：script 名是任意 TOML 字符串键（inventory.py:360-365 仅 isinstance 校验），敏感命名名可原文进入 `entrypoints[i].symbol`（S1/S4/S8，probe P-R4-2 亲证；解析目标 `pkg/__init__.py` 为良性，path 面过滤不可达）；良性锚：`safe_cli`/`cli` 不受影响（X7-1 同时断言）。
 2. **`_code_role_assignments(evidence, entry_targets, gaps)`（v3 新增，G1）**：迭代 `sorted(evidence)` 时跳过 `is_secret_shaped_path(relative_path)` 为 True 的路径，不生成 `CodeRoleAssignment`，计入 `inventory.skipped["sensitive-filename"]`。排序（`(role.value, path)`）与 `_MAX_CODE_ROLE_ASSIGNMENTS` cap/overflow 逻辑零改动（DR-03 §2 核验，无契约冲突）。
 3. `build_python_ram_facts` 的 `candidates`（@ram.py:364-365）：过滤后进入 RAM 派生，五清单与 key_flows/labels 全部不含命中路径。
-- 三点均保持 sorted 次序，过滤不得重排（ordinal 属 candidate_id，禁止漂移）。
-- **v4 跨命中去重（DR-04 §1.2）**：同一 repo-relative path 在同一 build result 内只计一次 `sensitive-filename`（entrypoint 过滤与 code role 过滤共享去重集）；Profile 与 RAM 两个 build result 各自独立计数（语义=各自候选集的拒绝数）。**RAM-only 构建**（不经 Profile）同样过滤并留痕（§3.3）。
-- **【DR-04-A' 门控】第四过滤点（manifest 候选）**：`_manifest_candidates`/`_load_manifests` 命名判定后对整条候选路径执行段级 `is_secret_shaped_path`，命中即跳过并计入 sensitive-filename skip 通道——统一闭合 MANIFEST_PARSE_ERROR / 读取失败 / 超限三类 detail 的文件名携带面（I3/I4a/I5，矩阵一）；零 IP-0016 冻结模板改动、零测试锚定修订（三处锚定清单见 DR-04 §2-A，A' 不触碰）、零 golden 影响；取舍=敏感命名 manifest 声明整体丢失（与代码文件同口径，损失经 skip 计数可观测）。未获批前不实施。
+4. ~~manifest 候选过滤点（v4 【DR-04-A'】）~~ **v5 撤回**：Maintainer 复审否决 A'（丢弃 manifest 声明 + 其 skip 序号对非 inventory 候选定义失效——requirements*.txt 不在默认 inventory extensions，`sorted(evidence)` 枚举不含 manifest），Packet 删除该过滤点；manifest detail 携带面改由 **DR-04-A 定稿版**（`manifest-index` 稳定标识，见 DR-IP-0022-04 §2-A）处置，X3-1/X3-2 锚定 A 定稿版。
+- 各过滤点均保持 sorted 次序，过滤不得重排（ordinal 属 candidate_id，禁止漂移）。
+- **v4 跨命中去重（DR-04 §1.2）**：同一 repo-relative path 在同一 build result 内只计一次 `sensitive-filename`（entrypoint path 过滤与 code role 过滤共享按 path 键的去重集）；**script 名称过滤的去重键 = script 名称本身**（名称非路径，独立于 path 去重集；同名多目标或同目标多名各自按名去重）。Profile 与 RAM 两个 build result 各自独立计数（语义=各自候选集的拒绝数）。**RAM-only 构建**（不经 Profile）同样过滤并留痕（§3.3），且公开 coverage_gaps 同步携带 `reason=sensitive-filename; count=N`（X5-2 v5 增强断言）。
+- **A' 撤回对序号定义的波及核查（v5，如实记录）**：§3.3 的 `AdmissionSkipRecord.index` 对 Profile code-role 候选取 `sorted(evidence)` 枚举下标、对 RAM 取 sorted `.py` 序——两个枚举体均为真实 inventory 文件集，定义成立，不受 A' 否决影响；A' 失效模式（对不在 inventory 的 manifest 候选套用 inventory 序号）随过滤点删除一并消除；v5 新增 script 名称过滤的序号取**其自身候选枚举**（过滤前 `sorted(summary.scripts)` 键序下标，§3.3），遵循"index = 被过滤候选列表自身的过滤前 sorted 全序下标"原则，不依赖 `sorted(evidence)`。
 
 ### 3.3 F1 — skip 汇总与内部留痕（R1 终案，DR-03 §3）
 
 - **公开面（批准）**：仅 `reason → count`——`inventory.skipped["sensitive-filename"]` → 既有 `_skip_reason_gaps` 通道 → `GAP_INVENTORY_SKIPPED`，detail=`reason=sensitive-filename; count=N`（模板不变）。无 shape 家族输出。
 - **内部逐项记录（终案设计）**：`AdmissionSkipRecord(index: int, reason: str, family: str)`——**扫描内序号 + reason + family，不带原文件名，不含任何 basename 派生摘要**（sha8 方案被否决）。挂载于 `ProfileBuildResult.admission_skips` / `RamFactsBuildResult.admission_skips`（默认 `()`，`lima/audit` 层 dataclass，不入 wire、不改 contracts）。
-- **v4 序号与次序定稿（DR-04 §1.2）**：`index` = 该 build **过滤前 sorted 候选全序枚举下标**（Profile：`sorted(evidence)` 键序；RAM：`sorted(item.path for item in files if .py)` 序），0 基，与 `candidate_id` 的 ordinal 无关（candidate_id 为 Do-not-touch），同输入同序号可复现；`admission_skips`/`inventory.skipped` 写入必须发生在 `_skip_reason_gaps`（Profile）/`_coverage_gaps`（RAM）构造之前（不变量，X5 负例承载）。
+- **v4 序号与次序定稿（DR-04 §1.2；v5 复核维持 + script 枚举补充）**：`index` = 该 build **过滤前 sorted 候选全序枚举下标**（Profile code roles：`sorted(evidence)` 键序；Profile script 名称（v5）：`sorted(summary.scripts)` 键序；RAM：`sorted(item.path for item in files if .py)` 序），0 基，与 `candidate_id` 的 ordinal 无关（candidate_id 为 Do-not-touch），同输入同序号可复现；`admission_skips`/`inventory.skipped` 写入必须发生在 `_skip_reason_gaps`（Profile）/`_coverage_gaps`（RAM）构造之前（不变量，X5 负例承载）。v5 附注：三处枚举体均为各自被过滤候选的真实列表，A' 否决所针对的"对非 inventory 候选套用 inventory 序号"失效模式不适用于此（§3.2 第 4 点撤回记录）。
 - **FR-01 记 PARTIAL**：内部逐项留痕当前仅覆盖 `sensitive-filename` 一类；覆盖全部跳过原因（binary/size/limit/… 全 vocabulary）前 FR-01 满足面记 PARTIAL。
 
 ### 3.4 F1 — 词汇表扩展（DR-01 存活授权）
@@ -132,7 +133,7 @@ def is_secret_shaped_path(path: str) -> bool:
 `validate_ram_wire_payload` 在既有结构校验后依序追加（**六步**）：
 
 - **path 检查（v4 强化，对齐 #58 `_validated_path` 段级语义不弱于）**：ram 五清单 entry 与 `semantic.ranked` 每项 path：非空 str、无 `\`、非 `/` 开头、无 `^[A-Za-z]:` 盘符、**无 Cc 控制字符、任一 `/` 段 ∉ {"", ".", ".."}**（v3 缺后两条，系弱于 #58 契约，v4 补齐；长度 cap 差异记残余风险 R-6）；违例 `ContractError(INVALID_FIELD_VALUE, "$.ram.<section>[i].path" / "$.semantic.ranked[i].path")`。
-- **【DR-04-B 门控】candidate_id 一致性检查（第七项，获批后 mandatory）**：每个 `semantic.ranked[i]` 校验 `candidate_id ≡ f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"`——prefix=`f"{kind}:{path}:"` 前缀匹配 + `tail.rsplit("#",1)` 得（symbol 槽 = symbol 或 "-"，非负数字 ordinal）；违例 `$.semantic.ranked[i].candidate_id`。依据：`_result_digest` payload 不含 kind/path/symbol（semantic_prioritizer.py:640-660），无此检查时三字段篡改五摘要全不设防（X4 RED 复现）。real-chain 与 golden 零误伤已证（§9）。未获批前维持残余风险 R-9。
+- **【DR-04-B 门控（v5 重写版，待重审）】candidate_id 一致性检查（第七项，获批后 mandatory）**：每个 `semantic.ranked[i]` 校验 `candidate_id ≡ f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"`——prefix=`f"{kind}:{path}:"` 前缀匹配 + `tail.rsplit("#",1)` 得（symbol 槽，非负数字 ordinal）等值比对；**消歧规则（v5 新增，消除 None↔`'-'` 碰撞）**：candidate_id 槽位 `'-'` 严格且唯一地对应 `symbol is None` 的序列化值 `null`——`semantic.ranked[i].symbol == "-"` **字面值一律 wire 层拒绝**（`ContractError(INVALID_FIELD_VALUE, "$.semantic.ranked[i].symbol")`）。依据与安全性：(a) 碰撞缺陷——`symbol=None` 与 `symbol='-'` 生成同一 ID（candidate_id() @prioritizer:336），且 `_result_digest` payload 不含 symbol（:640-660），故 None↔`'-'` 互换既不动 ID 也不动五摘要，"三字段全绑定"在无消歧规则时不成立（X4-7 RED：main 接受该翻转，probe P-R4-4 亲证）；(b) **生产链定源（v5 逐一定源，probe P-R4-1/P-R4-3 实证）**——ranked symbol 的全部生产源为 RAM 五清单：entrypoints=`ast.FunctionDef.name`（Python 标识符，不含 `-`）、external_sources=包裹函数名（标识符）或 None、trust_boundaries/sensitive_sinks=None、unresolved_edges=`_call_name()`（点分标识符）或哨兵 `"<dynamic-call>"`；唯一能产出字面 `'-'` 的生产路径是 Profile `_build_entrypoints` 的 script 名（任意 TOML 键，P-R4-1 实测 `[project.scripts] "-"=...` → `entrypoints.symbol='-'`），但 **Profile entrypoints 不是 RAM/semantic ranked 的输入**（ranked 仅由 `facts` 五清单派生，prioritizer:525-585），故 wire 层拒绝 `'-'` 对生产链零误伤；(c) Profile 层 `symbol='-'` 维持 #58 冻结契约原样（无 candidate_id 域，本 Packet 不触碰，矩阵一 I13 记录性注记）。未获批前维持残余风险 R-9。
 - `ram_facts_digest_from_wire(payload) != identity.ram_facts_digest` → `$.identity.ram_facts_digest`。
 - `semantic_config_digest_from_wire(payload) != identity.semantic_config_digest` → `$.identity.semantic_config_digest`。
 - `semantic_result_digest_from_wire(payload) != identity.semantic_result_digest` → `$.identity.semantic_result_digest`。
@@ -151,11 +152,18 @@ def is_secret_shaped_path(path: str) -> bool:
 
 | 类别 | 文件 |
 |---|---|
-| Add | `tests/audit/test_ip_0022_fix.py`（D2 冻结落库；D1/D1'/D1'' 已 scratch RED） |
+| Add | `tests/audit/test_ip_0022_fix.py`（D2 冻结落库；D1..D1'''' 已 `_red_proof` RED）；**`_red_proof/` 全量底稿（v5 起纳入提交，见 §4a）** |
 | Modify | `lima/audit/inventory.py`（§3.1-§3.4 含 `_code_role_assignments` 过滤 + `AdmissionSkipRecord`）、`lima/audit/ram.py`（§3.2.3 过滤 + `admission_skips`）、`lima/audit/ram_schema.py`（§3.5）、`lima/audit/__init__.py`（导出） |
 | Modify（DR 授权冻结测试面修订，D2） | `tests/audit/test_fr05_gap_encoding.py`（扩词）、`tests/audit/test_ram_schema.py`（`MINIMAL_PAYLOAD` 四 digest 自洽迁移，用例 @:223-224；摘要检查末位约束 DR-01 R-2） |
 | Read-only | 其余 `tests/**`、`schemas/**`、`docs/**` 既有文件、`lima/**` 其余 |
 | Must-not-modify | `lima/contracts/**`、`schemas/v4/version_compatibility_matrix.json`、`lima/workspace.py`、`#94` 轨道一切（PR #178 零交集） |
+
+### 4a. `_red_proof/` 底稿的提交范围与管理办法（v5，问题 2 处置）
+
+- **提交范围（PR #180 统一口径）**：本 PR 范围 = `docs/**`（Packet/DR/矩阵/勘误）+ `_red_proof/**`（RED 证明底稿）。此前分支只提交了 X 系文件而 v3 的 23 用例文件未入库，致 `_red_proof` 全量不可从 PR 复现、PR 自称 docs-only 与实际内容不符——v5 起全部底稿（`test_ip_0022_fix_red.py` 23 例、`test_ip_0022_xaudit_red.py` 14 例、`probe_xaudit.py`、`probe_r4.py`）入库，`python -m pytest _red_proof -q` 可从 PR 原样复现 **37 failed / 3 passed**（干净 checkout 复核，§9.5）。
+- **性质声明**：`_red_proof/` 是 **D2 冻结测试的底稿（draft-of-freeze）**，不是运行时产品代码。pytest 配置 `testpaths=["tests"]`（pyproject.toml:41）不含 `_red_proof`，CI 与常规验收命令均不收集、不执行；其内容在 D2 阶段逐例迁入 `tests/audit/test_ip_0022_fix.py` 正式冻结。
+- **管理办法**：D2 迁移完成并经独立验证后，`_red_proof/` 整体归档（移出仓库或在独立 commit 中删除，由 Coordinator 在 D2 验收时裁定）；迁移前保持只读（P&V 冻结底稿，Implementation 不得修改）。
+- **证据索引（可复现命令与前置条件）**：任意 clone PR 分支（head SHA 见 §9.5）→ `pip install -r requirements.txt`（无网络外呼，测试全部本地）→ `python -m pytest _red_proof -q` → 预期 `37 failed, 3 passed`；回归锚 `python -m pytest tests/audit tests/contracts -q` → `801 passed`；`python -m pytest tests/audit/test_golden_matrix.py -q` → `15 passed`；探针 `python _red_proof/probe_r4.py`、`python _red_proof/probe_xaudit.py` → 输出与 §9.5 摘要逐行一致。
 
 ## 5. 行为约束与恢复要求
 
@@ -166,7 +174,7 @@ def is_secret_shaped_path(path: str) -> bool:
 
 ## 6. 最低用例矩阵（冻结测试集，23 例 + 迁移正例 + 回归锚）
 
-RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''（34 例，本版：v3 的 23 例 + X 系 11 例新负例）**，签名均为目标行为缺失（§9）。
+RED 五轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''（34 例）、**D1''''（37 例，v5：+ X4-7 / X7-1 / X7-2 三例 + X3-1/X5-2 断言增强）**，签名均为目标行为缺失（§9/§9.5）。
 
 | # | ID（D2 冻结名可微调，语义不得变） | 断言 |
 |---|---|---|
@@ -183,11 +191,13 @@ RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''
 | G2-P | minimal_payload_self_consistent_migration_validates | **五 digest** 自洽迁移正例通过（D2 迁移后既有正例改造，基线与实现后均绿——迁移兼容锚，非 RED；X6 已在 D1''' 预证） |
 | X1 | sensitive_directory_segment_excluded_from_code_roles | 敏感**目录段**（tests/secrets/anything.py）不入 code_roles（v4） |
 | X2 | sensitive_directory_segment_excluded_from_ram | 敏感目录段（secrets/danger.py）不入 RAM 任何清单（v4） |
-| X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径（**【DR-04-A'/A 门控】**，A'=manifest 候选准入过滤为建议优先项（零冻结面触碰），A=detail 脱敏为备选；获批任一后 mandatory；RED 已证 main 泄漏，X3-2 经 XAUDIT-FIX 勘正为目标缺失签名） |
-| X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B 门控】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
+| X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径，且携带 `manifest-index=<i>` 稳定标识（**【DR-04-A 定稿版门控，待重审】**；A' 已撤回；RED 已证 main 泄漏；X3-2 经 XAUDIT-FIX 勘正为目标缺失签名） |
+| X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B 门控（v5 重写版）】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
 | X4-4/5/6 | wire_path_segment_rules | 空段（a//b）、`.` 段（./x）、Cc 控制字符 path 拒绝（v4 补齐 #58 契约两处弱于） |
+| X4-7 | wire_candidate_id_none_dash_disambiguation | `symbol` None↔`'-'` 互换篡改（candidate_id 与五摘要均不变）被拒——`symbol == "-"` 字面值 wire 层拒绝，槽位 `'-'` ≡ `symbol is None`（v5 新增，DR-04-B 重写版；RED：main 接受该翻转） |
 | X5-1 | admission_skip_counted_once_per_path | 同一 path 命中 entrypoint+code role 只计一次（count=1、恰一个 typed gap） |
-| X5-2 | ram_only_build_records_admission_skips | RAM-only 构建留痕 admission_skips（无 path 字段） |
+| X5-2 | ram_only_build_records_admission_skips | RAM-only 构建留痕 admission_skips（无 path 字段）**且公开 coverage_gaps 携带 `reason=sensitive-filename; count=1`**（v5 增强断言） |
+| X7-1/X7-2 | sensitive_script_name_admission | 敏感命名 script **名称**不入 `entrypoints[i].symbol`/`to_dict()`（良性名 safe_cli 保留）；skip 经公开通道计数（`count=1`、恰一个 typed gap）（v5 新增；RED：main 原文泄漏，probe P-R4-2） |
 | X6 | minimal_payload_five_digests_true_valued | 五摘要槽互异、非占位、可重算（迁移兼容锚，基线即绿） |
 | R1-R2 | 回归锚 | golden matrix 15 绿 + `tests/audit`+`tests/contracts` 801 绿 |
 | R3 | goldens 零命中核验锚 | 启发式（含 `id_` 族）对 golden 全部路径/repo_shapes 文件名零命中 |
@@ -204,6 +214,14 @@ RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''
 - 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed。
 - **PI-DR6 双平台（D1''' 轮，已执行）**：Windows 本机全量 + docker Linux（python:3.12-slim，Linux x86_64，`pytest tests/audit tests/contracts` = 801 passed +318 subtests、golden 15 passed、`_red_proof` = 34 failed / 3 anchors——与 Windows 完全一致，平台无关实证）+ 临时分支 `pv/ip-0022-xaudit-pidr6`（@d32fd2e）GitHub Actions Linux CI 完整跑，run 34763112315 **completed/success**（https://github.com/agent-sec-labs/LIMA/actions/runs/34763112315）。
 
+## 9.5 RED 证明（D1''''，v5 / PKT-IP-0022-R4）
+
+- 测试文件：`_red_proof/test_ip_0022_xaudit_red.py`（14 例，v5 增 X4-7、X7-1、X7-2 三例并增强 X3-1/X5-2 断言）+ `_red_proof/test_ip_0022_fix_red.py`（v3 的 23 例，签名复验不变）。命令：`python -m pytest _red_proof -q`。结果：**37 failed / 3 passed**（D1''' 34 failed 基础上 +3，均为新增目标缺失型；3 个通过项仍为锚：X4-0、X6 两例）。
+- **新失败签名（逐例目标缺失型，非 arrange 缺陷）**：X4-7 `Exception not raised`（wire 接受 symbol None→`'-'` 翻转，candidate_id 与五摘要均不变——碰撞缺陷复现）；X7-1 `True is not false : sensitive script name leaked into entrypoints.symbol: ['safe_cli', 'token_FAKESECRET123']`；X7-2 `0 != 1 : expected exactly one skip gap: []`；X5-2 增强断言（公开 coverage gap）随首断言（admission_skips 缺失）失败；X3-1 增强（manifest-index 存在）随首断言（原路径泄漏）失败。
+- **可复现性（问题 2 处置）**：v3 的 23 用例文件此前未提交（34/3 不可从 PR 复现的原因），本轮全部底稿入库（commit `6f90375`）；**干净 checkout 复核**（`git archive <head>` 解包至空目录后原样运行）：`_red_proof` = 37 failed / 3 passed、`tests/audit tests/contracts` = 801 passed、golden = 15 passed，与工作树逐项一致。
+- **探针证据（probe_r4.py，入库）**：P-R4-1 script 名 `'-'` → Profile entrypoints.symbol=`'-'`（Profile 层生产路径实证）；P-R4-2 敏感 script 名原文进 entrypoints.symbol + to_dict（解析目标良性，path 面过滤不可达）；P-R4-3 RAM 全链观察 symbol 集 = 标识符 ∪ {`"<dynamic-call>"`}，无 `'-'` 字面值；P-R4-4 wire 接受 None→`'-'` 翻转（X4-7 RED 基础）。
+- 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed（工作树 + 干净 checkout 双跑）。
+
 ## 7. 缺口查证结论（v1 结论维持，行号经 R-1 勘正）
 
 - 缺口 1：存在 1 处宽松接受冻结断言——`test_ram_schema.py::test_minimal_payload_validates`（@:223-224；MINIMAL_PAYLOAD @:79，identity @:128-135）。DR-01 授权 + DR-03 §1(a) 升级为四 digest 自洽迁移。
@@ -212,8 +230,10 @@ RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''
 ## 8. 验收命令与判定
 
 ```bash
-python -m pytest tests/audit tests/contracts -q        # ≥801+23+X passed（X = v4 非 DR 门控新负例 X1/X2/X4-4..6/X5；X3/X4-1..3 随 DR-04-A/B 裁定计入），0 failed, 0 new skip
+python -m pytest tests/audit tests/contracts -q        # ≥801+23+X passed（X = 非 DR 门控新负例 X1/X2/X4-4..6/X5/X7；X3/X4-1..3/X4-7 随 DR-04-A/B 裁定计入），0 failed, 0 new skip
 python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原样）
+# RED 底稿可复现（D2 实现前）：git clone PR 分支后
+python -m pytest _red_proof -q                          # 37 failed / 3 passed（D1''''，§9.5）
 ```
 
 判定依据：M1'-M18 + G1/G2 系全绿；R1-R3 全绿；`git diff 30bdfaa -- tests/audit/fixtures schemas` 为空；ruff/bandit 零新 finding。PI-DR6：D2 冻结前至少一个非 Windows 平台完整跑一次（M1'/G 系为纯字符串/纯构造断言，平台无关）。
@@ -228,7 +248,7 @@ python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原�
 
 ## 10. Completion Summary / PR 要求
 
-PR 描述必须含：F1/F2 需求映射（§0）、§2 残余风险声明逐字 + NFR-01/FR-01 **PARTIAL** 记账口径、§3.5 认证定位声明、冻结接口落位、验收命令输出摘要、golden 零改动 diff 证据、DR-01/02/03 授权修订落位（含 MINIMAL_PAYLOAD 四 digest 自洽迁移）、PI-DR6 非 Windows 记录。禁止任何自动关闭 #60 的关键字。
+PR 描述必须含：F1/F2 需求映射（§0）、§2 残余风险声明逐字 + NFR-01/FR-01 **PARTIAL** 记账口径、§3.5 认证定位声明、冻结接口落位、验收命令输出摘要、golden 零改动 diff 证据、DR-01/02/03 授权修订落位（含 MINIMAL_PAYLOAD 四 digest 自洽迁移）、PI-DR6 非 Windows 记录、**提交范围如实声明（docs + `_red_proof/` D2 冻结底稿及其管理办法，§4a）与 RED 可复现命令（`python -m pytest _red_proof -q` → 37 failed / 3 passed）**。禁止任何自动关闭 #60 的关键字。
 
 ## 11. R1 终案（Maintainer 终裁，DR-03 §3）
 

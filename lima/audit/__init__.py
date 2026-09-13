@@ -1,7 +1,8 @@
 """Public API surface of the LIMA audit inventory layer (IP-0016).
 
 Re-exports only the frozen Packet v1.1 (§6 D2) public API; all logic lives
-in :mod:`lima.audit.inventory`.
+in :mod:`lima.audit.inventory`. IP-0019 appends the semantic prioritizer
+Top-N layer re-exports of :mod:`lima.audit.semantic_prioritizer`.
 """
 
 from lima.audit.inventory import (
@@ -28,6 +29,32 @@ from lima.audit.ram import (
     build_python_ram_facts,
     ram_facts_digest,
 )
+from lima.audit.semantic_prioritizer import (
+    GAP_SEMANTIC_MALFORMED_OUTPUT,
+    GAP_SEMANTIC_MODEL_OFF,
+    GAP_SEMANTIC_MODEL_TIMEOUT,
+    SEMANTIC_CATEGORY_CODE_EXECUTION,
+    SEMANTIC_CATEGORY_COMMAND_EXECUTION,
+    SEMANTIC_CATEGORY_DESERIALIZATION,
+    SEMANTIC_CATEGORY_ENTRYPOINT,
+    SEMANTIC_CATEGORY_EXTERNAL_INPUT,
+    SEMANTIC_CATEGORY_PATH_TRAVERSAL,
+    SEMANTIC_CATEGORY_SQL_INJECTION,
+    SEMANTIC_CATEGORY_TRUST_BOUNDARY,
+    SEMANTIC_CATEGORY_UNRESOLVED_EDGE,
+    SEMANTIC_MAX_TOP_N,
+    SEMANTIC_PROVENANCE_ANCHOR,
+    SemanticBudgets,
+    SemanticCandidate,
+    SemanticModelClient,
+    SemanticOptions,
+    SemanticTopNResult,
+    SemanticWeights,
+    build_semantic_top_n,
+    candidate_id,
+    semantic_config_digest,
+    semantic_result_digest,
+)
 
 __all__ = [
     "GAP_BUDGET_EXHAUSTED",
@@ -50,4 +77,28 @@ __all__ = [
     "RamKeyFlow",
     "build_python_ram_facts",
     "ram_facts_digest",
+    "GAP_SEMANTIC_MALFORMED_OUTPUT",
+    "GAP_SEMANTIC_MODEL_OFF",
+    "GAP_SEMANTIC_MODEL_TIMEOUT",
+    "SEMANTIC_CATEGORY_CODE_EXECUTION",
+    "SEMANTIC_CATEGORY_COMMAND_EXECUTION",
+    "SEMANTIC_CATEGORY_DESERIALIZATION",
+    "SEMANTIC_CATEGORY_ENTRYPOINT",
+    "SEMANTIC_CATEGORY_EXTERNAL_INPUT",
+    "SEMANTIC_CATEGORY_PATH_TRAVERSAL",
+    "SEMANTIC_CATEGORY_SQL_INJECTION",
+    "SEMANTIC_CATEGORY_TRUST_BOUNDARY",
+    "SEMANTIC_CATEGORY_UNRESOLVED_EDGE",
+    "SEMANTIC_MAX_TOP_N",
+    "SEMANTIC_PROVENANCE_ANCHOR",
+    "SemanticBudgets",
+    "SemanticCandidate",
+    "SemanticModelClient",
+    "SemanticOptions",
+    "SemanticTopNResult",
+    "SemanticWeights",
+    "build_semantic_top_n",
+    "candidate_id",
+    "semantic_config_digest",
+    "semantic_result_digest",
 ]

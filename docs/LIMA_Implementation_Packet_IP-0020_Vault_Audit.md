@@ -1,8 +1,8 @@
 # LIMA Implementation Packet IP-0020：Vault/Audit（Feature Slice S3：vault port 默认 disabled 合同 + 历史 Artifact 只读审计）
 
-- Packet 版本：**1.2**（2026-09-13，P&V erratum，状态 DESIGN-FROZEN-REVISED / PENDING-MERGE。**v1.1 → v1.2 修订（erratum，修订非删除）**：按 Maintainer 修订裁定 **DR-IP-0020-4R**（裁定正本 + 契约增量规格 = `.pv_tmp/COORD-IP0020-DR4R_RULING_AND_V12_SPEC_2026-09-13.md`，2026-09-13，P&V 逐字消费其 §① 裁定与 §② 规格起草本节；裁定精神：暂不整组批准 DR-IP-0020-4，六项修订执行——D1' 位置模型 v2（成员序号路径 + 全携带面零原值）、D2' `TenantAuditContext` 聚合入口租户绑定（混合 fail-closed、内部长标签双重防漏出、零 finding 批次覆盖）、D3' 脚本 per-run 随机密钥（禁固定密钥回流）、F4' vault 错误 backend 元数据化、B2' symlink 边界 + Linux 权威负例、F5' 预算分层 + `status`/`incomplete_reasons` + exit 3；附随 F6' Ruff 清零、G3' `classify_payload` 空租户 fail-closed）。修订落点：§8.1.3/§8.1.5（F4'）、§8.2（D1'/D2'/F5' 库层）、§8.3（D1'.2/D3'/B2'/F5' 脚本层）、§9 T2/T4（携带面与租户隔离升级）、§11/§12（断言面与验收命令）、新增 **§17 v1.2 契约增量规格（逐小节）与 §18 断言映射总表（修订非删除，逐条"旧 → 新"映射）**。被 v1.2 替代的 v1.1 条款在本节内以 **[v1.2-replaced]** 标注保留原文（修订非删除），冲突时以 §17/§18 为准。既有 8 文件零修改边界、`__all__` 13 项、`PrivacyErrorCode` 12 值锚定不动（红线 5；`audit.py` 扩 `TenantAuditContext` 属 DR-IP-0020-1 后置授权情形，DR-IP-0020-4R 即授权，见 §17.D2'）。此前：v1.1（2026-09-13，P&V 起草，状态 DESIGN-FROZEN / PENDING-MERGE；v1.0 同日发布。v1.0 → v1.1 修订：按 Coordinator PR #173 评审裁定 COORD-IP0020-PACKET_PR_REVIEW 2026-09-13 + AI Reviewer 提前检查 REVIEW-IP-0020-SECBOUNDARY_EARLYCHECK 发现项 **F-1（MINOR）**——§8.2.3 指纹需租户凭据 vs §8.3 脚本 CLI 无租户参数 vs §9 T4 表述的租户凭据未定义缺口，采用"固定离线租户"方案修订：新增 §8.3.8、改写 §9 T4、更新 §11.1 断言组、§11.5 补 Windows 路径变体用例（非阻塞建议采纳）。其余内容零改动）
+- Packet 版本：**1.3**（2026-09-13，P&V erratum rev.2，状态 DESIGN-FROZEN-REVISED / PENDING-MERGE。**v1.2 → v1.3 修订**：按 Maintainer 对 PR #178 的五项修订指令 R1-R5（已入 Issue #94 Ledger 决策日志 2026-09-13；规格增量正本 = COORD-IP0020-R1R5_SPEC_ADDENDUM_2026-09-13，P&V 逐项落实）：R1 `TenantAuditContext` repr=False + 自定义 `__repr__` 仅含 tenant_id_len/tenant_key_len，构造异常链全查零 key（§17.D2'-R1、§18 #17）；R2 句柄限量读取 `f.read(LIMIT+1)`（禁 `read_bytes()`/st_size 预检）+ 目录级 `max_files_per_scan=10_000`/`max_total_bytes_per_scan=104_857_600`（§17.F5'-R2、§18 #18）；R3 定稿机制 A——`os.open`（POSIX 叠加 O_NOFOLLOW）+ `fstat(fd)` 与 `entry.stat(follow_symlinks=False)` 比对 `(st_dev, st_ino)`，不一致或 st_ino==0 一律 fail-closed（symlink-risk），v1.2 "Windows 注明残余 TOCTOU" 条款废止（§17.B2'-R3、§18 #19）；R4 库侧 source_path 白名单 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` → `INVALID_FIELD_VALUE("source_path")`（新增 §17.D1'.3、§18 #20）；R5 derived_key 定稿（HMAC-SHA256(tenant_key, b"lima.evidence_privacy.tenant-key.v1\x00"+tenant_id.utf8)，对齐 fingerprint.py 实物）+ `.pv_tmp` 权威引用替换为 §17 自含 + Ledger 锚点（§17.D2'-R5、§18 #21、R5.3 替换清单）。**顺序裁定**：预备 Frozen v3（commit 2a47a1e，分支 codex/ip-0020-frozen-tests-v3）仅为预备 RED 证据；正式 Frozen v3-final 于本 Packet 合并后在合并 main 上重建并重证 RED。此前 v1.2：**v1.1 → v1.2 修订（erratum，修订非删除）**：按 Maintainer 修订裁定 **DR-IP-0020-4R**（裁定正本 = Issue #94 Ledger 决策日志 2026-09-13（Maintainer DR-IP-0020-4R 修订裁定，稳定仓库锚点）；契约增量规格 = 本 Packet §17（自含权威）；erratum commit = 本修订合并 commit SHA（合并时回填）。裁定精神：暂不整组批准 DR-IP-0020-4，六项修订执行——D1' 位置模型 v2（成员序号路径 + 全携带面零原值）、D2' `TenantAuditContext` 聚合入口租户绑定（混合 fail-closed、内部长标签双重防漏出、零 finding 批次覆盖）、D3' 脚本 per-run 随机密钥（禁固定密钥回流）、F4' vault 错误 backend 元数据化、B2' symlink 边界 + Linux 权威负例、F5' 预算分层 + `status`/`incomplete_reasons` + exit 3；附随 F6' Ruff 清零、G3' `classify_payload` 空租户 fail-closed）。修订落点：§8.1.3/§8.1.5（F4'）、§8.2（D1'/D2'/F5' 库层）、§8.3（D1'.2/D3'/B2'/F5' 脚本层）、§9 T2/T4（携带面与租户隔离升级）、§11/§12（断言面与验收命令）、新增 **§17 v1.2 契约增量规格（逐小节）与 §18 断言映射总表（修订非删除，逐条"旧 → 新"映射）**。被 v1.2 替代的 v1.1 条款在本节内以 **[v1.2-replaced]** 标注保留原文（修订非删除），冲突时以 §17/§18 为准。既有 8 文件零修改边界、`__all__` 13 项、`PrivacyErrorCode` 12 值锚定不动（红线 5；`audit.py` 扩 `TenantAuditContext` 属 DR-IP-0020-1 后置授权情形，DR-IP-0020-4R 即授权，见 §17.D2'）。此前：v1.1（2026-09-13，P&V 起草，状态 DESIGN-FROZEN / PENDING-MERGE；v1.0 同日发布。v1.0 → v1.1 修订：按 Coordinator PR #173 评审裁定 COORD-IP0020-PACKET_PR_REVIEW 2026-09-13 + AI Reviewer 提前检查 REVIEW-IP-0020-SECBOUNDARY_EARLYCHECK 发现项 **F-1（MINOR）**——§8.2.3 指纹需租户凭据 vs §8.3 脚本 CLI 无租户参数 vs §9 T4 表述的租户凭据未定义缺口，采用"固定离线租户"方案修订：新增 §8.3.8、改写 §9 T4、更新 §11.1 断言组、§11.5 补 Windows 路径变体用例（非阻塞建议采纳）。其余内容零改动）
 - 制作：LIMA Packet & Verification Agent（运行模型：无法核验——本环境未提供可验证的运行元数据）
-- 依据：Coordinator 裁定 COORD-IP94-S3-ENTRY_RULING-2026-09-13（`.pv_tmp/COORD-IP94-S3-ENTRY_RULING_2026-09-13.md`，Assignment 正本 = 其 §D，Assignment 编号 `IP-0020-PKT-P1/v1`；编号登记 = 其 §C.2）
+- 依据：Coordinator 裁定 COORD-IP94-S3-ENTRY_RULING-2026-09-13（原 `.pv_tmp/COORD-IP94-S3-ENTRY_RULING_2026-09-13.md` 为过程性证据，非权威；Assignment 正本以 PR #173 合并 commit 中的 Packet v1.0 §依据 为准；Assignment 编号 `IP-0020-PKT-P1/v1` 即仓库内可 grep 锚点；编号登记见其 §C.2）
 
 ## 1. 需求映射（Header）
 
@@ -32,7 +32,7 @@
 | DI-008 | `lima/evidence_privacy/__init__.py` | `ef21f161f0c63b99a8a1cd6060a5efc3b3758654` | 只读：`__all__` 保持 13 项；新模块经 `lima.evidence_privacy.vault_port` / `lima.evidence_privacy.audit` 模块路径消费（扩 `__all__` 须 DR，§10） |
 | DI-009 | `tests/evidence_privacy/` 15 文件 @ dc6a50e（`__init__.py`=e69de29b…5391、`test_base64_refinement.py`=08376855…c2d8、`test_classifier.py`=8cee2190…0517、`test_conformance_cycles.py`=6abdd11a…363a、`test_conformance_limits_matrix.py`=cb95f042…d4ce、`test_conformance_sinks.py`=315fc937…1f30、`test_content_forms.py`=38ac47b0…9627、`test_error_hygiene.py`=3a9be6d8…85e2、`test_fingerprint.py`=dfda7f1f…abbe4、`test_fixture_no_leak.py`=73a175ee…f89a、`test_limits.py`=1d7f5700…108a、`test_models.py`=c94c0f5f…8ed4、`test_policy.py`=08908d9e…b10a、`test_port_sanitize.py`=945d2df1…d41f、`test_value_kinds.py`=7b360294…1a89） | 冻结测试，只读不得修改（§11.6）；154 用例为回归底线（下限不减少） |
 | DI-010 | Issue #94 远程正文（updated 2026-09-13T05:51:10Z，含 Delivery Ledger、IP-0020 登记、G3 条款与 Reviewer 登记） | GitHub API 只读亲验（2026-09-13） | 需求唯一来源（FR/NFR/AC/T 稳定 ID） |
-| DI-011 | Coordinator 裁定 COORD-IP94-S3-ENTRY_RULING-2026-09-13（§A consumer review / §B 切分 + T1–T5 / §C 编号登记 / §D Assignment / §E 风险） | `.pv_tmp/COORD-IP94-S3-ENTRY_RULING_2026-09-13.md`（本地基线外控制面） | 派发权威 |
+| DI-011 | Coordinator 裁定 COORD-IP94-S3-ENTRY_RULING-2026-09-13（§A consumer review / §B 切分 + T1–T5 / §C 编号登记 / §D Assignment / §E 风险） | 过程性证据（原 `.pv_tmp/COORD-IP94-S3-ENTRY_RULING_2026-09-13.md`，非权威）；权威 = PR #173 合并 commit 内 Packet v1.0 §依据 | 派发权威 |
 | DI-012 | IP-0017 Packet v1.0 + IP-0015 Packet v1.1 | `docs/LIMA_Implementation_Packet_IP-0017_Content_Conformance.md`=a5b42207…12a9、`docs/LIMA_Implementation_Packet_IP-0015_Evidence_Privacy_Core.md`（main 树内） | §7 符号冻结 / §9 边界惯例模板；上游契约依据（记录性引用） |
 | DI-013 | 开工清单 | `docs/LIMA_Issue_94_Coding_Agent_Kickoff_Checklist.md` = `42957cfa8e2269a7205cc40680a043e242fcca7d` @ dc6a50e | §2 第三层（L39–40）/ §3（L44–50）边界与验收 |
 | DI-014 | 生命周期 `docs/LIMA_ISSUE_TO_IP_TO_PR_TO_CLOSURE_LIFECYCLE.md`=385c3e74…072a（§8/§9/§9.1/§12）、开发与交接标准 `59d8d27c…3e98e`、P&V 责任书、CONTRIBUTING.md | origin/main docs/ 树内 @ dc6a50e | 流程权威 |
@@ -149,7 +149,7 @@ diff 中不得出现：对既有 8 文件任何行的增删改（本 IP 对它�
 > (b) 报告 `source_path` 不再是文件名，改为工件序号 `a<n>`（目标目录内符合后缀过滤的文件**字典序** 0 基编号；symlink 亦占工件序号）；
 > (c) §8.3.3 exit code 语义扩展：`0` = 完成且完整；`1` = 报告写失败（维持）；`2` = 参数/IO 参数错误（维持）；**新增 `3` = 完成但有未完成项**（`status:"incomplete"` 的正常退出路径，非错误退出；消费者必须检查 `status`/`incomplete_reasons`）；
 > (d) §8.3.8 固定离线租户常量方案**废止**：脚本每次运行生成 `tenant_key = secrets.token_bytes(32)`（per-run 随机），`tenant_id = "offline-audit"`；`OFFLINE_TENANT_KEY`（`b"lima-offline-audit.v1"`）常量**删除**且禁止回流（红线 4）；报告顶层 `tenant_context` 值定稿 `"offline-audit/random-per-run"`；报告顶层新增必含 `status`（`"complete"`|`"incomplete"`）与 `incomplete_reasons`（非空当且仅当存在 unparseable-json/undecodable-text/symlink-skipped/resource-limit 各类未完成项）；单文件字节数 > `max_payload_bytes`（1_048_576）→ 可识别跳过（stderr `resource-limit` + `incomplete_reasons` 记 `"a<n>:resource-limit"`），**禁止静默超限跳过与"零发现即完成"假象**；
-> (e) 遍历改 `os.scandir`；`entry.is_symlink()` → 跳过 + `{"artifact": "a<n>", "error": "symlink-skipped"}` + `incomplete_reasons` 记录；POSIX 读取用 `os.open(path, os.O_RDONLY | os.O_NOFOLLOW)`（Windows 无 `O_NOFOLLOW` 时先 `is_symlink()` 再 open，注明残余 TOCTOU 窗口，Linux CI 负例为权威）；`target_dir` 本身或中间目录解析后为 symlink → stderr `error: target-dir must not be a symlink path` + exit 2（调用方传入路径允许回显）。
+> (e) 遍历改 `os.scandir`；`entry.is_symlink()` → 跳过 + `{"artifact": "a<n>", "error": "symlink-skipped"}` + `incomplete_reasons` 记录；读取采用 R3 定稿机制 A（`os.open` + POSIX `O_NOFOLLOW` + `fstat(fd)`/`entry.stat(follow_symlinks=False)` 的 `(st_dev, st_ino)` 比对，不一致或 `st_ino==0` 一律 fail-closed `symlink-risk`；v1.2 "Windows 注明残余 TOCTOU" 条款废止，见 §17.B2'-R3）；`target_dir` 本身或中间目录解析后为 symlink → stderr `error: target-dir must not be a symlink path` + exit 2（调用方传入路径允许回显）。
 > 详见 §17.D1'.2/D3'/B2'/F5'。其余 §8.3 条款（CLI 形态、只读证明、依赖白名单、不进生产 pipeline）不变。
 
 1. CLI：`python scripts/audit_sensitive_artifacts.py <target-dir> [--output <report-path>] [--pretty]`；`<target-dir>` 必须是显式传入的本地目录（不默认扫仓库、不接受 URL、不递归出 `<target-dir>` 之外）。
@@ -318,7 +318,7 @@ Python 解释器：`python`（3.12.x，基线亲测可用）。
 
 ## 17. v1.2 契约增量规格（DR-IP-0020-4R erratum 正本；修订非删除）
 
-> 本章为 DR-IP-0020-4R 六项修订裁定（D1'/D2'/D3'/F4'/B2'/F5' + 附随 F6'/G3'）的落地规格，逐字落实裁定正本 §②（`.pv_tmp/COORD-IP0020-DR4R_RULING_AND_V12_SPEC_2026-09-13.md`，P&V 不扩大不缩小）。与 §7.1/§8/§9 v1.1 原文冲突处以本章为准；被替代原文即 §8/§9 内 [v1.2-replaced] 语境下的 v1.1 表述，语义继承关系见 §18。总则：全部修订复用既有 `PrivacyErrorCode`（12 值冻结不动）；`lima/evidence_privacy` 既有 8 文件中 `models.py`/`errors.py`/`fingerprint.py`/`policy.py`/`port.py`/`content_scan.py` 仍零修改，本轮授权修订对象 = `audit.py`/`classifier.py`/`vault_port.py` + 脚本（IP-0020 新增三产品文件 + 脚本）。所有签名变化均显式列出并进入 §18。
+> 本章为 DR-IP-0020-4R 六项修订裁定（D1'/D2'/D3'/F4'/B2'/F5' + 附随 F6'/G3'）**及 Maintainer R1-R5 修订指令（2026-09-13）**的落地规格；本节即权威规格（自含），上游依据 = Issue #94 Ledger 决策日志 2026-09-13（DR-IP-0020-4R 与 R1-R5 指令）。原 `.pv_tmp/COORD-IP0020-DR4R_RULING_AND_V12_SPEC_2026-09-13.md` 与 `.pv_tmp/COORD-IP0020-R1R5_SPEC_ADDENDUM_2026-09-13.md` 为过程性证据，非权威。与 §7.1/§8/§9 v1.1 原文冲突处以本章为准；被替代原文即 §8/§9 内 [v1.2-replaced] 语境下的 v1.1 表述，语义继承关系见 §18。总则：全部修订复用既有 `PrivacyErrorCode`（12 值冻结不动）；`lima/evidence_privacy` 既有 8 文件中 `models.py`/`errors.py`/`fingerprint.py`/`policy.py`/`port.py`/`content_scan.py` 仍零修改，本轮授权修订对象 = `audit.py`/`classifier.py`/`vault_port.py` + 脚本（IP-0020 新增三产品文件 + 脚本）。所有签名变化均显式列出并进入 §18。
 
 ### 17.D1'.1 位置模型 v2：确定性成员序号路径（替代 §8.2.2 field_path 条款）
 
@@ -345,16 +345,32 @@ Python 解释器：`python`（3.12.x，基线亲测可用）。
 - **finding repr / JSON 全字段排查清单**（负例逐面锁定）：`AuditFinding` 四字段 + `AuditLocation` 三字段 + 报告 JSON 全部顶层键（artifact_count / findings / policy_digest / policy_version / recommended_action / status / incomplete_reasons / tenant_context）——repr 与序列化输出对 fixture 的明文键名、明文值、明文文件名**全部零命中**。
 - **span**：保留（码点区间，无原值）。
 
+### 17.D1'.3 库侧 source_path 工件标识契约（R4，Maintainer 指令 2026-09-13，新增）
+
+`audit.py` 全部公开函数（`audit_text`/`audit_structured`/`build_audit_report` 消费的 `source_path` 与 `AuditLocation.source_path`）执行**入口校验**：
+
+- 合法形态：`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`（ASCII 字母/数字开头，全长 1-64，仅 `[A-Za-z0-9._-]`）。脚本层 `a<n>` 序号天然合规；选择通用安全字符集而非强制 `a\d+`：库不应假设调用方编号方案，但任何含路径分隔符、盘符、`..`、空白、非 ASCII、引号、反斜杠或超 64 字符的值一律拒绝——路径语义与注入面在库入口源头封死（`..` 由"开头必须字母数字 + 无 `/`/`\\`"结构保证）。库不信任调用方：即使脚本层已序号化，直接调用库的第三方仍可能传入真实路径/文件名。
+- 违规 → `PrivacyError(INVALID_FIELD_VALUE, field_path="source_path", context={"len": len(value), "reason": "artifact-id"})`——**context 不含原值**（errors.py 契约：context 仅非值元数据）。
+- 兼容：既有测试直传的 `sample.json`/`log_excerpt.txt` 等值合规；直传敏感串/路径样值的用例逐条分流为负例或改传合规值（§18 行 #20）。
+
 ### 17.D2' 租户边界 v2：`TenantAuditContext`（替代 §8.2.2/§8.2.4/§8.2.5 租户入口、§9 T4 部分）
 
 **新类型（audit.py；DR-IP-0020-1 后置授权情形——本 DR 即授权扩入 `audit.py` 的 `__all__`；`lima/evidence_privacy/__init__.py` 的 13 项 `__all__` 仍不动，`TenantAuditContext` 经模块路径 `lima.evidence_privacy.audit` 消费）**：
 
 ```python
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class TenantAuditContext:
     tenant_id: str
     tenant_key: bytes
+
+    def __repr__(self) -> str:
+        return (
+            f"TenantAuditContext(tenant_id_len={len(self.tenant_id)}, "
+            f"tenant_key_len={len(self.tenant_key)})"
+        )
 ```
+
+**R1（Maintainer 指令，2026-09-13）tenant_key 防泄漏面（冻结）**：`repr=False` 关闭自动 repr；自定义 `__repr__` **仅含长度元数据**（tenant_id_len/tenant_key_len），不含 tenant_id 原文与 tenant_key 任何字节；未覆写 `__str__` 时 `str()` 回落 `__repr__`，str/repr 双面同锁。指纹化标识形态**不采用**（避免额外 HMAC 与新的可关联标识，与 D2' "不批准 2A"精神一致）。构造校验异常零 key（实物核对结论，断言锁定而非改实现）：`MISSING_TENANT_KEY` 无 context；`INVALID_FIELD_VALUE` context 仅 `{"value_kind": type(x).__name__}`；断言覆盖 `repr(ctx)`/`str(ctx)`、构造失败 `PrivacyError` 的 `str`/`repr`/`context` 序列化、`__cause__`/`__context__`/`traceback.format_exception` 全链，对 key 原文与其 hex 形态、tenant_id 原文零命中（§18 行 #17）。
 
 构造校验（fail-closed，复用既有枚举）：`tenant_key` 非 bytes 或空 → `PrivacyError(MISSING_TENANT_KEY, field_path="tenant_key")`；`tenant_id` 空/非 str/UTF-8 超 128 字节 → `PrivacyError(INVALID_FIELD_VALUE, field_path="tenant_id")`（与 port.py 既有语义一致）。
 
@@ -364,7 +380,7 @@ class TenantAuditContext:
 - `build_audit_report(context: TenantAuditContext, findings: Mapping[str, tuple[AuditFinding, ...]], policy: TenantPolicy) -> AuditReport`
 - 旧 keyword-only `tenant_id`/`tenant_key` 参数**移除**（上下文是唯一租户入口——签名级强制，防止绕过；旧 keyword 调用形态 → `TypeError`）。
 
-**内部长标签（不输出）**：`AuditFinding` 增字段 `_tenant_tag: str = field(repr=False)`，值 = `hmac.new(derived_key, b"audit.tenant-tag.v1" + tenant_id, sha256).hexdigest()`（64 hex 字符 = 32 字节信息量，与 fingerprint 域分隔；**定稿采用 64 hex 方案**，满足"足够长"）。仅用于聚合一致性校验，**任何用途不得进入输出**。
+**内部长标签（不输出；R5 公式冻结）**：`AuditFinding` 增字段 `_tenant_tag: str = field(repr=False)`，其中 `derived_key = HMAC-SHA256(tenant_key, b"lima.evidence_privacy.tenant-key.v1\x00" + tenant_id.encode("utf-8"))`（与 `fingerprint.py` 实物 `_TENANT_KEY_DOMAIN`/`_derive_tenant_key` 一致，推荐 import 复用，fingerprint.py 零修改），`_tenant_tag = HMAC-SHA256(derived_key, b"audit.tenant-tag.v1" + tenant_id.encode("utf-8")).hexdigest()`（64 hex = 32 字节；域分隔串与 fingerprint 域及 tenant-key 域均不同，互不可关联）。仅用于聚合一致性校验，**任何用途不得进入输出**。测试以同公式独立重算做跨实现一致性断言（不导出 tag 本身，§18 行 #21）。
 
 **双重防漏出机制（冻结断言锁定）**：(1) `field(repr=False)`——`repr(AuditFinding)` 不含该字段；(2) 序列化白名单排除——`_finding_payload`（与脚本报告组装）为显式字段白名单，不含 `_tenant_tag`；测试断言 repr 与 JSON 序列化输出对该标签值零命中。
 
@@ -396,7 +412,8 @@ class TenantAuditContext:
 - 结果数：单次 `audit_text`/`audit_structured` findings 总数 > 10_000（`max_items`）→ `PrivacyError(RESOURCE_LIMIT_EXCEEDED, field_path="findings", context={"max_items": 10000})`。
 
 **脚本层——可识别跳过，禁止静默**：
-- 单文件读取后字节数 > 1_048_576（`max_payload_bytes`）→ 该文件可识别跳过：stderr `{"artifact": "a<n>", "error": "resource-limit"}`；报告 `incomplete_reasons` 增 `"a<n>:resource-limit"`。
+- **句柄限量读取（R2 定稿，替代"读取后判长"）**：`with open(path, "rb") as f: data = f.read(PrivacyLimits().max_payload_bytes + 1)`，以句柄实际读取字节数判长（`len(data) > max_payload_bytes` → 该文件可识别跳过：stderr `{"artifact": "a<n>", "error": "resource-limit"}`；`incomplete_reasons` 增 `"a<n>:resource-limit"`）。**禁止** `path.read_bytes()` 全量读后判长（main 现状 scripts/audit_sensitive_artifacts.py:67 即此形态，RED 点）；禁止以 `stat().st_size` 预检替代（stat 可被竞态替换，FIFO/proc 类 st_size 无意义）。上限取值经 `PrivacyLimits()` 实例（= 1_048_576，实物 @ models.py），不硬编码字面量。
+- **目录级预算（R2 定稿，仅脚本层，不入 `PrivacyLimits`/库签名）**：`max_files_per_scan = 10_000`（镜像 `max_items` 基数上界）；`max_total_bytes_per_scan = 104_857_600`（= max_payload_bytes × 100，聚合上界 100 MiB）。任一预算触顶后**后续文件逐个按 resource-limit 可识别跳过**（同型 stderr + `"a<n>:resource-limit"`；聚合面另记 `"scan:file-budget"` / `"scan:byte-budget"` 一条目录级原因），`status:"incomplete"`、exit 3、已读文件正常入报告；不得中断、不得 exit 1/2、不得静默。计数口径：字节预算按实际句柄读取字节数累计（被跳过文件按 LIMIT+1 计入，防绕过）；文件预算按进入处理管线的工件序号计数（symlink-skipped 亦计入，序号冻结占位）。断言见 §18 行 #18。
 - **报告顶层 `status` 字段（新增，必含）**：`"complete"` | `"incomplete"`。任何跳过/拒读发生 → `"incomplete"` 且 `incomplete_reasons` 非空（含 unparseable-json / undecodable-text / symlink-skipped / resource-limit 各类）。禁止：存在未完成项时 `status:"complete"` 或呈现"零发现即完成"。
 - **exit code 定稿**：`0` = 完成且完整；`1` = 报告写失败（维持）；`2` = 参数/IO 参数错误（维持）；`3` = 完成但有未完成项（status=incomplete 的正常退出路径，非错误退出——报告已成功产出且可读，消费者必须检查 `status`/`incomplete_reasons`）。
 - 总量/字符串预算（max_string_bytes 等）由库层既有限制路径覆盖，本轮不新增脚本层复制检查（如扫描中遇 `MAX_STRING_LENGTH_EXCEEDED` 类 typed error，按文件级可识别跳过处理，同类目 `resource-limit`）。
@@ -405,7 +422,7 @@ class TenantAuditContext:
 
 - **遍历**：`os.scandir(target)`；`entry.is_symlink()` → 跳过 + stderr `{"artifact": "a<n>", "error": "symlink-skipped"}`（symlink 亦占工件序号，保证序号稳定）+ `incomplete_reasons` 记录。不跟随目录内 symlink（无论指向文件或目录）。
 - **读取**：POSIX 用 `os.open(path, os.O_RDONLY | os.O_NOFOLLOW)` 后 `os.read` 防 TOCTOU（O_NOFOLLOW 只挡最终组件 symlink）。
-- **Windows 回退**（无 `O_NOFOLLOW`）：先 `entry.is_symlink()` 检查再 open；注明残余 TOCTOU 窗口（检查与打开之间被替换为 symlink 的竞态在 Windows 上不可结构性消除），以 **Linux CI 负例为权威**。
+- **[v1.2-replaced 原文，R3 废止]** "Windows 回退：先 `entry.is_symlink()` 检查再 open；注明残余 TOCTOU 窗口，以 Linux CI 负例为权威"——该条款废止。**R3 定稿（机制 A，两平台同构）**：`flags = os.O_RDONLY | (os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0)`；`fd = os.open(path, flags)`（POSIX O_NOFOLLOW 先行拦截最终组件 symlink）；`fst = os.fstat(fd)` 与遍历时取得的 `est = entry.stat(follow_symlinks=False)` 比对 `(st_dev, st_ino)`：一致且 `est.st_ino != 0` → 以同一 fd 做 R2.1 句柄限量读取（不重开）；否则 **fail closed**——关闭 fd、跳过、stderr `{"artifact": "a<n>", "error": "symlink-risk"}`、`incomplete_reasons` 增 `"a<n>:symlink-risk"`、`status:"incomplete"`（该文件零内容进入任何输出）；"验证不可行"（Windows `st_ino == 0`）与"验证失败"同权，均不读取、不宣称完成。`symlink-risk` 为新增 stderr/`incomplete_reasons` 字符串类目（不动 `PrivacyErrorCode` 12 值冻结）。Windows `st_ino` 可用性为实现期验证项：Implementation 须 Windows 实测典型 NTFS 路径 `st_ino != 0`；若普遍为 0 致全量 fail-closed，须提交 DR 附证据，不得私自放宽。总断言：任何 `symlink-risk`/`symlink-skipped`/`resource-limit`/`unparseable-json`/`undecodable-text` 出现 ⇒ `status != "complete"` 且 exit == 3（§18 行 #19）。
 - **目录本身为 symlink**（target_dir 或中间目录解析后为链接）→ 拒绝：stderr `error: target-dir must not be a symlink path` + exit 2（参数错误，允许回显调用方传入路径）。
 - **Linux 负例（CI 实跑，权威）**：目录内 symlink 指向目录外文件 → 断言：外部文件未被读取（内容零出现在任何输出）、symlink-skipped 警示存在、status=incomplete。
 - 源码卫生断言（全平台）：脚本含 `is_symlink`/`scandir`/`O_NOFOLLOW`（POSIX 分支）使用；无 `shutil`/`os.remove`/`unlink`/`rename`（既有 T3 断言保留）。
@@ -443,6 +460,11 @@ class TenantAuditContext:
 | 14 | （新增）深嵌套输入无既有断言（现裸 `RecursionError`） | 深度 40 嵌套 → `MAX_DEPTH_EXCEEDED` typed error（context 含 depth/max_depth），非 RecursionError | 预算前置，typed 拒绝 | F5' |
 | 15 | `--output` 内拒绝组（:347-395 保留）与 §8.3.3 v1.1 "有无 finding 均为 0" | 保留；exit 语义按 17.F5' 四值扩展（0/1/2/3），目录 symlink → exit 2 负例新增 | 参数错误路径维持，未完成项新增可识别退出 | F5'/B2' |
 | 16 | Ruff 格式问题所在断言（三测试文件格式类） | `ruff format`/`ruff check --fix` 后语义不变 | 格式修订，无语义变化 | F6' |
+| 17 | （无——`TenantAuditContext` 为 v1.2 新类型，main 不存在） | 新增负例组：repr/str(ctx) 与构造失败 `PrivacyError` 的 str/repr/context 序列化/异常链全文（含 `__cause__`/`__context__`/`traceback.format_exception`）对 tenant_key 原文与 hex 零命中、tenant_id 原文零命中；`repr=False` + 长度元数据 repr 形态锁定（§17.D2'-R1） | R1（对 c5b375e 无 RED 意义——类型不存在，属新面新锁） | R1 |
+| 18 | 脚本 `read_bytes()` 全量读（scripts/audit_sensitive_artifacts.py:67，无对应断言） | 新增：1 MiB+1B → resource-limit 跳过（句柄读取形态，源码 grep 无 `read_bytes()`，对 c5b375e RED）；恰 1 MiB 正常读（边界含）；10_001 文件目录 → 第 10_001 起 resource-limit + `scan:file-budget` + incomplete + exit 3；合计 >100 MiB → `scan:byte-budget` 同型；预算触顶后报告仍成功产出（§17.F5'-R2） | R2；预算意图（F5'）由单文件扩至目录级，禁静默继承 | R2 |
+| 19 | §17.B2' v1.2 草案"Windows 注明残余 TOCTOU"表述（main 无对应实现断言） | 改/新增：`os.open`+`os.fstat`+`(st_dev,st_ino)` 比对机制（源码 grep `os.fstat`/`st_ino`）；注入 stat 不一致 → 跳过 + `symlink-risk` + incomplete + 内容零泄漏；`st_ino==0` → fail closed；总断言：任何 symlink-risk/skipped/resource-limit/unparseable/undecodable 出现 ⇒ status != complete 且 exit==3；Windows 实测 st_ino 可用性为实现期验证项（§17.B2'-R3） | R3；B2' 链接边界意图继承，"注明竞态仍宣称完成"被 fail-closed 替代 | R3 |
+| 20 | （无——source_path 入口校验不存在） | 新增负例：库函数 source_path 白名单 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`——路径/盘符/`..`/超长/空串/非 ASCII → `INVALID_FIELD_VALUE(field_path="source_path")` 且 str(exc) 不含原值；`a<n>` 与 `artifact.main-2` 合法通过；既有直传敏感串用例逐条分流（负例/改合规值）（§17.D1'.3） | R4；D1'.2 原值携带面意图由脚本层扩至库入口源头封死 | R4 |
+| 21 | §17.D2' v1.2 草案 `derived_key` 用而未定义；Packet 引用 `.pv_tmp` 正本 | 新增：derived_key = HMAC-SHA256(tenant_key, b"lima.evidence_privacy.tenant-key.v1\x00" + tenant_id.utf8)（与 fingerprint.py 实物一致）；tag 公式独立重算一致性；Packet 文档卫生 grep（`.pv_tmp` 仅"过程性证据"语境）（§17.D2'-R5） | R5；D2' 标签语义补全 + 权威锚点入库 | R5 |
 
 **fixture 增量（Frozen v3，`tests/evidence_privacy/fixtures/audit_samples/`）**：新增 `secret_keyname.json`（键名 = 已知敏感原值 #3、值 = 原值 #2，头部 `_known_values_header` 自校验）与文件名 = 敏感原值 #1 的 JSON 样本（内容仅 clean 值 + 头部清单）；深嵌套（深度 40）与超大文件（1 MiB + 1 字节，tempdir 内生成、不落盘 fixture）为测试内构造。既有 `sample.json`/`log_excerpt.txt`/`broken.json`/`clean_note.txt` 零修改。
 

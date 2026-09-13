@@ -200,7 +200,7 @@ RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''
 - **goldens 零命中（v4 段级口径）**：fixtures 全量 JSON 路径值与 tests 源文件路径对段级启发式零命中（v3 已知 `ram/shapes.py:192 secret.py` 字面量命中维持既有结论：语义即秘密命名，IP-0018 冻结用例绿）。
 - **新 wire 检查零误伤**：段级 path 规则 + candidate_id 一致性（ordinal ≥ 0）对 3 种 real-chain wire payload 零违例，且既有 `validate_ram_wire_payload` 全绿。
 - 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed。
-- **PI-DR6 双平台（D1''' 轮）**：Windows 本机全量 + Linux 完整跑（临时分支 CI / docker Linux，记录见 PR 描述）。X/G 系为纯字符串/纯构造断言，平台无关。
+- **PI-DR6 双平台（D1''' 轮，已执行）**：Windows 本机全量 + docker Linux（python:3.12-slim，Linux x86_64，`pytest tests/audit tests/contracts` = 801 passed +318 subtests、golden 15 passed、`_red_proof` = 34 failed / 3 anchors——与 Windows 完全一致，平台无关实证）+ 临时分支 `pv/ip-0022-xaudit-pidr6`（@d32fd2e）GitHub Actions Linux CI 完整跑，run 34763112315 **completed/success**（https://github.com/agent-sec-labs/LIMA/actions/runs/34763112315）。
 
 ## 7. 缺口查证结论（v1 结论维持，行号经 R-1 勘正）
 

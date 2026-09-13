@@ -2,19 +2,19 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0022-PACKET/v3`
+> Packet 版本：`IP-0022-PACKET/v4`
 >
-> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1：启发式超集、路线 B'、R1 提案；含 9bd6159 复审微修——`id_` SSH 私钥族入冻结 regex、M1' 正例集补录）；v3（2026-09-13，PKT-IP-0022-D1R3，DR-IP-0022-03）：G1 Profile code_roles 泄漏面补全（§3.2 第三过滤点、公开面改五面）、G2 B' 正例迁移（四 digest 自洽）+ `model_digest` 绑定 + 认证定位声明（§3.5）、两项终裁落地（NFR-01 PARTIAL 记账 §2、R1 终案 §3.3/§11）、新增负例 G1-1/2/3 + G2-1/2（§6）、RED 重证 D1''（§9）。
+> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；**v4（2026-09-13，PKT-IP-0022-XAUDIT，DR-IP-0022-04：Maintainer 四项核清——段级检测（§3.1）、AdmissionSkip 语义定稿（§3.2/§3.3）、wire path 规则补齐两处弱于 + candidate_id 一致性【DR-04-B 门控】（§3.5）、MINIMAL_PAYLOAD 五摘要全真值定稿（§3.5）+ X 系负例（§6）+ RED D1'''（§9）+ 两张可核查矩阵（随批文档）**。
 >
-> 状态：`READY-FOR-CODE`（TBD = 0；两项子提案已由 Maintainer 终裁落地，无待决提案）
+> 状态：`READY-FOR-CODE`（TBD = 0；DR-04-A/B 两项**冻结面变更请求待裁定**，未获批前不实施且不属 mandatory——见 DR-IP-0022-04 §2）
 >
 > Exact base：`30bdfaa13ac72572d65ccb2567ae8702923c4187`（origin/main，IP-0021 merge）
 >
 > 制作人：lima-packet-verification（Assignment `IP-0022-PV-P1/v1` → `P1R2/v1` → `P1R3/v1`，任务标识 `PKT-IP-0022-D1` / `D1R2` / `D1R3`，2026-09-13）
 >
-> 上游决策：COORD `ENTRY60-CLOSURE-1/v1`（拆分方案 α）；DR-IP-0022-01（REOPENED）；DR-IP-0022-02（REOPENED-by-03 / 部分 SUPERSEDED）；**DR-IP-0022-03（RESOLVED-MAINTAINER，本版执行依据）**；PI-DR1..PI-DR6 全部生效
+> 上游决策：COORD `ENTRY60-CLOSURE-1/v1`（拆分方案 α）；DR-IP-0022-01（REOPENED）；DR-IP-0022-02（REOPENED-by-03 / 部分 SUPERSEDED）；DR-IP-0022-03（RESOLVED-MAINTAINER）；**DR-IP-0022-04（OPEN，v4 执行依据；A/B 冻结面请求待裁定）**；PI-DR1..PI-DR6 全部生效
 >
-> 随批文档：DR-IP-0022-01、DR-IP-0022-02、DR-IP-0022-03、C1 勘误（`LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md`）
+> 随批文档：DR-IP-0022-01、DR-IP-0022-02、DR-IP-0022-03、**DR-IP-0022-04**、C1 勘误（`LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md`）、**`LIMA_IP-0022_XAUDIT_Matrices_v1.md`（两张可核查矩阵 + 探针复验 + 残余风险清单）**
 
 ---
 
@@ -26,7 +26,7 @@ Issue specification revision：2026-09-13 Issue #60 正文（含 ENTRY60-CLOSURE
 公开面定义（v3，五面）：NFR-01 保护面 = Profile（entrypoints + code_roles，含 to_dict() 全文序列化）+ RAM facts + Top-N + prompt 文本 + wire payload
 Covered requirements（本 IP 只声明自身贡献）：
   NFR-01 扩展口径（DR-01 存活 + DR-02 §1 + DR-03 §2/§3）：启发式超集口径下的秘密形态文件名不在五面出现——贡献记 PARTIAL（Maintainer 终裁，§2），不得记"零泄漏已解决"
-  FR-04 补全（DR-02 §2 路线 B' + DR-03 §4）：wire 载荷完整性 = path 拒绝 + ram/semantic/model identity digest 重算比对 + wire_digest 传输头校验（末位）；认证定位见 §3.5
+  FR-04 补全（DR-02 §2 路线 B' + DR-03 §4 + DR-04 §1/§2-B）：wire 载荷完整性 = path 拒绝（v4 段级规则对齐 #58 不弱于）+ ram/semantic/model identity digest 重算比对 + candidate_id↔kind/path/symbol 一致性【DR-04-B 门控】 + wire_digest 传输头校验（末位）；认证定位见 §3.5
   FR-01（R1 终案，§3.3）：公开面 reason→count；内部扫描内序号留痕——覆盖全部跳过原因前记 PARTIAL
 Not covered requirements：F3 workspace _safe_path TOCTOU、F4 回包/时间不设防（→ IP-0023 closure 负例）；S4b/T-03/V5 端到端；#64/#68 消费验证；防恶意重签认证（§3.5 定位声明）；直调语义层（build_semantic_top_n）处理已构造 facts 的内部 API 误用防御（Known Gaps §2）；穷尽式秘密检测
 Delivery role：hardening-fix（冻结面内最小防御 + 冻结测试面 DR 授权修订）
@@ -97,8 +97,8 @@ def is_secret_shaped_path(path: str) -> bool:
     """Heuristic superset check on the basename (DR-IP-0022-02 §1, DR-IP-0022-03 §2)."""
 ```
 
-- basename（`path.rsplit("/", 1)[-1]`）执行 search；非 str/空串返回 False；从 `lima/audit/__init__.py` 导出。
-- 断言口径：**超集断言**（五 token 形状全命中 + 两驳回样本 + `id_rsa.pem`/`id_ed25519` 命中 + §6 M1' 误伤负例集不命中）；不与 `_SECRET_TOKEN_PATTERN` 等值。
+- **v4 段级语义**：对 path 的**每一段**（目录段 + basename，`path.split("/")` 全集）执行 search，任一段命中即 True；非 str/空串返回 False；从 `lima/audit/__init__.py` 导出。
+- 断言口径：**超集断言**（五 token 形状全命中 + 两驳回样本 + `id_rsa.pem`/`id_ed25519` 命中 + §6 M1' 误伤负例集不命中 + **段级形态**：`tests/secrets/anything.py` 命中、`tests/tokenizer/anything.py` 不命中）；不与 `_SECRET_TOKEN_PATTERN` 等值。
 - shape 家族归类仅用于内部留痕 `family` 字段（§3.3），不入公开输出。
 
 ### 3.2 F1 — 准入过滤点（v3：三处）
@@ -107,11 +107,13 @@ def is_secret_shaped_path(path: str) -> bool:
 2. **`_code_role_assignments(evidence, entry_targets, gaps)`（v3 新增，G1）**：迭代 `sorted(evidence)` 时跳过 `is_secret_shaped_path(relative_path)` 为 True 的路径，不生成 `CodeRoleAssignment`，计入 `inventory.skipped["sensitive-filename"]`。排序（`(role.value, path)`）与 `_MAX_CODE_ROLE_ASSIGNMENTS` cap/overflow 逻辑零改动（DR-03 §2 核验，无契约冲突）。
 3. `build_python_ram_facts` 的 `candidates`（@ram.py:364-365）：过滤后进入 RAM 派生，五清单与 key_flows/labels 全部不含命中路径。
 - 三点均保持 sorted 次序，过滤不得重排（ordinal 属 candidate_id，禁止漂移）。
+- **v4 跨命中去重（DR-04 §1.2）**：同一 repo-relative path 在同一 build result 内只计一次 `sensitive-filename`（entrypoint 过滤与 code role 过滤共享去重集）；Profile 与 RAM 两个 build result 各自独立计数（语义=各自候选集的拒绝数）。**RAM-only 构建**（不经 Profile）同样过滤并留痕（§3.3）。
 
 ### 3.3 F1 — skip 汇总与内部留痕（R1 终案，DR-03 §3）
 
 - **公开面（批准）**：仅 `reason → count`——`inventory.skipped["sensitive-filename"]` → 既有 `_skip_reason_gaps` 通道 → `GAP_INVENTORY_SKIPPED`，detail=`reason=sensitive-filename; count=N`（模板不变）。无 shape 家族输出。
 - **内部逐项记录（终案设计）**：`AdmissionSkipRecord(index: int, reason: str, family: str)`——**扫描内序号 + reason + family，不带原文件名，不含任何 basename 派生摘要**（sha8 方案被否决）。挂载于 `ProfileBuildResult.admission_skips` / `RamFactsBuildResult.admission_skips`（默认 `()`，`lima/audit` 层 dataclass，不入 wire、不改 contracts）。
+- **v4 序号与次序定稿（DR-04 §1.2）**：`index` = 该 build **过滤前 sorted 候选全序枚举下标**（Profile：`sorted(evidence)` 键序；RAM：`sorted(item.path for item in files if .py)` 序），0 基，与 `candidate_id` 的 ordinal 无关（candidate_id 为 Do-not-touch），同输入同序号可复现；`admission_skips`/`inventory.skipped` 写入必须发生在 `_skip_reason_gaps`（Profile）/`_coverage_gaps`（RAM）构造之前（不变量，X5 负例承载）。
 - **FR-01 记 PARTIAL**：内部逐项留痕当前仅覆盖 `sensitive-filename` 一类；覆盖全部跳过原因（binary/size/limit/… 全 vocabulary）前 FR-01 满足面记 PARTIAL。
 
 ### 3.4 F1 — 词汇表扩展（DR-01 存活授权）
@@ -128,7 +130,8 @@ def is_secret_shaped_path(path: str) -> bool:
 
 `validate_ram_wire_payload` 在既有结构校验后依序追加（**六步**）：
 
-- **path 检查**：ram 五清单 entry 与 `semantic.ranked` 每项 path：非空 str、无 `\`、非 `/` 开头、无 `^[A-Za-z]:` 盘符、无 `..` 段；违例 `ContractError(INVALID_FIELD_VALUE, "$.ram.<section>[i].path" / "$.semantic.ranked[i].path")`。
+- **path 检查（v4 强化，对齐 #58 `_validated_path` 段级语义不弱于）**：ram 五清单 entry 与 `semantic.ranked` 每项 path：非空 str、无 `\`、非 `/` 开头、无 `^[A-Za-z]:` 盘符、**无 Cc 控制字符、任一 `/` 段 ∉ {"", ".", ".."}**（v3 缺后两条，系弱于 #58 契约，v4 补齐；长度 cap 差异记残余风险 R-6）；违例 `ContractError(INVALID_FIELD_VALUE, "$.ram.<section>[i].path" / "$.semantic.ranked[i].path")`。
+- **【DR-04-B 门控】candidate_id 一致性检查（第七项，获批后 mandatory）**：每个 `semantic.ranked[i]` 校验 `candidate_id ≡ f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"`——prefix=`f"{kind}:{path}:"` 前缀匹配 + `tail.rsplit("#",1)` 得（symbol 槽 = symbol 或 "-"，非负数字 ordinal）；违例 `$.semantic.ranked[i].candidate_id`。依据：`_result_digest` payload 不含 kind/path/symbol（semantic_prioritizer.py:640-660），无此检查时三字段篡改五摘要全不设防（X4 RED 复现）。real-chain 与 golden 零误伤已证（§9）。未获批前维持残余风险 R-9。
 - `ram_facts_digest_from_wire(payload) != identity.ram_facts_digest` → `$.identity.ram_facts_digest`。
 - `semantic_config_digest_from_wire(payload) != identity.semantic_config_digest` → `$.identity.semantic_config_digest`。
 - `semantic_result_digest_from_wire(payload) != identity.semantic_result_digest` → `$.identity.semantic_result_digest`。
@@ -137,7 +140,7 @@ def is_secret_shaped_path(path: str) -> bool:
 
 **校验目标与认证定位声明**：`wire_digest` = 传输头校验（build + identity 槽位），不验证载荷内容；载荷完整性由 identity digest 重算比对承担（ram 段全覆盖；semantic 段全覆盖；model_id 绑定）。**摘要比对只证明字段自洽（防意外损坏/传输错配），不能当作防恶意重签的认证**（持有 canonical 编码能力者可整体重算；防重签不在本 IP 威胁模型内）。不改任何 digest 值，不触发 IP-0021 重冻结。
 
-**MINIMAL_PAYLOAD 迁移（G2a，DR-01 授权条目升级）**：`tests/audit/test_ram_schema.py::MINIMAL_PAYLOAD`（定义 @:79，identity @:128-135，`HEX64="0"*64` @:39）identity 中 `ram_facts_digest`/`semantic_config_digest`/`semantic_result_digest`/`wire_digest` 四槽须改为**彼此一致的真实重算值**（以 helper 口径重算构造自洽最小载荷；`prompt_digest`/`model_digest` 用真实 `digest(默认模板)`/`digest(model_id)` 或保持占位但与重算口径一致——D2 定稿取全真值），正例断言"自洽载荷通过"；既有结构/词表/rank 类负例逐个复核仍因预期原因失败（与摘要无关；末位约束保障）。
+**MINIMAL_PAYLOAD 迁移（G2a，DR-01 授权条目升级；v4 定稿五摘要全真值）**：`tests/audit/test_ram_schema.py::MINIMAL_PAYLOAD`（定义 @:79，identity @:128-135，`HEX64="0"*64` @:39）identity **五个摘要槽全部改为真值**：`ram_facts_digest=compute_content_digest(payload["ram"])`、`semantic_config_digest=semantic_config_digest(SemanticOptions())`、`semantic_result_digest`=以 payload 自身 semantic 段按 `_result_digest` 形状重算（input_facts_digest 取 ram 槽重算值）、`prompt_digest=compute_content_digest(默认 prompt_template)`（不可从 wire 复原，真值口径即模板 digest）、`model_digest=compute_content_digest(model_id)`；`wire_digest` 随迁重算。正例断言"自洽载荷通过"；**独立保留**全零占位拒绝负例（G2-2）；既有结构/词表/rank 类负例逐个复核仍因预期原因失败（14 类核对表见矩阵文档"预期错误核对表"；末位约束保障摘要层不前置）。v4 迁移兼容锚 X6（五值互异、非占位、可重算）已在 D1''' 实测通过。
 
 ### 3.6 明确不改（Do-not-touch）
 
@@ -162,11 +165,11 @@ def is_secret_shaped_path(path: str) -> bool:
 
 ## 6. 最低用例矩阵（冻结测试集，23 例 + 迁移正例 + 回归锚）
 
-RED 三轮证明：D1（16 例）、D1'（18 例）、**D1''（23 例，本版：M1' 增 `id_` 正例 + G1-1/2/3 + G2-1/2 新增）**，签名均为目标行为缺失（§9）。
+RED 四轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、**D1'''（34 例，本版：v3 的 23 例 + X 系 11 例新负例）**，签名均为目标行为缺失（§9）。
 
 | # | ID（D2 冻结名可微调，语义不得变） | 断言 |
 |---|---|---|
-| M1' | secret_shaped_path_helper_is_heuristic_superset | 超集断言：五 token 形状全命中；两驳回样本命中；前缀族扩展（gho_/sk_test_/github_pat_/xoxb-/id_rsa.pem/id_ed25519）命中；关键词族（my_secret/secrets/api_key/apikey/password_reset/credential_store/key.pem）命中；高熵段命中；误伤负例集（tokenizer/tokenization/keyboard_layout/monkey_patch/keynote/api/danger/safe/cli/application/library_profile_golden.json）不命中；basename 语义（pkg/ 前缀） |
+| M1' | secret_shaped_path_helper_is_heuristic_superset | 超集断言：五 token 形状全命中；两驳回样本命中；前缀族扩展（gho_/sk_test_/github_pat_/xoxb-/id_rsa.pem/id_ed25519）命中；关键词族（my_secret/secrets/api_key/apikey/password_reset/credential_store/key.pem）命中；高熵段命中；误伤负例集（tokenizer/tokenization/keyboard_layout/monkey_patch/keynote/api/danger/safe/cli/application/library_profile_golden.json）不命中；basename 语义（pkg/ 前缀）+ **v4 段级语义（tests/secrets/x.py 命中、tests/tokenizer/x.py 不命中）** |
 | M2-M10 | 同 v1 | RAM facts 三形状排除、词汇表扩词、typed gap count=1、entrypoint script 目标排除（safe 锚）、Top-N 排除、prompt 排除（model_id 激活捕获）、wire payload 排除 |
 | M11-M16 | 同 v1 | 绝对 POSIX / Windows 盘符 / `..` 逃逸（entry 与 ranked）/ 摘要单字符篡改 / build 变更后陈旧摘要 |
 | M17/M17s | 同 v2 | ram path / semantic rationale 篡改 + wire_digest 同步回填 → 仍失败 |
@@ -176,11 +179,28 @@ RED 三轮证明：D1（16 例）、D1'（18 例）、**D1''（23 例，本版�
 | G1-3 | profile_secret_filename_skip_counted | code_roles 过滤计入 `reason=sensitive-filename; count=1` typed gap |
 | G2-1 | model_digest_tamper_rejected | `identity.model_digest` 单字符篡改 → ContractError（v3 新增） |
 | G2-2 | minimal_payload_placeholder_digests_rejected | 全零占位 MINIMAL_PAYLOAD 被拒（RED 形式；基线宽松为反锚） |
-| G2-P | minimal_payload_self_consistent_migration_validates | 四 digest 自洽迁移正例通过（D2 迁移后既有正例改造，基线与实现后均绿——迁移兼容锚，非 RED） |
+| G2-P | minimal_payload_self_consistent_migration_validates | **五 digest** 自洽迁移正例通过（D2 迁移后既有正例改造，基线与实现后均绿——迁移兼容锚，非 RED；X6 已在 D1''' 预证） |
+| X1 | sensitive_directory_segment_excluded_from_code_roles | 敏感**目录段**（tests/secrets/anything.py）不入 code_roles（v4） |
+| X2 | sensitive_directory_segment_excluded_from_ram | 敏感目录段（secrets/danger.py）不入 RAM 任何清单（v4） |
+| X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径（**【DR-04-A 门控】**，获批后 mandatory；RED 已证 main 泄漏） |
+| X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B 门控】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
+| X4-4/5/6 | wire_path_segment_rules | 空段（a//b）、`.` 段（./x）、Cc 控制字符 path 拒绝（v4 补齐 #58 契约两处弱于） |
+| X5-1 | admission_skip_counted_once_per_path | 同一 path 命中 entrypoint+code role 只计一次（count=1、恰一个 typed gap） |
+| X5-2 | ram_only_build_records_admission_skips | RAM-only 构建留痕 admission_skips（无 path 字段） |
+| X6 | minimal_payload_five_digests_true_valued | 五摘要槽互异、非占位、可重算（迁移兼容锚，基线即绿） |
 | R1-R2 | 回归锚 | golden matrix 15 绿 + `tests/audit`+`tests/contracts` 801 绿 |
 | R3 | goldens 零命中核验锚 | 启发式（含 `id_` 族）对 golden 全部路径/repo_shapes 文件名零命中 |
 
-注：M18/R3/G2-P 在 D1'' scratch 集中以 DR-03 §1 实证与制作期扫描承担，D2 冻结集须补齐为可执行用例。
+注：M18/R3/G2-P/X4-0/X6 在 scratch 集中以实证与制作期扫描承担，D2 冻结集须补齐为可执行用例。
+
+## 9.4 RED 证明（D1'''，v4）
+
+- 测试文件：`_red_proof/test_ip_0022_xaudit_red.py`（X 系）+ 既有 `_red_proof/test_ip_0022_fix_red.py`（v3 的 23 例，签名复验不变）。命令：`python -m pytest _red_proof -q` @main 等同代码。结果：**34 failed / 3 passed**——X 系新签名：X1 `sensitive directory segment leaked into code_roles: ['tests/secrets/anything.py']`；X2 `['danger.py', 'secrets/danger.py']`（RAM sinks）；X3-1 `manifest parse-error detail carries the raw path: [... 'manifest=token/pyproject.toml; error=UnicodeDecodeError']`；X4 系 `ContractError not raised`（candidate_id 三字段不设防 + path 段级规则缺位）；X5-1 `expected exactly one gap: []`；X5-2 `admission_skips` 缺失。3 个通过项均为锚（X4-0 冻结模式锚、X6 两迁移兼容锚），非 RED。无 arrange 型失败（全部 arrange 路径与冻结套件同 shape）。
+- **五项探针独立复验**（矩阵一附注）：第 2 项结论勘正——`secrets/pyproject.toml` 坏 TOML 的目录段 **"secrets" 实际泄漏**于 MANIFEST_PARSE_ERROR detail（哨兵口径假阴性），系 IP-0016 冻结模板泄漏面（DR-04-A）；`requirements-ghp_*.txt` 坏内容不触发 parse error 属构造性事实（无内容校验器），但**读取失败路径泄漏全文件名**（`manifest=requirements-ghp_AAAA….txt; error=UnicodeDecodeError`）。
+- **goldens 零命中（v4 段级口径）**：fixtures 全量 JSON 路径值与 tests 源文件路径对段级启发式零命中（v3 已知 `ram/shapes.py:192 secret.py` 字面量命中维持既有结论：语义即秘密命名，IP-0018 冻结用例绿）。
+- **新 wire 检查零误伤**：段级 path 规则 + candidate_id 一致性（ordinal ≥ 0）对 3 种 real-chain wire payload 零违例，且既有 `validate_ram_wire_payload` 全绿。
+- 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed。
+- **PI-DR6 双平台（D1''' 轮）**：Windows 本机全量 + Linux 完整跑（临时分支 CI / docker Linux，记录见 PR 描述）。X/G 系为纯字符串/纯构造断言，平台无关。
 
 ## 7. 缺口查证结论（v1 结论维持，行号经 R-1 勘正）
 
@@ -190,7 +210,7 @@ RED 三轮证明：D1（16 例）、D1'（18 例）、**D1''（23 例，本版�
 ## 8. 验收命令与判定
 
 ```bash
-python -m pytest tests/audit tests/contracts -q        # ≥801+23 passed, 0 failed, 0 new skip
+python -m pytest tests/audit tests/contracts -q        # ≥801+23+X passed（X = v4 非 DR 门控新负例 X1/X2/X4-4..6/X5；X3/X4-1..3 随 DR-04-A/B 裁定计入），0 failed, 0 new skip
 python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原样）
 ```
 

@@ -62,6 +62,9 @@ def semantic_gap_pairs(
 class Layer1ProfileBudgetTests(unittest.TestCase):
     """L1 ProfileBudgets: manifest-file-limit and manifest bytes cap."""
 
+    def setUp(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
+
     def test_manifest_file_count_over_budget(self) -> None:
         files = {
             "requirements.txt": "fastapi==0.110.0\n",
@@ -88,6 +91,9 @@ class Layer1ProfileBudgetTests(unittest.TestCase):
 
 class Layer2RamBudgetTests(unittest.TestCase):
     """L2 RamBudgets: python-file / key-flow / unresolved-edge limits."""
+
+    def setUp(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
 
     def test_python_file_count_over_budget(self) -> None:
         files = {"a_first.py": "A = 1\n", "b_second.py": "B = 2\n"}
@@ -129,6 +135,9 @@ class Layer2RamBudgetTests(unittest.TestCase):
 
 class Layer3SemanticBudgetTests(unittest.TestCase):
     """L3 SemanticBudgets: pre-call checkpoints with scripted clients only."""
+
+    def setUp(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
 
     def _many_sink_repo(self) -> dict[str, str]:
         from tests.audit.fixtures.semantic.shapes import MANY_SINK_REPO

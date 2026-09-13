@@ -94,6 +94,9 @@ def profile_gaps(files: dict[str, str]) -> list[tuple[str, str]]:
 class ManifestParseErrorTests(unittest.TestCase):
     """GAP_MANIFEST_PARSE_ERROR encoding: frozen code + frozen detail."""
 
+    def setUp(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
+
     def test_broken_pyproject_toml_yields_frozen_code_and_detail(self) -> None:
         gaps = profile_gaps({"pyproject.toml": "[[[not toml\n", "a.py": "X = 1\n"})
         self.assertIn(
@@ -124,6 +127,9 @@ class ManifestParseErrorTests(unittest.TestCase):
 
 class SkipReasonMappingTests(unittest.TestCase):
     """Unsupported-subset typed gap encoding via the frozen skip mapping."""
+
+    def setUp(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
 
     def test_skip_reason_table_covers_frozen_reason_set(self) -> None:
         self.assertEqual(frozenset(SKIP_REASON_TO_GAP_DETAIL), FROZEN_SKIP_REASONS)
@@ -239,6 +245,9 @@ class ExecutionRequiredRuleTableTests(unittest.TestCase):
 
 class GenericExceptionRegressionTests(unittest.TestCase):
     """IP-0019 gap-①: bare/wide ``except`` shapes stay stable, codes frozen."""
+
+    def setUp(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
 
     def test_generic_except_shape_builds_stable_facts(self) -> None:
         def build() -> tuple[str, list[str]]:

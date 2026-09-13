@@ -407,6 +407,7 @@ class InitAppendSegmentTests(unittest.TestCase):
     """
 
     def test_all_prefix_unchanged_and_exact_cap_44_plus_k(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
         import lima.audit as audit
         from tests.audit.test_semantic_prioritizer import (
             IP0016_IP0018_ALL_PREFIX,
@@ -423,6 +424,7 @@ class InitAppendSegmentTests(unittest.TestCase):
             self.assertTrue(hasattr(audit, name), name)
 
     def test_all_bounded_tail_is_exactly_the_new_symbol_set(self) -> None:
+        rs_module()  # module-absence RED anchor (PI-DR4)
         import lima.audit as audit
 
         self.assertEqual(list(audit.__all__[44 : 44 + IP0021_K]), IP0021_NEW_SYMBOLS)

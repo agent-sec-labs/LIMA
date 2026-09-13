@@ -84,6 +84,7 @@ _SECRET_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"|gho_[0-9A-Za-z]{36,}"
     r"|github_pat_[0-9A-Za-z_]{20,}"
     r"|xox[baprs]-[0-9A-Za-z-]{10,}"
+    r"|id_(rsa|dsa|ecdsa|ed25519)([._\-][0-9A-Za-z_.\-]*)?"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}"
     r"|(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
@@ -157,7 +158,7 @@ RED 已两轮证明：D1（16 例，commit 70946e1 轮）与 D1'（18 例，本�
 
 | # | ID（D2 冻结名可微调，语义不得变） | 断言 |
 |---|---|---|
-| M1' | secret_shaped_path_helper_is_heuristic_superset | 超集断言：五 token 形状全命中；两驳回样本（`token_FAKESECRET123.py`、`sk_live_ABC123xyztoken.py`）命中；前缀族扩展（gho_/sk_test_/github_pat_/xoxb-）命中；关键词族（my_secret/secrets/api_key/apikey/password_reset/credential_store/key.pem）命中；高熵段（≥20 base62）命中；误伤负例集（tokenizer/tokenization/keyboard_layout/monkey_patch/keynote/api/danger/safe/cli/application/library_profile_golden.json）不命中；basename 语义（pkg/ 前缀） |
+| M1' | secret_shaped_path_helper_is_heuristic_superset | 超集断言：五 token 形状全命中；两驳回样本（`token_FAKESECRET123.py`、`sk_live_ABC123xyztoken.py`）命中；前缀族扩展（gho_/sk_test_/github_pat_/xoxb-/id_rsa.pem/id_ed25519）命中；关键词族（my_secret/secrets/api_key/apikey/password_reset/credential_store/key.pem）命中；高熵段（≥20 base62）命中；误伤负例集（tokenizer/tokenization/keyboard_layout/monkey_patch/keynote/api/danger/safe/cli/application/library_profile_golden.json）不命中；basename 语义（pkg/ 前缀） |
 | M2-M10 | 同 v1（M2-M10） | RAM facts 三形状排除（ghp_/AKIA/JWT）、词汇表扩词、typed gap count=1、entrypoint script 目标排除（safe 锚）、Top-N 排除、prompt 排除（model_id 激活 + 捕获）、wire payload 排除 |
 | M11-M16 | 同 v1（M11-M16） | 绝对 POSIX / Windows 盘符 / `..` 逃逸（entry 与 ranked）/ 摘要单字符篡改 / build 变更后陈旧摘要——均 ContractError |
 | M17 | payload_tamper_with_synced_wire_digest_still_rejected | 篡改 `ram.sensitive_sinks[0].path` 为合法相对路径 + `ram_wire_digest` 同步回填 → 仍失败（`$.identity.ram_facts_digest`） |

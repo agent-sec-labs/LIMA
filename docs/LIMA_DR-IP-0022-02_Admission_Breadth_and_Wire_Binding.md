@@ -12,7 +12,7 @@
 `is_secret_shaped_path(path)` 对 basename 启用**启发式超集**检测，三族判据任一命中即拒绝：
 
 1. **关键词族**（段边界匹配，容忍复数）：basename 的任一 `[_\-.]`（或串首/串尾）界定的段等于（或复数形式等于）`token|secret|key|password|passwd|credential|apikey|api_key|private[_-]?key`（不区分大小写）。段边界限定使 `tokenizer.py`、`keyboard_layout.py`、`monkey_patch.py`、`keynote.md` 不命中（误伤负例集，冻结断言）。
-2. **服务商前缀族**：`sk_live_` / `sk_test_` / `AKIA[0-9A-Z]{16}` / `ghp_[0-9A-Za-z]{36,}` / `gho_[0-9A-Za-z]{36,}` / `github_pat_[0-9A-Za-z_]{20,}` / `xox[baprs]-[0-9A-Za-z-]{10,}` / JWT `eyJ…`（同 `_SECRET_TOKEN_PATTERN` 口径）/ `-----BEGIN [A-Z ]*PRIVATE KEY-----`。
+2. **服务商前缀族**：`sk_live_` / `sk_test_` / `AKIA[0-9A-Z]{16}` / `ghp_[0-9A-Za-z]{36,}` / `gho_[0-9A-Za-z]{36,}` / `github_pat_[0-9A-Za-z_]{20,}` / `xox[baprs]-[0-9A-Za-z-]{10,}` / `id_(rsa|dsa|ecdsa|ed25519)([._\-][0-9A-Za-z_.\-]*)?`（SSH 私钥命名族，复审补录——Coordinator 实测 `id_rsa.pem` 为原冻结集唯一 POS 漏项）/ JWT `eyJ…`（同 `_SECRET_TOKEN_PATTERN` 口径）/ `-----BEGIN [A-Z ]*PRIVATE KEY-----`。
 3. **高熵段族**：basename 含 ≥20 字符的无分隔 base62 连续段（`(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])`）。
 
 冻结 regex（Packet v2 §3 逐字收录，实现以此为准）：
@@ -27,6 +27,7 @@ _SECRET_FILENAME_PATTERN = re.compile(
     r"|gho_[0-9A-Za-z]{36,}"
     r"|github_pat_[0-9A-Za-z_]{20,}"
     r"|xox[baprs]-[0-9A-Za-z-]{10,}"
+    r"|id_(rsa|dsa|ecdsa|ed25519)([._\-][0-9A-Za-z_.\-]*)?"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}"
     r"|(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
@@ -94,7 +95,7 @@ Coordinator 授权先行验证，结果**两项均可行，无需降级**：
 ## 3. R1 整合（提案，待 Maintainer 终裁；Packet v2 §11 为执行面）
 
 - **公开面**：count-only 汇总（`reason=sensitive-filename; count=N`，模板不变）+ shape 家族计数（`families=keyword:1` 式后缀，仅报家族名，不含任何文件名原文——家族后缀入 detail 属本提案的一部分，未获批则维持纯 count-only）。
-- **FR-01 逐项满足面（内部记录）**：准入拒绝处生成 `AdmissionSkipRecord(redacted_id=f"redact:{sha256(basename)[:8]}", family=…)`，挂载于 `ProfileBuildResult` / `RamFactsBuildResult` 新增默认空字段 `admission_skips`（`lima/audit` 层 dataclass，非 contracts 载体、不入 wire payload；默认 `()` 保持既有构造合法）。内部留痕不含原文件名。
+- **FR-01 逐项满足面（内部记录）**：准入拒绝处生成 `AdmissionSkipRecord(redacted_id=f"redact:{sha256(basename.encode())[:8]}", family=…)`，挂载于 `ProfileBuildResult` / `RamFactsBuildResult` 新增默认空字段 `admission_skips`（`lima/audit` 层 dataclass，非 contracts 载体、不入 wire payload；默认 `()` 保持既有构造合法）。内部留痕不含原文件名。
 - **否决分支**：若 Maintainer 否决 → 回退纯 count-only，并明示修订 FR-01 满足面声明（不新增 `admission_skips` 字段）。
 
 ## 5. 影响面与验收耦合

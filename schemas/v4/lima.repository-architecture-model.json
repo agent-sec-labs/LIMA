@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lima.dev/schemas/v4/lima.repository-architecture-model.json",
+  "title": "LIMA Repository Architecture Model (RAM wire payload)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_kind",
+    "build",
+    "ram",
+    "semantic",
+    "identity",
+    "provenance",
+    "execution_required"
+  ],
+  "properties": {
+    "schema_version": {"const": "4.0"},
+    "model_kind": {"const": "lima.repository-architecture-model"},
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_budgets", "ram_budgets", "semantic"],
+      "properties": {
+        "profile_budgets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifest_max_bytes", "max_manifest_files"],
+          "properties": {
+            "manifest_max_bytes": {"type": "integer", "minimum": 1},
+            "max_manifest_files": {"type": "integer", "minimum": 1}
+          }
+        },
+        "ram_budgets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_python_files", "max_key_flows", "max_unresolved_edges"],
+          "properties": {
+            "max_python_files": {"type": "integer", "minimum": 1},
+            "max_key_flows": {"type": "integer", "minimum": 1},
+            "max_unresolved_edges": {"type": "integer", "minimum": 1}
+          }
+        },
+        "semantic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["top_n", "seed", "tie_break", "model_id", "weights", "budgets"],
+          "properties": {
+            "top_n": {"type": "integer", "minimum": 1, "maximum": 100},
+            "seed": {"type": "integer", "minimum": 0},
+            "tie_break": {"const": "kind-path-symbol-ordinal"},
+            "model_id": {"type": "string"},
+            "weights": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "sink_flow_command",
+                "sink_flow_sql",
+                "sink_flow_eval",
+                "sink_flow_path",
+                "sink_flow_deserialization",
+                "entrypoint",
+                "external_source",
+                "trust_boundary",
+                "unresolved_edge"
+              ],
+              "properties": {
+                "sink_flow_command": {"type": "integer", "minimum": 0},
+                "sink_flow_sql": {"type": "integer", "minimum": 0},
+                "sink_flow_eval": {"type": "integer", "minimum": 0},
+                "sink_flow_path": {"type": "integer", "minimum": 0},
+                "sink_flow_deserialization": {"type": "integer", "minimum": 0},
+                "entrypoint": {"type": "integer", "minimum": 0},
+                "external_source": {"type": "integer", "minimum": 0},
+                "trust_boundary": {"type": "integer", "minimum": 0},
+                "unresolved_edge": {"type": "integer", "minimum": 0}
+              }
+            },
+            "budgets": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "max_llm_calls",
+                "max_prompt_tokens_estimate",
+                "max_output_tokens_estimate",
+                "max_total_tokens_estimate",
+                "max_wall_time_seconds"
+              ],
+              "properties": {
+                "max_llm_calls": {"type": "integer", "minimum": 1},
+                "max_prompt_tokens_estimate": {"type": "integer", "minimum": 1},
+                "max_output_tokens_estimate": {"type": "integer", "minimum": 1},
+                "max_total_tokens_estimate": {"type": "integer", "minimum": 1},
+                "max_wall_time_seconds": {"type": "integer", "minimum": 1}
+              }
+            }
+          }
+        }
+      }
+    },
+    "ram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entrypoints",
+        "external_sources",
+        "source_labels",
+        "sensitive_sinks",
+        "sink_rule_ids",
+        "sink_cwes",
+        "trust_boundaries",
+        "key_flows",
+        "unresolved_edges",
+        "coverage_gaps",
+        "counters"
+      ],
+      "properties": {
+        "entrypoints": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/attackSurfaceEntry"}},
+        "external_sources": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/attackSurfaceEntry"}},
+        "source_labels": {"type": "array", "maxItems": 4096, "items": {"type": "string"}},
+        "sensitive_sinks": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/attackSurfaceEntry"}},
+        "sink_rule_ids": {"type": "array", "maxItems": 4096, "items": {"type": "string"}},
+        "sink_cwes": {"type": "array", "maxItems": 4096, "items": {"type": "string"}},
+        "trust_boundaries": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/attackSurfaceEntry"}},
+        "key_flows": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sink_rule_id", "steps"],
+            "properties": {
+              "sink_rule_id": {"type": "string"},
+              "steps": {"type": "array", "maxItems": 12, "items": {"type": "string"}}
+            }
+          }
+        },
+        "unresolved_edges": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/attackSurfaceEntry"}},
+        "coverage_gaps": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["gap_code", "detail"],
+            "properties": {
+              "gap_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+              "detail": {"type": "string"}
+            }
+          }
+        },
+        "counters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ambiguous_modules",
+            "cross_file_edges",
+            "dynamic_import_sites",
+            "functions_indexed",
+            "interprocedural_edges",
+            "modules_indexed",
+            "parse_error_files",
+            "unresolved_calls"
+          ],
+          "properties": {
+            "ambiguous_modules": {"type": "integer", "minimum": 0},
+            "cross_file_edges": {"type": "integer", "minimum": 0},
+            "dynamic_import_sites": {"type": "integer", "minimum": 0},
+            "functions_indexed": {"type": "integer", "minimum": 0},
+            "interprocedural_edges": {"type": "integer", "minimum": 0},
+            "modules_indexed": {"type": "integer", "minimum": 0},
+            "parse_error_files": {"type": "integer", "minimum": 0},
+            "unresolved_calls": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ranked", "total_candidates", "coverage_gaps"],
+      "properties": {
+        "ranked": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "candidate_id",
+              "kind",
+              "path",
+              "symbol",
+              "score",
+              "rank",
+              "category",
+              "rationale",
+              "key_flow_steps"
+            ],
+            "properties": {
+              "candidate_id": {"type": "string", "pattern": "^[^:#]+:[^:#]+:[^:#]*#[0-9]+$"},
+              "kind": {"type": "string"},
+              "path": {"type": "string"},
+              "symbol": {"type": ["string", "null"]},
+              "score": {"type": "integer", "minimum": 0},
+              "rank": {"type": "integer", "minimum": 1},
+              "category": {
+                "enum": [
+                  "command-execution",
+                  "sql-injection",
+                  "code-execution",
+                  "path-traversal",
+                  "deserialization",
+                  "external-input",
+                  "entrypoint",
+                  "trust-boundary",
+                  "unresolved-edge"
+                ]
+              },
+              "rationale": {"type": "string"},
+              "key_flow_steps": {"type": "array", "maxItems": 12, "items": {"type": "string"}}
+            }
+          }
+        },
+        "total_candidates": {"type": "integer", "minimum": 0},
+        "coverage_gaps": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["gap_code", "detail"],
+            "properties": {
+              "gap_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+              "detail": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ram_facts_digest",
+        "semantic_config_digest",
+        "semantic_result_digest",
+        "prompt_digest",
+        "model_digest",
+        "wire_digest"
+      ],
+      "properties": {
+        "ram_facts_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "semantic_config_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "semantic_result_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "prompt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "model_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "wire_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provenance_anchor_ids"],
+      "properties": {
+        "provenance_anchor_ids": {
+          "const": ["inventory", "ram-facts", "semantic-prioritizer"]
+        }
+      }
+    },
+    "execution_required": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "trigger_gap_codes"],
+      "properties": {
+        "required": {"type": "boolean"},
+        "trigger_gap_codes": {
+          "type": "array",
+          "maxItems": 9,
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "attackSurfaceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason_codes", "source_artifact_ids", "symbol"],
+      "properties": {
+        "path": {"type": "string"},
+        "reason_codes": {"type": "array", "maxItems": 4096, "items": {"type": "string"}},
+        "source_artifact_ids": {"type": "array", "maxItems": 4096, "items": {"type": "string"}},
+        "symbol": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

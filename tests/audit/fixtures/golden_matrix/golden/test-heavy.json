@@ -1,0 +1,144 @@
+{
+  "build": {
+    "profile_budgets": {
+      "manifest_max_bytes": 262144,
+      "max_manifest_files": 64
+    },
+    "ram_budgets": {
+      "max_key_flows": 256,
+      "max_python_files": 512,
+      "max_unresolved_edges": 1024
+    },
+    "semantic": {
+      "budgets": {
+        "max_llm_calls": 8,
+        "max_output_tokens_estimate": 4096,
+        "max_prompt_tokens_estimate": 24000,
+        "max_total_tokens_estimate": 28096,
+        "max_wall_time_seconds": 120
+      },
+      "model_id": "unset",
+      "seed": 0,
+      "tie_break": "kind-path-symbol-ordinal",
+      "top_n": 20,
+      "weights": {
+        "entrypoint": 60,
+        "external_source": 50,
+        "sink_flow_command": 80,
+        "sink_flow_deserialization": 70,
+        "sink_flow_eval": 90,
+        "sink_flow_path": 70,
+        "sink_flow_sql": 80,
+        "trust_boundary": 40,
+        "unresolved_edge": 30
+      }
+    }
+  },
+  "execution_required": {
+    "required": true,
+    "trigger_gap_codes": [
+      "DYNAMIC_IMPORT"
+    ]
+  },
+  "identity": {
+    "model_digest": "ac66e3bc9621458d8b98a8ca6e320ef8828d5f8af56bdc50b2983f7bd0017e4a",
+    "prompt_digest": "349cea1e7f056f99270f654a5fcad9eaf4787adb5517e8edddbe97c8e0915029",
+    "ram_facts_digest": "ad30c76a44782066857d954bbbaadad16117384ee6f66109d607be1dc564d38d",
+    "semantic_config_digest": "337e1002b4240b1d4938ce6975c94aa26290debebbe485ceaa01c71be9ad1b41",
+    "semantic_result_digest": "bada1de4ae048760b04f52414ad35ef1769a04b22c2cc1ec1460ae3bb7f6c513",
+    "wire_digest": "a8e5f360921818e840fc8a4fad0c34cda7eff78441ee99c76158e1c6e6cf00c7"
+  },
+  "model_kind": "lima.repository-architecture-model",
+  "provenance": {
+    "provenance_anchor_ids": [
+      "inventory",
+      "ram-facts",
+      "semantic-prioritizer"
+    ]
+  },
+  "ram": {
+    "counters": {
+      "ambiguous_modules": 0,
+      "cross_file_edges": 1,
+      "dynamic_import_sites": 1,
+      "functions_indexed": 4,
+      "interprocedural_edges": 1,
+      "modules_indexed": 5,
+      "parse_error_files": 0,
+      "unresolved_calls": 0
+    },
+    "coverage_gaps": [
+      {
+        "detail": "reason=dynamic-import; count=1",
+        "gap_code": "DYNAMIC_IMPORT"
+      }
+    ],
+    "entrypoints": [],
+    "external_sources": [
+      {
+        "path": "tests/conftest.py",
+        "reason_codes": [
+          "RAM_EXTERNAL_SOURCE"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": "fixture_root"
+      }
+    ],
+    "key_flows": [],
+    "sensitive_sinks": [],
+    "sink_cwes": [],
+    "sink_rule_ids": [],
+    "source_labels": [
+      "environment variable"
+    ],
+    "trust_boundaries": [
+      {
+        "path": "tests/conftest.py",
+        "reason_codes": [
+          "RAM_TRUST_BOUNDARY"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": null
+      }
+    ],
+    "unresolved_edges": []
+  },
+  "schema_version": "4.0",
+  "semantic": {
+    "coverage_gaps": [
+      {
+        "detail": "reason=model-disabled; candidates=2",
+        "gap_code": "SEMANTIC_MODEL_OFF"
+      }
+    ],
+    "ranked": [
+      {
+        "candidate_id": "external-source:tests/conftest.py:fixture_root#0",
+        "category": "external-input",
+        "key_flow_steps": [],
+        "kind": "external-source",
+        "path": "tests/conftest.py",
+        "rank": 1,
+        "rationale": "deterministic fallback; kind=external-source",
+        "score": 50,
+        "symbol": "fixture_root"
+      },
+      {
+        "candidate_id": "trust-boundary:tests/conftest.py:-#0",
+        "category": "trust-boundary",
+        "key_flow_steps": [],
+        "kind": "trust-boundary",
+        "path": "tests/conftest.py",
+        "rank": 2,
+        "rationale": "deterministic fallback; kind=trust-boundary",
+        "score": 40,
+        "symbol": null
+      }
+    ],
+    "total_candidates": 2
+  }
+}

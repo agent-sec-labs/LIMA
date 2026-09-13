@@ -1,0 +1,90 @@
+{
+  "build": {
+    "profile_budgets": {
+      "manifest_max_bytes": 262144,
+      "max_manifest_files": 64
+    },
+    "ram_budgets": {
+      "max_key_flows": 256,
+      "max_python_files": 512,
+      "max_unresolved_edges": 1024
+    },
+    "semantic": {
+      "budgets": {
+        "max_llm_calls": 8,
+        "max_output_tokens_estimate": 4096,
+        "max_prompt_tokens_estimate": 24000,
+        "max_total_tokens_estimate": 28096,
+        "max_wall_time_seconds": 120
+      },
+      "model_id": "unset",
+      "seed": 0,
+      "tie_break": "kind-path-symbol-ordinal",
+      "top_n": 20,
+      "weights": {
+        "entrypoint": 60,
+        "external_source": 50,
+        "sink_flow_command": 80,
+        "sink_flow_deserialization": 70,
+        "sink_flow_eval": 90,
+        "sink_flow_path": 70,
+        "sink_flow_sql": 80,
+        "trust_boundary": 40,
+        "unresolved_edge": 30
+      }
+    }
+  },
+  "execution_required": {
+    "required": false,
+    "trigger_gap_codes": []
+  },
+  "identity": {
+    "model_digest": "ac66e3bc9621458d8b98a8ca6e320ef8828d5f8af56bdc50b2983f7bd0017e4a",
+    "prompt_digest": "349cea1e7f056f99270f654a5fcad9eaf4787adb5517e8edddbe97c8e0915029",
+    "ram_facts_digest": "5023b40fb5f0866a64601aca1fcdeb28b892069cc0d574dbfdba08ef9c7fbe35",
+    "semantic_config_digest": "337e1002b4240b1d4938ce6975c94aa26290debebbe485ceaa01c71be9ad1b41",
+    "semantic_result_digest": "65982653b10f45dd558d81dfcf35822de0949d3883edc4eee313395a9ce4909d",
+    "wire_digest": "84a4b4fab1857a804bc2f258e8bd29cf11b57dc3a74fd5852d0dc78a4be45146"
+  },
+  "model_kind": "lima.repository-architecture-model",
+  "provenance": {
+    "provenance_anchor_ids": [
+      "inventory",
+      "ram-facts",
+      "semantic-prioritizer"
+    ]
+  },
+  "ram": {
+    "counters": {
+      "ambiguous_modules": 0,
+      "cross_file_edges": 0,
+      "dynamic_import_sites": 0,
+      "functions_indexed": 0,
+      "interprocedural_edges": 0,
+      "modules_indexed": 0,
+      "parse_error_files": 0,
+      "unresolved_calls": 0
+    },
+    "coverage_gaps": [],
+    "entrypoints": [],
+    "external_sources": [],
+    "key_flows": [],
+    "sensitive_sinks": [],
+    "sink_cwes": [],
+    "sink_rule_ids": [],
+    "source_labels": [],
+    "trust_boundaries": [],
+    "unresolved_edges": []
+  },
+  "schema_version": "4.0",
+  "semantic": {
+    "coverage_gaps": [
+      {
+        "detail": "reason=model-disabled; candidates=0",
+        "gap_code": "SEMANTIC_MODEL_OFF"
+      }
+    ],
+    "ranked": [],
+    "total_candidates": 0
+  }
+}

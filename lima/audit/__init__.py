@@ -29,6 +29,18 @@ from lima.audit.ram import (
     build_python_ram_facts,
     ram_facts_digest,
 )
+from lima.audit.ram_schema import (
+    GAP_CODES_ALL,
+    GAP_EXECUTION_REQUIRED_TRIGGERS,
+    PROVENANCE_ANCHOR_CHAIN,
+    RAM_WIRE_SCHEMA_FILE,
+    RAM_WIRE_SCHEMA_NAME,
+    execution_required_from_gaps,
+    load_ram_wire_schema,
+    ram_wire_digest,
+    ram_wire_payload,
+    validate_ram_wire_payload,
+)
 from lima.audit.semantic_prioritizer import (
     GAP_SEMANTIC_MALFORMED_OUTPUT,
     GAP_SEMANTIC_MODEL_OFF,
@@ -101,4 +113,14 @@ __all__ = [
     "candidate_id",
     "semantic_config_digest",
     "semantic_result_digest",
+    "GAP_CODES_ALL",
+    "GAP_EXECUTION_REQUIRED_TRIGGERS",
+    "PROVENANCE_ANCHOR_CHAIN",
+    "RAM_WIRE_SCHEMA_FILE",
+    "RAM_WIRE_SCHEMA_NAME",
+    "execution_required_from_gaps",
+    "load_ram_wire_schema",
+    "ram_wire_digest",
+    "ram_wire_payload",
+    "validate_ram_wire_payload",
 ]

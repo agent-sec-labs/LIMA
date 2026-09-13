@@ -1,0 +1,324 @@
+{
+  "build": {
+    "profile_budgets": {
+      "manifest_max_bytes": 262144,
+      "max_manifest_files": 64
+    },
+    "ram_budgets": {
+      "max_key_flows": 256,
+      "max_python_files": 512,
+      "max_unresolved_edges": 1024
+    },
+    "semantic": {
+      "budgets": {
+        "max_llm_calls": 8,
+        "max_output_tokens_estimate": 4096,
+        "max_prompt_tokens_estimate": 24000,
+        "max_total_tokens_estimate": 28096,
+        "max_wall_time_seconds": 120
+      },
+      "model_id": "unset",
+      "seed": 0,
+      "tie_break": "kind-path-symbol-ordinal",
+      "top_n": 20,
+      "weights": {
+        "entrypoint": 60,
+        "external_source": 50,
+        "sink_flow_command": 80,
+        "sink_flow_deserialization": 70,
+        "sink_flow_eval": 90,
+        "sink_flow_path": 70,
+        "sink_flow_sql": 80,
+        "trust_boundary": 40,
+        "unresolved_edge": 30
+      }
+    }
+  },
+  "execution_required": {
+    "required": false,
+    "trigger_gap_codes": []
+  },
+  "identity": {
+    "model_digest": "ac66e3bc9621458d8b98a8ca6e320ef8828d5f8af56bdc50b2983f7bd0017e4a",
+    "prompt_digest": "349cea1e7f056f99270f654a5fcad9eaf4787adb5517e8edddbe97c8e0915029",
+    "ram_facts_digest": "84fec0134159f33e0386392754f49e089342d869b5b8b99fbfd6789fb4713c83",
+    "semantic_config_digest": "337e1002b4240b1d4938ce6975c94aa26290debebbe485ceaa01c71be9ad1b41",
+    "semantic_result_digest": "8aecae4e63146bfc20071052343154527a2c2d52dbff5f5adeb9c12e1edfbe65",
+    "wire_digest": "e45c60baa4fc7810a358b9377a25d495c7aa57832a84ea23b6273333bd6f7854"
+  },
+  "model_kind": "lima.repository-architecture-model",
+  "provenance": {
+    "provenance_anchor_ids": [
+      "inventory",
+      "ram-facts",
+      "semantic-prioritizer"
+    ]
+  },
+  "ram": {
+    "counters": {
+      "ambiguous_modules": 0,
+      "cross_file_edges": 0,
+      "dynamic_import_sites": 0,
+      "functions_indexed": 3,
+      "interprocedural_edges": 0,
+      "modules_indexed": 4,
+      "parse_error_files": 0,
+      "unresolved_calls": 0
+    },
+    "coverage_gaps": [],
+    "entrypoints": [
+      {
+        "path": "api.py",
+        "reason_codes": [
+          "RAM_ENDPOINT_DECORATED"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": "list_items"
+      },
+      {
+        "path": "app.py",
+        "reason_codes": [
+          "RAM_ENDPOINT_DECORATED"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": "submit"
+      }
+    ],
+    "external_sources": [
+      {
+        "path": "api.py",
+        "reason_codes": [
+          "RAM_EXTERNAL_SOURCE"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": "list_items"
+      },
+      {
+        "path": "danger.py",
+        "reason_codes": [
+          "RAM_EXTERNAL_SOURCE"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": "run_command"
+      },
+      {
+        "path": "runner.py",
+        "reason_codes": [
+          "RAM_EXTERNAL_SOURCE"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": "config_dir"
+      }
+    ],
+    "key_flows": [
+      {
+        "sink_rule_id": "FLOW-COMMAND",
+        "steps": [
+          "danger.py:6",
+          "danger.py:6"
+        ]
+      }
+    ],
+    "sensitive_sinks": [
+      {
+        "path": "danger.py",
+        "reason_codes": [
+          "RAM_SENSITIVE_SINK"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": null
+      }
+    ],
+    "sink_cwes": [
+      "CWE-78"
+    ],
+    "sink_rule_ids": [
+      "FLOW-COMMAND"
+    ],
+    "source_labels": [
+      "request query parameter",
+      "request query parameter",
+      "environment variable"
+    ],
+    "trust_boundaries": [
+      {
+        "path": "api.py",
+        "reason_codes": [
+          "RAM_TRUST_BOUNDARY"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": null
+      },
+      {
+        "path": "app.py",
+        "reason_codes": [
+          "RAM_TRUST_BOUNDARY"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": null
+      },
+      {
+        "path": "danger.py",
+        "reason_codes": [
+          "RAM_TRUST_BOUNDARY"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": null
+      },
+      {
+        "path": "runner.py",
+        "reason_codes": [
+          "RAM_TRUST_BOUNDARY"
+        ],
+        "source_artifact_ids": [
+          "ram-facts"
+        ],
+        "symbol": null
+      }
+    ],
+    "unresolved_edges": []
+  },
+  "schema_version": "4.0",
+  "semantic": {
+    "coverage_gaps": [
+      {
+        "detail": "reason=model-disabled; candidates=10",
+        "gap_code": "SEMANTIC_MODEL_OFF"
+      }
+    ],
+    "ranked": [
+      {
+        "candidate_id": "sensitive-sink:danger.py:-#0",
+        "category": "command-execution",
+        "key_flow_steps": [
+          "danger.py:6",
+          "danger.py:6"
+        ],
+        "kind": "sensitive-sink",
+        "path": "danger.py",
+        "rank": 1,
+        "rationale": "deterministic fallback; kind=sensitive-sink",
+        "score": 80,
+        "symbol": null
+      },
+      {
+        "candidate_id": "entrypoint:api.py:list_items#0",
+        "category": "entrypoint",
+        "key_flow_steps": [],
+        "kind": "entrypoint",
+        "path": "api.py",
+        "rank": 2,
+        "rationale": "deterministic fallback; kind=entrypoint",
+        "score": 60,
+        "symbol": "list_items"
+      },
+      {
+        "candidate_id": "entrypoint:app.py:submit#1",
+        "category": "entrypoint",
+        "key_flow_steps": [],
+        "kind": "entrypoint",
+        "path": "app.py",
+        "rank": 3,
+        "rationale": "deterministic fallback; kind=entrypoint",
+        "score": 60,
+        "symbol": "submit"
+      },
+      {
+        "candidate_id": "external-source:api.py:list_items#0",
+        "category": "external-input",
+        "key_flow_steps": [],
+        "kind": "external-source",
+        "path": "api.py",
+        "rank": 4,
+        "rationale": "deterministic fallback; kind=external-source",
+        "score": 50,
+        "symbol": "list_items"
+      },
+      {
+        "candidate_id": "external-source:danger.py:run_command#1",
+        "category": "external-input",
+        "key_flow_steps": [],
+        "kind": "external-source",
+        "path": "danger.py",
+        "rank": 5,
+        "rationale": "deterministic fallback; kind=external-source",
+        "score": 50,
+        "symbol": "run_command"
+      },
+      {
+        "candidate_id": "external-source:runner.py:config_dir#2",
+        "category": "external-input",
+        "key_flow_steps": [],
+        "kind": "external-source",
+        "path": "runner.py",
+        "rank": 6,
+        "rationale": "deterministic fallback; kind=external-source",
+        "score": 50,
+        "symbol": "config_dir"
+      },
+      {
+        "candidate_id": "trust-boundary:api.py:-#0",
+        "category": "trust-boundary",
+        "key_flow_steps": [],
+        "kind": "trust-boundary",
+        "path": "api.py",
+        "rank": 7,
+        "rationale": "deterministic fallback; kind=trust-boundary",
+        "score": 40,
+        "symbol": null
+      },
+      {
+        "candidate_id": "trust-boundary:app.py:-#1",
+        "category": "trust-boundary",
+        "key_flow_steps": [],
+        "kind": "trust-boundary",
+        "path": "app.py",
+        "rank": 8,
+        "rationale": "deterministic fallback; kind=trust-boundary",
+        "score": 40,
+        "symbol": null
+      },
+      {
+        "candidate_id": "trust-boundary:danger.py:-#2",
+        "category": "trust-boundary",
+        "key_flow_steps": [],
+        "kind": "trust-boundary",
+        "path": "danger.py",
+        "rank": 9,
+        "rationale": "deterministic fallback; kind=trust-boundary",
+        "score": 40,
+        "symbol": null
+      },
+      {
+        "candidate_id": "trust-boundary:runner.py:-#3",
+        "category": "trust-boundary",
+        "key_flow_steps": [],
+        "kind": "trust-boundary",
+        "path": "runner.py",
+        "rank": 10,
+        "rationale": "deterministic fallback; kind=trust-boundary",
+        "score": 40,
+        "symbol": null
+      }
+    ],
+    "total_candidates": 10
+  }
+}

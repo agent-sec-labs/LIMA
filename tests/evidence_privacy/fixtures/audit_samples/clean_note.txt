@@ -1,0 +1,2 @@
+this file contains no secrets at all, just plain words and numbers 12345.
+no base64, no keys, no credentials.

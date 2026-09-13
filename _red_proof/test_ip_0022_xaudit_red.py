@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import re
 import unittest
 
 from tests.audit.fixtures.repo_shapes import profile_kwargs, workspace_with
@@ -113,6 +114,16 @@ class X3ManifestErrorDetailRedactionTests(unittest.TestCase):
             any("token/pyproject.toml" in detail for detail in details),
             f"manifest parse-error detail carries the raw path: {details}",
         )
+        # R4 / DR-04-A finalized design: the replacement identifier is the
+        # manifest scan ordinal (index into the sorted _manifest_candidates
+        # enumeration), deterministic and free of any path/filename fragment.
+        self.assertTrue(
+            any(
+                re.search(r"manifest-index=\d+; error=", detail)
+                for detail in details
+            ),
+            f"manifest error detail must use the manifest-index identifier: {details}",
+        )
 
     def test_oversized_manifest_budget_detail_free_of_sensitive_path(self):
         inv = inv_module()
@@ -190,6 +201,62 @@ class X4WireConsistencyTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.validate(payload)
 
+    def test_candidate_id_none_dash_disambiguation_tamper_rejected(self):
+        # X4-7 (DR-04-B rewrite, problem 1): the '-' slot in candidate_id is
+        # the serialized form of symbol=None ONLY. A literal symbol == "-"
+        # must be rejected at the wire layer: without this rule, flipping
+        # symbol between None and '-' leaves candidate_id and every digest
+        # unchanged (the ranked digest subset excludes symbol), so the three
+        # fields are not fully bound. Production chain for ranked symbol is
+        # identifiers / None / "<dynamic-call>" -- never '-' -- so this rule
+        # has zero false positives (source-traced in DR-IP-0022-04 R4).
+        payload = self.payload
+        payload["semantic"]["ranked"][0]["symbol"] = "-"
+        with self.assertRaises(Exception) as ctx:
+            self.validate(payload)
+        self.assertIn("symbol", str(ctx.exception))
+
+
+class X7SensitiveScriptNameAdmissionTests(unittest.TestCase):
+    """X7 (problem 3, included in IP-0022 per R4 ruling): a manifest script
+    *name* that is secret-shaped must not surface as
+    ``profile.entrypoints[i].symbol`` (S1/S4/S8), and the rejection must be
+    counted through the public sensitive-filename skip channel."""
+
+    def _repo(self):
+        return {
+            "pyproject.toml": (
+                "[project.scripts]\n"
+                'token_FAKESECRET123 = "pkg.cli:main"\n'
+                'safe_cli = "pkg.cli:main"\n'
+            ),
+            "pkg/__init__.py": "x = 1\n",
+            "pkg/cli.py": "def main():\n    pass\n",
+        }
+
+    def test_sensitive_script_name_excluded_from_entrypoints(self):
+        result = build_profile(self._repo())
+        symbols = [e.symbol for e in result.profile.entrypoints]
+        self.assertFalse(
+            any(s and "FAKESECRET" in s for s in symbols),
+            f"sensitive script name leaked into entrypoints.symbol: {symbols}",
+        )
+        self.assertIn("safe_cli", symbols)
+        serialized = json.dumps(result.profile.to_dict(), ensure_ascii=False)
+        self.assertNotIn("FAKESECRET", serialized)
+
+    def test_sensitive_script_name_skip_counted(self):
+        result = build_profile(self._repo())
+        details = [
+            g.detail
+            for g in result.profile.coverage_gaps
+            if "sensitive-filename" in g.detail
+        ]
+        self.assertEqual(
+            len(details), 1, f"expected exactly one skip gap: {details}"
+        )
+        self.assertIn("count=1", details[0])
+
 
 class X5AdmissionSkipSemanticsTests(unittest.TestCase):
     """X5: AdmissionSkip semantics (count-once, gap ordering, RAM-only trace)."""
@@ -227,6 +294,20 @@ class X5AdmissionSkipSemanticsTests(unittest.TestCase):
             all(not hasattr(s, "path") for s in skips),
             "skip records must not carry the raw filename",
         )
+        # R4 amendment (problem 3 co-fix): the RAM-only path must also publish
+        # the skip count through the public coverage_gaps channel, not only the
+        # internal admission_skips trace.
+        details = [
+            gap.detail
+            for gap in result.facts.coverage_gaps
+            if "sensitive-filename" in gap.detail
+        ]
+        self.assertEqual(
+            len(details),
+            1,
+            f"expected one public coverage gap for the skip: {details}",
+        )
+        self.assertIn("count=1", details[0])
 
 
 class X6MinimalPayloadFiveDigestTests(unittest.TestCase):

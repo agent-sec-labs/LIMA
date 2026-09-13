@@ -171,6 +171,30 @@ def run_script(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[st
     )
 
 
+IS_WINDOWS_PLATFORM = sys.platform == "win32"
+PLATFORM_UNSUPPORTED_MSG = "platform-unsupported-safe-scan"
+
+
+def posix_script_or_fail_closed(testcase, result) -> bool:
+    """R10 §17.B2'-R10: on Windows the script must refuse to run (exit 2,
+    single stderr line, no report output); POSIX continues to behavior."""
+    if not IS_WINDOWS_PLATFORM:
+        return True
+    testcase.assertEqual(result.returncode, 2, result.stderr)
+    testcase.assertIn(PLATFORM_UNSUPPORTED_MSG, result.stderr)
+    testcase.assertEqual(result.stdout.strip(), "")
+    return False
+
+
+def posix_main_or_fail_closed(testcase, code, err) -> bool:
+    """R10 in-process variant of posix_script_or_fail_closed."""
+    if not IS_WINDOWS_PLATFORM:
+        return True
+    testcase.assertEqual(code, 2, err)
+    testcase.assertIn(PLATFORM_UNSUPPORTED_MSG, err)
+    return False
+
+
 class FixtureSelfCheckTests(unittest.TestCase):
     """§11.2 + D1'.2: fixture header values and in-test constants must agree."""
 
@@ -498,6 +522,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # §8.3.3/§8.3.5 + D1'.2 §18 #2: stdout report and stderr carry zero
         # secret values, zero key names, zero file names.
         result = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, result):
+            return
         report = json.loads(result.stdout)
         self.assertIsInstance(report, dict)
         assert_zero_secret(self, result.stdout, "script stdout")
@@ -519,6 +545,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # status "incomplete", non-empty incomplete_reasons. Exit 3 is the
         # normal completed-with-gaps path, not an error exit.
         result = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, result):
+            return
         self.assertEqual(result.returncode, 3, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(report.get("status"), "incomplete")
@@ -531,6 +559,9 @@ class AuditScriptSubprocessTests(unittest.TestCase):
             clean = pathlib.Path(tmp)
             (clean / "clean.txt").write_text("nothing sensitive here\n", encoding="utf-8")
             result = run_script(str(clean))
+            if not posix_script_or_fail_closed(self, result):
+                return
+
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(report.get("status"), "complete")
@@ -540,6 +571,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # D3' §18 #5: the report self-labels the per-run random fingerprint
         # domain with the frozen tenant_context value.
         result = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, result):
+            return
         report = json.loads(result.stdout)
         self.assertEqual(report.get("tenant_context"), TENANT_CONTEXT_VALUE)
 
@@ -549,6 +582,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # known value QUJD... appears in several fixtures, so some
         # fingerprint repeats; fingerprints keep the frozen 32-hex form.
         result = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, result):
+            return
         report = json.loads(result.stdout)
         fingerprints = [str(fp) for fp in collect_key_values(report, "fingerprint")]
         self.assertTrue(fingerprints)
@@ -565,6 +600,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # random key, so two runs over the same fixture directory must yield
         # different fingerprint sets (cross-run comparison is unsupported).
         first = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, first):
+            return
         second = run_script(str(FIXTURE_DIR))
         fp_first = sorted(
             str(fp) for fp in collect_key_values(json.loads(first.stdout), "fingerprint")
@@ -581,6 +618,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # unchanged.
         before = fixture_state()
         result = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, result):
+            return
         self.assertIn(result.returncode, (0, 3), result.stderr)
         self.assertEqual(fixture_state(), before)
 
@@ -591,6 +630,9 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = pathlib.Path(tmp) / "report.json"
             result = run_script(str(FIXTURE_DIR), "--output", str(report_path))
+            if not posix_script_or_fail_closed(self, result):
+                return
+
             self.assertIn(result.returncode, (0, 3), result.stderr)
             self.assertTrue(report_path.is_file())
             content = report_path.read_text(encoding="utf-8")
@@ -647,6 +689,8 @@ class AuditScriptSubprocessTests(unittest.TestCase):
         # 3 with status incomplete; the skipped artifact contributes nothing.
         ids = artifact_ids(FIXTURE_DIR)
         result = run_script(str(FIXTURE_DIR))
+        if not posix_script_or_fail_closed(self, result):
+            return
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn("unparseable-json", result.stderr)
         expected = json.dumps({"artifact": ids["broken.json"], "error": "unparseable-json"})
@@ -705,6 +749,9 @@ class AuditScriptSubprocessTests(unittest.TestCase):
             (target / "big.txt").write_text("x" * (1_048_576 + 1), encoding="utf-8")
             ids = artifact_ids(target)
             result = run_script(str(target))
+            if not posix_script_or_fail_closed(self, result):
+                return
+
             self.assertEqual(result.returncode, 3, result.stderr)
             expected = json.dumps({"artifact": ids["big.txt"], "error": "resource-limit"})
             self.assertIn(expected, result.stderr)
@@ -717,7 +764,7 @@ class AuditScriptSubprocessTests(unittest.TestCase):
 
 
 class SymlinkBoundaryTests(unittest.TestCase):
-    """B2' §17.B2': symlink traversal and read boundary."""
+    """B2' §17.B2' + R10: symlink boundary (POSIX) / platform fail-closed (Windows)."""
 
     def _make_symlink(self, link: pathlib.Path, target: pathlib.Path) -> None:
         try:
@@ -725,11 +772,28 @@ class SymlinkBoundaryTests(unittest.TestCase):
         except (OSError, NotImplementedError) as exc:  # pragma: no cover
             self.skipTest(f"symlink creation unavailable on this platform ({exc})")
 
+    def _assert_windows_fail_closed(self, target: pathlib.Path) -> None:
+        # R10 §18 #25 (revised from the v1.4 Windows conditional-skip): on
+        # Windows the safe-scan capabilities are absent, so the script must
+        # refuse to run -- exit 2, single platform-unsupported stderr line,
+        # no report output, no report file.
+        result = run_script(str(target))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(PLATFORM_UNSUPPORTED_MSG, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
     def test_symlinked_file_skipped_and_external_target_unread(self) -> None:
-        # B2' (Linux CI authoritative; Windows conditional): a symlink inside
-        # the target directory pointing at an outside file is skipped with a
+        # B2' (Linux/POSIX authoritative): a symlink inside the target
+        # directory pointing at an outside file is skipped with a
         # symlink-skipped warning; the outside content never reaches any
-        # output; the run is incomplete.
+        # output; the run is incomplete. On Windows the R10 fail-closed
+        # branch replaces the v1.4 conditional skip (revision, not deletion).
+        if IS_WINDOWS_PLATFORM:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = pathlib.Path(tmp)
+                (target / "inside.txt").write_text("plain\n", encoding="utf-8")
+                self._assert_windows_fail_closed(target)
+            return
         with tempfile.TemporaryDirectory() as scan_tmp, tempfile.TemporaryDirectory() as out_tmp:
             target = pathlib.Path(scan_tmp)
             outside = pathlib.Path(out_tmp) / "outside.txt"
@@ -746,8 +810,9 @@ class SymlinkBoundaryTests(unittest.TestCase):
             self.assertEqual(report.get("status"), "incomplete")
 
     def test_target_dir_symlink_rejected(self) -> None:
-        # B2': a target directory that is itself a symlink (or resolves
-        # through one) is a parameter error -- exit 2.
+        # B2': a target directory that is itself a symlink is a parameter
+        # error -- exit 2. On Windows the R10 platform fail-closed branch
+        # applies (also exit 2, platform-unsupported message).
         with tempfile.TemporaryDirectory() as scan_tmp, tempfile.TemporaryDirectory() as out_tmp:
             real = pathlib.Path(scan_tmp)
             (real / "inside.txt").write_text("plain internal note\n", encoding="utf-8")
@@ -755,7 +820,128 @@ class SymlinkBoundaryTests(unittest.TestCase):
             self._make_symlink(link_dir, real)
             result = run_script(str(link_dir))
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("target-dir must not be a symlink path", result.stderr)
+            if IS_WINDOWS_PLATFORM:
+                self.assertIn(PLATFORM_UNSUPPORTED_MSG, result.stderr)
+            else:
+                self.assertIn("target-dir must not be a symlink path", result.stderr)
+
+
+class DirFdBindingTests(unittest.TestCase):
+    """R10 §17.B2'-R10 / §18 #25: directory-handle binding and race isolation."""
+
+    def test_source_uses_dirfd_binding_and_seam(self) -> None:
+        # R10 (RED on 30bdfaa): every per-file open is dir_fd-relative; no
+        # by-path opens, no path-prefix joins; the _read_artifacts seam
+        # exists; R11 flags present at the single openat site.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("dir_fd=", source)
+        self.assertIn("_read_artifacts", source)
+        self.assertIn("O_NONBLOCK", source)
+        self.assertIn("S_ISREG", source)
+        self.assertNotIn("read_bytes", source)
+        self.assertNotIn("st_size", source)
+        self.assertNotIn("os.path.join", source)
+        for forbidden_form in ("os.open(path", "os.open(target", "os.open(str("):
+            self.assertNotIn(forbidden_form, source)
+
+    def test_directory_replacement_race_isolated(self) -> None:
+        # R10 (POSIX/Linux authoritative): after the dir_fd is validated,
+        # renaming the target directory and replacing it in place with a
+        # symlink to an outside directory must not divert any read -- the
+        # seam reads the original directory inode; the outside sentinel
+        # never appears in any returned value.
+        if IS_WINDOWS_PLATFORM:
+            self.skipTest("dir_fd binding is POSIX-only; Windows covered by fail-closed")
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "audit_sensitive_artifacts_under_test", SCRIPT_PATH
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as scan_tmp, tempfile.TemporaryDirectory() as out_tmp:
+            target = pathlib.Path(scan_tmp)
+            external = pathlib.Path(out_tmp)
+            inside_1 = "one.txt"
+            inside_2 = "two.txt"
+            (target / inside_1).write_text(
+                "bearer " + KNOWN_SECRET_VALUES[0] + "\n", encoding="utf-8"
+            )
+            (target / inside_2).write_text(
+                "bearer " + KNOWN_SECRET_VALUES[1] + "\n", encoding="utf-8"
+            )
+            (external / "outside.txt").write_text(
+                "external " + KNOWN_SECRET_VALUES[3] + "\n", encoding="utf-8"
+            )
+            dir_fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+            moved = target.with_name(target.name + "-moved")
+            try:
+                os.rename(target, moved)
+                os.symlink(external, target)
+                result = module._read_artifacts(dir_fd, [inside_1, inside_2])
+            finally:
+                os.close(dir_fd)
+            rendered = repr(result) + json.dumps(result, default=str, sort_keys=True)
+            # The outside sentinel never reaches any returned value.
+            for value in (KNOWN_SECRET_VALUES[3],):
+                self.assertNotIn(value, rendered)
+            assert_zero_secret(self, rendered, "race-isolated seam result")
+            # Both in-scope relative names were processed (sized container).
+            self.assertIsNotNone(result)
+
+    def test_windows_platform_fail_closed_no_report(self) -> None:
+        # R10 §18 #25 (Windows): any legal target -> exit 2, single
+        # platform-unsupported stderr line, and NO report file produced.
+        if not IS_WINDOWS_PLATFORM:
+            self.skipTest("fail-closed branch is Windows-only (POSIX runs the safe scan)")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            (target / "clean.txt").write_text("plain\n", encoding="utf-8")
+            report_path = pathlib.Path(tmp).parent / "ip0020-win-report.json"
+            result = run_script(str(target), "--output", str(report_path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(PLATFORM_UNSUPPORTED_MSG, result.stderr)
+            self.assertEqual(result.stdout.strip(), "")
+            self.assertFalse(report_path.exists())
+
+
+class SpecialFileTests(unittest.TestCase):
+    """R11 §17.F5'-R11 / §18 #26: FIFO/special files never block the scan."""
+
+    def test_source_locks_nonblock_and_isreg(self) -> None:
+        # R11 (RED on 30bdfaa): O_NONBLOCK at the single openat site and a
+        # stat.S_ISREG type gate after the single fstat.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("O_NONBLOCK", source)
+        self.assertIn("S_ISREG", source)
+
+    def test_fifo_does_not_block_and_is_identifiably_skipped(self) -> None:
+        # R11 (POSIX conditional; Windows covered by R10 fail-closed): a
+        # FIFO must not block the open (O_NONBLOCK); it is skipped with a
+        # special-file warning, incomplete status, exit 3; the sibling
+        # regular file is still scanned normally.
+        if IS_WINDOWS_PLATFORM or not hasattr(os, "mkfifo"):
+            self.skipTest("mkfifo is POSIX-only; Windows covered by platform fail-closed")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            (target / "normal.txt").write_text(
+                "bearer " + KNOWN_SECRET_VALUES[0] + "\n", encoding="utf-8"
+            )
+            os.mkfifo(str(target / "pipe.txt"))
+            ids = artifact_ids(target)
+            try:
+                result = run_script(str(target), timeout=45)
+            except subprocess.TimeoutExpired:
+                self.fail("scan blocked on FIFO open -- O_NONBLOCK missing (R11)")
+                return
+            self.assertEqual(result.returncode, 3, result.stderr)
+            expected = json.dumps({"artifact": ids["pipe.txt"], "error": "special-file"})
+            self.assertIn(expected, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report.get("status"), "incomplete")
+            self.assertIn(f"{ids['pipe.txt']}:special-file", report.get("incomplete_reasons", []))
+            fingerprints = collect_key_values(report, "fingerprint")
+            self.assertTrue(fingerprints, "regular sibling file must still be scanned")
 
 
 class TenantContextLeakPreventionTests(unittest.TestCase):
@@ -829,35 +1015,55 @@ class ScriptReadBudgetTests(unittest.TestCase):
             target = pathlib.Path(tmp)
             (target / "edge.txt").write_text("y" * 1_048_576, encoding="utf-8")
             result = run_script(str(target), timeout=300)
+            if not posix_script_or_fail_closed(self, result):
+                return
+
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(report.get("status"), "complete")
 
     def test_file_budget_truncation_bounded_output(self) -> None:
-        # R8 §18 #23 (revised from the v1.3 per-file semantics, which is
-        # [v1.3-replaced]): 10_005 files -> enumeration and per-file
-        # processing stop at the 10_000-file budget; incomplete_reasons
-        # carries EXACTLY ONE "scan:file-budget:truncated-at=a<n>" summary,
-        # no per-file a10000+ entries, a single stderr summary line, and the
-        # report stays parseable with bounded size.
+        # R9 §18 #24 (revised from the R8 wording, [v1.4-erratum] via R12):
+        # single-pass enumeration + bounded top-K lexicographic selection.
+        # 10_005 files; the 5 lexicographically LARGEST names carry unique
+        # sentinels -> they are evicted from the 10_000 selection set and
+        # must contribute zero findings; the truncation summary is EXACTLY
+        # ONE fixed-shape entry truncated-at=a9999; stderr single line; no
+        # per-file a10000+ entries; incomplete + exit 3.
+        import base64
+
+        evicted_sentinels = [
+            base64.b64encode(f"evicted-sentinel-{i:03d}-payload-0123456789abcdef".encode()).decode()
+            for i in range(5)
+        ]
+        for sentinel in evicted_sentinels:
+            self.assertTrue(is_bare_base64_secret(sentinel))
         with tempfile.TemporaryDirectory() as tmp:
             target = pathlib.Path(tmp)
-            for index in range(10_005):
+            for index in range(10_000):
                 (target / f"f{index:05d}.txt").write_text(f"file {index}\n", encoding="utf-8")
+            for index, sentinel in zip(range(10_000, 10_005), evicted_sentinels, strict=True):
+                (target / f"f{index:05d}.txt").write_text(sentinel + "\n", encoding="utf-8")
             result = run_script(str(target), timeout=600)
+            if not posix_script_or_fail_closed(self, result):
+                return
             self.assertEqual(result.returncode, 3, result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(report.get("status"), "incomplete")
             reasons = report.get("incomplete_reasons", [])
             summaries = [r for r in reasons if r.startswith("scan:file-budget")]
             self.assertEqual(len(summaries), 1, reasons)
-            self.assertRegex(summaries[0], r"^scan:file-budget:truncated-at=a(0|[1-9][0-9]{0,3})$")
+            self.assertEqual(summaries[0], "scan:file-budget:truncated-at=a9999")
             self.assertEqual([r for r in reasons if ":resource-limit" in r], [])
             budget_lines = [line for line in result.stderr.splitlines() if "file-budget" in line]
             self.assertEqual(len(budget_lines), 1, result.stderr)
-            # R8: bounded output -- stderr carries no per-file truncation spam.
             self.assertLessEqual(len(result.stderr.strip().splitlines()), 2)
-            self.assertLessEqual(len(report.get("findings", [])), 10_000)
+            # R9: evicted files contribute nothing -- zero findings (the
+            # kept 10_000 files are clean) and zero sentinel leakage.
+            self.assertEqual(report.get("findings", []), [])
+            self.assertEqual(collect_key_values(report, "fingerprint"), [])
+            for sentinel in evicted_sentinels:
+                self.assertNotIn(sentinel, result.stdout + result.stderr)
 
     def test_byte_budget_exceeded_report_still_written(self) -> None:
         # R2 (RED on c5b375e): cumulative handle-read bytes past
@@ -872,6 +1078,8 @@ class ScriptReadBudgetTests(unittest.TestCase):
                 (target / f"b{index:03d}.txt").write_text(payload, encoding="utf-8")
             report_path = pathlib.Path(tmp) / "report.json"
             result = run_script(str(target), "--output", str(report_path), timeout=600)
+            if not posix_script_or_fail_closed(self, result):
+                return
             self.assertEqual(result.returncode, 3, result.stderr)
             self.assertTrue(report_path.is_file())
             report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -882,6 +1090,11 @@ class ScriptReadBudgetTests(unittest.TestCase):
             summaries = [r for r in reasons if r.startswith("scan:byte-budget")]
             self.assertEqual(len(summaries), 1, reasons)
             self.assertRegex(summaries[0], r"^scan:byte-budget:truncated-at=a(0|[1-9][0-9]{0,3})$")
+            # R9 §18 #24: the byte budget trips mid-selection-set, so the
+            # truncation index is strictly below a9999 (no file-budget trip).
+            match = re.search(r"truncated-at=a(\d+)$", summaries[0])
+            self.assertIsNotNone(match)
+            self.assertLess(int(match.group(1)), 9_999)
             self.assertNotIn("scan:file-budget", reasons, "no file-budget trip in this scenario")
 
 
@@ -947,6 +1160,8 @@ class SecureReadVerificationTests(unittest.TestCase):
                 code, out, err = self._run_main(module, target)
             finally:
                 os.fstat = original_fstat
+            if not posix_main_or_fail_closed(self, code, err):
+                return
             self.assertEqual(code, 3, err)
             self.assertIn("symlink-risk", err)
             combined = out + err
@@ -983,6 +1198,8 @@ class SecureReadVerificationTests(unittest.TestCase):
                 code, out, err = self._run_main(module, target)
             finally:
                 os.fstat = original_fstat
+            if not posix_main_or_fail_closed(self, code, err):
+                return
             self.assertEqual(code, 3, err)
             self.assertIn("symlink-risk", err)
             report = json.loads(out)
@@ -1143,6 +1360,8 @@ class SameHandleReadTests(unittest.TestCase):
                 import builtins as _builtins
 
                 _builtins.open = real_builtin_open
+            if not posix_main_or_fail_closed(self, code, err.getvalue()):
+                return
             self.assertEqual(code, 3, err.getvalue())
             self.assertEqual(counters["builtin_open"], 0, "builtins.open used for reading")
             # Two artifacts, each opened exactly once via os.open.

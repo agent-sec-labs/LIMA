@@ -2,9 +2,11 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0019-PACKET/v1.1`
+> Packet 版本：`IP-0019-PACKET/v1.2`
 >
 > 修订历史：v1.1（2026-09-13，DR-IP-0019-01，裁定 DR-IP-0019-0102 选项 A）：§5.3 `max_total_tokens_estimate` 默认值 `28_000` → `28_096`，保留构造期不变量（total ≥ prompt+output）；DR-TOPN-01 批准值 24,000 / 4,096 / 120s 不变。
+>
+> 修订历史：v1.2（2026-09-13，勘误 PKT-ERRATUM-IP-0019-02，随 IP-0021 Packet docs 批次）：§3.1 字面差异修正——原文"`sink_rule_ids`/`sink_cwes`/`key_flows` 与条目按索引一一对应（并行元组）"不准确；实测（`lima/audit/ram.py` `_collect_sink_facts`）：仅 `sink_rule_ids`/`sink_cwes` 与 `sensitive_sinks` 按索引一一对应，`key_flows` 按 `(sink_rule_id, steps)` 独立排序且受 `max_key_flows` 截断（sinks 本身不截断），与 `sensitive_sinks` 无索引对应。纯文档修正，不改任何已冻结验收语义与命令；§5.2.1 的 ordinal 关联是已冻结实现行为，勘误仅纠正描述文字。
 >
 > 状态：`READY-FOR-CODE`（TBD = 0）
 >
@@ -100,7 +102,7 @@ Upstream ruling：COORD-60S3-ENTRY_RULING-2026-09-13（IP-0019 = #60-S3）；DR-
 
 关键口径（本 Packet 设计前提，不修改）：
 
-- `sensitive_sinks` 由 findings 按 `(path, line, rule_id)` 排序后逐条构造，**symbol 一律 None**——同一文件可有多条、且 `sink_rule_ids`/`sink_cwes`/`key_flows` 与条目按索引一一对应（并行元组，§5.2 key flow 关联依据）；
+- `sensitive_sinks` 由 findings 按 `(path, line, rule_id)` 排序后逐条构造，**symbol 一律 None**——同一文件可有多条、且 `sink_rule_ids`/`sink_cwes` 与条目按索引一一对应（并行元组；v1.2 勘误：`key_flows` 不在此列——flows 按 `(sink_rule_id, steps)` 独立排序且受 `max_key_flows` 截断而 sinks 不截断，与 `sensitive_sinks` 无索引对应；§5.2.1 的 ordinal 关联是位置回退近似而非一一对应）；
 - `trust_boundaries` 每条 symbol=None（文件级去重并集）；`external_sources` 的 symbol 为最近包围函数名，可为 None；
 - `unresolved_edges` symbol=callee 呈现名，同文件同名可多条；
 - 全部元组已按冻结序排序；两次构建同快照同预算 ⇒ facts 与 digest 相等（IP-0018 §5.1.7 冻结）。

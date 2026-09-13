@@ -1,6 +1,6 @@
 # LIMA Implementation Packet IP-0020：Vault/Audit（Feature Slice S3：vault port 默认 disabled 合同 + 历史 Artifact 只读审计）
 
-- Packet 版本：1.0（2026-09-13，P&V 起草，状态 DESIGN-FROZEN / PENDING-MERGE）
+- Packet 版本：1.1（2026-09-13，P&V 起草，状态 DESIGN-FROZEN / PENDING-MERGE；v1.0 同日发布。v1.0 → v1.1 修订：按 Coordinator PR #173 评审裁定 COORD-IP0020-PACKET_PR_REVIEW 2026-09-13 + AI Reviewer 提前检查 REVIEW-IP-0020-SECBOUNDARY_EARLYCHECK 发现项 **F-1（MINOR）**——§8.2.3 指纹需租户凭据 vs §8.3 脚本 CLI 无租户参数 vs §9 T4 表述的租户凭据未定义缺口，采用"固定离线租户"方案修订：新增 §8.3.8、改写 §9 T4、更新 §11.1 断言组、§11.5 补 Windows 路径变体用例（非阻塞建议采纳）。其余内容零改动）
 - 制作：LIMA Packet & Verification Agent（运行模型：无法核验——本环境未提供可验证的运行元数据）
 - 依据：Coordinator 裁定 COORD-IP94-S3-ENTRY_RULING-2026-09-13（`.pv_tmp/COORD-IP94-S3-ENTRY_RULING_2026-09-13.md`，Assignment 正本 = 其 §D，Assignment 编号 `IP-0020-PKT-P1/v1`；编号登记 = 其 §C.2）
 
@@ -142,6 +142,7 @@ diff 中不得出现：对既有 8 文件任何行的增删改（本 IP 对它�
 5. 零原值义务：stdout、报告文件、stderr 警示行均不得含任何被扫描文件中的敏感原值或其 ≥4 字符子串（验收以已知原值清单 grep 断言，§12）。
 6. 依赖：仅标准库（argparse/json/pathlib/sys）+ `lima.evidence_privacy.audit`/`content_scan`；不 import 数据库/service/网络模块；无 `shell=True`、无 `eval`/`exec`。
 7. 不修改 `scripts/` 既有脚本；本脚本自身不进入任何生产 pipeline（手动/CI 只读调用）。
+8. **离线租户上下文（F-1 修订，冻结）**：脚本指纹一律以文档化固定离线租户计算——`tenant_id = "offline-audit"`，tenant_key 为 Packet 文档化的固定字节常量 `b"lima-offline-audit.v1"`（实现为脚本层私有常量 `module-level Final`，非凭据材料、不来自环境/文件/网络）。**离线指纹仅在该固定离线上下文内稳定：不与在线系统指纹（在线租户凭据所产）可关联，不可作为跨租户对比/关联依据**——此声明必须同步体现在报告 JSON 语义中：报告顶层固定携带 `"tenant_context": "offline-audit"`（标识性字符串常量，非凭据），消费方据此可区分离线/在线指纹域。脚本 CLI 不接受任何租户参数。
 
 ### 8.4 资源与权限契约（延续 IP-0015 §8.5 / IP-0017 §8.8）
 
@@ -178,9 +179,9 @@ diff 中不得出现：对既有 8 文件任何行的增删改（本 IP 对它�
 ### T4 跨租户读取（审计绕过租户隔离读取他人 fingerprint/位置关联）
 
 - **威胁描述**：审计报告把不同租户的 fingerprint/位置拼在一份可横向对比的载体里，或以错误 tenant_key 计算 fingerprint，破坏"跨租户不可关联"。
-- **攻击面**：`audit_*` 的 `tenant_id`/`tenant_key` 参数；报告聚合（多 artifact 单报告）；脚本对多租户数据混扫。
-- **防护措施**：fingerprint 一律经 `compute_fingerprint`（DI-005 租户隔离语义沿用——换 key 指纹必变）；`AuditReport` 不含 tenant_id 字段（报告按单次调用单租户产出；跨租户聚合不在本 IP）；脚本不自带租户上下文（fixture 域单租户，报告消费方负责租户归属）。
-- **对应冻结测试断言计划**：同一 text/structured 输入换 `tenant_key` → 全部 fingerprint 变化且位置不变；同 key 重复调用 → fingerprint 稳定（同租户可识别重复内容）；`AuditReport` 字段集合断言（无 tenant_id/tenant_key 字段）。
+- **攻击面**：`audit_*` 的 `tenant_id`/`tenant_key` 参数；报告聚合（多 artifact 单报告）；脚本对多租户数据混扫；脚本层指纹的租户凭据来源（F-1 缺口原址）。
+- **防护措施**：fingerprint 一律经 `compute_fingerprint`（DI-005 租户隔离语义沿用——换 key 指纹必变）；`AuditReport` 不含 tenant_id/tenant_key 字段（报告按单次调用单租户产出；跨租户聚合不在本 IP）；脚本使用 §8.3.8 固定离线租户（`"offline-audit"` + 文档化常量 `b"lima-offline-audit.v1"`——文档化常量，非凭据材料），报告以 `"tenant_context": "offline-audit"` 显式标识离线指纹域，与在线系统指纹不可关联、不可作跨租户对比依据。
+- **对应冻结测试断言计划**：同一 text/structured 输入换 `tenant_key` → 全部 fingerprint 变化且位置不变；同 key 重复调用 → fingerprint 稳定（同租户可识别重复内容）；`AuditReport` 字段集合断言（无 tenant_id/tenant_key 字段）；**离线指纹一致性（F-1）**——同一 fixture：脚本子进程输出的 fingerprint ≡ 库函数（`audit_text`/`audit_structured`）以固定离线租户凭据计算的值 ≢ 以任何其他租户凭据计算的值。
 - **Reviewer 检查要点**：审计调用链上不存在绕过 `compute_fingerprint` 的自造摘要；报告 JSON schema 字段白名单与 §7.1 一致。
 
 ### T5 默认关闭旁路（conformance fixture 意外依赖 vault 开启才能通过）
@@ -205,7 +206,7 @@ diff 中不得出现：对既有 8 文件任何行的增删改（本 IP 对它�
 | 文件 | 覆盖需求 | 最少用例数 |
 |---|---|---|
 | `tests/evidence_privacy/test_vault_port_disabled.py` | FR-N05-04、§8.1、§9 T1/T5 | 12（默认关闭态 1 + validate 九分支 9 + acquire NoReturn 双配置 2；含源码卫生 grep 断言计入用例） |
-| `tests/evidence_privacy/test_readonly_audit.py` | FR-N05-06、NFR-N05-04 审计侧、AC/T-N05-06、§8.2、§8.3、§9 T2/T3/T4/T5 | 14（text 扫描 2 + structured 深层/field_path 2 + value-free/repr/JSON 零原值 3 + 租户隔离/稳定 2 + report policy 证据 1 + 脚本子进程：exit 0+stdout 零原值 1 + fixture hash/mtime 不变 1 + `--output` 落目录内拒绝 1 + 坏 JSON 跳过零泄漏 1） |
+| `tests/evidence_privacy/test_readonly_audit.py` | FR-N05-06、NFR-N05-04 审计侧、AC/T-N05-06、§8.2、§8.3、§9 T2/T3/T4/T5 | 14（text 扫描 2 + structured 深层/field_path 2 + value-free/repr/JSON 零原值 3 + 租户隔离/稳定 2 + report policy 证据 1 + 脚本子进程：exit 0+stdout 零原值 1 + fixture hash/mtime 不变 1 + `--output` 落目录内拒绝 1（含 §11.5 Windows 路径变体）+ 坏 JSON 跳过零泄漏 1；**离线指纹一致性（F-1，§9 T4）**：脚本 fingerprint ≡ 库函数以 §8.3.8 固定离线租户计算值 ≢ 其他租户计算值——断言并入脚本子进程组与租户隔离组，不另增最低用例数） |
 
 合计 ≥ 26 个新用例；既有 154 + 新 ≥26 = ≥180（evidence_privacy 目录）。每条断言注释锚定需求 ID 与 Packet 契约小节号（`# FR-N05-04 §8.1.3: ...`，PI-DR1）。
 
@@ -224,7 +225,7 @@ worktree 外临时目录（如 `%TEMP%/ip0020-scratch`）实现最小骨架：`v
 
 ### 11.5 双 runner 条款（PI-DR6-bis，冻结）
 
-进入 Frozen Test Commit 的全部新测试必须同时满足 `python -m pytest tests/evidence_privacy -q` 与 `python -m unittest discover -s tests/evidence_privacy -t .` 可收集、可执行、结论一致；禁止 pytest 专有 API（`fixture`/`parametrize`/`importorskip`），测试类继承 `unittest.TestCase`；断言不隐式依赖平台行为（路径分隔统一 `pathlib`、大小写、权限语义）；mtime 断言允许精度 ≥1s 的比较（避免 FS 时间戳粒度假红），fixture 内容不变以 sha256 为准。
+进入 Frozen Test Commit 的全部新测试必须同时满足 `python -m pytest tests/evidence_privacy -q` 与 `python -m unittest discover -s tests/evidence_privacy -t .` 可收集、可执行、结论一致；禁止 pytest 专有 API（`fixture`/`parametrize`/`importorskip`），测试类继承 `unittest.TestCase`；断言不隐式依赖平台行为（路径分隔统一 `pathlib`、大小写、权限语义）；mtime 断言允许精度 ≥1s 的比较（避免 FS 时间戳粒度假红），fixture 内容不变以 sha256 为准。`--output` 越界判定断言须以 `Path(...).resolve()` 规范化后做包含关系判定，并覆盖 Windows 变体（大小写不同、正反斜杠混用、`..` 段）——各变体均须判越界（v1.1 采纳 Coordinator 非阻塞建议）。
 
 ### 11.6 回归命令（cwd 钉死 = 交付 worktree 根；PI-DR3）
 

@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 
 from lima.evidence_privacy.audit import (
@@ -152,7 +153,7 @@ def artifact_ids(directory: pathlib.Path) -> dict[str, str]:
     return {name: f"a{index}" for index, name in enumerate(names)}
 
 
-def run_script(*args: str) -> subprocess.CompletedProcess[str]:
+def run_script(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     # §8.3 CLI form: ``python scripts/audit_sensitive_artifacts.py ...`` from
     # the worktree root; PYTHONPATH pins the repo root so the script's
     # sys.path (script dir) can still resolve ``lima`` under both runners.
@@ -166,7 +167,7 @@ def run_script(*args: str) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         cwd=str(REPO_ROOT),
         env=env,
-        timeout=120,
+        timeout=timeout,
     )
 
 
@@ -763,6 +764,306 @@ class SymlinkBoundaryTests(unittest.TestCase):
             result = run_script(str(link_dir))
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("target-dir must not be a symlink path", result.stderr)
+
+
+class TenantContextLeakPreventionTests(unittest.TestCase):
+    """R1 §17.D2'-R1 / §18 #17: zero tenant_key leakage across repr/str and
+    the full constructor-failure exception chain."""
+
+    SENSITIVE_KEY = bytes.fromhex("fa11ce11ba5eca5e1111deadbeef2222" * 2)  # noqa: S105 - synthetic recognizable key
+
+    def test_context_repr_length_metadata_only(self) -> None:
+        # R1: repr=False + custom __repr__ carrying ONLY tenant_id_len /
+        # tenant_key_len; str() falls back to __repr__; no tenant_id
+        # plaintext, no key bytes (raw or hex) anywhere.
+        ctx = make_context("tenant-alpha", self.SENSITIVE_KEY)
+        rendered = repr(ctx)
+        self.assertEqual(
+            rendered,
+            "TenantAuditContext(tenant_id_len=11, tenant_key_len=32)",
+        )
+        self.assertEqual(str(ctx), rendered)
+        combined = rendered + str(ctx)
+        self.assertNotIn("tenant-alpha", combined)
+        self.assertNotIn(self.SENSITIVE_KEY.hex(), combined)
+
+    def test_constructor_failure_zero_key_all_surfaces(self) -> None:
+        # R1: every failing construction surfaces (str/repr/context
+        # serialization and the full exception chain: __cause__,
+        # __context__, traceback text) stay zero-key (raw + hex).
+        key_hex = self.SENSITIVE_KEY.hex()
+        for kwargs in (
+            {"tenant_key": b""},
+            {"tenant_key": "not-bytes"},
+            {"tenant_id": ""},
+            {"tenant_id": "x" * 129},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(PrivacyError) as ctx:
+                    make_context(
+                        tenant_id=kwargs.get("tenant_id", "tenant-alpha"),
+                        tenant_key=kwargs.get("tenant_key", self.SENSITIVE_KEY),
+                    )
+                exc = ctx.exception
+                surfaces = [
+                    str(exc),
+                    repr(exc),
+                    json.dumps(dict(exc.context), default=str, sort_keys=True),
+                    str(exc.__cause__),
+                    repr(exc.__cause__),
+                    str(exc.__context__),
+                    repr(exc.__context__),
+                    "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                ]
+                for surface in surfaces:
+                    self.assertNotIn(key_hex, surface)
+                    self.assertNotIn("fa11ce11", surface)
+
+
+class ScriptReadBudgetTests(unittest.TestCase):
+    """R2 §17.F5'-R2 / §18 #18: handle-limited reads and directory budgets."""
+
+    def test_source_has_no_full_read_bytes(self) -> None:
+        # R2 (RED on c5b375e scripts/audit_sensitive_artifacts.py:67): the
+        # script must read via a handle with a byte limit, never
+        # path.read_bytes() followed by a length check.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("read_bytes", source)
+
+    def test_exact_limit_file_is_read(self) -> None:
+        # R2 boundary: a file of exactly max_payload_bytes (1 MiB) is within
+        # budget -- read normally, complete scan, exit 0.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            (target / "edge.txt").write_text("y" * 1_048_576, encoding="utf-8")
+            result = run_script(str(target), timeout=300)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report.get("status"), "complete")
+
+    def test_file_count_budget_exceeded(self) -> None:
+        # R2 (RED on c5b375e): 10_001 files -> files past the 10_000 budget
+        # are identifiably skipped (resource-limit), scan:file-budget is
+        # recorded, status incomplete, exit 3, and the report is still
+        # produced and parseable (never aborts).
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            for index in range(10_001):
+                (target / f"f{index:05d}.txt").write_text(f"file {index}\n", encoding="utf-8")
+            result = run_script(str(target), timeout=600)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertIn("resource-limit", result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report.get("status"), "incomplete")
+            self.assertIn("scan:file-budget", report.get("incomplete_reasons", []))
+
+    def test_byte_budget_exceeded_report_still_written(self) -> None:
+        # R2 (RED on c5b375e): cumulative handle-read bytes past
+        # 104_857_600 -> later files skipped, scan:byte-budget recorded,
+        # exit 3, and the --output report file is still written and parseable.
+        per_file = 1_048_575  # just under the per-file limit
+        count = 101  # 101 * 1_048_575 = 105_906_075 > 104_857_600
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            payload = "z" * per_file
+            for index in range(count):
+                (target / f"b{index:03d}.txt").write_text(payload, encoding="utf-8")
+            report_path = pathlib.Path(tmp) / "report.json"
+            result = run_script(str(target), "--output", str(report_path), timeout=600)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertTrue(report_path.is_file())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report.get("status"), "incomplete")
+            self.assertIn("scan:byte-budget", report.get("incomplete_reasons", []))
+
+
+class SecureReadVerificationTests(unittest.TestCase):
+    """R3 §17.B2'-R3 / §18 #19: open-then-verify read path, fail-closed."""
+
+    def _load_script_module(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "audit_sensitive_artifacts_under_test", SCRIPT_PATH
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _run_main(self, module, target: pathlib.Path):
+        import contextlib
+        import io as _io
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = module.main([str(target)])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_source_uses_open_verify_mechanism(self) -> None:
+        # R3 (RED on c5b375e): the script must use os.open + os.fstat and
+        # compare (st_dev, st_ino) identity -- no TOCTOU-tolerant fallback.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("os.open", source)
+        self.assertIn("os.fstat", source)
+        self.assertIn("st_ino", source)
+
+    def test_identity_mismatch_fails_closed(self) -> None:
+        # R3 (RED on c5b375e): a mismatch between fstat(fd) and the
+        # DirEntry stat identity must fail closed -- symlink-risk warning,
+        # status incomplete, exit 3, and the file content never reaches any
+        # output.
+        module = self._load_script_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            secret = KNOWN_SECRET_VALUES[1]
+            (target / "raced.txt").write_text("raced bearer " + secret + "\n", encoding="utf-8")
+            real = os.stat(target / "raced.txt")
+            # st_dev/st_ino fields are indices 2/1 of the stat_result tuple.
+            forged = os.stat_result(
+                (
+                    real.st_mode,
+                    real.st_ino + 1,
+                    real.st_dev,
+                    real.st_nlink,
+                    real.st_uid,
+                    real.st_gid,
+                    real.st_size,
+                    real.st_atime,
+                    real.st_mtime,
+                    real.st_ctime,
+                )
+            )
+            original_fstat = os.fstat
+            try:
+                os.fstat = lambda fd: forged
+                code, out, err = self._run_main(module, target)
+            finally:
+                os.fstat = original_fstat
+            self.assertEqual(code, 3, err)
+            self.assertIn("symlink-risk", err)
+            combined = out + err
+            assert_zero_secret(self, combined, "identity-mismatch scan")
+            report = json.loads(out)
+            self.assertNotEqual(report.get("status"), "complete")
+
+    def test_zero_stino_fails_closed(self) -> None:
+        # R3: st_ino == 0 means identity verification is not feasible on
+        # this filesystem -- "not verifiable" is treated exactly like
+        # "verification failed": no read, incomplete, never complete.
+        module = self._load_script_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            (target / "noid.txt").write_text("plain note\n", encoding="utf-8")
+            real = os.stat(target / "noid.txt")
+            forged = os.stat_result(
+                (
+                    real.st_mode,
+                    0,
+                    real.st_dev,
+                    real.st_nlink,
+                    real.st_uid,
+                    real.st_gid,
+                    real.st_size,
+                    real.st_atime,
+                    real.st_mtime,
+                    real.st_ctime,
+                )
+            )
+            original_fstat = os.fstat
+            try:
+                os.fstat = lambda fd: forged
+                code, out, err = self._run_main(module, target)
+            finally:
+                os.fstat = original_fstat
+            self.assertEqual(code, 3, err)
+            self.assertIn("symlink-risk", err)
+            report = json.loads(out)
+            self.assertNotEqual(report.get("status"), "complete")
+
+
+class SourcePathWhitelistTests(unittest.TestCase):
+    """R4 §17.D1'.3 / §18 #20: library-side artifact-id whitelist."""
+
+    def test_valid_source_paths_accepted(self) -> None:
+        # R4: artifact indices and stable safe IDs pass the whitelist.
+        for good in ("a0", "artifact.main-2", "log_excerpt.txt", "sample.json"):
+            with self.subTest(good=good):
+                findings = audit_text(good, LOG_TEXT, POLICY, context=make_context())
+                self.assertTrue(findings)
+
+    def test_invalid_source_paths_rejected_without_echo(self) -> None:
+        # R4 (RED on c5b375e: no entry validation exists): paths, drive
+        # letters, traversal, over-length, empty, whitespace and non-ASCII
+        # values raise INVALID_FIELD_VALUE at field_path "source_path" with
+        # value-free context; str(exc) never echoes the raw value.
+        bad_values = [
+            "/etc/passwd",
+            "C:\\secrets\\token.json",
+            "../x",
+            "..",
+            "",
+            "x" * 65,
+            "has space.txt",
+            "sample 文件.json",
+        ]
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                with self.assertRaises(PrivacyError) as ctx:
+                    audit_text(bad, LOG_TEXT, POLICY, context=make_context())
+                exc = ctx.exception
+                self.assertIs(exc.code, PrivacyErrorCode.INVALID_FIELD_VALUE)
+                self.assertEqual(exc.field_path, "source_path")
+                self.assertEqual(exc.context.get("reason"), "artifact-id")
+                self.assertIn("len", exc.context)
+                if bad:
+                    self.assertNotIn(bad, str(exc))
+
+    def test_invalid_source_path_rejected_structured_and_report(self) -> None:
+        # R4: the same whitelist governs audit_structured inputs and the
+        # artifact keys accepted by build_audit_report.
+        with self.assertRaises(PrivacyError) as ctx:
+            audit_structured("../escape.json", SAMPLE_STRUCT, POLICY, context=make_context())
+        self.assertEqual(ctx.exception.field_path, "source_path")
+
+
+class TenantTagFormulaTests(unittest.TestCase):
+    """R5 §17.D2'-R5 / §18 #21: frozen derived_key / _tenant_tag formulas."""
+
+    def test_tenant_tag_matches_frozen_formula(self) -> None:
+        # R5: _tenant_tag must equal HMAC-SHA256(derived_key,
+        # b"audit.tenant-tag.v1" + tenant_id.utf8).hexdigest() where
+        # derived_key = HMAC-SHA256(tenant_key, b"lima.evidence_privacy."
+        # "tenant-key.v1\x00" + tenant_id.utf8) -- the same derivation as
+        # fingerprint.py's in-tree constant (import-reuse consistency).
+        import hashlib
+        import hmac as hmac_mod
+
+        from lima.evidence_privacy.fingerprint import _derive_tenant_key
+
+        tenant_id, tenant_key = "t-a", b"k-a" * 16
+        findings = audit_text(
+            "log_excerpt.txt", LOG_TEXT, POLICY, context=make_context(tenant_id, tenant_key)
+        )
+        self.assertTrue(findings)
+        derived = _derive_tenant_key(tenant_key, tenant_id)
+        expected = hmac_mod.new(
+            derived, b"audit.tenant-tag.v1" + tenant_id.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        for finding in findings:
+            self.assertEqual(getattr(finding, "_tenant_tag", None), expected)
+
+    def test_packet_doc_pv_tmp_references_non_authoritative_only(self) -> None:
+        # R5.4 docs hygiene: any residual .pv_tmp reference inside the
+        # IP-0020 Packet must be marked as process evidence / non-authority.
+        packet = REPO_ROOT / "docs" / "LIMA_Implementation_Packet_IP-0020_Vault_Audit.md"
+        if not packet.is_file():  # packet not yet merged in this baseline
+            self.fail("IP-0020 packet document not found in worktree")
+        for line in packet.read_text(encoding="utf-8").splitlines():
+            if ".pv_tmp" in line:
+                self.assertTrue(
+                    "过程性证据" in line or "非权威" in line,
+                    f"unmarked .pv_tmp authority reference: {line[:80]}",
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,6 +1,8 @@
 """Frozen acceptance tests for the IP-0020 vault port default-disabled contract.
 
-Anchors (per Packet IP-0020 v1.1): FR-N05-04, §8.1, §9 T1/T5.
+Anchors (per Packet IP-0020 v1.2 erratum, DR-IP-0020-4R): FR-N05-04,
+§8.1 as revised by Packet §17.F4' (backend metadata, zero backend echo),
+§9 T1/T5; assertion mapping = Packet §18 #7 (revision, not deletion).
 Dual-runner safe: unittest.TestCase only, no pytest API (PI-DR6-bis).
 """
 
@@ -19,6 +21,29 @@ from lima.evidence_privacy.models import SinkContext, TenantPolicy
 FAKE_BACKEND = "not-a-registered-backend"
 SINK = SinkContext(sink_kind="log", purpose="test", tenant_id="tenant-a", tenant_key=b"k-a" * 16)
 POLICY = TenantPolicy(policy_version="v1")
+
+
+def assert_backend_hygiene(testcase, exc, expected_backend):
+    """F4' §17.F4'/§18 #7: errors carry backend metadata only.
+
+    The PrivacyError context must expose backend_len/backend_registered
+    (never the backend name under a "backend" key) and its str()/repr()
+    must not echo the backend plaintext.
+    """
+    text = str(exc) + repr(exc)
+    testcase.assertNotIn("FAKE_BACKEND", text)
+    if expected_backend is not None:
+        testcase.assertNotIn(expected_backend, text)
+    context = exc.context
+    testcase.assertIn("backend_len", context)
+    testcase.assertIn("backend_registered", context)
+    testcase.assertNotIn("backend", context)
+    if expected_backend is None:
+        testcase.assertIsNone(context["backend_len"])
+        testcase.assertFalse(context["backend_registered"])
+    else:
+        testcase.assertEqual(context["backend_len"], len(expected_backend))
+        testcase.assertIs(context["backend_registered"], False)
 
 
 def _source_text() -> str:
@@ -62,15 +87,19 @@ class ValidateVaultConfigNineBranchTests(unittest.TestCase):
 
     def test_branch_3_enabled_without_backend_rejected(self) -> None:
         # §8.1.3 rule 2: enabled=True + backend None -> reject.
+        # F4' §18 #7: context carries backend_len/backend_registered metadata
+        # (backend_len None when no backend); no backend plaintext anywhere.
         with self.assertRaises(PrivacyError) as ctx:
             vp.validate_vault_config(vp.VaultPortConfig(enabled=True))
         self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+        assert_backend_hygiene(self, ctx.exception, None)
 
     def test_branch_4_enabled_with_unregistered_backend_rejected(self) -> None:
         # §8.1.3 rule 3: any backend not in the (empty) registry -> reject.
         with self.assertRaises(PrivacyError) as ctx:
             vp.validate_vault_config(vp.VaultPortConfig(enabled=True, backend=FAKE_BACKEND))
         self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+        assert_backend_hygiene(self, ctx.exception, FAKE_BACKEND)  # F4' §18 #7
 
     def test_branch_5_enabled_missing_ttl_rejected(self) -> None:
         # §8.1.3 rule 4: enabled=True + ttl_seconds None -> reject.
@@ -89,6 +118,7 @@ class ValidateVaultConfigNineBranchTests(unittest.TestCase):
                         vp.VaultPortConfig(enabled=True, backend=FAKE_BACKEND, ttl_seconds=bad_ttl)
                     )
                 self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+                assert_backend_hygiene(self, ctx.exception, FAKE_BACKEND)  # F4' §18 #7
 
     def test_branch_7_encryption_not_required_rejected(self) -> None:
         # §8.1.3 rule 5: enabled=True + not encryption_required -> reject.
@@ -97,6 +127,7 @@ class ValidateVaultConfigNineBranchTests(unittest.TestCase):
                 vp.VaultPortConfig(enabled=True, backend=FAKE_BACKEND, encryption_required=False)
             )
         self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+        assert_backend_hygiene(self, ctx.exception, FAKE_BACKEND)  # F4' §18 #7
 
     def test_branch_8_audit_access_not_required_rejected(self) -> None:
         # §8.1.3 rule 6: enabled=True + not audit_access_required -> reject.
@@ -105,12 +136,14 @@ class ValidateVaultConfigNineBranchTests(unittest.TestCase):
                 vp.VaultPortConfig(enabled=True, backend=FAKE_BACKEND, audit_access_required=False)
             )
         self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+        assert_backend_hygiene(self, ctx.exception, FAKE_BACKEND)  # F4' §18 #7
 
     def test_branch_9_backend_set_while_disabled_rejected(self) -> None:
         # §8.1.3 rule 7: backend configured but not enabled = drift -> reject.
         with self.assertRaises(PrivacyError) as ctx:
             vp.validate_vault_config(vp.VaultPortConfig(enabled=False, backend=FAKE_BACKEND))
         self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+        assert_backend_hygiene(self, ctx.exception, FAKE_BACKEND)  # F4' §18 #7
 
 
 class AcquireVaultAccessNoReturnTests(unittest.TestCase):
@@ -137,6 +170,7 @@ class AcquireVaultAccessNoReturnTests(unittest.TestCase):
                 policy=POLICY,
             )
         self.assertIs(ctx.exception.code, PrivacyErrorCode.POLICY_ERROR)
+        assert_backend_hygiene(self, ctx.exception, FAKE_BACKEND)  # F4' §18 #7
 
     def test_acquire_reuses_port_validation_unknown_sink(self) -> None:
         # §8.1.4: sink kind outside the policy allowlist -> UNKNOWN_SINK (no
@@ -161,9 +195,7 @@ class AcquireVaultAccessNoReturnTests(unittest.TestCase):
         original = vp.VAULT_BACKEND_PORT_NAMES
         try:
             vp.VAULT_BACKEND_PORT_NAMES = frozenset({FAKE_BACKEND})
-            config = vp.VaultPortConfig(
-                enabled=True, backend=FAKE_BACKEND, ttl_seconds=3600
-            )
+            config = vp.VaultPortConfig(enabled=True, backend=FAKE_BACKEND, ttl_seconds=3600)
             with self.assertRaises(PrivacyError) as ctx:
                 vp.acquire_vault_access(config, sink=SINK, policy=POLICY)
             self.assertIs(ctx.exception.code, PrivacyErrorCode.INTERNAL_REDACTION_FAILURE)

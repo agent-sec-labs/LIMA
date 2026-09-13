@@ -3,25 +3,35 @@
 # Frozen Test Commit v2 (DR-IP-0015-03 erratum 2026-09-12): converted from
 # v1 bare-function style to unittest.TestCase style 1:1; assertions,
 # boundary values, and requirement-ID anchors are unchanged from v1 (97e0b63).
+# Frozen Test Commit v3 (DR-IP-0020-4R G3' 2026-09-13): no-tenant
+# classify_payload calls are revised (not deleted) per Packet IP-0020 v1.2
+# §17.G3'/§18 #12 -- the helper now passes an explicit valid tenant, the
+# two direct no-tenant call sites become MISSING_TENANT_KEY negatives.
 """Classification core tests (Packet section 8.7; FR-N05-01, AC/T-N05-03 core)."""
 
 from __future__ import annotations
 
 import unittest
 
+from lima.contracts.common import ArtifactClassification
 from lima.evidence_privacy import (
     EvidencePayload,
     TenantPolicy,
     classify_payload,
 )
-
-from lima.contracts.common import ArtifactClassification
+from lima.evidence_privacy.errors import PrivacyError, PrivacyErrorCode
 
 POLICY = TenantPolicy(policy_version="v1")
+# G3' §17.G3'/§18 #12: classify_payload no longer supports the no-tenant
+# deterministic mode; existing classification assertions are preserved by
+# migrating the helper to an explicit valid tenant context.
+TENANT = {"tenant_id": "t-a", "tenant_key": b"k-a" * 16}
 
 
 def _manifest(value):
-    return classify_payload(EvidencePayload(payload_kind="structured_json", value=value), POLICY)
+    return classify_payload(
+        EvidencePayload(payload_kind="structured_json", value=value), POLICY, **TENANT
+    )
 
 
 class ClassifierTests(unittest.TestCase):
@@ -77,8 +87,9 @@ class ClassifierTests(unittest.TestCase):
 
     def test_text_payload_whole_value_fingerprinted(self):
         # Appendix A: unstructured text handled conservatively (whole-value).
+        # G3' §18 #12: migrated to explicit tenant (was a no-tenant call).
         m = classify_payload(
-            EvidencePayload(payload_kind="text", value="line with secret inside"), POLICY
+            EvidencePayload(payload_kind="text", value="line with secret inside"), POLICY, **TENANT
         )
         self.assertIn(
             m.classification,
@@ -88,8 +99,9 @@ class ClassifierTests(unittest.TestCase):
 
     def test_bytes_payload_classified_sensitive(self):
         # Appendix A: binary secret blob -> SENSITIVE entry with bytes kind.
+        # G3' §18 #12: migrated to explicit tenant (was a no-tenant call).
         m = classify_payload(
-            EvidencePayload(payload_kind="bytes", value=b"\x00\x11binaryblob"), POLICY
+            EvidencePayload(payload_kind="bytes", value=b"\x00\x11binaryblob"), POLICY, **TENANT
         )
         self.assertEqual(m.classification, ArtifactClassification.SENSITIVE)
         self.assertEqual(m.entries[0].value_kind, "bytes")
@@ -102,6 +114,60 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(len(m.policy_digest), 64)
         self.assertTrue(all(c in "0123456789abcdef" for c in m.policy_digest))
         self.assertTrue(m.created_at)  # UTC ISO-8601 NFC string present
+
+
+class MissingTenantFailClosedTests(unittest.TestCase):
+    """G3' §17.G3': empty/missing tenant -> MISSING_TENANT_KEY("classify.tenant")."""
+
+    def test_no_tenant_defaults_rejected(self):
+        # G3' (negative, RED on c5b375e baseline behavior): calling
+        # classify_payload without tenant credentials must fail closed with a
+        # stable privacy error instead of the no-tenant deterministic mode.
+        with self.assertRaises(PrivacyError) as ctx:
+            classify_payload(
+                EvidencePayload(payload_kind="structured_json", value={"note": "x"}),
+                POLICY,
+            )
+        self.assertIs(ctx.exception.code, PrivacyErrorCode.MISSING_TENANT_KEY)
+        self.assertEqual(ctx.exception.field_path, "classify.tenant")
+
+    def test_empty_tenant_id_rejected(self):
+        # G3': an empty tenant_id is an empty tenant.
+        with self.assertRaises(PrivacyError) as ctx:
+            classify_payload(
+                EvidencePayload(payload_kind="text", value="line with secret inside"),
+                POLICY,
+                tenant_id="",
+                tenant_key=b"k-a" * 16,
+            )
+        self.assertIs(ctx.exception.code, PrivacyErrorCode.MISSING_TENANT_KEY)
+        self.assertEqual(ctx.exception.field_path, "classify.tenant")
+
+    def test_empty_tenant_key_rejected(self):
+        # G3': an empty tenant_key is an empty tenant.
+        with self.assertRaises(PrivacyError) as ctx:
+            classify_payload(
+                EvidencePayload(payload_kind="text", value="line with secret inside"),
+                POLICY,
+                tenant_id="t-a",
+                tenant_key=b"",
+            )
+        self.assertIs(ctx.exception.code, PrivacyErrorCode.MISSING_TENANT_KEY)
+        self.assertEqual(ctx.exception.field_path, "classify.tenant")
+
+    def test_invalid_tenant_types_rejected(self):
+        # G3': wrong-typed tenant material is treated as missing/invalid.
+        for bad in (
+            {"tenant_id": 123, "tenant_key": b"k"},
+            {"tenant_id": "t-a", "tenant_key": "k"},
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PrivacyError) as ctx:
+                    classify_payload(
+                        EvidencePayload(payload_kind="bytes", value=b"\x00blob"), POLICY, **bad
+                    )
+                self.assertIs(ctx.exception.code, PrivacyErrorCode.MISSING_TENANT_KEY)
+                self.assertEqual(ctx.exception.field_path, "classify.tenant")
 
 
 if __name__ == "__main__":  # pragma: no cover

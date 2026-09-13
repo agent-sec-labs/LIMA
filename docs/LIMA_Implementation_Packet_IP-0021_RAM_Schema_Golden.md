@@ -2,7 +2,9 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0021-PACKET/v1`
+> Packet 版本：`IP-0021-PACKET/v1.1`
+>
+> 修订历史：v1（2026-09-13，PKT-IP-0021-D1，候选 0a55ae97）；v1.1（2026-09-13，PKT-IP-0021-D1R，DR-IP-0021-0102）：DR-1 修正案 C 定案 §5.4 execution_required 为 9 码触发（SEMANTIC_MODEL_OFF 不置位、仍入 coverage_gaps），§5.2 触发集冻结值同步、§9 停点 4 结案；DR-2 既有测试最小变更授权（`test_semantic_prioritizer.py` L817/L818，阶段二随 Frozen Test Commit 落地）写入 §9 停点 6 与 §6 落位注记。
 >
 > 状态：`READY-FOR-CODE`（TBD = 0）
 >
@@ -162,7 +164,7 @@ Upstream ruling：ENTRY60-S4-1/v1（IP-0021 = #60-S4a；四条边界裁定见 §
 RAM_WIRE_SCHEMA_NAME: Final[str] = "lima.repository-architecture-model"
 RAM_WIRE_SCHEMA_FILE: Final[Path] = Path("schemas") / "v4" / "lima.repository-architecture-model.json"
 GAP_CODES_ALL: Final[frozenset[str]]         # 10 码全集（值重述，不 import 三层模块）
-GAP_EXECUTION_REQUIRED_TRIGGERS: Final[frozenset[str]]   # §5.4 提案表
+GAP_EXECUTION_REQUIRED_TRIGGERS: Final[frozenset[str]]   # §5.4 定案：9 码（BUDGET_EXHAUSTED/INVENTORY_SKIPPED/MANIFEST_PARSE_ERROR/NO_LANGUAGES_DETECTED/UNSUPPORTED_LANGUAGE/DYNAMIC_IMPORT/AMBIGUOUS_DISPATCH/SEMANTIC_MODEL_TIMEOUT/SEMANTIC_MALFORMED_OUTPUT；DR-IP-0021-0102 DR-1，修正案 C——排除 SEMANTIC_MODEL_OFF）
 PROVENANCE_ANCHOR_CHAIN: Final[tuple[str, str, str]] = ("inventory", "ram-facts", "semantic-prioritizer")
 
 def execution_required_from_gaps(gap_codes: Iterable[str]) -> tuple[bool, tuple[str, ...]]
@@ -180,11 +182,11 @@ def load_ram_wire_schema() -> dict                                        # 只�
 
 > **勘误（制作时发现，不阻塞）**：`test_semantic_prioritizer.py` L817 `assertEqual(audit.__all__[20:], IP0019_NEW_SYMBOLS)` 在任何后续 `__init__.py` 追加后必然失败。这是 Assignment 边界裁定 2 预告的"分段断言须同步扩展"的具体落点：既有文件属禁区（裁定 3），故该断言更新必须走冻结测试变更授权流程（§9 停点 6 + DR），本 Packet 阶段二冻结测试将把"更新 `IP0019_NEW_SYMBOLS` 比较为 `[20:44]` 有界段"列为**需 Coordinator 授权的最小测试变更项**，一并在 Decision Request 中提交。
 
-### 5.4 `execution_required` 语义提案（**待 Coordinator 复核**；冻结单解后生效）
+### 5.4 `execution_required` 语义（**已定案**：DR-IP-0021-0102 DR-1，修正案 C，2026-09-13）
 
 **承载**：仅存在于 RAM wire envelope 的 `execution_required` typed 字段（`required: bool` + `trigger_gap_codes: tuple[str, ...]` 去重升序）；不进 `RepositoryProfile`、不进 `ProfileCoverageGap.extensions`、不新增 GAP 码。
 
-**规则表（提案）**——`required = (出现的 gap_code 集合 ∩ 触发集) ≠ ∅`，`trigger_gap_codes = 交集元素升序`：
+**规则表（定案）**——`required = (出现的 gap_code 集合 ∩ 触发集) ≠ ∅`，`trigger_gap_codes = 交集元素升序`：
 
 | GAP 码 | 置位 execution_required | 依据 |
 |---|---|---|
@@ -195,11 +197,11 @@ def load_ram_wire_schema() -> dict                                        # 只�
 | `UNSUPPORTED_LANGUAGE` | **是** | 子集不受支持 ⇒ 静态面缺失 |
 | `DYNAMIC_IMPORT` | **是** | 静态调用图不可解 |
 | `AMBIGUOUS_DISPATCH` | **是** | 静态分发不可解 |
-| `SEMANTIC_MODEL_OFF` | **是**（保守：语义覆盖不完整；note 语义与 not-an-absence-of-risk 一致） | L3 降级 |
+| `SEMANTIC_MODEL_OFF` | **否（默认态；仍入 coverage_gaps，不稀释规划信号）** | DR-IP-0021-0102 DR-1（修正案 C） |
 | `SEMANTIC_MODEL_TIMEOUT` | **是** | L3 降级 |
 | `SEMANTIC_MALFORMED_OUTPUT` | **是** | L3 降级 |
 
-即**提案 A（保守全触发）**：任一 typed gap ⇒ `required=True`；零 gap ⇒ `required=False, trigger_gap_codes=()`。**备选提案 B（窄触发）**：仅静态覆盖性 gap（前 7 码）触发，L3 语义降级三码不置位（理由：语义层是补充视图，模型 off 是默认态，全触发会使默认 CI 构建恒 True，削弱信号）。P&V 建议 **A**（fail-closed 一致性：任何覆盖缺口都不应被解释为"无需进一步执行"），但承认 B 的信噪比论证；**由 Coordinator 单解裁定后写入冻结测试**，未裁定前阶段二不冻结该面的测试（列入 §9 停点 5）。
+即定案为** 9 码触发**（10 码全集减 `SEMANTIC_MODEL_OFF`）：触发集内任一 typed gap ⇒ `required=True`；仅出现 `SEMANTIC_MODEL_OFF` 或零 gap ⇒ `required=False`（`SEMANTIC_MODEL_OFF` 仍正常进入 `coverage_gaps`，只是不置位 execution_required）。`SEMANTIC_MODEL_OFF` 单独出现时 `trigger_gap_codes=()`。本面测试随阶段二正常冻结。
 
 **FR-05 剩余同步断言**：`GAP_MANIFEST_PARSE_ERROR` 在 manifest 损坏 fixture 下以冻结 detail 模式出现（现有 `_load_one_manifest` 行为，只补断言不改行为）；unsupported 子集：`unsupported-extension` skip reason → `UNSUPPORTED_LANGUAGE` typed gap（`SKIP_REASON_TO_GAP_DETAIL` 映射断言，含 11 reasons 全表 + 三分桶正确性）；generic-exception 回归（IP-0019 gap①）：含裸/宽 `except` 形态的 fixture 在 RAM/semantic 链下 facts 稳定、gap 编码不漂移（回归补强，不改语义）。
 
@@ -241,8 +243,8 @@ def load_ram_wire_schema() -> dict                                        # 只�
 
 | 文件（全部新增） | 最低用例 | 覆盖 |
 |---|---|---|
-| `test_ram_schema.py` | 24 | schema 文件加载且 const/required/maxItems 自洽（≥4）；`validate_ram_wire_payload` 正例（五形态之一 wire）+ 负例（未知字段/类型错/枚举外 category/rank 断号/摘要非 64-hex/并行长度不匹配 → `ContractError`，≥10）；`ram_wire_payload` 确定性（两次构建 payload 相等 + digest 相等，2）；`ram_wire_digest` 64-hex 且随配置变化（2）；`__init__` 追加与分段断言 `[0:44]`+`[44:44+K]`（2）；入口 fail-closed（非法入参类型 → ContractError/ValueError，≥2）；导入零副作用（1） |
-| `test_fr05_gap_encoding.py` | 12 | `GAP_MANIFEST_PARSE_ERROR` 编码断言（损坏 JSON/YAML manifest → 码 + 冻结 detail，≥3）；unsupported 子集 typed gap（11 skip reasons 全表三分桶映射断言 + `unsupported-extension` fixture 端到端，≥4）；`execution_required` 规则表全 10 码逐码单测 + 空 gap 负例 + 集外码 ValueError（≥4，**Coordinator 裁定前此面不冻结**）；generic-exception 回归（gap①，≥2） |
+| `test_ram_schema.py` | 24 | schema 文件加载且 const/required/maxItems 自洽（≥4）；`validate_ram_wire_payload` 正例（五形态之一 wire）+ 负例（未知字段/类型错/枚举外 category/rank 断号/摘要非 64-hex/并行长度不匹配 → `ContractError`，≥10）；`ram_wire_payload` 确定性（两次构建 payload 相等 + digest 相等，2）；`ram_wire_digest` 64-hex 且随配置变化（2）；`__init__` 追加与分段断言 `[0:44]`+`[44:44+K]`（2；**精确封顶落位注记（DR-IP-0021-0102 DR-2）**：本文件断言 `len(__all__)==44+K` 与 `__all__[44:44+K]` 恰为新符号集——因既有文件 L818 按 DR-2 改为 `>=44` 后，这是全仓唯一的精确封顶断言）；入口 fail-closed（非法入参类型 → ContractError/ValueError，≥2）；导入零副作用（1） |
+| `test_fr05_gap_encoding.py` | 12 | `GAP_MANIFEST_PARSE_ERROR` 编码断言（损坏 JSON/YAML manifest → 码 + 冻结 detail，≥3）；unsupported 子集 typed gap（11 skip reasons 全表三分桶映射断言 + `unsupported-extension` fixture 端到端，≥4）；`execution_required` 规则表逐码单测（9 触发码置位 + `SEMANTIC_MODEL_OFF` 不置位但仍入 gaps）+ 空 gap/仅 OFF 负例 + 集外码 ValueError（≥4，按 §5.4 定案冻结）；generic-exception 回归（gap①，≥2） |
 | `test_golden_matrix.py` | 15 | 五形态 × (全链 golden 逐字段 + provenance 链)（≥5）+ 五形态 × Top-N 可重放（digest 全等 + candidate_id 序列相等）（≥5）+ wire 三 digest 入 golden（≥3）+ LF 口径/零执行零网络断言（≥2） |
 | `test_budget_exhaustion_e2e.py` | 12 | §5.6 矩阵逐行（L1×2、L2×3、L3×4、组合×1、digest 不变量×2） |
 
@@ -259,7 +261,7 @@ tests/audit `107 → 107+63=170`（0 skip）；contracts 617 不变（本 IP 不
 | AC/需求 | 贡献声明 | Test（§6） | 判定 |
 |---|---|---|---|
 | FR-04 剩余（schema 化 + identity 口径） | wire schema 字段全集 + 三 digest 口径 | `test_ram_schema.py` 全组 + `test_golden_matrix.py` 可重放组 | 全绿 |
-| FR-05 剩余 | MANIFEST_PARSE_ERROR/unsupported 断言 + execution_required typed 承载 | `test_fr05_gap_encoding.py` | 全绿（execution_required 面待裁定后冻结） |
+| FR-05 剩余 | MANIFEST_PARSE_ERROR/unsupported 断言 + execution_required typed 承载（9 码定案） | `test_fr05_gap_encoding.py` | 全绿 |
 | AC-01/T-01（非 monorepo） | 五形态全链 golden + 可重放 | `test_golden_matrix.py` | 全绿 |
 | V5-AC-01（非 monorepo 维度） | 同上子集 | `test_golden_matrix.py` | 全绿 |
 | 预算端到端 | 三层 + 组合 + 不变量 | `test_budget_exhaustion_e2e.py` | 全绿 |
@@ -296,9 +298,9 @@ Post-merge（main 复验）：上述 mandatory 全组。
 1. 发现必须修改 `lima/contracts/**`、matrix、既有 schemas/v4 14 文件、三层 audit 模块或既有 5 测试文件（除 §5.3/§6.1 勘误项）才能承载 → Contract Gap 停点；
 2. 三层冻结面（§3.1 消费面）在最新 main 漂移 → 停点；
 3. 基线命令结果与 §3.3 不符（环境问题）→ 停止上报；
-4. Coordinator 未裁定 §5.4 提案 A/B 而阶段二到期 → execution_required 测试面保持未冻结并上报，不自行择一；
+4. ~~Coordinator 未裁定 §5.4 提案 A/B 而阶段二到期 → execution_required 测试面保持未冻结并上报，不自行择一~~ **已裁定**（DR-IP-0021-0102 DR-1，修正案 C=9 码触发）：§5.4 定案，本面测试随阶段二正常冻结；
 5. golden 产出与冻结实现行为矛盾（如 docs 形态语言检测行为不定）→ 保留现场，提交 DR；
-6. **冻结测试变更预登记**：`test_semantic_prioritizer.py` L817 `[20:]` 断言在 `__init__.py` 追加后必然失败（§5.3 勘误）——阶段二开始前 P&V 将就该文件的最小授权修改（`[20:]` → `[20:44]`）提交 Decision Request，未获授权不动该文件。
+6. **冻结测试变更（已授权）**：`test_semantic_prioritizer.py` L817 `__all__[20:]` 断言在 `__init__.py` 追加后必然失败（§5.3 勘误）——已获 **DR-IP-0021-0102 DR-2** 授权：L817 `[20:]`→`[20:44]`、L818 `assertEqual(len(...),44)`→`assertGreaterEqual(len(...),44)`，随阶段二新 Frozen Test Commit 同 commit 落地（本轮不动测试文件）；精确封顶 `len==44+K` 断言由本 IP 新测试文件承载（§6 `test_ram_schema.py`，见落位注记）。
 
 ## 10. Completion Summary / PR contract
 
@@ -312,8 +314,8 @@ Post-merge（main 复验）：上述 mandatory 全组。
 
 ## 12. Open Decisions 移交（不阻塞本 IP）
 
-- `execution_required` 触发集单解（提案 A/B，§5.4）→ Coordinator 复核（主会话转呈）；
-- `test_semantic_prioritizer.py` L817 断言最小变更授权 → DR（§9.6）；
+- ~~`execution_required` 触发集单解（提案 A/B，§5.4）~~ 已定案：DR-IP-0021-0102 DR-1（修正案 C，9 码触发）；
+- ~~`test_semantic_prioritizer.py` L817 断言最小变更授权~~ 已授权：DR-IP-0021-0102 DR-2（阶段二落地）；
 - schema matrix 注册 → BG-60-01 backlog；
 - monorepo component graph / V5-FR-03 全量 → #60-S4 后续；
 - `execution_required` Mining 消费接线 → #64/#68。

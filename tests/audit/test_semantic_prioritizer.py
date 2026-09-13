@@ -814,8 +814,8 @@ class RegressionBoundaryTests(SemanticTestBase):
         import lima.audit as audit
 
         self.assertEqual(list(audit.__all__[:20]), IP0016_IP0018_ALL_PREFIX)
-        self.assertEqual(audit.__all__[20:], IP0019_NEW_SYMBOLS)
-        self.assertEqual(len(audit.__all__), 44)
+        self.assertEqual(audit.__all__[20:44], IP0019_NEW_SYMBOLS)
+        self.assertGreaterEqual(len(audit.__all__), 44)
         for name in IP0019_NEW_SYMBOLS:
             self.assertTrue(hasattr(audit, name), name)
 

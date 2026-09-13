@@ -1,12 +1,12 @@
-# IP-0022 XAUDIT 可核查矩阵（PKT-IP-0022-XAUDIT，2026-09-13；R4 修订 2026-09-13）
+# IP-0022 XAUDIT 可核查矩阵（PKT-IP-0022-XAUDIT，2026-09-13；R4 修订 2026-09-13；R5 修订 2026-09-13）
 
 > 文档类型：审查矩阵（P&V 制作，供 Maintainer 逐行核查）
 >
-> 依据：Assignment `IP-0022-PV-XAUDIT/v1` → `IP-0022-PV-R4/v1`；Packet `IP-0022-PACKET/v5`；DR-IP-0022-04（R4 修订版）
+> 依据：Assignment `IP-0022-PV-XAUDIT/v1` → `IP-0022-PV-R4/v1` → `IP-0022-PV-R5/v1`；Packet `IP-0022-PACKET/v5`（含 R5 修订）；DR-IP-0022-04（R5 修订版）
 >
-> 行为口径：main=`30bdfaa13ac72572d65ccb2567ae8702923c4187`（实测）；v3=Packet v3 修复后；v4=Packet v4 修复后；**v5=Packet v5 修复后（R4：+ script 名称准入（I13）、candidate_id `'-'` 槽位消歧（X4-7）；DR-04-A' 撤回）**；标注【DR-04-X】者为未获批不实施（A 定稿版 / B 重写版均待重审）
+> 行为口径：main=`30bdfaa13ac72572d65ccb2567ae8702923c4187`（实测）；v3=Packet v3 修复后；v4=Packet v4 修复后；**v5=Packet v5 修复后（R4：+ script 名称准入（I13）、candidate_id `'-'` 槽位消歧（X4-7）；DR-04-A' 撤回）**；**v5+R5=DR-04-B v3 修复后（入口域收窄：`build_semantic_top_n` / `ram_wire_payload` 两公开入口 typed 拒绝 `symbol='-'`；wire 拒绝维持）**；标注【DR-04-X】者为未获批不实施（A 定稿版待重审 / B v3 待裁定输入域收窄）
 >
-> 本文档全部"main 实测"结论均由 `_red_proof/probe_xaudit.py`、`_red_proof/probe_r4.py`、`_red_proof/test_ip_0022_xaudit_red.py`（D1'''）与 `_red_proof` 探针脚本在本 worktree（lima/** 与 main 等同）复现。
+> 本文档全部"main 实测"结论均由 `_red_proof/probe_xaudit.py`、`_red_proof/probe_r4.py`、`_red_proof/probe_r5.py`、`_red_proof/test_ip_0022_xaudit_red.py`（D1'''）与 `_red_proof` 探针脚本在本 worktree（lima/** 与 main 等同）复现。
 
 ## 矩阵一：输入来源 → 公开输出 → 拦截点 → 负例
 
@@ -30,7 +30,7 @@
 | I12 | RAM 候选**读取失败**通道（ram.py:300 `_GAP_INVENTORY_SKIPPED detail=reason=read-failed; file={relative_path}`） | S5 coverage_gaps → S8 | detail 模板携带不可读 .py 的**全路径**——但非 UTF-8 文件在 workspace 层已被排除（reason=non-utf8，不进 `inventory.files`），read-failed 仅剩枚举后 OSError 窗口，实测不可达（P3b：非 UTF-8 敏感命名 .py → RAM gaps 为空、路径零出现） | **闭合依据**：v4 过滤在 `candidates` 枚举处（§3.2.3），敏感形态候选在读循环**之前**即被剔除——`_read_python_text` 仅作用于过滤后候选，故 read-failed 模板永无敏感命名路径可携带（结构性前置，非巧合） | 同 v3 + RAM-only 构建同样前置（X5-2） | P3b 探针（记录性事实）；M2（前置过滤正例） |
 | I13 | **manifest scripts 名称**（`[project.scripts]` 键，任意 TOML 字符串，inventory.py:360-365 仅 isinstance 校验） | S1 entrypoints.symbol → S4 → S8 | **泄漏**：`token_FAKESECRET123 = "pkg.cli:main"` → `entrypoints.symbol='token_FAKESECRET123'` 原文公开（probe P-R4-2 亲证；解析目标 `pkg/__init__.py` 良性，v4 path 面过滤不可达——泄漏源是名称不是路径） | v3/v4 均未覆盖（过滤只作用 path） | **v5 纳入修复**：script 名称准入过滤（同一启发式作用于名称字符串，单段语义），命中不入 entrypoints、计 `sensitive-filename` skip（公开 count 通道，与文件名同口径）；良性名（safe_cli/cli）不受影响 | X7-1（S1/S4 排除 + 良性锚）、X7-2（skip 计数） |
 
-| I13n | script 名 `'-'` 字面值（`[project.scripts] "-" = ...`） | S1 entrypoints.symbol | **可产出**：`entrypoints.symbol='-'`（probe P-R4-1 实测，#58 契约接受）——良性数据（非敏感形态），且 **Profile entrypoints 不是 RAM/semantic ranked 的输入**（ranked 仅由 RAM facts 五清单派生，prioritizer:525-585），故不构成 candidate_id `'-'` 槽位碰撞的生产路径；ranked symbol 全源 = 标识符 ∪ None ∪ `"<dynamic-call>"`（P-R4-3） | 不设防（非泄漏） | 同 main（#58 冻结契约原样，无 candidate_id 域；DR-04-B 重写版据此安全地在 wire 层拒绝 ranked `symbol=="-"` 字面值） | 记录性事实（P-R4-1/P-R4-3；X4-7 的安全性依据） |
+| I13n | script 名 `'-'` 字面值（`[project.scripts] "-" = ...`） | S1 entrypoints.symbol | **可产出**：`entrypoints.symbol='-'`（probe P-R4-1 实测，#58 契约接受）——良性数据（非敏感形态），且 **Profile entrypoints 不是 RAM/semantic ranked 的输入**（ranked 仅由 RAM facts 五清单派生，prioritizer:525-585），故不构成 candidate_id `'-'` 槽位碰撞的生产路径；ranked symbol 全源 = 标识符 ∪ None ∪ `"<dynamic-call>"`（P-R4-3） | 不设防（非泄漏） | 同 main（#58 冻结契约原样，无 candidate_id 域；**R5 注记：DR-04-B v3 的入口收窄只作用于 facts/ranked 域，Profile `_build_entrypoints` 的 `'-'` script 名维持 #58 接受——ranked 域的消歧安全性由入口 typed 拒绝承担，不再单靠"生产链不产出"论证**，见 P-R5-1） | 记录性事实（P-R4-1/P-R4-3/P-R5-1；X4-7/X8 的安全性依据） |
 
 
 矩阵一附注（主会话五项探针观察的独立复验与解释）：
@@ -43,7 +43,7 @@
 
 ## 矩阵二：wire 字段 → 绑定机制 → 篡改变体
 
-绑定机制图例：**[Struct]**=IP-0021 冻结结构校验（键封闭/类型/词表/cap/rank 连续/平行数组/枚举）；**[Path]**=路径规则（v3 引入，v4 强化）；**[CID]**=candidate_id 一致性（v4，【DR-04-B 重写版，待重审】；v5 增 `'-'` 槽位消歧）；**[RamD]**=ram_facts_digest 重算（ram 段 canonical 全量）；**[CfgD]**=semantic_config_digest 重算；**[RstD]**=semantic_result_digest 重算；**[MdlD]**=model_digest 重算（v3/G2b）；**[WireD]**=wire_digest 传输头（build+三 identity 摘要 re-wrap，末位）。
+绑定机制图例：**[Struct]**=IP-0021 冻结结构校验（键封闭/类型/词表/cap/rank 连续/平行数组/枚举）；**[Path]**=路径规则（v3 引入，v4 强化）；**[CID]**=candidate_id 一致性（v4，【DR-04-B v3，待裁定】；v5+R5：`'-'` 槽位消歧由入口域收窄保证）；**[Entry]**=公开入口 typed 拒绝（R5 新增，【DR-04-B v3，待裁定输入域收窄】）；**[RamD]**=ram_facts_digest 重算（ram 段 canonical 全量）；**[CfgD]**=semantic_config_digest 重算；**[RstD]**=semantic_result_digest 重算；**[MdlD]**=model_digest 重算（v3/G2b）；**[WireD]**=wire_digest 传输头（build+三 identity 摘要 re-wrap，末位）。
 
 | wire 字段 | 绑定机制 | 篡改变体与拦截点（测试 ID） |
 |---|---|---|
@@ -57,7 +57,8 @@
 | `ram.key_flows[i].sink_rule_id/steps` | [Struct] cap≤步数上限 + [RamD] | 超 cap（既有冻结负例）；内容篡改 → [RamD] |
 | `ram.coverage_gaps[i].gap_code/detail`、`ram.counters.*` | [Struct] GAP_CODE 模式/非负 + [RamD] | gap_code 模式违例（既有）；detail 篡改 → [RamD]（M17 系） |
 | `semantic.ranked[i].rank/score/category/rationale/key_flow_steps/candidate_id` | [Struct] rank 连续/词表/候选 ID 模式 + [RstD]（六字段子集入 result digest payload） | rank 断号、category 出词表、candidate_id 模式（既有冻结负例）；篡改不同步 → [RstD]（M17s 同步洗白仍被 [WireD] 末位拦截） |
-| `semantic.ranked[i].kind/path/symbol` | [Struct] str/None + **[Path]**（path）+ **[CID]**（v4：candidate_id ≡ `f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"`，ordinal ≥ 0 数字；**v5 消歧**：槽位 `'-'` 严格对应 `symbol is None`，`symbol == "-"` 字面值 wire 层拒绝）+ [RstD]（经 candidate_id 传递） | **关键缺口（main 与 v3 均不设防）**：`_result_digest` payload 不含 kind/path/symbol——改 kind/path/symbol 而不动 candidate_id，三摘要与 wire_digest 全部保持有效！**v5 勘正（Maintainer 问题 1）**：v4 公式 `symbol or '-'` 使 `symbol=None` 与 `symbol='-'` 生成同一 ID——None↔`'-'` 互换不动 ID 亦不动任何摘要（X4-7 RED：main 接受，probe P-R4-4），三字段绑定不闭合；v5 [CID] 消歧规则补绑（X4-1/2/3 + **X4-7**）。安全性：ranked symbol 生产链全源 = AST 标识符 ∪ None ∪ `"<dynamic-call>"`（P-R4-3 源追踪），永不产出 `'-'` 字面值 → 拒绝规则零误伤 |
+| `semantic.ranked[i].kind/path/symbol` | [Struct] str/None + **[Path]**（path）+ **[CID]**（v4：candidate_id ≡ `f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"`，ordinal ≥ 0 数字；**v5+R5 消歧（DR-04-B v3）**：槽位 `'-'` **严格且唯一**对应 `symbol is None`——该不变量由**入口域收窄保证**（`'-'` 字面值在两公开入口被 typed 拒绝，见新增行），wire 层 `symbol == "-"` 一律拒绝与入口一致）+ [RstD]（经 candidate_id 传递） | **关键缺口（main 与 v3 均不设防）**：`_result_digest` payload 不含 kind/path/symbol——改 kind/path/symbol 而不动 candidate_id，三摘要与 wire_digest 全部保持有效！**v5 勘正（Maintainer 问题 1）**：`symbol or '-'` 使 `symbol=None` 与 `symbol='-'` 生成同一 ID——None↔`'-'` 互换不动 ID 亦不动任何摘要（X4-7 RED：main 接受，probe P-R4-4/P-R5-3），三字段绑定不闭合；**R5 勘正（往返契约）**：R4 的"生产链定源零误伤"只覆盖默认扫描链——#58 合法条目 `symbol='-'` 在 main 上**完成全链往返**（probe P-R5-1：两入口接受 + validate 通过），故消歧必须落在**入口拒绝**而非仅 wire 拒绝（否则该合法输入"能生成不能校验"）；v5+R5 [CID] + 入口收窄补绑（X4-1/2/3 + X4-7 wire 负例 + X8-1/X8-2 入口负例 + X8-0 往返 GREEN 锚）。安全性：默认扫描产物零影响（P-R4-3 源追踪维持；golden/real-chain 零命中维持） |
+| **入口域：facts 五清单条目 `symbol == "-"`（合法 #58 形态）经 `build_semantic_top_n` / 直构 `SemanticTopNResult` 经 `ram_wire_payload`** | **[Entry]（R5 新增图例：公开入口 typed 拒绝，【DR-04-B v3，待裁定输入域收窄】）**：`ContractError(INVALID_FIELD_VALUE, "$.facts.<section>[i].symbol")` / `ContractError(INVALID_FIELD_VALUE, "$.semantic_result.ranked[i].symbol")`；入径核查（probe/源码亲验，Packet §9.6）：携带 '-' 进 wire 的公开入径仅此两条 + wire dict 直入 validate（[CID] 覆盖），`lima/semantic_retrieval.py` 的 `SemanticCandidate` 为检索层同名异类非入径 | **main 现状**：两入口均**接受**（X8-1/X8-2 RED），'-' 载荷生成且 validate 通过（P-R5-1）；**v5+R5 后**：入口 typed 拒绝（fail-closed 可诊断），往返保证 = 被允许输入全链往返（X8-0）+ '-' 入口拒绝（X8-1/2）+ wire 必拒一致性（X4-7，入口已拒则 wire '-' 必为异常/篡改）。**影响面声明**：输入域收窄 = IP-0019/IP-0021 两冻结公开入口可观察行为变更（此前接受的合法 '-' 形态被拒），需 Maintainer 裁定；备选 B-2（改 candidate_id 编码）= IP-0019 重冻结，仅呈对照（DR-04-B v3 §2-B） |
 | `semantic.total_candidates` / `semantic.coverage_gaps` | [Struct] ≥len(ranked) / GAP_CODE + [RstD] | 篡改不同步 → [RstD] |
 | `identity.ram_facts_digest` | [Struct] hex64 + 重算比对（B'） | 单字符篡改（M15）；全零占位（G2-2） |
 | `identity.semantic_config_digest` | [Struct] hex64 + [CfgD] 重算 | 同上族（M15/M18） |
@@ -125,3 +126,9 @@
 1. **DR-04 锚定清单勘误**：DR-04 v1 称 `manifest=` detail 模板被三处冻结测试锚定，其中 `tests/evidence_privacy/test_models.py` 经本轮逐行复核**不锚定该模板**——其 `manifest=` 出现（:118）是 `SanitizedPayload(manifest=m, ...)` 的字段关键字实参，与 gap detail 模板无关（R4 亲验，全树 grep 复核）。真实锚定集 = **2 文件 4 断言**：`tests/audit/test_fr05_gap_encoding.py`（:103/:110/:121）与 `tests/audit/test_budget_exhaustion_e2e.py`（:87）；逐处修订形式见 DR-04 §2-A（定稿版）。
 2. **A' 撤回的波及核查**：A' 否决理由之一（skip 序号对不在 `sorted(evidence)` 枚举内的 manifest 候选定义失效）不波及 Packet §3.3 的 `AdmissionSkipRecord.index` 定义——code-role/RAM/script 三处枚举体均为各自被过滤候选的真实列表；A' 失效模式随 Packet v4 §3.2 第四过滤点删除而消除（Packet v5 §3.2 撤回记录）。
 3. **DR-03/02 无波及**（核对）：DR-03 裁定面（G1 code_roles 过滤、B' 迁移/model_digest、R1 终案）与 DR-02（启发式超集、路线 B'）均不依赖 manifest detail 模板或 manifest 候选序号；A' 撤回与 A 定稿版不改变其结论，状态链不变。
+
+## R5 附注（PKT-IP-0022-R5，2026-09-13）
+
+1. **往返契约证据（DR-04-B v3 事实基础，P&V 亲验）**：`_red_proof/probe_r5.py` 三探针——P-R5-1：#58 合法条目 `symbol='-'` 经 `build_semantic_top_n` → `ram_wire_payload` → `validate_ram_wire_payload` **全链通过**（ranked 携带 `'-'`）；P-R5-2：None 与 `'-'` 形态 candidate_id 集合非空交集（`entrypoint:danger.py:-#0` 等四类）；P-R5-3：None→`'-'` wire 篡改 ACCEPTED。结论：R4"生产链定源零误伤"只覆盖默认扫描链，"扫描链不产生 '-'"不足以证明公共契约零误伤——消歧须落在入口（DR-04-B v3 推荐方案）。
+2. **入径核查（Stop Condition）**：携带 `'-'` 进 wire 的公开入径共三条（`build_semantic_top_n(facts)` / `ram_wire_payload` 直构 `SemanticTopNResult` / wire dict 直入 validate），全部纳入 v3 设计；`lima/semantic_retrieval.py:1279` 的 `SemanticCandidate` 为检索层同名异类，非入径（全树 grep + 逐源亲验，Packet §9.6）。
+3. **RED D1'''''**：`_red_proof` **39 failed / 4 passed**（新增 X8-1/X8-2 两例目标缺失型 RED：两入口当前接受 '-'；X8-0 真实扫描全链往返 GREEN 锚通过）；回归锚 801 + golden 15 维持。

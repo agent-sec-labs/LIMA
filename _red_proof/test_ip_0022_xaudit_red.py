@@ -202,14 +202,19 @@ class X4WireConsistencyTests(unittest.TestCase):
             self.validate(payload)
 
     def test_candidate_id_none_dash_disambiguation_tamper_rejected(self):
-        # X4-7 (DR-04-B rewrite, problem 1): the '-' slot in candidate_id is
-        # the serialized form of symbol=None ONLY. A literal symbol == "-"
-        # must be rejected at the wire layer: without this rule, flipping
-        # symbol between None and '-' leaves candidate_id and every digest
-        # unchanged (the ranked digest subset excludes symbol), so the three
-        # fields are not fully bound. Production chain for ranked symbol is
-        # identifiers / None / "<dynamic-call>" -- never '-' -- so this rule
-        # has zero false positives (source-traced in DR-IP-0022-04 R4).
+        # X4-7 (DR-04-B v3, R5: WIRE-layer negative; entry negatives are
+        # X8-1/X8-2 in test_ip_0022_r5_red.py -- division of labour recorded
+        # here): the '-' slot in candidate_id is the serialized form of
+        # symbol=None ONLY. A literal symbol == "-" must be rejected at the
+        # wire layer: without this rule, flipping symbol between None and
+        # '-' leaves candidate_id and every digest unchanged (the ranked
+        # digest subset excludes symbol), so the three fields are not fully
+        # bound. With the R5 entrance rejection in force, a wire '-' can
+        # only be an anomaly or tamper, making this rule consistent with --
+        # not redundant to -- the entry rejections. R5 fact base (probe
+        # P-R5-1): the full round trip with a legal symbol='-' fact set
+        # currently PASSES on main, so "the default scan chain never
+        # produces '-'" cannot justify a wire-only rejection by itself.
         payload = self.payload
         payload["semantic"]["ranked"][0]["symbol"] = "-"
         with self.assertRaises(Exception) as ctx:

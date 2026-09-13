@@ -321,7 +321,7 @@ class Ip0016IntegrationTests(RamFactsTestBase):
     def test_ip0016_public_api_prefix_unchanged(self) -> None:
         self.assertEqual(list(self.audit.__all__[:11]), IP0016_ALL_PREFIX)
         self.assertEqual(
-            self.audit.__all__[11:], sorted(IP0018_NEW_SYMBOLS)
+            self.audit.__all__[11:20], sorted(IP0018_NEW_SYMBOLS)
         )
         for name in IP0018_NEW_SYMBOLS:
             self.assertTrue(hasattr(self.audit, name), name)

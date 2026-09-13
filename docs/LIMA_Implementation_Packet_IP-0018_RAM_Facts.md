@@ -2,7 +2,9 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0018-PACKET/v1`
+> Packet 版本：`IP-0018-PACKET/v1.1`
+>
+> 版本历史：v1（2026-09-13，Packet PR #169 @49c87d3）；v1.1（2026-09-13，勘误 PKT-ERRATUM-IP-0018-01：`lima/audit/__init__.py` 基线描述误记"`__all__` 12 项 / 追加后 len==21"，实测既有 11 项 / 追加后 20 项；纯文档修正，不影响任何已冻结验收语义与命令——§5.3 追加清单本身自洽，勘误仅纠正对既有前缀的计数表述）
 >
 > 状态：`READY-FOR-CODE`（TBD = 0）
 >
@@ -118,7 +120,7 @@ call_edges: set[tuple[str, str, str, int]]; cross_file_call_edges: set[...]
 
 ### 3.2 IP-0016 消费面（DI-006/DI-009）
 
-`lima/audit/__init__.py`（33 行，12 个 `__all__` 条目）纯追加 re-export 边界；`lima/audit/inventory.py`：`PROFILE_PROVENANCE_ANCHOR="inventory"`、五个 `GAP_*` Final 常量、`SKIP_REASON_TO_GAP_DETAIL`、`ProfileBudgets`、`ProfileInventoryOptions`、`ProfileBuildResult{profile,envelope,provenance_anchor_ids}`、`build_repository_profile(workspace, *, tenant_id, task_id, workflow_id, stage_attempt_id, artifact_id, repository_snapshot_digest, producer=..., policy_digest=..., toolchain_digest=..., options=None)`。
+`lima/audit/__init__.py`（v1.1 勘误：33 行，11 个 `__all__` 条目）纯追加 re-export 边界；`lima/audit/inventory.py`：`PROFILE_PROVENANCE_ANCHOR="inventory"`、五个 `GAP_*` Final 常量、`SKIP_REASON_TO_GAP_DETAIL`、`ProfileBudgets`、`ProfileInventoryOptions`、`ProfileBuildResult{profile,envelope,provenance_anchor_ids}`、`build_repository_profile(workspace, *, tenant_id, task_id, workflow_id, stage_attempt_id, artifact_id, repository_snapshot_digest, producer=..., policy_digest=..., toolchain_digest=..., options=None)`。
 
 `lima/contracts/profile.py`：`AttackSurfaceEntry{path, reason_codes, source_artifact_ids, symbol=None, extensions}`（path 经 `_validated_path` 强制 repo-relative、禁 `\` 与盘符）、`ProfileCoverageGap{gap_code, detail, extensions}`（gap_code 须匹配 `[A-Z][A-Z0-9_]{0,63}`）、`RepositoryProfile`（`entrypoints/external_inputs/trust_boundaries/sensitive_operations` 均为 `tuple[AttackSurfaceEntry, ...]`）。
 
@@ -131,7 +133,7 @@ Assignment 预告的 API 面与实际**无重大偏差**；两处口径差异已
 ## 4. Files boundary（Coordinator 裁定冻结）
 
 - **Files to Add**：`lima/audit/ram.py`（唯一产品代码文件）。
-- **Product Files Allowed to Modify**：`lima/audit/__init__.py` —— 仅限"纯追加 re-export"：在既有 import 块与 `__all__` 列表**末尾**追加 §5.3 冻结的新公共符号；不得改动既有 12 个 `__all__` 条目、既有 import 行、模块 docstring 的既有语句（docstring 首行可追加一句说明 ram 层，属追加语义；如 Implementation 判断有歧义，保持 docstring 原样）。
+- **Product Files Allowed to Modify**：`lima/audit/__init__.py` —— 仅限"纯追加 re-export"：在既有 import 块与 `__all__` 列表**末尾**追加 §5.3 冻结的新公共符号；不得改动既有 11 个 `__all__` 条目、既有 import 行、模块 docstring 的既有语句（docstring 首行可追加一句说明 ram 层，属追加语义；如 Implementation 判断有歧义，保持 docstring 原样）。
 - **Test/Fixture Files Owned by P&V（阶段二独占，本阶段不创建）**：`tests/audit/test_ram_facts.py`、`tests/audit/fixtures/ram/*`。
 - **Read-only Reference**：`lima/python_dataflow.py`、`lima/workspace.py`、`lima/audit/inventory.py`、`lima/contracts/**`、`lima/models.py`、tests/audit 既有三文件（`test_profile_contract_encoding.py`、`test_profile_inventory.py`、`test_profile_security.py`）。
 - **Files Forbidden**：除上述 Add/Modify 外的一切路径；特别冻结：`lima/audit/inventory.py`、tests/audit 既有三测试文件、`schemas/**`、`.zcode/**`、#94 轨道全部路径（`lima/evidence_privacy/`、`tests/evidence_privacy/`、`docs/LIMA_Issue_94_*`、IP-0017 分支/PR #168 相关）。
@@ -297,7 +299,7 @@ from lima.audit.ram import (
 )
 ```
 
-`__all__` 列表在既有 12 项之后按字母序段追加上述 9 个名字。既有条目、顺序、docstring 既有语句不动。追加后 `python -c "import lima.audit"` 必须零副作用（不触发任何文件/网络操作）。
+`__all__` 列表在既有 11 项之后按字母序段追加上述 9 个名字（追加后共 20 项；v1.1 勘误口径）。既有条目、顺序、docstring 既有语句不动。追加后 `python -c "import lima.audit"` 必须零副作用（不触发任何文件/网络操作）。
 
 ### 5.4 envelope / digest 裁定（DI-008 复核）
 
@@ -329,7 +331,7 @@ from lima.audit.ram import (
 | 调用图派生（六要素各≥2） | 12 | endpoint 装饰（含类方法）、source 三型、tainted sink、trust boundary 去重、key flow 首末站、unresolved call（FR-02） |
 | gap 类别 | 5 | DYNAMIC_IMPORT、AMBIGUOUS_DISPATCH、BUDGET_EXHAUSTED（files/key-flows/edges 三截断）、read-failed skip（FR-05 子集） |
 | 确定性 | 3 | 同快照两次构建 facts 相等且 digest 相等；digest 64-hex；facts 构造的契约校验负例（绝对 path/空 reason_codes → ContractError）（NFR-01+确定性） |
-| 与 profile 集成回归 | 2 | `import lima.audit` 后 IP-0016 公共 API 12 符号仍在 `__all__` 且顺序不变；既有 tests/audit 32 用例 0 回归（文件边界） |
+| 与 profile 集成回归 | 2 | `import lima.audit` 后 IP-0016 公共 API 11 符号仍在 `__all__` 且顺序不变；既有 tests/audit 32 用例 0 回归（文件边界） |
 | 安全负例 | 4 | 恶意 setup.py 不执行（无网络/无写盘断言）、secret 样式 token 不入 facts、源码正文不入 facts、非 workspace 入参 fail-closed（NFR-01/部分 NFR-02 复验） |
 
 合计最低 26 个新用例（`tests/audit/test_ram_facts.py`）。PI-DR 落实：
@@ -376,7 +378,7 @@ git diff --check                                                      → 干净
 git diff --name-only --diff-filter=ACMRTUXB                           → 恰为 lima/audit/ram.py + lima/audit/__init__.py + tests/audit/test_ram_facts.py (+ fixtures)
 ```
 
-Compatibility/boundary：`python -c "import lima.audit as a; assert a.__all__[:12]==[...IP-0016 既有 12 项...] and len(a.__all__)==21"`（既有前缀不变）。
+Compatibility/boundary：`python -c "import lima.audit as a; assert a.__all__[:11]==[...IP-0016 既有 11 项...] and len(a.__all__)==20"`（既有前缀不变；v1.1 勘误口径，@dd324915 实测 20 项）。
 
 Post-merge（main 上复验）：上述 mandatory 全组 + contracts 617。
 

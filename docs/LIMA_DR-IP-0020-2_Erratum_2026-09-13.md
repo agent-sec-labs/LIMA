@@ -43,7 +43,17 @@
 
 ## 5. DR-IP-0020-3 状态记录
 
-container-read-only CI 红因 Dockerfile 未打包 `scripts/audit_sensitive_artifacts.py`（6 用例环境性失败），属 Packet 测试计划与镜像打包之间的范围缺口；推荐方案 (i) Dockerfile 一行 COPY，**Pending Maintainer 授权**（超出 Coordinator 授权边界）。本 erratum 与 v2 重冻结均不触及 Dockerfile。
+container-read-only CI 红因 Dockerfile 未打包 `scripts/audit_sensitive_artifacts.py`（6 用例环境性失败），属 Packet 测试计划与镜像打包之间的范围缺口；推荐方案 (i) Dockerfile 一行 COPY。状态：**Authorized（2026-09-13，Maintainer 授权，原文逐字记录如下）**。本 erratum §1–§4、§6（v2 重冻结）不触及 Dockerfile；§5.1 的文件边界例外为授权后新增处置，仅涉及 Dockerfile test 阶段一行 COPY。
+
+> Maintainer 授权原文（2026-09-13）：
+> "授权 DR-IP-0020-3，但仅限在 Dockerfile 的 **FROM base AS test 阶段**增加所提的一行审计脚本 COPY；**不得放入 base 或 runtime 阶段**，不改基镜像、其他构建指令或测试断言。请将文件边界例外记入 DR/Packet 勘误，用 v2 冻结链创建替代 PR，并在最新 main 上核验完整 diff、Linux/Windows 单测及容器 CI。旧 PR #175 保持 HOLD，待替代 PR 可追溯后再关闭。CI 与 P&V 全绿后，把完整审查包交给 Maintainer；未经其书面安全审查，不得标记 G3 PASS 或合并。"
+
+### 5.1 文件边界例外（DR-IP-0020-3 授权范围，Packet 文件边界勘误）
+
+- **授权范围（仅此一项）**：在 Dockerfile `FROM base AS test` 阶段内（既有 test 阶段 COPY 之后）新增一行：`COPY --chown=lima:lima scripts/audit_sensitive_artifacts.py ./scripts/audit_sensitive_artifacts.py`
+- **禁止项**：不得放入 base 或 runtime 阶段；不改基镜像（ARG PYTHON_BASE_IMAGE / NODE_BASE_IMAGE digest）；不改任何其他构建指令；不改测试断言。
+- **例外效力**：本文件边界例外仅对 IP-0020 本行生效，不构成对 Packet 其他 Must-not-modify 边界的放开；冻结测试零改动。
+
 
 ## 6. v2 重新 RED 与证明（P&V 亲验，2026-09-13，worktree `D:\BaseAIProject\LIMA-ip0020-pv-wt`）
 

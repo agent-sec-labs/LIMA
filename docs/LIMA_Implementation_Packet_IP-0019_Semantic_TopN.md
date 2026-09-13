@@ -2,7 +2,9 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0019-PACKET/v1`
+> Packet 版本：`IP-0019-PACKET/v1.1`
+>
+> 修订历史：v1.1（2026-09-13，DR-IP-0019-01，裁定 DR-IP-0019-0102 选项 A）：§5.3 `max_total_tokens_estimate` 默认值 `28_000` → `28_096`，保留构造期不变量（total ≥ prompt+output）；DR-TOPN-01 批准值 24,000 / 4,096 / 120s 不变。
 >
 > 状态：`READY-FOR-CODE`（TBD = 0）
 >
@@ -289,7 +291,7 @@ class SemanticBudgets:   # 全部 int，__post_init__ 逐字段 type is int 校�
     max_llm_calls: int = 8                  # ≥1
     max_prompt_tokens_estimate: int = 24_000    # ≥1
     max_output_tokens_estimate: int = 4_096     # ≥1（A-2 增补：单次调用输出估算硬边界）
-    max_total_tokens_estimate: int = 28_000     # ≥1（A-2 增补：单次调用 输入+输出 总量硬边界）
+    max_total_tokens_estimate: int = 28_096     # ≥1（A-2 增补：单次调用 输入+输出 总量硬边界；v1.1 勘误见修订历史）
     max_wall_time_seconds: int = 120        # ≥1
     # 不变量：max_total_tokens_estimate ≥ max_prompt_tokens_estimate
     #         + max_output_tokens_estimate，否则 ValueError（保证两上界可同时满足）

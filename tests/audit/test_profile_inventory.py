@@ -495,7 +495,13 @@ class PublicApiSurfaceTests(InventoryTestBase):
         self.assertEqual(options.budgets.manifest_max_bytes, 262_144)
         result_fields = audit.ProfileBuildResult.__dataclass_fields__
         self.assertEqual(
-            set(result_fields), {"profile", "envelope", "provenance_anchor_ids"}
+            set(result_fields),
+            {"profile", "envelope", "provenance_anchor_ids", "admission_skips"},
+        )
+        self.assertEqual(
+            result_fields["admission_skips"].default,
+            (),
+            "admission_skips must default to the empty tuple (R1 final ruling)",
         )
 
 

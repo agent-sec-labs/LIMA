@@ -303,6 +303,7 @@ RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 - **PI-DR2 scratch GREEN（TEMP 副本 `%TEMP%\lima-ip0022-scratch`，不入 commit）**：按 Packet v5/v6 冻结接口实现最小骨架（四过滤点 + `is_secret_shaped_path` + `admission_skips` + manifest-index detail + 入口拒绝（`build_semantic_top_n` 五清单 / `ram_wire_payload` ranked）+ B' 校验序列（path 段规则 + 五摘要重算 + candidate_id 绑定 + wire 末位））→ 冻结面 51/51 全绿；`tests/audit + tests/contracts` = **852 passed**；全量 = **1388 passed / 1 skipped**（另 2 例 `%TEMP%` 路径分类用例系 scratch 位置环境效应——同位置 pristine `lima/` 复现同样失败，与骨架无关，亲验）。结论：**冻结面 GREEN 可达**。scratch 期间暴露并处置两处冻结面缺陷（X4-1/X4-7 断言形态、profile_inventory 三例锚定集缺失，均见上两条 re-freeze 记录）。
 - **实施注意（scratch 亲验事实，供 Implementation）**：入口拒绝的 `build_semantic_top_n` 校验点位于 `semantic_prioritizer.py`（isinstance 门后、候选收集前）——§3.6"prioritizer 全文件不改"系 R5 前旧文，与 §3.5 DR-04-B（mandatory）入口拒绝要求冲突，按上游优先级以 DR-04-B 为准（仅允许该最小校验插入，`_SECRET_TOKEN_PATTERN`/`_render_prompt`/排序逻辑仍禁改）；X8-1c 类构造的平行追加以 `sink_rule_ids += ("FLOW-COMMAND",)` / `sink_cwes += ("CWE-78",)` 为结构有效形态。
 - **PI-DR6 非 Windows CI（已执行）**：临时分支 `pv/ip-0022-freeze-pidr6`（@`a775d15b07fab2c59ecb6dac79bdb2f2d528e042`，= 2edba93 冻结面 + PI-DR2 scratch 骨架，TEMP 性质不属实施轨道）workflow_dispatch 触发 run **34826215469** = **completed/success**——unit-ubuntu-latest-py3.11 / py3.12 **双版本全绿**（连同 windows 双版本、merge-gate 等全部 10 job success；https://github.com/agent-sec-labs/LIMA/actions/runs/34826215469）。冻结面在 Linux 双版本 GREEN 可达性由此实证。
+- **冻结后测试勘误（re-freeze #3，RF3 / PKT-IP-0022-RF3，Assignment `IP-0022-PV-RF3/v1`，2026-09-13）**：对象 = `tests/audit/test_profile_inventory.py::PublicApiSurfaceTests::test_profile_budgets_defaults_and_validation` 的 `ProfileBuildResult` 恰三字段钉死断言（`{"profile","envelope","provenance_anchor_ids"}`）。依据 = **R1 终案（Maintainer 裁定）明确"挂载于 ProfileBuildResult/RamFactsBuildResult 新增默认空字段 admission_skips"**（§3.3/§11），该钉死断言系 IP-0016 冻结时点的过约束——已批准契约演进的留痕跟进而非删弱断言（先例链：re-freeze #1（X4 断言形态）→ #2（profile_inventory manifest 锚定集）→ 本例）。结论 = 预期字段集扩为**四字段精确集合断言** `{"profile","envelope","provenance_anchor_ids","admission_skips"}` 并补 `admission_skips` 默认 `()` 断言——仍为精确集合 + 精确默认值断言，强度不降反升；随本轮一并落 §8 导出面口径勘误（K=0，`__all__` 冻结帽 54 逐字不动，公共可导入性 = 命名空间 re-export）。亲验：修订后该用例在 Implementation 工作树（含未提交实现）转绿（`python -m unittest …test_profile_budgets_defaults_and_validation` → OK）；实现前基线上该四字段断言为 RED（`admission_skips` 字段缺失），符合冻结面语义。
 
 - 缺口 1：存在 1 处宽松接受冻结断言——`test_ram_schema.py::test_minimal_payload_validates`（@:223-224；MINIMAL_PAYLOAD @:79，identity @:128-135）。DR-01 授权 + DR-03 §1(a) 升级为四 digest 自洽迁移。
 - 缺口 2：skip reason 词汇表为封闭冻结枚举（`test_fr05_gap_encoding.py:43-53,135`）。DR-01 授权扩词。
@@ -317,6 +318,8 @@ python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原�
 ```
 
 判定依据：M1'-M18 + G1/G2 系全绿；R1-R3 全绿；`git diff 30bdfaa -- tests/audit/fixtures schemas` 为空；ruff/bandit 零新 finding。PI-DR6：D2 冻结前至少一个非 Windows 平台完整跑一次（M1'/G 系为纯字符串/纯构造断言，平台无关）。
+
+**导出面口径（RF3 勘误定稿，与冻结帽一致）**：IP-0022 新公共符号（`is_secret_shaped_path`、`AdmissionSkipRecord`）的公共可导入性以**命名空间 re-export**（`from lima.audit import …` 可导入，§3.1）承载；`lima/audit/__all__` **逐字不动、冻结帽 `len(__all__) == 54` 维持**（`test_ram_schema.py::InitAppendSegmentTests`，K=0——本 IP 无新增 `__all__` 条目）。任何"54+K"式扩帽口径与本冻结帽在 K≥1 时不相容，以本行为准（Implementation 已按 K=0 落位且 scratch 852 全绿事实与此一致；Packet 原文并无字面 "54+K" Done Command，本行为该口径的明文化勘误）。
 
 ## 9. RED 证明（D1 + D1' + D1''）
 

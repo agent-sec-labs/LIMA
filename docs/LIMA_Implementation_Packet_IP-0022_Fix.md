@@ -319,7 +319,7 @@ python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原�
 
 判定依据：M1'-M18 + G1/G2 系全绿；R1-R3 全绿；`git diff 30bdfaa -- tests/audit/fixtures schemas` 为空；ruff/bandit 零新 finding。PI-DR6：D2 冻结前至少一个非 Windows 平台完整跑一次（M1'/G 系为纯字符串/纯构造断言，平台无关）。
 
-**导出面口径（RF3 勘误定稿，与冻结帽一致）**：IP-0022 新公共符号（`is_secret_shaped_path`、`AdmissionSkipRecord`）的公共可导入性以**命名空间 re-export**（`from lima.audit import …` 可导入，§3.1）承载；`lima/audit/__all__` **逐字不动、冻结帽 `len(__all__) == 54` 维持**（`test_ram_schema.py::InitAppendSegmentTests`，K=0——本 IP 无新增 `__all__` 条目）。任何"54+K"式扩帽口径与本冻结帽在 K≥1 时不相容，以本行为准（Implementation 已按 K=0 落位且 scratch 852 全绿事实与此一致；Packet 原文并无字面 "54+K" Done Command，本行为该口径的明文化勘误）。
+**导出面口径（RF3 勘误定稿，与冻结帽一致；VERIFY 措辞勘误附注）**：IP-0022 新公共符号仅 `is_secret_shaped_path` 一个，其公共可导入性以**命名空间 re-export**（`from lima.audit import is_secret_shaped_path`，§3.1）承载；`AdmissionSkipRecord` 依 §3.1/R1 终案为**内部逐项留痕记录、非公共符号、不做 re-export**（PKT-IP-0022-VERIFY 指出本行初稿曾将两者并列为公共符号，属措辞越界，此处勘正；实现与上游一致，无冻结面波及）；`lima/audit/__all__` **逐字不动、冻结帽 `len(__all__) == 54` 维持**（`test_ram_schema.py::InitAppendSegmentTests`，K=0——本 IP 无新增 `__all__` 条目）。任何"54+K"式扩帽口径与本冻结帽在 K≥1 时不相容，以本行为准（Implementation 已按 K=0 落位且 scratch 852 全绿事实与此一致；Packet 原文并无字面 "54+K" Done Command，本行为该口径的明文化勘误）。
 
 ## 9. RED 证明（D1 + D1' + D1''）
 

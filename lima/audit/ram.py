@@ -126,6 +126,7 @@ class RamFactsBuildResult:
 
     facts: PythonRamFacts
     provenance_anchor_ids: tuple[str, ...]
+    admission_skips: tuple = ()
 
 
 def _dotted_name(node: ast.AST) -> str:
@@ -359,11 +360,33 @@ def build_python_ram_facts(
         raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE)
     limits = budgets if budgets is not None else RamBudgets()
 
+    from lima.audit.inventory import AdmissionSkipRecord, is_secret_shaped_path
+
     inventory = workspace.inventory()
-    candidates = sorted(
+    all_candidates = sorted(
         item.path for item in inventory.files if item.path.endswith(".py")
     )
+    admission_skips: list[AdmissionSkipRecord] = []
+    secret_count = 0
+    candidates: list[str] = []
+    for index, relative_path in enumerate(all_candidates):
+        if is_secret_shaped_path(relative_path):
+            secret_count += 1
+            admission_skips.append(
+                AdmissionSkipRecord(
+                    index=index, reason="sensitive-filename", family="filename"
+                )
+            )
+            continue
+        candidates.append(relative_path)
     gaps: list[tuple[str, str]] = []
+    if secret_count:
+        gaps.append(
+            (
+                _GAP_INVENTORY_SKIPPED,
+                f"reason=sensitive-filename; count={secret_count}",
+            )
+        )
     if len(candidates) > limits.max_python_files:
         overflow = len(candidates) - limits.max_python_files
         gaps.append(
@@ -405,6 +428,7 @@ def build_python_ram_facts(
     return RamFactsBuildResult(
         facts=facts,
         provenance_anchor_ids=(RAM_PROVENANCE_ANCHOR,),
+        admission_skips=tuple(admission_skips),
     )
 
 

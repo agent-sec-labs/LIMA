@@ -519,6 +519,27 @@ def _run_model_pass(
     return enrichment, gap_pairs
 
 
+_FROZEN_INVENTORIES: tuple[str, ...] = (
+    "entrypoints",
+    "external_sources",
+    "sensitive_sinks",
+    "trust_boundaries",
+    "unresolved_edges",
+)
+
+
+def _reject_dash_symbols(facts: PythonRamFacts) -> None:
+    from lima.contracts.errors import ContractError, ContractErrorCode
+
+    for section in _FROZEN_INVENTORIES:
+        for index, entry in enumerate(getattr(facts, section)):
+            if entry.symbol == "-":
+                raise ContractError(
+                    ContractErrorCode.INVALID_FIELD_VALUE,
+                    f"$.facts.{section}[{index}].symbol",
+                )
+
+
 def _collect_candidates(
     facts: PythonRamFacts, weights: SemanticWeights
 ) -> list[_Candidate]:
@@ -713,6 +734,7 @@ def build_semantic_top_n(
 
     if not isinstance(facts, PythonRamFacts):
         raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE)
+    _reject_dash_symbols(facts)
     resolved = options if options is not None else SemanticOptions()
     if not isinstance(resolved, SemanticOptions):
         raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE)

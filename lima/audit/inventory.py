@@ -68,7 +68,9 @@ __all__ = [
     "GAP_NO_LANGUAGES_DETECTED",
     "GAP_UNSUPPORTED_LANGUAGE",
     "PROFILE_PROVENANCE_ANCHOR",
+    "AdmissionSkipRecord",
     "SKIP_REASON_TO_GAP_DETAIL",
+    "is_secret_shaped_path",
     "ProfileBudgets",
     "ProfileBuildResult",
     "ProfileInventoryOptions",
@@ -103,11 +105,57 @@ _SKIP_REASONS: Final[tuple[str, ...]] = (
     "total-size-limit",
     "unreadable",
     "unsupported-extension",
+    "sensitive-filename",
 )
 
 SKIP_REASON_TO_GAP_DETAIL: Final[Mapping[str, str]] = MappingProxyType(
     {reason: _SKIP_DETAIL_TEMPLATE for reason in _SKIP_REASONS}
 )
+
+import re as _re
+from dataclasses import dataclass as _dc_dataclass
+
+_SECRET_FILENAME_PATTERN: Final[_re.Pattern[str]] = _re.compile(
+    r"(?i:(^|[_\-.])(token|secret|key|password|passwd|credential|apikey|api_key|private[_-]?key)s?([_\-.]|$))"
+    r"|sk_live_[0-9A-Za-z]+"
+    r"|sk_test_[0-9A-Za-z]+"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|ghp_[0-9A-Za-z]{36,}"
+    r"|gho_[0-9A-Za-z]{36,}"
+    r"|github_pat_[0-9A-Za-z_]{20,}"
+    r"|xox[baprs]-[0-9A-Za-z-]{10,}"
+    r"|id_(rsa|dsa|ecdsa|ed25519)([._\-][0-9A-Za-z_.\-]*)?"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}"
+    r"|(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
+)
+
+
+def is_secret_shaped_path(path: str) -> bool:
+    """Heuristic superset check on every path segment (IP-0022 scratch)."""
+    if not isinstance(path, str) or not path:
+        return False
+    return any(
+        _SECRET_FILENAME_PATTERN.search(segment) for segment in path.split("/")
+    )
+
+
+@_dc_dataclass(frozen=True)
+class AdmissionSkipRecord:
+    index: int
+    reason: str
+    family: str
+
+
+_CURRENT_MANIFEST_ORDER: list[str] = []
+
+
+def _manifest_ordinal(relative_path: str) -> int:
+    try:
+        return sorted(_CURRENT_MANIFEST_ORDER).index(relative_path)
+    except ValueError:
+        return 0
+
 
 _BUDGET_SKIP_REASONS: Final[frozenset[str]] = frozenset(
     {"file-limit", "file-size-limit", "total-size-limit"}
@@ -297,7 +345,7 @@ def _record_manifest_error(
     gaps.append(
         (
             GAP_MANIFEST_PARSE_ERROR,
-            f"manifest={relative_path}; error={type(error).__name__}",
+            f"manifest-index={_manifest_ordinal(relative_path)}; error={type(error).__name__}",
         )
     )
 
@@ -505,7 +553,7 @@ def _load_one_manifest(
         gaps.append(
             (
                 GAP_BUDGET_EXHAUSTED,
-                f"manifest={relative_path}; bytes={size}; "
+                f"manifest-index={_manifest_ordinal(relative_path)}; bytes={size}; "
                 f"limit={budgets.manifest_max_bytes}",
             )
         )
@@ -525,6 +573,7 @@ def _load_manifests(
 ) -> tuple[_ManifestSummary, list[tuple[str, str]]]:
     summary = _ManifestSummary()
     gaps: list[tuple[str, str]] = []
+    _CURRENT_MANIFEST_ORDER[:] = candidates
     ordered = sorted(candidates)
     if len(ordered) > budgets.max_manifest_files:
         overflow = len(ordered) - budgets.max_manifest_files
@@ -616,14 +665,31 @@ def _resolve_script_target(target: str, inventoried: frozenset[str]) -> str | No
 
 
 def _build_entrypoints(
-    summary: _ManifestSummary, inventoried: frozenset[str]
+    summary: _ManifestSummary,
+    inventoried: frozenset[str],
+    skipped: dict[str, int],
+    path_dedupe: set[str],
 ) -> tuple[list[AttackSurfaceEntry], frozenset[str]]:
     entries: list[AttackSurfaceEntry] = []
     targets: set[str] = set()
+
+    def _skip(key: str) -> None:
+        if key not in path_dedupe:
+            path_dedupe.add(key)
+            skipped["sensitive-filename"] = (
+                skipped.get("sensitive-filename", 0) + 1
+            )
+
     if summary.scripts:
         for name in sorted(summary.scripts):
             resolved = _resolve_script_target(summary.scripts[name], inventoried)
             if resolved is None:
+                continue
+            if is_secret_shaped_path(name):
+                _skip(name)
+                continue
+            if is_secret_shaped_path(resolved):
+                _skip(resolved)
                 continue
             targets.add(resolved)
             entries.append(
@@ -636,15 +702,19 @@ def _build_entrypoints(
             )
     else:
         for relative_path in sorted(_ROOT_ENTRY_CANDIDATES):
-            if relative_path in inventoried:
-                entries.append(
-                    AttackSurfaceEntry(
-                        path=relative_path,
-                        symbol=None,
-                        reason_codes=("ENTRY_ROOT_CONVENTION",),
-                        source_artifact_ids=(PROFILE_PROVENANCE_ANCHOR,),
-                    )
+            if relative_path not in inventoried:
+                continue
+            if is_secret_shaped_path(relative_path):
+                _skip(relative_path)
+                continue
+            entries.append(
+                AttackSurfaceEntry(
+                    path=relative_path,
+                    symbol=None,
+                    reason_codes=("ENTRY_ROOT_CONVENTION",),
+                    source_artifact_ids=(PROFILE_PROVENANCE_ANCHOR,),
                 )
+            )
     entries.sort(key=lambda entry: (entry.path, entry.symbol or ""))
     return entries, frozenset(targets)
 
@@ -773,9 +843,19 @@ def _code_role_assignments(
     evidence: dict[str, set[str]],
     entry_targets: frozenset[str],
     gaps: list[tuple[str, str]],
+    skipped: dict[str, int] | None = None,
+    path_dedupe: set[str] | None = None,
 ) -> tuple[CodeRoleAssignment, ...]:
     assignments: list[CodeRoleAssignment] = []
     for relative_path in sorted(evidence):
+        if is_secret_shaped_path(relative_path):
+            if skipped is not None and path_dedupe is not None:
+                if relative_path not in path_dedupe:
+                    path_dedupe.add(relative_path)
+                    skipped["sensitive-filename"] = (
+                        skipped.get("sensitive-filename", 0) + 1
+                    )
+            continue
         reasons = evidence[relative_path]
         if relative_path in entry_targets:
             reasons.add("ENTRY_SCRIPT_DECLARED")
@@ -936,7 +1016,10 @@ def build_repository_profile(
             reasons.add("NOT_IMPORTED_BY_PROD")
 
     inventoried = frozenset(item.path for item in inventory.files)
-    entrypoints, entry_targets = _build_entrypoints(summary, inventoried)
+    _path_dedupe: set[str] = set()
+    entrypoints, entry_targets = _build_entrypoints(
+        summary, inventoried, inventory.skipped, _path_dedupe
+    )
 
     languages = _language_declarations(inventory.files, summary)
     language_names = frozenset(declaration.name for declaration in languages)
@@ -952,8 +1035,10 @@ def build_repository_profile(
 
     kinds = _repository_kinds(inventory.files, summary, language_names, manifest_rels)
     support_level = _support_level_and_gaps(language_names, summary, gaps)
+    code_roles = _code_role_assignments(
+        evidence, entry_targets, gaps, inventory.skipped, _path_dedupe
+    )
     gaps.extend(_skip_reason_gaps(inventory, bool(language_names)))
-    code_roles = _code_role_assignments(evidence, entry_targets, gaps)
 
     file_count = len(inventory.files)
     total_bytes = inventory.total_bytes

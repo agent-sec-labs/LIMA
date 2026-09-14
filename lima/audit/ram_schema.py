@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Final
 
 from lima.audit.inventory import ProfileBudgets
+from lima.contracts.codec import compute_content_digest
 from lima.audit.ram import (
     PythonRamFacts,
     RamBudgets,
@@ -285,6 +286,13 @@ def ram_wire_payload(
     ):
         raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$.semantic_options")
 
+    for index, item in enumerate(semantic_result.ranked):
+        if item.symbol == "-":
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE,
+                f"$.semantic_result.ranked[{index}].symbol",
+            )
+
     profile_limits = profile_budgets if profile_budgets is not None else ProfileBudgets()
     ram_limits = ram_budgets if ram_budgets is not None else RamBudgets()
     options = semantic_options if semantic_options is not None else SemanticOptions()
@@ -354,6 +362,72 @@ def ram_wire_payload(
     return payload
 
 
+_FIVE_ENTRY_SECTIONS: Final[tuple[str, ...]] = (
+    "entrypoints",
+    "external_sources",
+    "sensitive_sinks",
+    "trust_boundaries",
+    "unresolved_edges",
+)
+
+
+def _validated_wire_path(path: object, field_path: str) -> None:
+    if (
+        not isinstance(path, str)
+        or not path
+        or "\\" in path
+        or path.startswith("/")
+        or re.match(r"^[A-Za-z]:", path)
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in path)
+        or any(segment in ("", ".", "..") for segment in path.split("/"))
+    ):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_VALUE, field_path)
+
+
+def ram_facts_digest_from_wire(payload: Mapping[str, object]) -> str:
+    return compute_content_digest(payload["ram"])
+
+
+def semantic_config_digest_from_wire(payload: Mapping[str, object]) -> str:
+    build = payload["build"]["semantic"]
+    identity = payload["identity"]
+    return compute_content_digest(
+        {
+            "top_n": build["top_n"],
+            "weights": build["weights"],
+            "tie_break": build["tie_break"],
+            "seed": build["seed"],
+            "budgets": build["budgets"],
+            "prompt_digest": identity["prompt_digest"],
+            "model_digest": compute_content_digest(build["model_id"]),
+        }
+    )
+
+
+def semantic_result_digest_from_wire(payload: Mapping[str, object]) -> str:
+    semantic = payload["semantic"]
+    ranked = [
+        {
+            "rank": item["rank"],
+            "candidate_id": item["candidate_id"],
+            "score": item["score"],
+            "category": item["category"],
+            "rationale": item["rationale"],
+            "key_flow_steps": list(item["key_flow_steps"]),
+        }
+        for item in semantic["ranked"]
+    ]
+    return compute_content_digest(
+        {
+            "config_digest": semantic_config_digest_from_wire(payload),
+            "input_facts_digest": ram_facts_digest_from_wire(payload),
+            "ranked": ranked,
+            "total_candidates": semantic["total_candidates"],
+            "coverage_gaps": list(semantic["coverage_gaps"]),
+        }
+    )
+
+
 def validate_ram_wire_payload(payload: Mapping[str, object]) -> None:
     """Validate one RAM wire payload fail-closed against the frozen format.
 
@@ -382,6 +456,63 @@ def validate_ram_wire_payload(payload: Mapping[str, object]) -> None:
     _validate_execution(
         _object_field(payload, "execution_required", "$"), ram_gaps + semantic_gaps
     )
+    _validate_path_and_binding(payload)
+    _validate_identity_digests(payload)
+
+
+def _validate_path_and_binding(payload: Mapping[str, object]) -> None:
+    ram_section = payload["ram"]
+    for section in _FIVE_ENTRY_SECTIONS:
+        items = ram_section.get(section) or []
+        for index, item in enumerate(items):
+            _validated_wire_path(
+                item["path"], f"$.ram.{section}[{index}].path"
+            )
+    ranked = payload["semantic"]["ranked"]
+    for index, item in enumerate(ranked):
+        _validated_wire_path(
+            item["path"], f"$.semantic.ranked[{index}].path"
+        )
+        symbol = item["symbol"]
+        if symbol == "-":
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE,
+                f"$.semantic.ranked[{index}].symbol",
+            )
+        prefix = (
+            f"{item['kind']}:{item['path']}:"
+            f"{symbol if symbol is not None else '-'}#"
+        )
+        candidate_id = item["candidate_id"]
+        ordinal = candidate_id.rsplit("#", 1)[-1]
+        if not candidate_id.startswith(prefix) or not ordinal.isdigit():
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE,
+                f"$.semantic.ranked[{index}].candidate_id",
+            )
+
+
+def _validate_identity_digests(payload: Mapping[str, object]) -> None:
+    identity = payload["identity"]
+    build = payload["build"]["semantic"]
+    pairs = (
+        ("ram_facts_digest", ram_facts_digest_from_wire),
+        ("semantic_config_digest", semantic_config_digest_from_wire),
+        ("semantic_result_digest", semantic_result_digest_from_wire),
+    )
+    for key, recompute in pairs:
+        if identity[key] != recompute(payload):
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE, f"$.identity.{key}"
+            )
+    if identity["model_digest"] != compute_content_digest(build["model_id"]):
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE, "$.identity.model_digest"
+        )
+    if identity["wire_digest"] != ram_wire_digest(payload):
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE, "$.identity.wire_digest"
+        )
 
 
 def ram_wire_digest(payload: Mapping[str, object]) -> str:

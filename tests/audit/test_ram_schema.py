@@ -76,6 +76,12 @@ _ENTRY = {
 
 #: One minimal, fully valid wire payload: the frozen wire-format contract
 #: (Packet §5.1 field table) expressed as data.
+#: IP-0022 DR-authorized migration (DR-IP-0022-03 §1 / Packet v6 §4d-3):
+#: the identity block carries FIVE self-consistent true digests (ram /
+#: config / result / prompt / model) recomputed with the real functions;
+#: the all-zero placeholder form is rejected by an independent negative in
+#: tests/audit/test_ip_0022_fix.py (G2-2). ``SemanticOptions()`` defaults
+#: are field-for-field identical to ``build.semantic`` above (verified).
 MINIMAL_PAYLOAD: dict[str, Any] = {
     "schema_version": "4.0",
     "model_kind": "lima.repository-architecture-model",
@@ -138,6 +144,51 @@ MINIMAL_PAYLOAD: dict[str, Any] = {
     },
     "execution_required": {"required": True, "trigger_gap_codes": ["DYNAMIC_IMPORT"]},
 }
+
+
+def _migrate_minimal_payload_identity() -> None:
+    """Recompute the identity digests of MINIMAL_PAYLOAD with the real
+    chain functions (IP-0022 §4d-3 migration; deterministic, no clock)."""
+    import lima.audit.ram_schema as rs
+    import lima.audit.semantic_prioritizer as sp
+    from lima.contracts.codec import compute_content_digest
+
+    options = sp.SemanticOptions()
+    payload = MINIMAL_PAYLOAD
+    ram_digest = compute_content_digest(payload["ram"])
+    config_digest = sp.semantic_config_digest(options)
+    ranked = tuple(
+        sp.SemanticCandidate(
+            candidate_id=item["candidate_id"],
+            kind=item["kind"],
+            path=item["path"],
+            symbol=item["symbol"],
+            score=item["score"],
+            rank=item["rank"],
+            category=item["category"],
+            rationale=item["rationale"],
+            key_flow_steps=tuple(item["key_flow_steps"]),
+        )
+        for item in payload["semantic"]["ranked"]
+    )
+    result_digest = sp._result_digest(
+        config_digest=config_digest,
+        input_facts_digest=ram_digest,
+        ranked=ranked,
+        total_candidates=payload["semantic"]["total_candidates"],
+        coverage_gaps=(),
+    )
+    payload["identity"]["ram_facts_digest"] = ram_digest
+    payload["identity"]["semantic_config_digest"] = config_digest
+    payload["identity"]["semantic_result_digest"] = result_digest
+    payload["identity"]["prompt_digest"] = compute_content_digest(
+        options.prompt_template
+    )
+    payload["identity"]["model_digest"] = compute_content_digest(options.model_id)
+    payload["identity"]["wire_digest"] = rs.ram_wire_digest(payload)
+
+
+_migrate_minimal_payload_identity()
 
 
 def rs_module() -> Any:

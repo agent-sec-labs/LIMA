@@ -4,6 +4,10 @@ Re-exports only the frozen Packet v1.1 (§6 D2) public API; all logic lives
 in :mod:`lima.audit.inventory`. IP-0019 appends the semantic prioritizer
 Top-N layer re-exports of :mod:`lima.audit.semantic_prioritizer`.
 IP-0021 appends the RAM wire schema re-exports of :mod:`lima.audit.ram_schema`.
+IP-0022 appends the secret-shaped filename admission re-exports of
+:mod:`lima.audit.inventory` as package-namespace re-exports only: the frozen
+IP-0021 exact-cap assertion (``test_ram_schema.InitAppendSegmentTests``) pins
+``len(__all__) == 54`` with the IP-0021 tail, so ``__all__`` stays verbatim.
 """
 
 from lima.audit.inventory import (
@@ -18,6 +22,9 @@ from lima.audit.inventory import (
     ProfileBuildResult,
     ProfileInventoryOptions,
     build_repository_profile,
+)
+from lima.audit.inventory import (
+    is_secret_shaped_path as is_secret_shaped_path,
 )
 from lima.audit.ram import (
     GAP_AMBIGUOUS_DISPATCH,

@@ -29,6 +29,7 @@ import configparser
 import fnmatch
 import json
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ from lima.contracts.profile import (
 from lima.workspace import RepositoryWorkspace
 
 __all__ = [
+    "AdmissionSkipRecord",
     "GAP_BUDGET_EXHAUSTED",
     "GAP_INVENTORY_SKIPPED",
     "GAP_MANIFEST_PARSE_ERROR",
@@ -73,6 +75,7 @@ __all__ = [
     "ProfileBuildResult",
     "ProfileInventoryOptions",
     "build_repository_profile",
+    "is_secret_shaped_path",
 ]
 
 PROFILE_PROVENANCE_ANCHOR: Final[str] = "inventory"
@@ -99,6 +102,7 @@ _SKIP_REASONS: Final[tuple[str, ...]] = (
     "ignored-directory",
     "non-utf8",
     "sensitive-config",
+    "sensitive-filename",
     "symlink",
     "total-size-limit",
     "unreadable",
@@ -203,6 +207,128 @@ _MAX_CODE_ROLE_ASSIGNMENTS: Final[int] = 2048
 _DETERMINISTIC_CREATED_AT: Final[str] = "1970-01-01T00:00:00.000000Z"
 _INVENTORY_SCHEMA_NAME: Final[str] = "lima.repository-inventory"
 
+# --- IP-0022 F1: secret-shaped filename admission (Packet §3.1-§3.3) ---
+
+#: Frozen heuristic superset pattern (Packet §3.1, verbatim): keyword family,
+#: token prefixes, identity-key files, PEM header, JWT shape, high-entropy run.
+_SECRET_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i:(^|[_\-.])(token|secret|key|password|passwd|credential|apikey|api_key|private[_-]?key)s?([_\-.]|$))"
+    r"|sk_live_[0-9A-Za-z]+"
+    r"|sk_test_[0-9A-Za-z]+"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|ghp_[0-9A-Za-z]{36,}"
+    r"|gho_[0-9A-Za-z]{36,}"
+    r"|github_pat_[0-9A-Za-z_]{20,}"
+    r"|xox[baprs]-[0-9A-Za-z-]{10,}"
+    r"|id_(rsa|dsa|ecdsa|ed25519)([._\-][0-9A-Za-z_.\-]*)?"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}"
+    r"|(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
+)
+
+#: Internal shape-family classifiers (Packet §3.3 ``family`` bookkeeping only;
+#: never public output). Keep the two component literals in lockstep with the
+#: corresponding alternatives of ``_SECRET_FILENAME_PATTERN`` above; the
+#: remaining alternatives classify as ``token-prefix``.
+_SECRET_KEYWORD_FAMILY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i:(^|[_\-.])(token|secret|key|password|passwd|credential|apikey|api_key|private[_-]?key)s?([_\-.]|$))"
+)
+_SECRET_HIGH_ENTROPY_FAMILY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
+)
+
+_ADMISSION_SKIP_REASON: Final[str] = "sensitive-filename"
+
+
+def is_secret_shaped_path(path: str) -> bool:
+    """Heuristic superset check on the basename (DR-IP-0022-02 §1, DR-IP-0022-03 §2).
+
+    v4 segment semantics (Packet §3.1): every ``/``-separated segment of the
+    path (directory segments plus the basename) is searched; any hit is
+    ``True``. Non-``str`` and empty inputs are ``False``.
+    """
+
+    return _secret_shape_family(path) is not None
+
+
+def _secret_shape_family(path: str) -> str | None:
+    """Return the internal shape family of the first matching segment, if any."""
+
+    if not isinstance(path, str) or not path:
+        return None
+    for segment in path.split("/"):
+        if _SECRET_FILENAME_PATTERN.search(segment) is None:
+            continue
+        if _SECRET_KEYWORD_FAMILY_PATTERN.search(segment) is not None:
+            return "keyword"
+        if _SECRET_HIGH_ENTROPY_FAMILY_PATTERN.search(segment) is not None:
+            return "high-entropy"
+        return "token-prefix"
+    return None
+
+
+@dataclass(frozen=True)
+class AdmissionSkipRecord:
+    """One admission-time rejection trace (IP-0022 §3.3, R1 终案).
+
+    Carries only the scan-internal pre-filter sorted ordinal, the reason, and
+    the shape family -- never the raw filename and no basename-derived digest.
+    Not part of any wire payload.
+    """
+
+    index: int
+    reason: str
+    family: str
+
+
+@dataclass
+class _AdmissionSkips:
+    """Per-build admission-rejection accumulator (Packet §3.2/§3.3).
+
+    ``path_keys`` is the cross-hit dedupe set shared by the entrypoint path
+    filter and the code-role filter (DR-04 §1.2); script-name rejections use
+    their own key set (a name is not a path). Counts stay in a local mapping
+    that is merged into the existing skip-reason gap channel before gap
+    construction; the workspace inventory object itself is never mutated.
+    """
+
+    path_keys: set[str] = field(default_factory=set)
+    name_keys: set[str] = field(default_factory=set)
+    counts: dict[str, int] = field(default_factory=dict)
+    records: list[AdmissionSkipRecord] = field(default_factory=list)
+
+    def reject_path(self, relative_path: str, *, index: int) -> bool:
+        """Reject one secret-shaped candidate path; count once per path."""
+
+        family = _secret_shape_family(relative_path)
+        if family is None:
+            return False
+        if relative_path not in self.path_keys:
+            self.path_keys.add(relative_path)
+            self._record(index, family)
+        return True
+
+    def reject_name(self, name: str, *, index: int) -> bool:
+        """Reject one secret-shaped manifest script name (its own dedupe set)."""
+
+        family = _secret_shape_family(name)
+        if family is None:
+            return False
+        if name not in self.name_keys:
+            self.name_keys.add(name)
+            self._record(index, family)
+        return True
+
+    def _record(self, index: int, family: str) -> None:
+        self.counts[_ADMISSION_SKIP_REASON] = (
+            self.counts.get(_ADMISSION_SKIP_REASON, 0) + 1
+        )
+        self.records.append(
+            AdmissionSkipRecord(
+                index=index, reason=_ADMISSION_SKIP_REASON, family=family
+            )
+        )
+
 
 @dataclass(frozen=True)
 class ProfileBudgets:
@@ -233,6 +359,7 @@ class ProfileBuildResult:
     profile: RepositoryProfile
     envelope: ArtifactEnvelope
     provenance_anchor_ids: tuple[str, ...]
+    admission_skips: tuple[AdmissionSkipRecord, ...] = ()
 
 
 @dataclass
@@ -291,13 +418,19 @@ def _manifest_candidates(workspace: RepositoryWorkspace) -> list[str]:
 
 
 def _record_manifest_error(
-    gaps: list[tuple[str, str]], relative_path: str, error: Exception
+    gaps: list[tuple[str, str]], manifest_index: int, error: Exception
 ) -> None:
-    """Record one manifest failure without embedding the exception text."""
+    """Record one manifest failure identified by its stable sorted index.
+
+    IP-0022 (DR-04-A 定稿版): the detail carries the ``manifest-index``
+    identifier instead of the raw path, so sensitive-shaped manifest
+    filenames never enter the public gap surface.
+    """
+
     gaps.append(
         (
             GAP_MANIFEST_PARSE_ERROR,
-            f"manifest={relative_path}; error={type(error).__name__}",
+            f"manifest-index={manifest_index}; error={type(error).__name__}",
         )
     )
 
@@ -341,7 +474,7 @@ def _import_stems(text: str) -> set[str]:
 
 
 def _parse_pyproject(
-    relative_path: str,
+    manifest_index: int,
     text: str,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
@@ -349,7 +482,7 @@ def _parse_pyproject(
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
     summary.has_python_manifest = True
     project = data.get("project")
@@ -398,7 +531,7 @@ def _parse_pyproject(
 
 
 def _parse_setup_py(
-    relative_path: str,
+    manifest_index: int,
     text: str,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
@@ -407,7 +540,7 @@ def _parse_setup_py(
     try:
         ast.parse(text)
     except (SyntaxError, ValueError) as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
     # Layer-1 metadata is limited to parse success: no keyword arguments are
     # trusted from untrusted setup code and nothing beyond parsing happens.
@@ -416,7 +549,7 @@ def _parse_setup_py(
 
 
 def _parse_setup_cfg(
-    relative_path: str,
+    manifest_index: int,
     text: str,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
@@ -425,13 +558,13 @@ def _parse_setup_cfg(
     try:
         parser.read_string(text)
     except configparser.Error as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
     summary.has_python_manifest = True
 
 
 def _parse_package_json(
-    relative_path: str,
+    manifest_index: int,
     text: str,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
@@ -439,7 +572,7 @@ def _parse_package_json(
     try:
         data = json.loads(text)
     except ValueError as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
     if isinstance(data, dict):
         summary.package_managers.add("npm")
@@ -447,7 +580,7 @@ def _parse_package_json(
 
 
 def _parse_cargo_toml(
-    relative_path: str,
+    manifest_index: int,
     text: str,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
@@ -455,7 +588,7 @@ def _parse_cargo_toml(
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
     summary.declared_languages.add("Rust")
     summary.package_managers.add("cargo")
@@ -464,21 +597,22 @@ def _parse_cargo_toml(
 
 def _parse_manifest(
     relative_path: str,
+    manifest_index: int,
     text: str,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
 ) -> None:
     name = relative_path.rsplit("/", 1)[-1]
     if name == "pyproject.toml":
-        _parse_pyproject(relative_path, text, summary, gaps)
+        _parse_pyproject(manifest_index, text, summary, gaps)
     elif name == "setup.py":
-        _parse_setup_py(relative_path, text, summary, gaps)
+        _parse_setup_py(manifest_index, text, summary, gaps)
     elif name == "setup.cfg":
-        _parse_setup_cfg(relative_path, text, summary, gaps)
+        _parse_setup_cfg(manifest_index, text, summary, gaps)
     elif name == "package.json":
-        _parse_package_json(relative_path, text, summary, gaps)
+        _parse_package_json(manifest_index, text, summary, gaps)
     elif name == "Cargo.toml":
-        _parse_cargo_toml(relative_path, text, summary, gaps)
+        _parse_cargo_toml(manifest_index, text, summary, gaps)
     elif name == "go.mod":
         summary.declared_languages.add("Go")
         summary.package_managers.add("go-modules")
@@ -491,6 +625,7 @@ def _parse_manifest(
 def _load_one_manifest(
     workspace: RepositoryWorkspace,
     relative_path: str,
+    manifest_index: int,
     budgets: ProfileBudgets,
     summary: _ManifestSummary,
     gaps: list[tuple[str, str]],
@@ -499,13 +634,13 @@ def _load_one_manifest(
         path = workspace.absolute_file(relative_path)
         size = path.stat().st_size
     except OSError as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
     if size > budgets.manifest_max_bytes:
         gaps.append(
             (
                 GAP_BUDGET_EXHAUSTED,
-                f"manifest={relative_path}; bytes={size}; "
+                f"manifest-index={manifest_index}; bytes={size}; "
                 f"limit={budgets.manifest_max_bytes}",
             )
         )
@@ -513,9 +648,9 @@ def _load_one_manifest(
     try:
         text = workspace.read_text(relative_path)
     except (OSError, ValueError) as error:
-        _record_manifest_error(gaps, relative_path, error)
+        _record_manifest_error(gaps, manifest_index, error)
         return
-    _parse_manifest(relative_path, text, summary, gaps)
+    _parse_manifest(relative_path, manifest_index, text, summary, gaps)
 
 
 def _load_manifests(
@@ -532,8 +667,8 @@ def _load_manifests(
             (GAP_BUDGET_EXHAUSTED, f"reason=manifest-file-limit; count={overflow}")
         )
         ordered = ordered[: budgets.max_manifest_files]
-    for relative_path in ordered:
-        _load_one_manifest(workspace, relative_path, budgets, summary, gaps)
+    for manifest_index, relative_path in enumerate(ordered):
+        _load_one_manifest(workspace, relative_path, manifest_index, budgets, summary, gaps)
     return summary, gaps
 
 
@@ -616,14 +751,23 @@ def _resolve_script_target(target: str, inventoried: frozenset[str]) -> str | No
 
 
 def _build_entrypoints(
-    summary: _ManifestSummary, inventoried: frozenset[str]
+    summary: _ManifestSummary,
+    inventoried: frozenset[str],
+    admission: _AdmissionSkips,
 ) -> tuple[list[AttackSurfaceEntry], frozenset[str]]:
     entries: list[AttackSurfaceEntry] = []
     targets: set[str] = set()
     if summary.scripts:
-        for name in sorted(summary.scripts):
+        for index, name in enumerate(sorted(summary.scripts)):
+            # IP-0022 name face (v5, X7): the script NAME is an arbitrary TOML
+            # string key and surfaces verbatim as entrypoints[i].symbol.
+            if admission.reject_name(name, index=index):
+                continue
             resolved = _resolve_script_target(summary.scripts[name], inventoried)
             if resolved is None:
+                continue
+            # IP-0022 path face: secret-shaped parse targets stay out.
+            if admission.reject_path(resolved, index=index):
                 continue
             targets.add(resolved)
             entries.append(
@@ -635,16 +779,22 @@ def _build_entrypoints(
                 )
             )
     else:
-        for relative_path in sorted(_ROOT_ENTRY_CANDIDATES):
-            if relative_path in inventoried:
-                entries.append(
-                    AttackSurfaceEntry(
-                        path=relative_path,
-                        symbol=None,
-                        reason_codes=("ENTRY_ROOT_CONVENTION",),
-                        source_artifact_ids=(PROFILE_PROVENANCE_ANCHOR,),
-                    )
+        present = sorted(
+            relative_path
+            for relative_path in _ROOT_ENTRY_CANDIDATES
+            if relative_path in inventoried
+        )
+        for index, relative_path in enumerate(present):
+            if admission.reject_path(relative_path, index=index):
+                continue
+            entries.append(
+                AttackSurfaceEntry(
+                    path=relative_path,
+                    symbol=None,
+                    reason_codes=("ENTRY_ROOT_CONVENTION",),
+                    source_artifact_ids=(PROFILE_PROVENANCE_ANCHOR,),
                 )
+            )
     entries.sort(key=lambda entry: (entry.path, entry.symbol or ""))
     return entries, frozenset(targets)
 
@@ -716,11 +866,17 @@ def _support_level_and_gaps(
 
 
 def _skip_reason_gaps(
-    inventory, has_languages: bool
+    inventory, has_languages: bool, admission_counts: Mapping[str, int]
 ) -> list[tuple[str, str]]:
     gaps: list[tuple[str, str]] = []
-    for reason in sorted(inventory.skipped):
-        count = inventory.skipped[reason]
+    # IP-0022 (§3.3): admission rejections ride the existing skip-reason gap
+    # channel; their counts are merged here, after every filter point has
+    # written and before any gap is constructed.
+    counts: dict[str, int] = dict(inventory.skipped)
+    for reason, count in admission_counts.items():
+        counts[reason] = counts.get(reason, 0) + count
+    for reason in sorted(counts):
+        count = counts[reason]
         detail = SKIP_REASON_TO_GAP_DETAIL[reason].format(reason=reason, count=count)
         if reason in _BUDGET_SKIP_REASONS:
             gaps.append((GAP_BUDGET_EXHAUSTED, detail))
@@ -773,9 +929,14 @@ def _code_role_assignments(
     evidence: dict[str, set[str]],
     entry_targets: frozenset[str],
     gaps: list[tuple[str, str]],
+    admission: _AdmissionSkips,
 ) -> tuple[CodeRoleAssignment, ...]:
     assignments: list[CodeRoleAssignment] = []
-    for relative_path in sorted(evidence):
+    for index, relative_path in enumerate(sorted(evidence)):
+        # IP-0022 (G1/X1): secret-shaped paths never become code roles; the
+        # shared path-keyed dedupe set keeps the count once per path.
+        if admission.reject_path(relative_path, index=index):
+            continue
         reasons = evidence[relative_path]
         if relative_path in entry_targets:
             reasons.add("ENTRY_SCRIPT_DECLARED")
@@ -923,6 +1084,7 @@ def build_repository_profile(
 
     inventory = workspace.inventory()
     gaps: list[tuple[str, str]] = []
+    admission = _AdmissionSkips()
     manifest_rels = _manifest_candidates(workspace)
     summary, manifest_gaps = _load_manifests(workspace, manifest_rels, budgets)
     gaps.extend(manifest_gaps)
@@ -936,7 +1098,7 @@ def build_repository_profile(
             reasons.add("NOT_IMPORTED_BY_PROD")
 
     inventoried = frozenset(item.path for item in inventory.files)
-    entrypoints, entry_targets = _build_entrypoints(summary, inventoried)
+    entrypoints, entry_targets = _build_entrypoints(summary, inventoried, admission)
 
     languages = _language_declarations(inventory.files, summary)
     language_names = frozenset(declaration.name for declaration in languages)
@@ -952,8 +1114,12 @@ def build_repository_profile(
 
     kinds = _repository_kinds(inventory.files, summary, language_names, manifest_rels)
     support_level = _support_level_and_gaps(language_names, summary, gaps)
-    gaps.extend(_skip_reason_gaps(inventory, bool(language_names)))
-    code_roles = _code_role_assignments(evidence, entry_targets, gaps)
+    # IP-0022 ordering invariant (§3.3): every admission skip write happens
+    # before the skip-reason gaps are constructed. The code-role filter is
+    # therefore evaluated first; _coverage_gaps sorts all gaps, so the final
+    # public ordering is unchanged.
+    code_roles = _code_role_assignments(evidence, entry_targets, gaps, admission)
+    gaps.extend(_skip_reason_gaps(inventory, bool(language_names), admission.counts))
 
     file_count = len(inventory.files)
     total_bytes = inventory.total_bytes
@@ -1008,4 +1174,5 @@ def build_repository_profile(
         profile=profile,
         envelope=envelope,
         provenance_anchor_ids=(PROFILE_PROVENANCE_ANCHOR,),
+        admission_skips=tuple(admission.records),
     )

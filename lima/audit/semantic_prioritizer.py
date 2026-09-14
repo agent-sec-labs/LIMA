@@ -719,6 +719,25 @@ def build_semantic_top_n(
     if model_client is not None and not callable(getattr(model_client, "complete", None)):
         raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE)
 
+    # IP-0022 entrance narrowing (DR-04-B v3, RESOLVED-MAINTAINER, mandatory):
+    # a literal symbol == "-" on any of the five frozen fact inventories is
+    # rejected here, at the public entrance, so every accepted input keeps
+    # round-tripping through ram_wire_payload/validate (the wire layer treats
+    # a '-' as an anomaly because the entrance already refused it).
+    for section_name in (
+        "entrypoints",
+        "external_sources",
+        "sensitive_sinks",
+        "trust_boundaries",
+        "unresolved_edges",
+    ):
+        for index, entry in enumerate(getattr(facts, section_name)):
+            if entry.symbol == "-":
+                raise ContractError(
+                    ContractErrorCode.INVALID_FIELD_VALUE,
+                    f"$.facts.{section_name}[{index}].symbol",
+                )
+
     candidates = _collect_candidates(facts, resolved.weights)
     ordered = sorted(candidates, key=_sort_key)
     total_candidates = len(ordered)

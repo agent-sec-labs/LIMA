@@ -316,8 +316,7 @@ class ManifestLayerTests(InventoryTestBase):
             result = self.build(workspace)
         details = self.gap_details(result, "MANIFEST_PARSE_ERROR")
         self.assertEqual(len(details), 1)
-        self.assertIn("pyproject.toml", details[0])
-        self.assertIn("TOMLDecodeError", details[0])
+        self.assertIn("manifest-index=0; error=TOMLDecodeError", details[0])
         self.assertEqual(result.profile.support_level.value, "partial")
         self.assertIn("Python", self.names(result.profile.languages))
 
@@ -330,8 +329,7 @@ class ManifestLayerTests(InventoryTestBase):
             result = self.build(workspace)
         details = self.gap_details(result, "MANIFEST_PARSE_ERROR")
         self.assertEqual(len(details), 1)
-        self.assertIn("setup.py", details[0])
-        self.assertIn("SyntaxError", details[0])
+        self.assertIn("manifest-index=0; error=SyntaxError", details[0])
         self.assertIn("Python", self.names(result.profile.languages))
 
     def test_manifest_single_file_budget_gap(self) -> None:
@@ -349,7 +347,8 @@ class ManifestLayerTests(InventoryTestBase):
             result = self.build(workspace, options=options)
         details = self.gap_details(result, "BUDGET_EXHAUSTED")
         self.assertEqual(len(details), 1)
-        self.assertIn("pyproject.toml", details[0])
+        self.assertIn("manifest-index=0; bytes=", details[0])
+        self.assertIn("; limit=32", details[0])
         self.assertEqual(self.gap_details(result, "MANIFEST_PARSE_ERROR"), [])
         self.assertEqual(self.names(result.profile.build_systems), [])
 
@@ -496,7 +495,13 @@ class PublicApiSurfaceTests(InventoryTestBase):
         self.assertEqual(options.budgets.manifest_max_bytes, 262_144)
         result_fields = audit.ProfileBuildResult.__dataclass_fields__
         self.assertEqual(
-            set(result_fields), {"profile", "envelope", "provenance_anchor_ids"}
+            set(result_fields),
+            {"profile", "envelope", "provenance_anchor_ids", "admission_skips"},
+        )
+        self.assertEqual(
+            result_fields["admission_skips"].default,
+            (),
+            "admission_skips must default to the empty tuple (R1 final ruling)",
         )
 
 

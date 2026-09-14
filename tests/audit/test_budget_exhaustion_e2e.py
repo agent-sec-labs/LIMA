@@ -84,7 +84,7 @@ class Layer1ProfileBudgetTests(unittest.TestCase):
         pairs = profile_gap_pairs(files, budgets)
         expected = (
             "BUDGET_EXHAUSTED",
-            f"manifest=pyproject.toml; bytes={len(content.encode('utf-8'))}; limit=16",
+            f"manifest-index=0; bytes={len(content.encode('utf-8'))}; limit=16",
         )
         self.assertIn(expected, pairs)
 

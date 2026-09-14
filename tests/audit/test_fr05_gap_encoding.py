@@ -48,6 +48,7 @@ FROZEN_SKIP_REASONS: frozenset[str] = frozenset(
         "ignored-directory",
         "non-utf8",
         "sensitive-config",
+        "sensitive-filename",
         "symlink",
         "total-size-limit",
         "unreadable",
@@ -100,14 +101,14 @@ class ManifestParseErrorTests(unittest.TestCase):
     def test_broken_pyproject_toml_yields_frozen_code_and_detail(self) -> None:
         gaps = profile_gaps({"pyproject.toml": "[[[not toml\n", "a.py": "X = 1\n"})
         self.assertIn(
-            ("MANIFEST_PARSE_ERROR", "manifest=pyproject.toml; error=TOMLDecodeError"),
+            ("MANIFEST_PARSE_ERROR", "manifest-index=0; error=TOMLDecodeError"),
             gaps,
         )
 
     def test_broken_package_json_yields_frozen_code_and_detail(self) -> None:
         gaps = profile_gaps({"package.json": "{not json", "a.py": "X = 1\n"})
         self.assertIn(
-            ("MANIFEST_PARSE_ERROR", "manifest=package.json; error=JSONDecodeError"),
+            ("MANIFEST_PARSE_ERROR", "manifest-index=0; error=JSONDecodeError"),
             gaps,
         )
 
@@ -118,7 +119,7 @@ class ManifestParseErrorTests(unittest.TestCase):
         self.assertIn(
             (
                 "MANIFEST_PARSE_ERROR",
-                "manifest=pkg/pyproject.toml; error=TOMLDecodeError",
+                "manifest-index=0; error=TOMLDecodeError",
             ),
             gaps,
         )

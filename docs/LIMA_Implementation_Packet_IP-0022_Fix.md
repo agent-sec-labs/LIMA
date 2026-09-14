@@ -2,9 +2,9 @@
 
 > 文档类型：Implementation Packet（P&V 制作）
 >
-> Packet 版本：`IP-0022-PACKET/v5`
+> Packet 版本：`IP-0022-PACKET/v6`（正式冻结版，PKT-IP-0022-FREEZE）
 >
-> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；v4（PKT-IP-0022-XAUDIT，DR-IP-0022-04）；**v5（2026-09-13，PKT-IP-0022-R4，Assignment `IP-0022-PV-R4/v1`：Maintainer 复审三问题一次性修订——①DR-04-B 公式重写（symbol `'-'` 槽位消歧，§3.5）+ 生产链定源（§3.5 附源追踪）+ X4-7 负例；②`_red_proof` 全量底稿纳入提交（§4a，可从 PR 原样复现，RED D1'''' = 37 failed / 3 passed，§9.5）；③script **名称**准入过滤（entrypoints.symbol 出口，§3.2.4）+ X7 负例 + X5-2 补公开 coverage gap 计数断言；DR-04-A' 撤回落 Packet（§3.2 删第四过滤点，X3 锚定 A 定稿版）**；**v5-R5 修订（2026-09-13，PKT-IP-0022-R5，Assignment `IP-0022-PV-R5/v1`：DR-04-B 升 v3——公共 API 往返契约（入口域收窄 + 类型化拒绝，§3.5 重写）；新增 `_red_proof/test_ip_0022_r5_red.py`（X8-0 往返 GREEN 锚 + X8-1/X8-2 入口负例）与 `probe_r5.py`（P-R5-1/2/3 亲验）；RED D1''''' = 39 failed / 4 passed（§9.6）；DR-04-A 部分不动**）；**v5-R6 修订（2026-09-13，PKT-IP-0022-R6，Assignment `IP-0022-PV-R6/v1`：DR-04-B v3 获 Maintainer 批准裁定 1+2（RESOLVED-MAINTAINER），入口域收窄 + wire 消歧**转为 mandatory**（§3.5 门控解除）；X8-1 按 Maintainer 冻结测试要求展开为五类 facts 清单各一例（准确错误码 + 准确字段位置断言）；RED D1'''''' = 43 failed / 4 passed（§9.7）；兼容性措辞定稿（§3.5）**）。
+> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；v4（PKT-IP-0022-XAUDIT，DR-IP-0022-04）；**v5（2026-09-13，PKT-IP-0022-R4，Assignment `IP-0022-PV-R4/v1`：Maintainer 复审三问题一次性修订——①DR-04-B 公式重写（symbol `'-'` 槽位消歧，§3.5）+ 生产链定源（§3.5 附源追踪）+ X4-7 负例；②`_red_proof` 全量底稿纳入提交（§4a，可从 PR 原样复现，RED D1'''' = 37 failed / 3 passed，§9.5）；③script **名称**准入过滤（entrypoints.symbol 出口，§3.2.4）+ X7 负例 + X5-2 补公开 coverage gap 计数断言；DR-04-A' 撤回落 Packet（§3.2 删第四过滤点，X3 锚定 A 定稿版）**；**v5-R5 修订（2026-09-13，PKT-IP-0022-R5，Assignment `IP-0022-PV-R5/v1`：DR-04-B 升 v3——公共 API 往返契约（入口域收窄 + 类型化拒绝，§3.5 重写）；新增 `_red_proof/test_ip_0022_r5_red.py`（X8-0 往返 GREEN 锚 + X8-1/X8-2 入口负例）与 `probe_r5.py`（P-R5-1/2/3 亲验）；RED D1''''' = 39 failed / 4 passed（§9.6）；DR-04-A 部分不动**）；**v5-R6 修订（2026-09-13，PKT-IP-0022-R6，Assignment `IP-0022-PV-R6/v1`：DR-04-B v3 获 Maintainer 批准裁定 1+2（RESOLVED-MAINTAINER），入口域收窄 + wire 消歧**转为 mandatory**（§3.5 门控解除）；X8-1 按 Maintainer 冻结测试要求展开为五类 facts 清单各一例（准确错误码 + 准确字段位置断言）；RED D1'''''' = 43 failed / 4 passed（§9.7）；兼容性措辞定稿（§3.5）**）；**v6-FREEZE（2026-09-13/14，PKT-IP-0022-FREEZE，Assignment `IP-0022-PV-FREEZE/v1`：正式测试冻结版——①已知证据缺陷修复（X8-1c 结构有效构造 + DR-04-A 多下标用例，§6a）；②单次流程例外声明（§0.1）；③`_red_proof` 证据索引（SHA-256 清单，§4b）；④冻结测试文件设计定稿 `tests/audit/test_ip_0022_fix.py`（§4c）；⑤DR 授权冻结测试面修订落地记录（fr05/budget_exhaustion manifest-index 锚定 + MINIMAL_PAYLOAD 五摘要迁移，§4d）**）。
 >
 > 状态：`READY-FOR-CODE`（TBD = 0；DR-04-B **已获 Maintainer 批准（RESOLVED-MAINTAINER），其条目为 mandatory**；DR-04-A（定稿版）**待重审**——X3-1/X3-2 随其裁定计入，未获批前不属 mandatory——见 DR-IP-0022-04 §2）
 >
@@ -34,6 +34,10 @@ Issue closure impact：PARTIAL（解除两项关闭前阻断；Issue 关闭权�
 Upstream IP/PR/merge commits：IP-0016（fd219724）、IP-0018（cc17662）、IP-0019（e000e6f）、IP-0020（#176）、IP-0021（30bdfaa，#179）；PR #180 两次驳回（修订对象）
 Upstream ruling：ENTRY60-CLOSURE-1/v1 + DR-IP-0022-02/v1 + DR-IP-0022-03（已否决路线见 §12）
 ```
+
+## 0.1 单次流程例外声明（仅 IP-0022，不推广）
+
+经 Maintainer 端到端授权并已入 Issue #60 Ledger（2026-09-13）：**仅本轮 IP-0022**，Packet 终版修订（docs commit）、正式 Frozen Test Commit（tests commit）、Implementation 提交按序留在**同一 PR 链**，免除"D2 须待 Packet PR 合并后另开分支"的常规时序。约束：冻结提交仍须先于实现提交并对基线状态证明 RED（§9.8）；冻结后测试只读，禁删弱断言，测试错误走重冻结留痕；本例外不构成后续 IP 的先例。
 
 ## Design Input Manifest
 
@@ -158,9 +162,9 @@ def is_secret_shaped_path(path: str) -> bool:
 
 | 类别 | 文件 |
 |---|---|
-| Add | `tests/audit/test_ip_0022_fix.py`（D2 冻结落库；D1..D1'''' 已 `_red_proof` RED）；**`_red_proof/` 全量底稿（v5 起纳入提交，见 §4a）** |
+| Add | `tests/audit/test_ip_0022_fix.py`（D2 冻结落库 = v6 Frozen Test Commit；底稿 `_red_proof/` 随该 commit 删除，证据索引见 §4b） |
 | Modify | `lima/audit/inventory.py`（§3.1-§3.4 含 `_code_role_assignments` 过滤 + `AdmissionSkipRecord`）、`lima/audit/ram.py`（§3.2.3 过滤 + `admission_skips`）、`lima/audit/ram_schema.py`（§3.5）、`lima/audit/__init__.py`（导出） |
-| Modify（DR 授权冻结测试面修订，D2） | `tests/audit/test_fr05_gap_encoding.py`（扩词）、`tests/audit/test_ram_schema.py`（`MINIMAL_PAYLOAD` 四 digest 自洽迁移，用例 @:223-224；摘要检查末位约束 DR-01 R-2） |
+| Modify（DR 授权冻结测试面修订，D2/v6 落地） | `tests/audit/test_fr05_gap_encoding.py`（扩词 + L103/110/121 manifest-index 锚定）、`tests/audit/test_budget_exhaustion_e2e.py`（L87 manifest-index 锚定）、`tests/audit/test_ram_schema.py`（`MINIMAL_PAYLOAD` 五 digest 自洽迁移；摘要检查末位约束 DR-01 R-2；误伤核对表 §4d） |
 | Read-only | 其余 `tests/**`、`schemas/**`、`docs/**` 既有文件、`lima/**` 其余 |
 | Must-not-modify | `lima/contracts/**`、`schemas/v4/version_compatibility_matrix.json`、`lima/workspace.py`、`#94` 轨道一切（PR #178 零交集） |
 
@@ -170,6 +174,33 @@ def is_secret_shaped_path(path: str) -> bool:
 - **性质声明**：`_red_proof/` 是 **D2 冻结测试的底稿（draft-of-freeze）**，不是运行时产品代码。pytest 配置 `testpaths=["tests"]`（pyproject.toml:41）不含 `_red_proof`，CI 与常规验收命令均不收集、不执行；其内容在 D2 阶段逐例迁入 `tests/audit/test_ip_0022_fix.py` 正式冻结。
 - **管理办法**：D2 迁移完成并经独立验证后，`_red_proof/` 整体归档（移出仓库或在独立 commit 中删除，由 Coordinator 在 D2 验收时裁定）；迁移前保持只读（P&V 冻结底稿，Implementation 不得修改）。
 - **证据索引（可复现命令与前置条件）**：任意 clone PR 分支（head SHA 见 §9.5-§9.7）→ `pip install -r requirements.txt`（无网络外呼，测试全部本地）→ `python -m pytest _red_proof -q` → 预期 `43 failed, 4 passed`；回归锚 `python -m pytest tests/audit tests/contracts -q` → `801 passed`；`python -m pytest tests/audit/test_golden_matrix.py -q` → `15 passed`；探针 `python _red_proof/probe_r4.py`、`python _red_proof/probe_xaudit.py`、`PYTHONPATH=. python _red_proof/probe_r5.py` → 输出与 §9.5-§9.7 摘要逐行一致。
+
+### 4b. `_red_proof/` 证据索引（v6 冻结轮；目录随 Frozen Test Commit 删除，追溯凭本清单与提交历史）
+
+底稿使命于 D2 正式冻结时完成，`_red_proof/` 在 Frozen Test Commit 中整体删除（替代 §4a"归档裁定"路径，Maintainer 派发包指定）；可从提交历史（分支 `docs/ip-0022-packet`，commit 10f1ae6 及此前各轮）原样取回，各文件 SHA-256（@10f1ae6，P&V 亲算 `sha256sum`）：
+
+| 文件 | SHA-256 | 用途 |
+|---|---|---|
+| `_red_proof/test_ip_0022_fix_red.py` | `c122b40e9cbf452dd759fdca4dccc70476147070e563fcf4f21d1ba059c09587` | D1'' 23 例底稿（M/G 系） |
+| `_red_proof/test_ip_0022_xaudit_red.py` | `de17c980d90cf9cc0b7278cbdc8b66a98682085fff1a201fa7ffa5011ce42b15` | X 系 14 例底稿（D1''''/R4） |
+| `_red_proof/test_ip_0022_r5_red.py` | `d0767ecb45f35e5dd4aed2b6b7f5473d9746dc7eed255e0b32a9f1c3e7d64f9f` | R5/R6 X8 系底稿 |
+| `_red_proof/probe_xaudit.py` | `53a9bf2c6d118a00d76fefb5cdc38d816472f1be2637cba9a327b99828b9acf8` | XAUDIT 探针 |
+| `_red_proof/probe_r4.py` | `4af5aa9198269c37bad58f3448ed41a980952138f42efe9b92e211a93ce0d605` | R4 探针（P-R4-1..4） |
+| `_red_proof/probe_r5.py` | `c6223b55f34ad03da4e9691a0da37462d287f353eb5ba5a46c6a4c74e6dce514` | R5 探针（P-R5-1..3） |
+
+勘误记录（v6，如实）：R6 版 §9.7 曾称"无 arrange 型失败"，**对 X8-1c 不成立**——其构造对 `sensitive_sinks` 追加条目未同步平行规则表（`sink_rule_ids`/`sink_cwes`），`_collect_candidates` 先抛 `ValueError: sensitive_sinks must be parallel to sink_rule_ids`（prioritizer:530），签名系 arrange 型而非目标缺失型。v6 冻结版已按"结构有效构造"修正（§6a-①）；`unresolved_edges` 无平行结构（亲核 ram.py PythonRamFacts 字段表），无需处理。
+
+### 4c. 冻结测试文件设计定稿（v6）
+
+`tests/audit/test_ip_0022_fix.py`（新增，Add）：由 §4b 三份底稿合并整理为正式冻结测试，覆盖 §6 全矩阵（X1-X8 + R3 + M17/M17s + 五清单展开 + DR-04-A 多下标用例 + 结构有效构造修正）。预期用例计数：**51 例 = 47 RED + 4 GREEN 锚**（X4-0、X6×2、X8-0；D1'''''' 43 RED 基础上 +M18 +R3 +X3-3/X3-4 四例 RED——M18/R3 系 §6 注"scratch 承担"项补齐为可执行用例）。逐例失败签名留档见 §9.8。
+
+### 4d. DR 授权冻结测试面修订落地记录（v6，Maintainer 派发包 PKT-IP-0022-FREEZE 授权；DR-04-A/-03/-01 授权链在案）
+
+1. `tests/audit/test_fr05_gap_encoding.py`：`FROZEN_SKIP_REASONS` 扩第 11 词 `sensitive-filename`（双侧词汇表等值断言保持强度）；L103/110/121 三处 `manifest=` 锚定断言改 `manifest-index=`（按 DR-04-A 定稿版模板：唯一 manifest 候选 → 下标 0）。
+2. `tests/audit/test_budget_exhaustion_e2e.py`：L87 `manifest=pyproject.toml; bytes=…` 改 `manifest-index=0; bytes=…`（同上模板）。
+   - 注：上述 manifest-index 锚定属 **DR-04-A 定稿版（待重审）的预置授权修订**——若 DR-04-A 重审被否决，此四处锚定须随重冻结回滚；X3 系负例同受门控。
+3. `tests/audit/test_ram_schema.py`：`MINIMAL_PAYLOAD` identity **五摘要自洽迁移**（ram/config/result/model/wire 全真值，以真实重算函数构造：`compute_content_digest(payload["ram"])`、`semantic_config_digest(SemanticOptions())`、`_result_digest(…)`、`compute_content_digest(model_id/prompt_template)`、`ram_wire_digest(payload)`；`SemanticOptions()` 默认值与 payload `build.semantic` 逐字段亲核一致）；全零占位拒绝负例由冻结文件 `test_ip_0022_fix.py` 独立承载（对迁移后 fixture 整体置零构造）。
+4. **误伤核对表（v6 亲核，"其余断言不因迁移而误伤通过"）**：`test_ram_schema.py` 其余 34 用例中，负例 22 个全部为结构/词表/rank/provenance 类错构——迁移后仍因**预期错误**失败（摘要检查居序列末位，DR-01 R-2 末位约束保障不前置）；`test_identity_digest_not_hex64_rejected` 的非 hex64 形状仍先于摘要比对失败；`test_minimal_payload_validates` 迁移后基线（无摘要检查）与实现后均绿（迁移兼容锚）。`tests/audit` 既有用例（不含新冻结文件 `test_ip_0022_fix.py`，其 RED 属预期）复跑全绿（§9.8）。
 
 ## 5. 行为约束与恢复要求
 
@@ -198,6 +229,7 @@ RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 | X1 | sensitive_directory_segment_excluded_from_code_roles | 敏感**目录段**（tests/secrets/anything.py）不入 code_roles（v4） |
 | X2 | sensitive_directory_segment_excluded_from_ram | 敏感目录段（secrets/danger.py）不入 RAM 任何清单（v4） |
 | X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径，且携带 `manifest-index=<i>` 稳定标识（**【DR-04-A 定稿版门控，待重审】**；A' 已撤回；RED 已证 main 泄漏；X3-2 经 XAUDIT-FIX 勘正为目标缺失签名） |
+| X3-3/X3-4 | manifest_index_true_sorted_ordinal（v6 新增） | 多 manifest 候选仓库断言**真实排序下标**（敏感 manifest = index 1，index 0 条目并存；解析失败 + 超限各一例）——防"全部写 0"实现（§6a-②；同受 DR-04-A 门控） |
 | X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B 已批准（裁定 2），mandatory】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
 | X4-4/5/6 | wire_path_segment_rules | 空段（a//b）、`.` 段（./x）、Cc 控制字符 path 拒绝（v4 补齐 #58 契约两处弱于） |
 | X4-7 | wire_candidate_id_none_dash_disambiguation | `symbol` None↔`'-'` 互换篡改（candidate_id 与五摘要均不变）被拒——`symbol == "-"` 字面值 wire 层拒绝，槽位 `'-'` ≡ `symbol is None`（v5 新增；**R5 定位为 wire 层负例，与入口负例 X8-1/2 分工**；RED：main 接受该翻转） |
@@ -212,6 +244,11 @@ RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 | R3 | goldens 零命中核验锚 | 启发式（含 `id_` 族）对 golden 全部路径/repo_shapes 文件名零命中 |
 
 注：M18/R3/G2-P/X4-0/X6 在 scratch 集中以实证与制作期扫描承担，D2 冻结集须补齐为可执行用例。
+
+### 6a. v6 冻结轮已知证据缺陷修复（Maintainer 派发指令 ①②，写入测试矩阵）
+
+1. **X8-1c（及同类）结构有效构造**：向 `sensitive_sinks` 注入 `symbol='-'` 条目时，**三平行元组同步追加**——`sink_rule_ids += ("FLOW-COMMAND",)`、`sink_cwes += ("CWE-78",)`（`key_flows` 按 `ordinal < len` 守卫无需同步），保证 `_collect_candidates` 不因平行性 `ValueError` 先抛（R6 版底稿缺陷，§4b 勘误）；`unresolved_edges` 等其余清单无平行结构（亲核）。修正后逐例核对失败签名 = `ContractError not raised`（目标缺失）。
+2. **DR-04-A 多下标用例（新增 X3-3/X3-4，防"全部写 0"的错误实现通过）**：至少两个 manifest 候选的仓库，断言**真实 sorted 排序下标**——X3-3（解析/读取失败）：`Cargo.toml`（坏 TOML，index 0）+ `requirements-ghp_<a*36>.txt`（非 UTF-8，index 1），断言敏感 manifest 的 detail 为 `manifest-index=1; error=UnicodeDecodeError` 且 index 0 条目并存；X3-4（超限）：同候选集 + `manifest_max_bytes=1`，断言 `manifest-index=1; bytes=…; limit=1`（及 index 0 并存）且任何 detail 无 `ghp_` 子串。下标源 = `_manifest_candidates(workspace)` 整体 `sorted()` 0 基枚举（DR-04-A 定稿版）。
 
 ## 9.4 RED 证明（D1'''，v4）
 
@@ -247,7 +284,20 @@ RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 - **X4 系无退化复核**：X4-1/2/3（绑定负例）与 X4-0（冻结模式锚）签名与 R5 逐项一致，无退化。
 - 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed（R6 本轮工作树亲跑；R6 增量为纯构造断言，平台无关）。
 
-## 7. 缺口查证结论（v1 结论维持，行号经 R-1 勘正）
+## 9.8 正式冻结 RED 证明（D2-FREEZE / PKT-IP-0022-FREEZE，v6）
+
+- **冻结文件**：`tests/audit/test_ip_0022_fix.py`（51 例 = 47 RED + 4 GREEN 锚）。命令：`python -m unittest tests.audit.test_ip_0022_fix -v`（及 `python -m pytest tests/audit/test_ip_0022_fix.py -q`）。结果：**47 failed / 4 passed**（D1'''''' 43 RED + M18 + R3 + X3-3 + X3-4）。
+- **逐例失败签名分类（本轮亲验留档，全部目标缺失型，无 arrange 型）**：
+  - 符号缺失（AttributeError，2 例 + R3 同类 1 例）：M1'/R3 `module 'lima.audit.inventory' has no attribute 'is_secret_shaped_path'`；M18 `module 'lima.audit.ram_schema' has no attribute 'ram_facts_digest_from_wire'`。
+  - ContractError not raised（F2 路径/摘要/绑定 + X4 系 + X8 系 + G2 系，计 22 例）：M11-M17s、X4-1..7、X8-1a..e、X8-2、G2-1/G2-2。**X8-1c 修正后签名 = `ContractError not raised`**（旧底稿的平行性 `ValueError` 已消除，§6a-① 亲证）；X8-1a..e/X8-2 同时断言 `code is INVALID_FIELD_VALUE` 与准确 `field_path`。
+  - 泄漏型（`True is not false` / `unexpectedly found`，计 14 例）：M2-M4 三形状（ghp_/AKIA/eyJ 进 RAM facts）、M7 script 目标、M8 Top-N、M9 prompt、M10 wire、G1-1/G1-2、X1/X2、X7-1（含 `['safe_cli', 'token_FAKESECRET123']` 原文证据）、X3-1/X3-2（`manifest=token/pyproject.toml; error=UnicodeDecodeError` 等原文泄漏）。
+  - 计数/留痕缺失（`[] is not true` / `0 != 1` / `unexpectedly None`，计 6 例）：M5 词汇表、M6/G1-3/X5-1/X5-2/X7-2 typed gap 缺失、X5-2 `admission_skips` 为 None。
+  - 真实下标断言（X3-3/X3-4）：`'manifest-index=1; error=UnicodeDecodeError' not found in ['manifest=Cargo.toml; error=TOMLDecodeError', 'manifest=requirements-ghp_a….txt; error=UnicodeDecodeError']`——敏感 manifest 在 sorted 候选中确为 index 1（排序亲验），防"全 0"实现。
+  - 4 个通过项均为 GREEN 锚（X4-0 冻结模式锚、X6×2 迁移兼容锚、X8-0 真实链往返锚），冻结后禁删禁弱化。
+- **授权修订后既有面状态（如实记录，含与派发包字面差异）**：`python -m pytest tests/audit -q`（不含新冻结文件）= **5 failed / 179 passed**——5 个失败**全部**是 §4d 授权锚定/扩词编辑的**预期目标缺失 RED**（4 处 manifest-index 锚定：基线仍产出 `manifest=<path>` 形态，逐处签名 `'manifest-index=0; …' not found in [('…','manifest=<path>; …')]`；1 处词汇表等值断言：基线 mapping 缺 `sensitive-filename`）。即：授权编辑本身将该 5 例转为实现 RED 面，**非误伤**；其余 179 例全绿。派发包"既有用例全绿"字面与此不符，差异归因=锚定编辑的固有语义（前置于实现的冻结断言），P&V 判定无需 DR，留此记录供 Coordinator 复核。
+- **MINIMAL_PAYLOAD 五摘要迁移误伤核对（§4d-4 亲核复跑）**：`tests/audit/test_ram_schema.py` 35 例全绿（迁移后 fixture 在基线校验器下通过；22 个负例逐类仍因预期结构/词表/rank/provenance 错误失败，无"误伤通过"）；golden matrix 15 passed（fixtures 零改动）。
+- **回归锚**：`tests/contracts` = 617 passed；全量 `python -m pytest tests -q` = 52 failed（= 新文件 47 + 授权编辑 5，全为预期 RED）/ 1336 passed / 1 skipped（既有 skip）。
+- **`_red_proof` 退役**：随 Frozen Test Commit 整体删除；证据索引与 SHA-256 见 §4b，git 历史可取回。
 
 - 缺口 1：存在 1 处宽松接受冻结断言——`test_ram_schema.py::test_minimal_payload_validates`（@:223-224；MINIMAL_PAYLOAD @:79，identity @:128-135）。DR-01 授权 + DR-03 §1(a) 升级为四 digest 自洽迁移。
 - 缺口 2：skip reason 词汇表为封闭冻结枚举（`test_fr05_gap_encoding.py:43-53,135`）。DR-01 授权扩词。
@@ -255,10 +305,10 @@ RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 ## 8. 验收命令与判定
 
 ```bash
-python -m pytest tests/audit tests/contracts -q        # ≥801+23+X passed（X = X1/X2/X4-4..6/X5/X7 + X4-1..3/X4-7/X8-1a..e/X8-2（DR-04-B 已批准，mandatory）+ GREEN 锚 X8-0；仅 X3-1/X3-2 随 DR-04-A 重审计入），0 failed, 0 new skip
+python -m pytest tests/audit tests/contracts -q        # ≥801+51 passed（51 = 冻结文件 `test_ip_0022_fix.py` 全部用例：M/G/X 全系 + X3-1..4（X3 系随 DR-04-A 重审门控——若否决须重冻结回滚 §4d-2 锚定与 X3 系）+ GREEN 锚 X4-0/X6×2/X8-0），0 failed, 0 new skip
 python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原样）
-# RED 底稿可复现（D2 实现前）：git clone PR 分支后
-python -m pytest _red_proof -q                          # 43 failed / 4 passed（D1''''''，§9.5-§9.7）
+# RED 底稿可复现（v6 冻结前，git 历史 @10f1ae6 取回 _red_proof/）：python -m pytest _red_proof -q → 43 failed / 4 passed（D1''''''，§9.5-§9.7；勘误 X8-1c 见 §4b）
+# v6 冻结后 RED 复现（实现提交前）：python -m unittest tests.audit.test_ip_0022_fix -v → 47 failed / 4 passed（§9.8）
 ```
 
 判定依据：M1'-M18 + G1/G2 系全绿；R1-R3 全绿；`git diff 30bdfaa -- tests/audit/fixtures schemas` 为空；ruff/bandit 零新 finding。PI-DR6：D2 冻结前至少一个非 Windows 平台完整跑一次（M1'/G 系为纯字符串/纯构造断言，平台无关）。

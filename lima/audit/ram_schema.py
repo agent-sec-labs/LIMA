@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Final
@@ -56,8 +57,11 @@ __all__ = [
     "RAM_WIRE_SCHEMA_NAME",
     "execution_required_from_gaps",
     "load_ram_wire_schema",
+    "ram_facts_digest_from_wire",
     "ram_wire_digest",
     "ram_wire_payload",
+    "semantic_config_digest_from_wire",
+    "semantic_result_digest_from_wire",
     "validate_ram_wire_payload",
 ]
 
@@ -222,6 +226,12 @@ _IDENTITY_KEYS: Final[frozenset[str]] = frozenset(
 _PROVENANCE_KEYS: Final[frozenset[str]] = frozenset({"provenance_anchor_ids"})
 _EXECUTION_KEYS: Final[frozenset[str]] = frozenset({"required", "trigger_gap_codes"})
 
+# --- IP-0022 §3.5 appended integrity-sequence constants ---
+#: Windows drive prefix (packet §3.5: ``^[A-Za-z]:``).
+_WINDOWS_DRIVE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z]:")
+#: Forbidden ``/`` segments (v4: not weaker than the #58 contract).
+_PATH_FORBIDDEN_SEGMENTS: Final[frozenset[str]] = frozenset({"", ".", ".."})
+
 
 def execution_required_from_gaps(
     gap_codes: Iterable[str],
@@ -289,6 +299,18 @@ def ram_wire_payload(
     ram_limits = ram_budgets if ram_budgets is not None else RamBudgets()
     options = semantic_options if semantic_options is not None else SemanticOptions()
     facts = ram_result.facts
+
+    # IP-0022 entrance narrowing (DR-04-B v3, RESOLVED-MAINTAINER, mandatory):
+    # a literal symbol == "-" on the ranked board is refused here, at the
+    # public entrance, defending against callers hand-constructing a
+    # SemanticTopNResult; the wire validator correspondingly treats any '-'
+    # as an anomaly or tamper.
+    for index, item in enumerate(semantic_result.ranked):
+        if item.symbol == "-":
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE,
+                f"$.semantic_result.ranked[{index}].symbol",
+            )
 
     identity: dict[str, object] = {
         "ram_facts_digest": ram_facts_digest(facts),
@@ -359,9 +381,20 @@ def validate_ram_wire_payload(payload: Mapping[str, object]) -> None:
 
     Any unknown field, wrong type, out-of-vocabulary category, non-consecutive
     rank, non-parallel parallel array, non-hex digest, wrong provenance order,
-    or ``execution_required`` carrier inconsistent with the payload's typed
-    coverage gaps raises :class:`lima.contracts.errors.ContractError`; nothing
-    is ever silently corrected. Returns ``None`` on success.
+    invalid path shape, literal ``"-"`` symbol, ``candidate_id`` inconsistent
+    with its own ``kind``/``path``/``symbol``/ordinal, recomputed identity
+    digest mismatch, or ``execution_required`` carrier inconsistent with the
+    payload's typed coverage gaps raises
+    :class:`lima.contracts.errors.ContractError`; nothing is ever silently
+    corrected. Returns ``None`` on success.
+
+    IP-0022 (Packet §3.5): after the structural checks, the frozen six-step
+    integrity sequence runs in order -- (1) path rules over the five RAM
+    inventories and the ranked board, (2) ranked ``symbol == "-"`` rejection
+    plus ``candidate_id`` binding, (3) ``ram_facts_digest``, (4)
+    ``semantic_config_digest``, (5) ``semantic_result_digest``, (6)
+    ``model_digest``, with the ``wire_digest`` transport-header comparison
+    last (DR-01 R-2 trailing-position constraint).
     """
 
     if not isinstance(payload, Mapping):
@@ -377,11 +410,45 @@ def validate_ram_wire_payload(payload: Mapping[str, object]) -> None:
     ram_gaps = _validate_build(_object_field(payload, "build", "$"))
     semantic_gaps = _validate_ram(_object_field(payload, "ram", "$"))
     semantic_gaps += _validate_semantic(_object_field(payload, "semantic", "$"))
-    _validate_identity(_object_field(payload, "identity", "$"))
+    identity = _object_field(payload, "identity", "$")
+    _validate_identity(identity)
     _validate_provenance(_object_field(payload, "provenance", "$"))
     _validate_execution(
         _object_field(payload, "execution_required", "$"), ram_gaps + semantic_gaps
     )
+
+    # --- IP-0022 appended integrity sequence (frozen order; wire last) ---
+    _validate_payload_paths(payload)
+    _validate_ranked_binding(_object_field(payload, "semantic", "$"))
+    if ram_facts_digest_from_wire(payload) != identity["ram_facts_digest"]:
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE, "$.identity.ram_facts_digest"
+        )
+    if semantic_config_digest_from_wire(payload) != identity["semantic_config_digest"]:
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE,
+            "$.identity.semantic_config_digest",
+        )
+    if semantic_result_digest_from_wire(payload) != identity["semantic_result_digest"]:
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE,
+            "$.identity.semantic_result_digest",
+        )
+    # Structural validation above already pinned build.semantic.model_id as a
+    # required str field; recompute its content digest (G2b binding; the
+    # prompt_digest is not recoverable from the wire and is bound transitively
+    # through the config comparison).
+    if (
+        compute_content_digest(payload["build"]["semantic"]["model_id"])
+        != identity["model_digest"]
+    ):
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE, "$.identity.model_digest"
+        )
+    if identity["wire_digest"] != ram_wire_digest(payload):
+        raise ContractError(
+            ContractErrorCode.INVALID_FIELD_VALUE, "$.identity.wire_digest"
+        )
 
 
 def ram_wire_digest(payload: Mapping[str, object]) -> str:
@@ -423,6 +490,188 @@ def _digest_slot(identity: Mapping[str, object], key: str) -> str:
             ContractErrorCode.REQUIRED_FIELD_MISSING, f"$.identity.{key}"
         )
     return value
+
+
+def ram_facts_digest_from_wire(payload: Mapping[str, object]) -> str:
+    """Recompute the RAM facts digest from one wire payload's ``ram`` section.
+
+    Dict-side helper (IP-0022 §3.5, DR-02 §2.1 proven equivalence): the wire
+    ``ram`` section carries exactly the canonical ``ram_facts_digest`` payload
+    shape, so the canonical content digest of the section equals the chain
+    digest for honestly built payloads.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$")
+    return compute_content_digest(payload["ram"])
+
+
+def semantic_config_digest_from_wire(payload: Mapping[str, object]) -> str:
+    """Recompute the semantic config digest from one wire payload.
+
+    Reassembles the frozen ``_config_digest_payload`` shape (semantic
+    prioritizer §5.7) from the wire ``build.semantic`` section plus the
+    ``prompt_digest`` identity slot (not recoverable from the wire itself)
+    and the recomputed ``model_id`` digest.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$")
+    build = payload["build"]
+    identity = payload["identity"]
+    if not isinstance(build, Mapping) or not isinstance(identity, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$")
+    semantic = build["semantic"]
+    if not isinstance(semantic, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$.build.semantic")
+    weights = semantic["weights"]
+    budgets = semantic["budgets"]
+    if not isinstance(weights, Mapping) or not isinstance(budgets, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$.build.semantic")
+    prompt_digest = identity.get("prompt_digest")
+    if not isinstance(prompt_digest, str):
+        raise ContractError(
+            ContractErrorCode.REQUIRED_FIELD_MISSING, "$.identity.prompt_digest"
+        )
+    return compute_content_digest(
+        {
+            "top_n": semantic["top_n"],
+            "weights": {name: weights[name] for name in sorted(_WEIGHT_FIELDS)},
+            "tie_break": semantic["tie_break"],
+            "seed": semantic["seed"],
+            "budgets": {
+                name: budgets[name] for name in sorted(_SEMANTIC_BUDGET_FIELDS)
+            },
+            "prompt_digest": prompt_digest,
+            "model_digest": compute_content_digest(semantic["model_id"]),
+        }
+    )
+
+
+def semantic_result_digest_from_wire(payload: Mapping[str, object]) -> str:
+    """Recompute the semantic result digest from one wire payload.
+
+    Reassembles the frozen ``_result_digest`` shape (semantic prioritizer
+    §5.7) from the wire ``semantic`` section -- the six digest-relevant
+    ranked fields per item -- with ``config_digest`` and
+    ``input_facts_digest`` taken as this payload's recomputed values.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$")
+    semantic = payload["semantic"]
+    if not isinstance(semantic, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$.semantic")
+    ranked = semantic["ranked"]
+    coverage_gaps = semantic["coverage_gaps"]
+    if not isinstance(ranked, list) or not isinstance(coverage_gaps, list):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$.semantic")
+    return compute_content_digest(
+        {
+            "config_digest": semantic_config_digest_from_wire(payload),
+            "input_facts_digest": ram_facts_digest_from_wire(payload),
+            "ranked": [
+                {
+                    "rank": item["rank"],
+                    "candidate_id": item["candidate_id"],
+                    "score": item["score"],
+                    "category": item["category"],
+                    "rationale": item["rationale"],
+                    "key_flow_steps": list(item["key_flow_steps"]),
+                }
+                for item in ranked
+            ],
+            "total_candidates": semantic["total_candidates"],
+            "coverage_gaps": list(coverage_gaps),
+        }
+    )
+
+
+def _validated_wire_path(value: object, field_path: str) -> None:
+    """Reject any path shape outside the repo-relative POSIX contract.
+
+    IP-0022 §3.5 (not weaker than the #58 ``_validated_path`` segment
+    semantics): non-empty ``str``, no backslash, not ``/``-rooted, no Windows
+    drive prefix, no Cc control characters, and no empty/``.``/``..`` ``/``
+    segment. The string-length-cap difference to #58 stays recorded as
+    residual risk R-6 in the Packet.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise ContractError(ContractErrorCode.INVALID_FIELD_VALUE, field_path)
+    if (
+        "\\" in value
+        or value.startswith("/")
+        or _WINDOWS_DRIVE_PATTERN.match(value) is not None
+    ):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_VALUE, field_path)
+    for char in value:
+        if unicodedata.category(char) == "Cc":
+            raise ContractError(ContractErrorCode.INVALID_FIELD_VALUE, field_path)
+    for segment in value.split("/"):
+        if segment in _PATH_FORBIDDEN_SEGMENTS:
+            raise ContractError(ContractErrorCode.INVALID_FIELD_VALUE, field_path)
+
+
+def _validate_payload_paths(payload: Mapping[str, object]) -> None:
+    """Appended step 1: path rules over every entry and ranked path."""
+
+    ram = payload["ram"]
+    semantic = payload["semantic"]
+    if not isinstance(ram, Mapping) or not isinstance(semantic, Mapping):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$")
+    for name in (
+        "entrypoints",
+        "external_sources",
+        "sensitive_sinks",
+        "trust_boundaries",
+        "unresolved_edges",
+    ):
+        entries = ram[name]
+        if not isinstance(entries, list):
+            raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, f"$.ram.{name}")
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping):
+                raise ContractError(
+                    ContractErrorCode.INVALID_FIELD_TYPE, f"$.ram.{name}[{index}]"
+                )
+            _validated_wire_path(entry["path"], f"$.ram.{name}[{index}].path")
+    ranked = semantic["ranked"]
+    if not isinstance(ranked, list):
+        raise ContractError(ContractErrorCode.INVALID_FIELD_TYPE, "$.semantic.ranked")
+    for index, item in enumerate(ranked):
+        if not isinstance(item, Mapping):
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_TYPE, f"$.semantic.ranked[{index}]"
+            )
+        _validated_wire_path(item["path"], f"$.semantic.ranked[{index}].path")
+
+
+def _validate_ranked_binding(semantic: Mapping[str, object]) -> None:
+    """Appended step 2: literal ``"-"`` rejection plus candidate_id binding.
+
+    DR-04-B v3 (RESOLVED-MAINTAINER): the entrance rejections make any wire
+    ``symbol == "-"`` an anomaly or tamper, and every ``candidate_id`` must
+    equal ``"<kind>:<path>:<symbol-or-dash>#<its own ordinal>"`` (frozen
+    encoding; the None slot renders as ``"-"``).
+    """
+
+    ranked = semantic["ranked"]
+    for index, item in enumerate(ranked):
+        item_path = f"$.semantic.ranked[{index}]"
+        symbol = item["symbol"]
+        if symbol == "-":
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE, f"{item_path}.symbol"
+            )
+        expected_head = (
+            f"{item['kind']}:{item['path']}:{symbol if symbol is not None else '-'}"
+        )
+        candidate = item["candidate_id"]
+        if candidate.rsplit("#", 1)[0] != expected_head:
+            raise ContractError(
+                ContractErrorCode.INVALID_FIELD_VALUE, f"{item_path}.candidate_id"
+            )
 
 
 def _execution_required(

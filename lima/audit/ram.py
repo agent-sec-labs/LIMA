@@ -28,6 +28,7 @@ Frozen behaviour (Packet ``IP-0018-PACKET/v1``):
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -79,6 +80,71 @@ _REASON_UNRESOLVED_CALL: Final[str] = "RAM_UNRESOLVED_CALL"
 #: TaintTrace step bound transcribed from Packet §3.1 and reused by §5.1.5.
 _MAX_TRACE_STEPS: Final[int] = 12
 
+# --- IP-0022 F1 (Packet §3.1-§3.3): secret-shaped filename admission. ---
+# Restated by value: the RAM layer must not import ``lima.audit.inventory``
+# (frozen dependency direction), so the detection pattern, the shape-family
+# classifiers, and the skip-record dataclass are restated here verbatim,
+# exactly like the frozen gap-code strings above. Keep in lockstep with
+# ``lima/audit/inventory.py``.
+
+#: Frozen heuristic superset pattern (Packet §3.1, verbatim).
+_SECRET_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i:(^|[_\-.])(token|secret|key|password|passwd|credential|apikey|api_key|private[_-]?key)s?([_\-.]|$))"
+    r"|sk_live_[0-9A-Za-z]+"
+    r"|sk_test_[0-9A-Za-z]+"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|ghp_[0-9A-Za-z]{36,}"
+    r"|gho_[0-9A-Za-z]{36,}"
+    r"|github_pat_[0-9A-Za-z_]{20,}"
+    r"|xox[baprs]-[0-9A-Za-z-]{10,}"
+    r"|id_(rsa|dsa|ecdsa|ed25519)([._\-][0-9A-Za-z_.\-]*)?"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}"
+    r"|(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
+)
+
+#: Internal shape-family classifiers (never public output); lockstep with the
+#: corresponding alternatives of ``_SECRET_FILENAME_PATTERN``.
+_SECRET_KEYWORD_FAMILY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i:(^|[_\-.])(token|secret|key|password|passwd|credential|apikey|api_key|private[_-]?key)s?([_\-.]|$))"
+)
+_SECRET_HIGH_ENTROPY_FAMILY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z0-9]{20,}(?![A-Za-z0-9])"
+)
+
+_ADMISSION_SKIP_REASON: Final[str] = "sensitive-filename"
+
+
+@dataclass(frozen=True)
+class AdmissionSkipRecord:
+    """One admission-time rejection trace (IP-0022 §3.3, R1 终案).
+
+    By-value restatement of ``lima.audit.inventory.AdmissionSkipRecord`` for
+    the RAM build result: scan-internal pre-filter sorted ordinal, reason,
+    and shape family only -- never the raw filename. Not part of any wire
+    payload.
+    """
+
+    index: int
+    reason: str
+    family: str
+
+
+def _secret_shape_family(path: str) -> str | None:
+    """Return the internal shape family of the first matching segment, if any."""
+
+    if not isinstance(path, str) or not path:
+        return None
+    for segment in path.split("/"):
+        if _SECRET_FILENAME_PATTERN.search(segment) is None:
+            continue
+        if _SECRET_KEYWORD_FAMILY_PATTERN.search(segment) is not None:
+            return "keyword"
+        if _SECRET_HIGH_ENTROPY_FAMILY_PATTERN.search(segment) is not None:
+            return "high-entropy"
+        return "token-prefix"
+    return None
+
 
 @dataclass(frozen=True)
 class RamBudgets:
@@ -126,6 +192,7 @@ class RamFactsBuildResult:
 
     facts: PythonRamFacts
     provenance_anchor_ids: tuple[str, ...]
+    admission_skips: tuple[AdmissionSkipRecord, ...] = ()
 
 
 def _dotted_name(node: ast.AST) -> str:
@@ -360,10 +427,34 @@ def build_python_ram_facts(
     limits = budgets if budgets is not None else RamBudgets()
 
     inventory = workspace.inventory()
-    candidates = sorted(
+    gaps: list[tuple[str, str]] = []
+    admission_skips: list[AdmissionSkipRecord] = []
+    py_candidates = sorted(
         item.path for item in inventory.files if item.path.endswith(".py")
     )
-    gaps: list[tuple[str, str]] = []
+    # IP-0022 (§3.2.3/§3.3): admission filter before the read loop, so
+    # secret-shaped files are structurally closed out of every downstream
+    # surface (including read-failure gap details, which embed the path).
+    # Record indexes are positions in the pre-filter sorted full order and
+    # the public skip gap is appended before coverage gaps are frozen.
+    candidates: list[str] = []
+    for index, relative_path in enumerate(py_candidates):
+        family = _secret_shape_family(relative_path)
+        if family is None:
+            candidates.append(relative_path)
+            continue
+        admission_skips.append(
+            AdmissionSkipRecord(
+                index=index, reason=_ADMISSION_SKIP_REASON, family=family
+            )
+        )
+    if admission_skips:
+        gaps.append(
+            (
+                _GAP_INVENTORY_SKIPPED,
+                f"reason={_ADMISSION_SKIP_REASON}; count={len(admission_skips)}",
+            )
+        )
     if len(candidates) > limits.max_python_files:
         overflow = len(candidates) - limits.max_python_files
         gaps.append(
@@ -405,6 +496,7 @@ def build_python_ram_facts(
     return RamFactsBuildResult(
         facts=facts,
         provenance_anchor_ids=(RAM_PROVENANCE_ANCHOR,),
+        admission_skips=tuple(admission_skips),
     )
 
 

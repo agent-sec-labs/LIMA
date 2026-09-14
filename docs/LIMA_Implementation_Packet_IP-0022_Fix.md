@@ -298,6 +298,7 @@ RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 - **MINIMAL_PAYLOAD 五摘要迁移误伤核对（§4d-4 亲核复跑）**：`tests/audit/test_ram_schema.py` 35 例全绿（迁移后 fixture 在基线校验器下通过；22 个负例逐类仍因预期结构/词表/rank/provenance 错误失败，无"误伤通过"）；golden matrix 15 passed（fixtures 零改动）。
 - **回归锚**：`tests/contracts` = 617 passed；全量 `python -m pytest tests -q` = 52 failed（= 新文件 47 + 授权编辑 5，全为预期 RED）/ 1336 passed / 1 skipped（既有 skip）。
 - **`_red_proof` 退役**：随 Frozen Test Commit 整体删除；证据索引与 SHA-256 见 §4b，git 历史可取回。
+- **冻结后测试勘误（re-freeze 留痕，v6a）**：scratch GREEN（PI-DR2，TEMP 副本不入 commit，49/51 绿）暴露两处冻结断言缺陷——X4-1/X4-7 原以 `assertIn("candidate_id"/"symbol", str(ctx.exception))` 断言，但 `ContractError` 按冻结目录只渲染固定消息（errors.py:99-118，字段位置在 `field_path` 属性，消息不嵌字段名），**任何符合冻结错误目录的实现都无法满足该断言**（scratch 复现：`'candidate_id' not found in 'Contract field has an invalid value.'`）。依 Maintainer 预授权"测试错误走重冻结留痕"改为与 X8 系同型的**更强**精确断言（`code is INVALID_FIELD_VALUE` + `field_path == "$.semantic.ranked[0].candidate_id"/".symbol"`）；非删弱断言。初冻结 commit `77b1431685e9c383753e2986bc08fb729038f423` 上的 RED 已亲验（47 failed / 4 passed，签名留档如上）；勘误后 RED 复验与 scratch GREEN 结论见下。
 
 - 缺口 1：存在 1 处宽松接受冻结断言——`test_ram_schema.py::test_minimal_payload_validates`（@:223-224；MINIMAL_PAYLOAD @:79，identity @:128-135）。DR-01 授权 + DR-03 §1(a) 升级为四 digest 自洽迁移。
 - 缺口 2：skip reason 词汇表为封闭冻结枚举（`test_fr05_gap_encoding.py:43-53,135`）。DR-01 授权扩词。

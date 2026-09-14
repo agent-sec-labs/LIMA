@@ -631,9 +631,12 @@ class X4WireConsistencyTests(unittest.TestCase):
         payload["semantic"]["ranked"][0]["candidate_id"] = (
             "sensitive-sink:other.py:-#1"
         )
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ContractError) as ctx:
             self.validate(payload)
-        self.assertIn("candidate_id", str(ctx.exception))
+        self.assertIs(ctx.exception.code, ContractErrorCode.INVALID_FIELD_VALUE)
+        self.assertEqual(
+            ctx.exception.field_path, "$.semantic.ranked[0].candidate_id"
+        )
 
     def test_candidate_id_symbol_slot_mismatch_rejected(self):
         payload = self.payload
@@ -677,9 +680,10 @@ class X4WireConsistencyTests(unittest.TestCase):
         # tamper.
         payload = self.payload
         payload["semantic"]["ranked"][0]["symbol"] = "-"
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ContractError) as ctx:
             self.validate(payload)
-        self.assertIn("symbol", str(ctx.exception))
+        self.assertIs(ctx.exception.code, ContractErrorCode.INVALID_FIELD_VALUE)
+        self.assertEqual(ctx.exception.field_path, "$.semantic.ranked[0].symbol")
 
 
 class X5AdmissionSkipSemanticsTests(unittest.TestCase):

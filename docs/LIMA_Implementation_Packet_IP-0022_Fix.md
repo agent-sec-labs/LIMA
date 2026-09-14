@@ -4,15 +4,15 @@
 >
 > Packet 版本：`IP-0022-PACKET/v5`
 >
-> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；v4（PKT-IP-0022-XAUDIT，DR-IP-0022-04）；**v5（2026-09-13，PKT-IP-0022-R4，Assignment `IP-0022-PV-R4/v1`：Maintainer 复审三问题一次性修订——①DR-04-B 公式重写（symbol `'-'` 槽位消歧，§3.5）+ 生产链定源（§3.5 附源追踪）+ X4-7 负例；②`_red_proof` 全量底稿纳入提交（§4a，可从 PR 原样复现，RED D1'''' = 37 failed / 3 passed，§9.5）；③script **名称**准入过滤（entrypoints.symbol 出口，§3.2.4）+ X7 负例 + X5-2 补公开 coverage gap 计数断言；DR-04-A' 撤回落 Packet（§3.2 删第四过滤点，X3 锚定 A 定稿版）**；**v5-R5 修订（2026-09-13，PKT-IP-0022-R5，Assignment `IP-0022-PV-R5/v1`：DR-04-B 升 v3——公共 API 往返契约（入口域收窄 + 类型化拒绝，§3.5 重写）；新增 `_red_proof/test_ip_0022_r5_red.py`（X8-0 往返 GREEN 锚 + X8-1/X8-2 入口负例）与 `probe_r5.py`（P-R5-1/2/3 亲验）；RED D1''''' = 39 failed / 4 passed（§9.6）；DR-04-A 部分不动**）。
+> 修订历史：v1（2026-09-13，PKT-IP-0022-D1，commit 70946e1）；v1 微修（PKT-IP-0022-D1R，R-1/R-2，commit 00093396）；v2（PKT-IP-0022-D1R2，DR-IP-0022-02/v1）；v3（PKT-IP-0022-D1R3，DR-IP-0022-03）；v4（PKT-IP-0022-XAUDIT，DR-IP-0022-04）；**v5（2026-09-13，PKT-IP-0022-R4，Assignment `IP-0022-PV-R4/v1`：Maintainer 复审三问题一次性修订——①DR-04-B 公式重写（symbol `'-'` 槽位消歧，§3.5）+ 生产链定源（§3.5 附源追踪）+ X4-7 负例；②`_red_proof` 全量底稿纳入提交（§4a，可从 PR 原样复现，RED D1'''' = 37 failed / 3 passed，§9.5）；③script **名称**准入过滤（entrypoints.symbol 出口，§3.2.4）+ X7 负例 + X5-2 补公开 coverage gap 计数断言；DR-04-A' 撤回落 Packet（§3.2 删第四过滤点，X3 锚定 A 定稿版）**；**v5-R5 修订（2026-09-13，PKT-IP-0022-R5，Assignment `IP-0022-PV-R5/v1`：DR-04-B 升 v3——公共 API 往返契约（入口域收窄 + 类型化拒绝，§3.5 重写）；新增 `_red_proof/test_ip_0022_r5_red.py`（X8-0 往返 GREEN 锚 + X8-1/X8-2 入口负例）与 `probe_r5.py`（P-R5-1/2/3 亲验）；RED D1''''' = 39 failed / 4 passed（§9.6）；DR-04-A 部分不动**）；**v5-R6 修订（2026-09-13，PKT-IP-0022-R6，Assignment `IP-0022-PV-R6/v1`：DR-04-B v3 获 Maintainer 批准裁定 1+2（RESOLVED-MAINTAINER），入口域收窄 + wire 消歧**转为 mandatory**（§3.5 门控解除）；X8-1 按 Maintainer 冻结测试要求展开为五类 facts 清单各一例（准确错误码 + 准确字段位置断言）；RED D1'''''' = 43 failed / 4 passed（§9.7）；兼容性措辞定稿（§3.5）**）。
 >
-> 状态：`READY-FOR-CODE`（TBD = 0；DR-04-A（定稿版）**待重审**、DR-04-B **v3 停在裁定点**——待 Maintainer 裁定两个冻结公开入口（IP-0019 `build_semantic_top_n` / IP-0021 `ram_wire_payload`）的**输入域收窄**，未获批前不实施且不属 mandatory——见 DR-IP-0022-04 §2-B）
+> 状态：`READY-FOR-CODE`（TBD = 0；DR-04-B **已获 Maintainer 批准（RESOLVED-MAINTAINER），其条目为 mandatory**；DR-04-A（定稿版）**待重审**——X3-1/X3-2 随其裁定计入，未获批前不属 mandatory——见 DR-IP-0022-04 §2）
 >
 > Exact base：`30bdfaa13ac72572d65ccb2567ae8702923c4187`（origin/main，IP-0021 merge）
 >
-> 制作人：lima-packet-verification（Assignment `IP-0022-PV-P1/v1` → `P1R2/v1` → `P1R3/v1` → `IP-0022-PV-XAUDIT/v1` → `IP-0022-PV-R4/v1`，任务标识 `PKT-IP-0022-D1` / `D1R2` / `D1R3` / `XAUDIT` / `R4`，2026-09-13）
+> 制作人：lima-packet-verification（Assignment `IP-0022-PV-P1/v1` → `P1R2/v1` → `P1R3/v1` → `IP-0022-PV-XAUDIT/v1` → `IP-0022-PV-R4/v1` → `IP-0022-PV-R5/v1` → `IP-0022-PV-R6/v1`，任务标识 `PKT-IP-0022-D1` / `D1R2` / `D1R3` / `XAUDIT` / `R4` / `R5` / `R6`，2026-09-13）
 >
-> 上游决策：COORD `ENTRY60-CLOSURE-1/v1`（拆分方案 α）；DR-IP-0022-01（REOPENED）；DR-IP-0022-02（REOPENED-by-03 / 部分 SUPERSEDED）；DR-IP-0022-03（RESOLVED-MAINTAINER）；**DR-IP-0022-04（OPEN，R5 修订版：A' 撤回 / A 定稿版待重审 / B v3 停在裁定点——待裁定输入域收窄）**；PI-DR1..PI-DR6 全部生效
+> 上游决策：COORD `ENTRY60-CLOSURE-1/v1`（拆分方案 α）；DR-IP-0022-01（REOPENED）；DR-IP-0022-02（REOPENED-by-03 / 部分 SUPERSEDED）；DR-IP-0022-03（RESOLVED-MAINTAINER）；**DR-IP-0022-04（OPEN，R6 修订版：A' 撤回 / A 定稿版待重审 / B v3 RESOLVED-MAINTAINER——裁定 1+2 批准，入口域收窄 mandatory）**；PI-DR1..PI-DR6 全部生效
 >
 > 随批文档：DR-IP-0022-01、DR-IP-0022-02、DR-IP-0022-03、**DR-IP-0022-04**、C1 勘误（`LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md`）、**`LIMA_IP-0022_XAUDIT_Matrices_v1.md`（两张可核查矩阵 + 探针复验 + 残余风险清单）**
 
@@ -26,7 +26,7 @@ Issue specification revision：2026-09-13 Issue #60 正文（含 ENTRY60-CLOSURE
 公开面定义（v3，五面）：NFR-01 保护面 = Profile（entrypoints + code_roles，含 to_dict() 全文序列化）+ RAM facts + Top-N + prompt 文本 + wire payload
 Covered requirements（本 IP 只声明自身贡献）：
   NFR-01 扩展口径（DR-01 存活 + DR-02 §1 + DR-03 §2/§3）：启发式超集口径下的秘密形态文件名不在五面出现——贡献记 PARTIAL（Maintainer 终裁，§2），不得记"零泄漏已解决"
-  FR-04 补全（DR-02 §2 路线 B' + DR-03 §4 + DR-04 §1/§2-B）：wire 载荷完整性 = path 拒绝（v4 段级规则对齐 #58 不弱于）+ ram/semantic/model identity digest 重算比对 + candidate_id↔kind/path/symbol 一致性【DR-04-B 门控】 + wire_digest 传输头校验（末位）；认证定位见 §3.5
+  FR-04 补全（DR-02 §2 路线 B' + DR-03 §4 + DR-04 §1/§2-B）：wire 载荷完整性 = path 拒绝（v4 段级规则对齐 #58 不弱于）+ ram/semantic/model identity digest 重算比对 + candidate_id↔kind/path/symbol 一致性【DR-04-B 已批准，mandatory】 + wire_digest 传输头校验（末位）；认证定位见 §3.5
   FR-01（R1 终案，§3.3）：公开面 reason→count；内部扫描内序号留痕——覆盖全部跳过原因前记 PARTIAL
 Not covered requirements：F3 workspace _safe_path TOCTOU、F4 回包/时间不设防（→ IP-0023 closure 负例）；S4b/T-03/V5 端到端；#64/#68 消费验证；防恶意重签认证（§3.5 定位声明）；直调语义层（build_semantic_top_n）处理已构造 facts 的内部 API 误用防御（Known Gaps §2）；穷尽式秘密检测
 Delivery role：hardening-fix（冻结面内最小防御 + 冻结测试面 DR 授权修订）
@@ -133,13 +133,13 @@ def is_secret_shaped_path(path: str) -> bool:
 `validate_ram_wire_payload` 在既有结构校验后依序追加（**六步**）：
 
 - **path 检查（v4 强化，对齐 #58 `_validated_path` 段级语义不弱于）**：ram 五清单 entry 与 `semantic.ranked` 每项 path：非空 str、无 `\`、非 `/` 开头、无 `^[A-Za-z]:` 盘符、**无 Cc 控制字符、任一 `/` 段 ∉ {"", ".", ".."}**（v3 缺后两条，系弱于 #58 契约，v4 补齐；长度 cap 差异记残余风险 R-6）；违例 `ContractError(INVALID_FIELD_VALUE, "$.ram.<section>[i].path" / "$.semantic.ranked[i].path")`。
-- **【DR-04-B 门控（v5-R5 版=DR-04-B v3，**停在裁定点：待 Maintainer 裁定输入域收窄**）】公共 API 往返契约——入口域收窄 + candidate_id 一致性（获批后 mandatory）**：
+- **【DR-04-B（v5-R6 版=DR-04-B v3，**RESOLVED-MAINTAINER：裁定 1+2 已批准**）】公共 API 往返契约——入口域收窄 + candidate_id 一致性（**mandatory**）**：
   - **往返契约事实（R5 亲验，probe P-R5-1/2/3）**：#58 合法条目 `symbol='-'` 在当前 main 上完成完整往返（两入口接受 + validate 通过）；None 与 `'-'` 碰撞出相同 candidate_id；None→`'-'` 篡改 validate 通过。故修复必须**在入口处**类型化拒绝，而非仅 wire 层拒绝（后者会把该合法输入变成"能生成不能校验"的中间态）。
-  - **入口域收窄（两项，均为冻结公开入口的可观察行为变更，待裁定）**：(1) `build_semantic_top_n`：facts 五清单任何条目 `symbol == "-"` → `ContractError(INVALID_FIELD_VALUE, "$.facts.<section>[i].symbol")`（pointer 风格对齐 `ram_wire_payload` 入口惯例；与 IP-0019 既有异常惯例冲突时以 IP-0019 为准并回报）；(2) `ram_wire_payload`：`semantic_result.ranked` 任何 `symbol == "-"` → `ContractError(INVALID_FIELD_VALUE, "$.semantic_result.ranked[i].symbol")`（防御直构 `SemanticTopNResult` 的调用方——入径核查（§9.6）：携带 '-' 进 wire 的公开入径仅此三条，`lima/semantic_retrieval.py` 的 `SemanticCandidate` 为检索层同名异类，不在 wire 路径）。
-  - **wire 第七项（消歧 + 一致性公式，维持 v5 设计）**：`symbol == "-"` 一律拒绝（`$.semantic.ranked[i].symbol`，入口已拒则 wire 出现 '-' 必为异常/篡改——与入口规则分工一致）；`candidate_id ≡ f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"` 前缀匹配 + `rsplit("#",1)` 等值比对，违例 `$.semantic.ranked[i].candidate_id`。
-  - **candidate_id 冻结编码不变**（`symbol or '-'` 槽位维持；歧义由入口拒绝消除）；**Profile 层 symbol='-' 不触碰**（I13n）。
-  - **往返保证**：被允许输入（扫描产物 + symbol≠'-' 构造输入）全链往返；`'-'` 入口 typed 拒绝（X8-0 GREEN 锚 / X8-1/X8-2 入口负例 / X4-7 wire 负例 / X4-1..3 绑定负例 / X4-0 冻结模式锚）。
-  - **兼容性**：正常扫描产物零影响（五源定源 P-R4-3 + golden/real-chain 零命中维持）；备选 B-2（改 candidate_id 编码 = IP-0019 重冻结）不推荐、仅呈对照（DR-04-B v3）。未获批前维持残余风险 R-9。
+  - **入口域收窄（两项，均为冻结公开入口的可观察行为变更，Maintainer 已批准）**：(1) `build_semantic_top_n`：facts 五清单（entrypoints / external_sources / sensitive_sinks / trust_boundaries / unresolved_edges）任何条目 `symbol == "-"` → `ContractError(INVALID_FIELD_VALUE, "$.facts.<section>[i].symbol")`（pointer 风格对齐 `ram_wire_payload` 入口惯例；与 IP-0019 既有异常惯例冲突时以 IP-0019 为准并回报）；(2) `ram_wire_payload`：`semantic_result.ranked` 任何 `symbol == "-"` → `ContractError(INVALID_FIELD_VALUE, "$.semantic_result.ranked[i].symbol")`（防御直构 `SemanticTopNResult` 的调用方——入径核查（§9.6）：携带 '-' 进 wire 的公开入径仅此三条，`lima/semantic_retrieval.py` 的 `SemanticCandidate` 为检索层同名异类，不在 wire 路径）。
+  - **wire 第七项（消歧 + 一致性公式，维持 v5 设计，Maintainer 裁定 2 批准）**：`symbol == "-"` 一律拒绝（`$.semantic.ranked[i].symbol`，入口已拒则 wire 出现 '-' 必为异常/篡改——与入口规则分工一致）；`candidate_id ≡ f"{kind}:{path}:{symbol if symbol is not None else '-'}#{ordinal}"` 前缀匹配 + `rsplit("#",1)` 等值比对，违例 `$.semantic.ranked[i].candidate_id`。
+  - **candidate_id 冻结编码不变**（`symbol or '-'` 槽位维持；歧义由入口拒绝消除）；**Profile 层 symbol='-' 不触碰**（I13n，#58 契约面维持）。
+  - **往返保证**：被允许输入（扫描产物 + symbol≠'-' 构造输入）全链往返；`'-'` 入口 typed 拒绝（X8-0 GREEN 锚 / X8-1a..e 五清单入口负例 / X8-2 入口负例 / X4-7 wire 负例 / X4-1..3 绑定负例 / X4-0 冻结模式锚）。
+  - **兼容性措辞（Maintainer 文档要求，R6 定稿）**：**仓内正常扫描产物不受影响**（五源定源 P-R4-3 + golden fixtures / real-chain payload 零命中证据维持）；**仓外依赖 `symbol='-'` 输入的调用方将收到类型化拒绝——这是有意收窄 #60 两个公开入口输入域的兼容性影响，不声称仓外调用方零影响**。备选 B-2（改 candidate_id 编码 = IP-0019 重冻结）未采纳、留档（DR-04-B v3 §2-B）。
 - `ram_facts_digest_from_wire(payload) != identity.ram_facts_digest` → `$.identity.ram_facts_digest`。
 - `semantic_config_digest_from_wire(payload) != identity.semantic_config_digest` → `$.identity.semantic_config_digest`。
 - `semantic_result_digest_from_wire(payload) != identity.semantic_result_digest` → `$.identity.semantic_result_digest`。
@@ -166,10 +166,10 @@ def is_secret_shaped_path(path: str) -> bool:
 
 ### 4a. `_red_proof/` 底稿的提交范围与管理办法（v5，问题 2 处置）
 
-- **提交范围（PR #180 统一口径）**：本 PR 范围 = `docs/**`（Packet/DR/矩阵/勘误）+ `_red_proof/**`（RED 证明底稿）。此前分支只提交了 X 系文件而 v3 的 23 用例文件未入库，致 `_red_proof` 全量不可从 PR 复现、PR 自称 docs-only 与实际内容不符——v5 起全部底稿（`test_ip_0022_fix_red.py` 23 例、`test_ip_0022_xaudit_red.py` 14 例、`test_ip_0022_r5_red.py` 3 例、`probe_xaudit.py`、`probe_r4.py`、`probe_r5.py`）入库，`python -m pytest _red_proof -q` 可从 PR 原样复现 **39 failed / 4 passed**（R5 计数；干净 checkout 复核见 §9.5/§9.6）。
+- **提交范围（PR #180 统一口径）**：本 PR 范围 = `docs/**`（Packet/DR/矩阵/勘误）+ `_red_proof/**`（RED 证明底稿）。此前分支只提交了 X 系文件而 v3 的 23 用例文件未入库，致 `_red_proof` 全量不可从 PR 复现、PR 自称 docs-only 与实际内容不符——v5 起全部底稿（`test_ip_0022_fix_red.py` 23 例、`test_ip_0022_xaudit_red.py` 14 例、`test_ip_0022_r5_red.py` 7 例（R6：X8-0 + X8-1a..e + X8-2）、`probe_xaudit.py`、`probe_r4.py`、`probe_r5.py`）入库，`python -m pytest _red_proof -q` 可从 PR 原样复现 **43 failed / 4 passed**（R6 计数；干净 checkout 复核见 §9.5-§9.7）。
 - **性质声明**：`_red_proof/` 是 **D2 冻结测试的底稿（draft-of-freeze）**，不是运行时产品代码。pytest 配置 `testpaths=["tests"]`（pyproject.toml:41）不含 `_red_proof`，CI 与常规验收命令均不收集、不执行；其内容在 D2 阶段逐例迁入 `tests/audit/test_ip_0022_fix.py` 正式冻结。
 - **管理办法**：D2 迁移完成并经独立验证后，`_red_proof/` 整体归档（移出仓库或在独立 commit 中删除，由 Coordinator 在 D2 验收时裁定）；迁移前保持只读（P&V 冻结底稿，Implementation 不得修改）。
-- **证据索引（可复现命令与前置条件）**：任意 clone PR 分支（head SHA 见 §9.5/§9.6）→ `pip install -r requirements.txt`（无网络外呼，测试全部本地）→ `python -m pytest _red_proof -q` → 预期 `39 failed, 4 passed`；回归锚 `python -m pytest tests/audit tests/contracts -q` → `801 passed`；`python -m pytest tests/audit/test_golden_matrix.py -q` → `15 passed`；探针 `python _red_proof/probe_r4.py`、`python _red_proof/probe_xaudit.py`、`PYTHONPATH=. python _red_proof/probe_r5.py` → 输出与 §9.5/§9.6 摘要逐行一致。
+- **证据索引（可复现命令与前置条件）**：任意 clone PR 分支（head SHA 见 §9.5-§9.7）→ `pip install -r requirements.txt`（无网络外呼，测试全部本地）→ `python -m pytest _red_proof -q` → 预期 `43 failed, 4 passed`；回归锚 `python -m pytest tests/audit tests/contracts -q` → `801 passed`；`python -m pytest tests/audit/test_golden_matrix.py -q` → `15 passed`；探针 `python _red_proof/probe_r4.py`、`python _red_proof/probe_xaudit.py`、`PYTHONPATH=. python _red_proof/probe_r5.py` → 输出与 §9.5-§9.7 摘要逐行一致。
 
 ## 5. 行为约束与恢复要求
 
@@ -180,7 +180,7 @@ def is_secret_shaped_path(path: str) -> bool:
 
 ## 6. 最低用例矩阵（冻结测试集，23 例 + 迁移正例 + 回归锚）
 
-RED 六轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''（34 例）、D1''''（37 例）、**D1'''''（39 例，R5：+ X8-1/X8-2 两例入口负例；X8-0 为 GREEN 锚非 RED）**，签名均为目标行为缺失（§9/§9.5/§9.6）。
+RED 七轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''（34 例）、D1''''（37 例）、D1'''''（39 例，R5：+ X8-1/X8-2 两例入口负例）、**D1''''''（43 例，R6：X8-1 展开为五类 facts 清单各一例（X8-1a..e），+4 例；X8-0 为 GREEN 锚非 RED）**，签名均为目标行为缺失（§9/§9.5-§9.7）。
 
 | # | ID（D2 冻结名可微调，语义不得变） | 断言 |
 |---|---|---|
@@ -198,12 +198,12 @@ RED 六轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 | X1 | sensitive_directory_segment_excluded_from_code_roles | 敏感**目录段**（tests/secrets/anything.py）不入 code_roles（v4） |
 | X2 | sensitive_directory_segment_excluded_from_ram | 敏感目录段（secrets/danger.py）不入 RAM 任何清单（v4） |
 | X3-1/X3-2 | manifest_gap_detail_free_of_sensitive_path | MANIFEST_PARSE_ERROR / manifest 超限 detail 不携带敏感形态路径，且携带 `manifest-index=<i>` 稳定标识（**【DR-04-A 定稿版门控，待重审】**；A' 已撤回；RED 已证 main 泄漏；X3-2 经 XAUDIT-FIX 勘正为目标缺失签名） |
-| X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B v3 门控，待裁定输入域收窄】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
+| X4-1/2/3 | wire_candidate_id_kind_path_symbol_consistency | candidate_id 与 kind/path/symbol（含 symbol 槽、非负数字 ordinal）一致（**【DR-04-B 已批准（裁定 2），mandatory】**）；X4-0 锚：非数字 ordinal 由 IP-0021 冻结模式拒绝（基线即绿，防弱化） |
 | X4-4/5/6 | wire_path_segment_rules | 空段（a//b）、`.` 段（./x）、Cc 控制字符 path 拒绝（v4 补齐 #58 契约两处弱于） |
 | X4-7 | wire_candidate_id_none_dash_disambiguation | `symbol` None↔`'-'` 互换篡改（candidate_id 与五摘要均不变）被拒——`symbol == "-"` 字面值 wire 层拒绝，槽位 `'-'` ≡ `symbol is None`（v5 新增；**R5 定位为 wire 层负例，与入口负例 X8-1/2 分工**；RED：main 接受该翻转） |
 | X8-0 | real_scan_round_trip_validates | 真实临时仓 scan → build_python_ram_facts → build_semantic_top_n → ram_wire_payload → validate 全链往返通过（**GREEN 锚**，基线与实现后均绿——往返保证的正例面；R5 新增） |
-| X8-1 | build_semantic_top_n_rejects_dash_symbol_entry | facts 五清单任何条目 `symbol == "-"` → 入口 `ContractError(INVALID_FIELD_VALUE, "$.facts.<section>[i].symbol")` typed 拒绝（**【DR-04-B v3 门控：待裁定输入域收窄】**；RED：main 接受且往返通过，probe P-R5-1） |
-| X8-2 | ram_wire_payload_rejects_dash_symbol_ranked | 直构 `SemanticTopNResult.ranked` 携带 `symbol == "-"` → 入口 typed 拒绝（**【DR-04-B v3 门控】**；RED：main 接受；防御直构调用方） |
+| X8-1a..e | build_semantic_top_n_rejects_dash_symbol_per_section（五例，D2 冻结名可微调） | facts 五清单（entrypoints / external_sources / sensitive_sinks / trust_boundaries / unresolved_edges）**逐清单各一例** `symbol == "-"` → 入口 `ContractError` 且 `code is INVALID_FIELD_VALUE`、`field_path == "$.facts.<section>[i].symbol"` **准确断言**（**【DR-04-B 已批准，mandatory】**；RED：main 接受且往返通过，probe P-R5-1；sinks/boundaries 现产 symbol 全 None，以 dataclasses.replace 注入验证入口校验通用性——R6 展开） |
+| X8-2 | ram_wire_payload_rejects_dash_symbol_ranked | 直构 `SemanticTopNResult.ranked` 携带 `symbol == "-"` → 入口 typed 拒绝，同准确断言（code INVALID_FIELD_VALUE + `$.semantic_result.ranked[i].symbol`）（**【DR-04-B 已批准，mandatory】**；RED：main 接受；防御直构调用方） |
 | X5-1 | admission_skip_counted_once_per_path | 同一 path 命中 entrypoint+code role 只计一次（count=1、恰一个 typed gap） |
 | X5-2 | ram_only_build_records_admission_skips | RAM-only 构建留痕 admission_skips（无 path 字段）**且公开 coverage_gaps 携带 `reason=sensitive-filename; count=1`**（v5 增强断言） |
 | X7-1/X7-2 | sensitive_script_name_admission | 敏感命名 script **名称**不入 `entrypoints[i].symbol`/`to_dict()`（良性名 safe_cli 保留）；skip 经公开通道计数（`count=1`、恰一个 typed gap）（v5 新增；RED：main 原文泄漏，probe P-R4-2） |
@@ -239,6 +239,14 @@ RED 六轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 - **入径核查（Stop Condition 亲验）**：携带 `symbol='-'` 进 wire 的公开入径共三条——`build_semantic_top_n(facts)`（`_collect_candidates` @prioritizer:522-585 逐源：五清单全部直接取 entry.symbol）、`ram_wire_payload` 直构 `SemanticTopNResult`（ram_schema:276-278 仅 isinstance）、wire dict 直入 validate。`lima/semantic_retrieval.py:1279` 的 `SemanticCandidate` 为检索层同名异类（不同 dataclass，不在 wire 路径）。三条入径全部纳入 DR-04-B v3 设计。
 - 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed（R5 本轮工作树亲跑；R5 增量用例为纯构造断言，平台无关）。
 
+## 9.7 RED 证明（D1''''''，v5-R6 / PKT-IP-0022-R6）
+
+- 触发：Maintainer 批准 DR-04-B v3 裁定 1+2（RESOLVED-MAINTAINER）；本轮按裁定落地 Packet/测试修订（授权范围=契约方向与 Packet/测试修订，不含实施）。
+- 测试文件：`_red_proof/test_ip_0022_r5_red.py`（R6 修订：X8-1 展开为 X8-1a..e 五例——五类 facts 清单各一例，sensitive_sinks/trust_boundaries 以 `dataclasses.replace` 注入 `symbol='-'`（现产全 None，注入验证入口校验通用性）；每例与 X8-2 均断言**准确错误码**（`ctx.exception.code is ContractErrorCode.INVALID_FIELD_VALUE`）与**准确字段位置**（`ctx.exception.field_path == "$.facts.<section>[i].symbol"` / `"$.semantic_result.ranked[i].symbol"`））+ 既有两组底稿（签名复验不变）。命令：`python -m pytest _red_proof -q`。结果：**43 failed / 4 passed**（D1''''' 39 failed 基础上 +4；4 个通过项 = GREEN 锚 X8-0 + 既有 3 锚 X4-0/X6×2）。
+- **新失败签名（逐例目标缺失型）**：X8-1a..e 与 X8-2 均 `AssertionError: ContractError not raised`（main 接受 `symbol='-'`，往返通过——目标行为缺失）。无 arrange 型失败：五清单注入走 `dataclasses.replace`（五清单同构 `AttackSurfaceEntry`，#58 契约合法形态）、构造通道复用 R5 绿色探针同路径；断言面（code/field_path）在 `ContractError` 上真实存在（lima/contracts/errors.py:99-113，`code`/`field_path` 属性亲验）。
+- **X4 系无退化复核**：X4-1/2/3（绑定负例）与 X4-0（冻结模式锚）签名与 R5 逐项一致，无退化。
+- 回归：`tests/audit tests/contracts` 801 passed；golden matrix 15 passed（R6 本轮工作树亲跑；R6 增量为纯构造断言，平台无关）。
+
 ## 7. 缺口查证结论（v1 结论维持，行号经 R-1 勘正）
 
 - 缺口 1：存在 1 处宽松接受冻结断言——`test_ram_schema.py::test_minimal_payload_validates`（@:223-224；MINIMAL_PAYLOAD @:79，identity @:128-135）。DR-01 授权 + DR-03 §1(a) 升级为四 digest 自洽迁移。
@@ -247,10 +255,10 @@ RED 六轮证明：D1（16 例）、D1'（18 例）、D1''（23 例）、D1'''�
 ## 8. 验收命令与判定
 
 ```bash
-python -m pytest tests/audit tests/contracts -q        # ≥801+23+X passed（X = 非 DR 门控新负例 X1/X2/X4-4..6/X5/X7 + GREEN 锚 X8-0；X3/X4-1..3/X4-7/X8-1/X8-2 随 DR-04-A/B 裁定计入），0 failed, 0 new skip
+python -m pytest tests/audit tests/contracts -q        # ≥801+23+X passed（X = X1/X2/X4-4..6/X5/X7 + X4-1..3/X4-7/X8-1a..e/X8-2（DR-04-B 已批准，mandatory）+ GREEN 锚 X8-0；仅 X3-1/X3-2 随 DR-04-A 重审计入），0 failed, 0 new skip
 python -m pytest tests/audit/test_golden_matrix.py -q  # 15 passed（golden 原样）
 # RED 底稿可复现（D2 实现前）：git clone PR 分支后
-python -m pytest _red_proof -q                          # 39 failed / 4 passed（D1'''''，§9.5-§9.6）
+python -m pytest _red_proof -q                          # 43 failed / 4 passed（D1''''''，§9.5-§9.7）
 ```
 
 判定依据：M1'-M18 + G1/G2 系全绿；R1-R3 全绿；`git diff 30bdfaa -- tests/audit/fixtures schemas` 为空；ruff/bandit 零新 finding。PI-DR6：D2 冻结前至少一个非 Windows 平台完整跑一次（M1'/G 系为纯字符串/纯构造断言，平台无关）。
@@ -265,7 +273,7 @@ python -m pytest _red_proof -q                          # 39 failed / 4 passed�
 
 ## 10. Completion Summary / PR 要求
 
-PR 描述必须含：F1/F2 需求映射（§0）、§2 残余风险声明逐字 + NFR-01/FR-01 **PARTIAL** 记账口径、§3.5 认证定位声明、冻结接口落位、验收命令输出摘要、golden 零改动 diff 证据、DR-01/02/03 授权修订落位（含 MINIMAL_PAYLOAD 四 digest 自洽迁移）、PI-DR6 非 Windows 记录、**提交范围如实声明（docs + `_red_proof/` D2 冻结底稿及其管理办法，§4a）与 RED 可复现命令（`python -m pytest _red_proof -q` → 39 failed / 4 passed）**。禁止任何自动关闭 #60 的关键字。
+PR 描述必须含：F1/F2 需求映射（§0）、§2 残余风险声明逐字 + NFR-01/FR-01 **PARTIAL** 记账口径、§3.5 认证定位声明、**§3.5 DR-04-B 兼容性措辞（仓内正常扫描产物不受影响；仓外依赖 `symbol='-'` 输入的调用方将收到类型化拒绝——有意收窄，不声称零影响）**、冻结接口落位、验收命令输出摘要、golden 零改动 diff 证据、DR-01/02/03 授权修订落位（含 MINIMAL_PAYLOAD 四 digest 自洽迁移）、**DR-04-B RESOLVED-MAINTAINER 状态行（裁定 1+2 批准）**、PI-DR6 非 Windows 记录、**提交范围如实声明（docs + `_red_proof/` D2 冻结底稿及其管理办法，§4a）与 RED 可复现命令（`python -m pytest _red_proof -q` → 43 failed / 4 passed）**。禁止任何自动关闭 #60 的关键字。
 
 ## 11. R1 终案（Maintainer 终裁，DR-03 §3）
 

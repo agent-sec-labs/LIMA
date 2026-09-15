@@ -71,6 +71,8 @@ class Finding:
     trigger_path: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if isinstance(self.severity, str):
+            self.severity = Severity(self.severity.lower().strip())
         self.cwe = self.cwe.upper().strip()
         self.source = self.source.strip() or "unknown"
         self.evidence_kind = self.evidence_kind.strip() or "line"

@@ -61,6 +61,7 @@ from lima.agent_orchestrator import (
     PlatformReviewOutcome,
     platform_rule_id,
 )
+from lima.agent_patch import PatchFlowOutcome
 from lima.contracts.aep import (
     AuditBudget,
     AuditCoverage,
@@ -85,6 +86,16 @@ from lima.contracts.evidence import (
     SourceLocation,
     VulnerabilityHypothesis,
 )
+from lima.contracts.rvr import (
+    CandidateVerdict,
+    CandidateVerification,
+    GateKind,
+    GateOutcome,
+    GateResult,
+    PatchReference,
+    RepairVerificationReport,
+    VepReference,
+)
 from lima.contracts.summary import (
     ArtifactLink,
     ExecutionStatus,
@@ -104,6 +115,7 @@ from lima.contracts.vep import (
 
 __all__ = [
     "finding_to_vep",
+    "patch_outcome_to_rvr",
     "platform_review_to_aep",
     "platform_review_to_workflow_summary",
 ]
@@ -1089,4 +1101,206 @@ def platform_review_to_workflow_summary(
         stage_attempts=tuple(stage_attempts),
         evidence=tuple(evidence),
         legacy_artifact_ids=(),
+    )
+
+
+# --- task T3: PatchFlowOutcome -> RepairVerificationReport ------------------
+
+_PATCH_GENERATOR_ID: Final = "lima-agent-patch-engineer"
+_VERIFY_PRODUCER_ID: Final = "lima-agent-platform"
+
+
+def _gate_outcome_for(value: bool | None) -> GateOutcome:
+    """Map one ``PatchVerification`` boolean fact onto a gate outcome.
+
+    ``None`` means the fact was never established (compile skipped by the
+    noop shortcut, PoC unjudgeable after a compile failure, instrument noise
+    or an inconclusive run), so the honest six-state wire form is
+    ``inconclusive`` -- never a guessed pass/fail.
+    """
+
+    if value is True:
+        return GateOutcome.PASS
+    if value is False:
+        return GateOutcome.FAILED
+    return GateOutcome.INCONCLUSIVE
+
+
+def _security_gate_outcome(poc_still_triggers: bool | None) -> GateOutcome:
+    """Inverted polarity of the PoC oracle: ``False`` is the passing fact.
+
+    The PoC *no longer* triggering (``False``) means the patch preserved the
+    security property -> pass; still triggering -> failed; unjudged ->
+    inconclusive.
+    """
+
+    if poc_still_triggers is True:
+        return GateOutcome.FAILED
+    if poc_still_triggers is False:
+        return GateOutcome.PASS
+    return GateOutcome.INCONCLUSIVE
+
+
+def _gate_detail(headline: str, diagnostics: tuple[str, ...]) -> str:
+    """One bounded, deterministic gate detail line with its diagnostics."""
+
+    detail = headline
+    if diagnostics:
+        detail += "; diagnostics: " + ", ".join(diagnostics)
+    return _sanitize_text(detail, cap=_MAX_TEXT_BYTES)
+
+
+def patch_outcome_to_rvr(
+    patch_outcome: PatchFlowOutcome,
+    *,
+    finding: PlatformFinding,
+    snapshot_sha256: str,
+    repository: str,
+) -> RepairVerificationReport:
+    """Convert one patch flow outcome into a strictly validated V4 RVR (T3).
+
+    Mapping:
+
+    ==================================  ===================================
+    platform patch fact                 RVR field
+    ==================================  ===================================
+    :func:`finding_to_vep`\ (``finding``) ``source_vep`` triple pinned at
+                                        the real canonical VEP payload
+                                        digest (hypothesis id as artifact id)
+    ``proposal.patched_content``        ``patch.content_digest`` (sha256 of
+                                        the complete replacement file) plus
+                                        a deterministic ``patch-`` artifact id
+    ``proposal.target_path``            ``changed_files`` (single entry)
+    ``proposal.rationale``              ``strategy`` (bounded; fixed
+                                        fallback when sanitization empties it)
+    ``verification.compiles``           functional_preservation gate:
+                                        True/False/None -> pass/failed/
+                                        inconclusive
+    ``verification.poc_still_triggers`` security_preservation gate:
+                                        False/True/None -> pass/failed/
+                                        inconclusive (the PoC no longer
+                                        triggering is the passing fact)
+    derived from both gates             ``verdict`` (frozen matrix: any
+                                        failed gate -> rejected; both pass
+                                        -> verified_patch; else inconclusive)
+    ``asan_type_after`` + diagnostics   security gate ``detail``
+    ``rounds_used``                     not expressible at 4.0 (the frozen
+                                        RVR admits no extensions) -- dropped
+    ``proposal=None`` (generation
+    failed) or ``verification=None``    rejected (``ValueError``)
+    ==================================  ===================================
+
+    Honesty boundaries: the generator (the platform patch engineer model)
+    never produces gate evidence -- both gates are owned by the platform's
+    isolated-copy build and PoC regression run, so the frozen
+    generator-may-not-verify-own-candidate ban holds structurally.  The
+    ``patch_outcome.verified`` flag must agree with the gate-derived verdict
+    in both directions (a contradictory outcome is ``ValueError``, never a
+    coerced verified_patch).  Gate evidence ids are deterministic stand-ins
+    (T1 stand-in policy): the isolated-copy run artifacts are payload-level
+    pins until the platform mints them.  Failures of the real ``RVR`` /
+    ``CandidateVerification`` constructors propagate unchanged (fail-closed).
+    """
+
+    if not isinstance(patch_outcome, PatchFlowOutcome):
+        raise ValueError("patch_outcome must be a PatchFlowOutcome")
+    if not isinstance(finding, PlatformFinding):
+        raise ValueError("finding must be a PlatformFinding")
+    if not isinstance(snapshot_sha256, str) or not snapshot_sha256:
+        raise ValueError("snapshot_sha256 must be a non-empty string")
+    if not isinstance(repository, str) or not repository:
+        raise ValueError("repository must be a non-empty string")
+    proposal = patch_outcome.proposal
+    verification = patch_outcome.verification
+    if proposal is None or verification is None:
+        raise ValueError(
+            "patch outcome carries no proposal/verification pair to verify "
+            f"(diagnostics: {', '.join(patch_outcome.diagnostics) or 'none'})"
+        )
+
+    vep = finding_to_vep(
+        finding, snapshot_sha256=snapshot_sha256, repository=repository
+    )
+    patch_digest = hashlib.sha256(
+        proposal.patched_content.encode("utf-8")
+    ).hexdigest()
+    target_path = _normalized_path(proposal.target_path)
+    identity_material = _canonical_json(
+        {
+            "hypothesis_id": vep.hypothesis_id,
+            "patch_sha256": patch_digest,
+            "target_path": target_path,
+        }
+    )
+    short = _short_digest(identity_material)
+    gate_material = _canonical_json(
+        {
+            "candidate_id": "cand-" + short,
+            "patch_artifact_id": "patch-" + short,
+            "repository": repository,
+            "snapshot_sha256": snapshot_sha256,
+        }
+    )
+    gates = (
+        GateResult(
+            gate=GateKind.FUNCTIONAL_PRESERVATION,
+            outcome=_gate_outcome_for(verification.compiles),
+            producer=_VERIFY_PRODUCER_ID,
+            evidence_artifact_ids=("build-" + _short_digest(gate_material),),
+            detail=_gate_detail(
+                f"Isolated-copy compile of {target_path}: "
+                f"compiles={verification.compiles}",
+                verification.diagnostics,
+            ),
+        ),
+        GateResult(
+            gate=GateKind.SECURITY_PRESERVATION,
+            outcome=_security_gate_outcome(verification.poc_still_triggers),
+            producer=_VERIFY_PRODUCER_ID,
+            evidence_artifact_ids=("pocpost-" + _short_digest(gate_material),),
+            detail=_gate_detail(
+                "PoC regression on the patched isolated copy: "
+                f"poc_still_triggers={verification.poc_still_triggers}"
+                + (
+                    f"; observed post-patch sanitizer type "
+                    f"{verification.asan_type_after}"
+                    if verification.asan_type_after is not None
+                    else ""
+                ),
+                verification.diagnostics,
+            ),
+        ),
+    )
+    outcomes = [gate.outcome for gate in gates]
+    if any(outcome is GateOutcome.FAILED for outcome in outcomes):
+        verdict = CandidateVerdict.REJECTED
+    elif all(outcome is GateOutcome.PASS for outcome in outcomes):
+        verdict = CandidateVerdict.VERIFIED_PATCH
+    else:
+        verdict = CandidateVerdict.INCONCLUSIVE
+    if patch_outcome.verified is not (verdict is CandidateVerdict.VERIFIED_PATCH):
+        raise ValueError("patch outcome verified flag contradicts the gates")
+
+    candidate = CandidateVerification(
+        candidate_id="cand-" + short,
+        patch=PatchReference(
+            patch_artifact_id="patch-" + short, content_digest=patch_digest
+        ),
+        strategy=(
+            _sanitize_text(proposal.rationale, cap=512)
+            or "platform-proposed complete-file patch"
+        ),
+        changed_files=(target_path,),
+        generator=_PATCH_GENERATOR_ID,
+        gates=gates,
+        verdict=verdict,
+    )
+    return RepairVerificationReport(
+        schema_version=SCHEMA_VERSION,
+        source_vep=VepReference(
+            artifact_id=vep.hypothesis_id,
+            content_digest=compute_content_digest(vep.to_dict()),
+            schema_version=SCHEMA_VERSION,
+        ),
+        candidates=(candidate,),
     )

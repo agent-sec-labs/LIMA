@@ -28,8 +28,26 @@ Mapping pinned here (task T1 design decisions):
 import json
 import unittest
 
+from lima.agent_orchestrator import PlatformReviewOutcome, PlatformReviewStats
+from lima.contracts.aep import (
+    AuditBudget,
+    AuditCoverageGap,
+    AuditDepth,
+    AuditOutcome,
+    AuditPackageStatus,
+    decode_aep_payload,
+    encode_aep_payload,
+)
+from lima.contracts.codec import compute_content_digest
 from lima.contracts.common import SchemaVersion
-from lima.contracts.evidence import EvidenceLevel, EvidencePolarity
+from lima.contracts.evidence import EvidenceLevel, EvidencePolarity, HypothesisStatus
+from lima.contracts.summary import (
+    ExecutionStatus,
+    SummaryReferenceKind,
+    SummarySourceKind,
+    decode_workflow_summary_payload,
+    encode_workflow_summary_payload,
+)
 from lima.contracts.vep import (
     ClaimKind,
     ReproductionOutcome,
@@ -43,6 +61,15 @@ try:  # module under test (RED until implemented)
     from lima.platform_contracts import finding_to_vep
 except ImportError:  # pragma: no cover - RED phase
     finding_to_vep = None
+
+try:  # T2 converters (RED until implemented)
+    from lima.platform_contracts import (
+        platform_review_to_aep,
+        platform_review_to_workflow_summary,
+    )
+except ImportError:  # pragma: no cover - RED phase
+    platform_review_to_aep = None
+    platform_review_to_workflow_summary = None
 
 
 SNAPSHOT = "a" * 64
@@ -245,6 +272,298 @@ class FindingToVepTests(unittest.TestCase):
         self.assertEqual(decoded, vep)
         # Canonical JSON round trip stays stable for downstream digesting.
         self.assertEqual(json.loads(json.dumps(payload)), payload)
+
+
+_STATIC_RECORD = EvidenceRecord(
+    source="cppcheck",
+    kind="static",
+    path="src/example.c",
+    line=40,
+    snippet="Buffer overrun detected",
+    rule_id="cppcheck.bufferOverflow",
+    cwe="CWE-787",
+    tool_run_id="run-static-0001",
+)
+
+
+def _outcome(**overrides):
+    """One platform review outcome carrying the T1 runtime-confirmed finding."""
+
+    finding = _plain_finding(
+        {
+            "target_id": "lead-0001",
+            "path": "src/example.c",
+            "line": 42,
+            "symbol": "parse_input",
+            "cwe": "CWE-787",
+            "state": "tool-corroborated",
+            "hypothesis_reason": "Attacker-controlled length reaches memcpy unbounded.",
+            "poc_driver_code": "int main(void) { return 0; }",
+            "experiment_log": (),
+            "identity": None,
+            "evidence_records": (_STATIC_RECORD,),
+        }
+    )
+    base = {
+        "findings": (finding,),
+        "targets": (finding,),
+        "stats": PlatformReviewStats(2, 1, 1, 2, 3, 2, 1),
+        "diagnostics": (),
+        "leads_considered": 2,
+        "translation_units": ("src/example.c", "src/other.c", "vendored/big.c"),
+    }
+    base.update(overrides)
+    return PlatformReviewOutcome(**base)
+
+
+class PlatformReviewContractsTests(unittest.TestCase):
+    """PlatformReviewOutcome -> AEP / WorkflowSummary converters (T2)."""
+
+    # ------------------------------------------------------------ AEP mapping
+
+    def test_aep_maps_coverage_and_budget(self):
+        aep = platform_review_to_aep(
+            _outcome(), snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+        )
+        self.assertEqual(aep.schema_version, SchemaVersion(4, 0))
+        self.assertIs(aep.package_status, AuditPackageStatus.SEALED)
+        self.assertIs(aep.audit_depth, AuditDepth.INITIAL)
+        self.assertIs(aep.audit_outcome, AuditOutcome.COMPLETED)
+        self.assertEqual(aep.revision, 1)
+        # stats numbers survive verbatim: experiment_count -> tool_runs and
+        # the three LLM roles sum into model_calls; unmetered axes stay 0.
+        self.assertEqual(
+            aep.budget,
+            AuditBudget(tool_runs=2, model_calls=6, model_tokens=0, wall_clock_ms=0),
+        )
+        # analyzed = distinct audited target paths; in scope adds the
+        # translation units the fact instrument covered (vendored/big.c).
+        self.assertEqual(aep.coverage.analyzed_file_count, 1)
+        self.assertEqual(aep.coverage.in_scope_file_count, 3)
+        self.assertTrue(
+            aep.repository_profile_artifact_ids[0].startswith("profile-platform-")
+        )
+        # tool-corroborated finding: D2 SUPPORTS -> statically supported ->
+        # mining eligible and the completed outcome is mandatory.
+        self.assertEqual(len(aep.mining_eligible_hypothesis_ids), 1)
+        statuses = {
+            hypothesis.status
+            for hypothesis in aep.evidence.vulnerability_hypotheses
+        }
+        self.assertEqual(statuses, {HypothesisStatus.STATICALLY_SUPPORTED})
+
+    def test_aep_maps_coverage_gaps_from_diagnostics(self):
+        outcome = _outcome(
+            diagnostics=(
+                "coverage gap: unit vendored/big.c skipped: over per-file budget",
+                "scout: degraded provider output",
+            )
+        )
+        aep = platform_review_to_aep(
+            outcome, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+        )
+        self.assertEqual(
+            aep.coverage_gaps,
+            (
+                AuditCoverageGap(
+                    gap_code="COVERAGE_GAP",
+                    detail="unit vendored/big.c skipped: over per-file budget",
+                ),
+            ),
+        )
+        # Non coverage-gap diagnostics never become gaps.
+        plain = platform_review_to_aep(
+            _outcome(diagnostics=("scout: degraded provider output",)),
+            snapshot_sha256=SNAPSHOT,
+            repository=REPOSITORY,
+        )
+        self.assertEqual(plain.coverage_gaps, ())
+
+    def test_aep_without_supported_hypotheses_is_no_actionable(self):
+        outcome = _outcome(
+            findings=(),
+            targets=(),
+            stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 1),
+            leads_considered=0,
+            translation_units=("src/example.c",),
+        )
+        aep = platform_review_to_aep(
+            outcome, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+        )
+        self.assertIs(aep.audit_outcome, AuditOutcome.NO_ACTIONABLE_HYPOTHESIS)
+        self.assertEqual(aep.mining_eligible_hypothesis_ids, ())
+        self.assertEqual(aep.evidence.vulnerability_hypotheses, ())
+        self.assertEqual(aep.coverage.in_scope_file_count, 1)
+        self.assertEqual(aep.coverage.analyzed_file_count, 0)
+
+    # ------------------------------------------------- WorkflowSummary mapping
+
+    def test_workflow_summary_completed(self):
+        summary = platform_review_to_workflow_summary(
+            _outcome(), snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+        )
+        self.assertEqual(summary.schema_version, SchemaVersion(4, 0))
+        self.assertIs(summary.source, SummarySourceKind.CHAIN)
+        self.assertIs(summary.execution_status, ExecutionStatus.SUCCEEDED)
+        self.assertIsNotNone(summary.workflow)
+        self.assertIs(summary.workflow.kind, SummaryReferenceKind.WORKFLOW)
+        self.assertIsNotNone(summary.security_outcome)
+        self.assertIs(
+            summary.security_outcome.kind, SummaryReferenceKind.SECURITY_OUTCOME
+        )
+        self.assertIsNone(summary.run_manifest)
+        # Chain-source summaries must never carry legacy ids.
+        self.assertEqual(summary.legacy_artifact_ids, ())
+        # Deterministic: same inputs -> identical summary.
+        again = platform_review_to_workflow_summary(
+            _outcome(), snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+        )
+        self.assertEqual(summary, again)
+
+    def test_workflow_summary_maps_execution_status(self):
+        cancelled = platform_review_to_workflow_summary(
+            _outcome(
+                findings=(),
+                targets=(),
+                stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 0),
+                diagnostics=("cancelled before the platform review started",),
+            ),
+            snapshot_sha256=SNAPSHOT,
+            repository=REPOSITORY,
+        )
+        self.assertIs(cancelled.execution_status, ExecutionStatus.CANCELLED)
+        for diagnostic in (
+            "deadline-exceeded before the platform review started",
+            "scout-unavailable: provider offline",
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                summary = platform_review_to_workflow_summary(
+                    _outcome(
+                        findings=(),
+                        targets=(),
+                        stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 0),
+                        diagnostics=(diagnostic,),
+                    ),
+                    snapshot_sha256=SNAPSHOT,
+                    repository=REPOSITORY,
+                )
+                self.assertIs(summary.execution_status, ExecutionStatus.FAILED)
+        # Degradation is not an execution failure: the wire vocabulary has no
+        # degraded value and the run finished its audit loop.
+        degraded = platform_review_to_workflow_summary(
+            _outcome(diagnostics=("scout: degraded provider output",)),
+            snapshot_sha256=SNAPSHOT,
+            repository=REPOSITORY,
+        )
+        self.assertIs(degraded.execution_status, ExecutionStatus.SUCCEEDED)
+
+    def test_workflow_summary_evidence_links_to_veps(self):
+        findings = (
+            _plain_finding(
+                {
+                    "target_id": "lead-0001",
+                    "path": "src/example.c",
+                    "line": 42,
+                    "symbol": "parse_input",
+                    "cwe": "CWE-787",
+                    "state": "runtime-confirmed",
+                    "hypothesis_reason": "Attacker-controlled length reaches memcpy.",
+                    "poc_driver_code": "int main(void) { return 0; }",
+                    "experiment_log": (_HIT_ENTRY,),
+                    "identity": None,
+                    "evidence_records": (_ASAN_RECORD,),
+                }
+            ),
+            _plain_finding(
+                {
+                    "target_id": "lead-0002",
+                    "path": "src/example.c",
+                    "line": 43,
+                    "symbol": "parse_input",
+                    "cwe": "CWE-787",
+                    "state": "tool-corroborated",
+                    "hypothesis_reason": "Second reachable memcpy.",
+                    "poc_driver_code": "int main(void) { return 0; }",
+                    "experiment_log": (),
+                    "identity": None,
+                    "evidence_records": (_STATIC_RECORD,),
+                }
+            ),
+        )
+        summary = platform_review_to_workflow_summary(
+            _outcome(findings=findings, targets=findings, stats=PlatformReviewStats(
+                2, 2, 2, 1, 3, 2, 1,
+            )),
+            snapshot_sha256=SNAPSHOT,
+            repository=REPOSITORY,
+        )
+        veps = [
+            finding_to_vep(finding, snapshot_sha256=SNAPSHOT, repository=REPOSITORY)
+            for finding in findings
+        ]
+        digests = {
+            vep.hypothesis_id: compute_content_digest(vep.to_dict()) for vep in veps
+        }
+        # One evidence link per finding, addressed at the real VEP identity.
+        self.assertEqual(len(summary.evidence), len(veps))
+        self.assertEqual(
+            [link.artifact_id for link in summary.evidence],
+            sorted(digests),
+        )
+        for link in summary.evidence:
+            self.assertIs(
+                link.kind, SummaryReferenceKind.VULNERABILITY_EVIDENCE_PACKAGE
+            )
+            self.assertEqual(link.schema_version, SchemaVersion(4, 0))
+            self.assertEqual(link.content_digest, digests[link.artifact_id])
+        # One stage-attempt link per platform role, sorted by artifact id.
+        self.assertEqual(len(summary.stage_attempts), 3)
+        for link in summary.stage_attempts:
+            self.assertIs(link.kind, SummaryReferenceKind.STAGE_ATTEMPT)
+        self.assertEqual(
+            [link.artifact_id for link in summary.stage_attempts],
+            sorted(link.artifact_id for link in summary.stage_attempts),
+        )
+
+    def test_workflow_summary_rejects_empty_outcome(self):
+        empty = _outcome(
+            findings=(),
+            targets=(),
+            stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 0),
+            leads_considered=0,
+            diagnostics=(),
+        )
+        with self.assertRaises(ValueError):
+            platform_review_to_workflow_summary(
+                empty, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+            )
+
+    # ---------------------------------------------------------------- codec
+
+    def test_roundtrip_via_codec(self):
+        aep = platform_review_to_aep(
+            _outcome(
+                diagnostics=("coverage gap: unit vendored/big.c skipped",)
+            ),
+            snapshot_sha256=SNAPSHOT,
+            repository=REPOSITORY,
+        )
+        payload = encode_aep_payload(aep)
+        decoded = decode_aep_payload(payload, schema_version=SchemaVersion(4, 0))
+        self.assertEqual(decoded, aep)
+        self.assertEqual(encode_aep_payload(decoded), payload)
+
+        summary = platform_review_to_workflow_summary(
+            _outcome(), snapshot_sha256=SNAPSHOT, repository=REPOSITORY
+        )
+        summary_payload = encode_workflow_summary_payload(summary)
+        summary_decoded = decode_workflow_summary_payload(
+            summary_payload, schema_version=SchemaVersion(4, 0)
+        )
+        self.assertEqual(summary_decoded, summary)
+        self.assertEqual(
+            encode_workflow_summary_payload(summary_decoded), summary_payload
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

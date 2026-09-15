@@ -56,14 +56,41 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Any, Final
 
-from lima.agent_orchestrator import PlatformFinding, PlatformReviewOutcome
+from lima.agent_orchestrator import (
+    PlatformFinding,
+    PlatformReviewOutcome,
+    platform_rule_id,
+)
+from lima.contracts.aep import (
+    AuditBudget,
+    AuditCoverage,
+    AuditCoverageGap,
+    AuditDepth,
+    AuditEvidencePackage,
+    AuditOutcome,
+    AuditPackageStatus,
+)
+from lima.contracts.codec import compute_content_digest
 from lima.contracts.common import SchemaVersion
 from lima.contracts.evidence import (
+    EvidenceDomainBundle,
     EvidenceLevel,
     EvidencePolarity,
     EvidenceRecord,
     EvidenceSubjectKind,
+    HypothesisStatus,
+    RequiredProofKind,
+    SecurityIssue,
+    Signal,
     SourceLocation,
+    VulnerabilityHypothesis,
+)
+from lima.contracts.summary import (
+    ArtifactLink,
+    ExecutionStatus,
+    SummaryReferenceKind,
+    SummarySourceKind,
+    WorkflowSummary,
 )
 from lima.contracts.vep import (
     AepReference,
@@ -78,6 +105,7 @@ from lima.contracts.vep import (
 __all__ = [
     "finding_to_vep",
     "platform_review_to_aep",
+    "platform_review_to_workflow_summary",
 ]
 
 SCHEMA_VERSION: Final = SchemaVersion(4, 0)
@@ -95,6 +123,19 @@ _PROBABLE_STATES: Final = frozenset(
     }
 )
 _DISPUTED_STATE: Final = "rejected"
+
+# --- task T2: platform review -> AEP / WorkflowSummary ---------------------
+
+_IDENTIFIER_SAFE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_CANCELLED_PRESTART: Final = "cancelled before the platform review started"
+_FAILED_PRESTART_PREFIXES: Final = (
+    "deadline-exceeded before the platform review started",
+    "scout-unavailable:",
+)
+_COVERAGE_GAP_PREFIX: Final = "coverage gap: "
+_COVERAGE_GAP_CODE: Final = "COVERAGE_GAP"
+_AEP_MAX_DETAIL_BYTES: Final = 4096
+_STAGE_ROLES: Final = ("scout", "specialist", "critic")
 
 
 def _canonical_json(material: Mapping[str, Any]) -> str:
@@ -466,17 +507,586 @@ def finding_to_vep(
     )
 
 
+def _identifier_safe(value: object, fallback: str) -> str:
+    """Keep ``value`` when it already is a contract identifier, else fall back."""
+
+    if isinstance(value, str) and _IDENTIFIER_SAFE.fullmatch(value) is not None:
+        return value
+    return fallback
+
+
+def _audit_subject_record(
+    *,
+    evidence_id: str,
+    subject_kind: EvidenceSubjectKind,
+    subject_id: str,
+    summary: str,
+    reason_code: str,
+    artifact_id: str,
+) -> EvidenceRecord:
+    """One D0 platform bookkeeping record bound to a signal or issue subject."""
+
+    return EvidenceRecord(
+        evidence_id=evidence_id,
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+        level=EvidenceLevel.D0,
+        polarity=EvidencePolarity.SUPPORTS,
+        analysis_family="platform-adjudication",
+        producer=_PLATFORM_PRODUCER,
+        independence_key=_sanitize_text(
+            f"{subject_kind.value}:{subject_id}", cap=512
+        ),
+        summary=_sanitize_text(summary, cap=_MAX_TEXT_BYTES),
+        source_artifact_ids=(artifact_id,),
+        reason_codes=(reason_code,),
+    )
+
+
+def _aep_finding_objects(
+    finding: PlatformFinding,
+    *,
+    snapshot_sha256: str,
+    repository: str,
+) -> tuple[Signal, SecurityIssue, VulnerabilityHypothesis, list[EvidenceRecord]]:
+    """Project one platform finding onto the audit (D0-D2) evidence graph.
+
+    State -> static hypothesis status (the bundle derives statuses from D2
+    records bound to the hypothesis, so the mapping below is exactly the
+    admissible one):
+
+    ================================  ==============================  =============================
+    ``PlatformFinding.state``         bound records                   hypothesis status
+    ================================  ==============================  =============================
+    ``fact-verified`` /
+    ``tool-corroborated``             D2 SUPPORTS per static record   ``statically_supported``
+    ``semantic-supported`` /
+    ``needs-human-review`` /
+    ``runtime-confirmed``             D1 SUPPORTS platform record     ``proposed``
+    ================================  ==============================  =============================
+
+    Runtime (ASan, D3) records stay out of the audit bundle (D0-D2 only);
+    they travel in the VEP produced by :func:`finding_to_vep`.  Every graph
+    object also gets one D0 bookkeeping record because the bundle requires
+    non-empty evidence binding per subject.
+    """
+
+    cwe = _normalized_cwe(finding.cwe)
+    path = _normalized_path(finding.path)
+    hypothesis_id = _hypothesis_id(
+        finding, snapshot_sha256=snapshot_sha256, repository=repository
+    )
+    identity_material = _canonical_json(
+        {
+            "cwe": cwe,
+            "kind": "lima.platform.audit-object",
+            "line": finding.line,
+            "path": path,
+            "repository": repository,
+            "snapshot_sha256": snapshot_sha256,
+            "target_id": finding.target_id,
+        }
+    )
+    digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+    short = _short_digest(identity_material)
+    issue_id = "issue-" + short
+    signal_id = "signal-" + short
+    location = SourceLocation(
+        path=path,
+        start_line=finding.line,
+        end_line=finding.line,
+        symbol=_sanitize_text(finding.symbol, cap=512) or None,
+    )
+
+    records: list[EvidenceRecord] = []
+    d2_supported = False
+    for candidate in finding.evidence_records:
+        if candidate.source == "asan":
+            continue  # D3 runtime evidence is VEP-domain, not audit-bundle.
+        material = _canonical_json(
+            {
+                "layer": "aep-static",
+                "line": candidate.line,
+                "path": candidate.path,
+                "snippet": candidate.snippet,
+                "source": candidate.source,
+                "subject_id": hypothesis_id,
+                "tool_run_id": candidate.tool_run_id,
+            }
+        )
+        summary = _sanitize_text(candidate.snippet, cap=_MAX_TEXT_BYTES)
+        if not summary:
+            summary = _sanitize_text(
+                f"{candidate.source} static evidence at "
+                f"{candidate.path}:{candidate.line}",
+                cap=512,
+            )
+        artifact_id = (
+            candidate.tool_run_id
+            if candidate.tool_run_id
+            else "tool-" + _short_digest(material)
+        )
+        records.append(
+            EvidenceRecord(
+                evidence_id="ev" + _short_digest(material),
+                subject_kind=EvidenceSubjectKind.VULNERABILITY_HYPOTHESIS,
+                subject_id=hypothesis_id,
+                level=EvidenceLevel.D2,
+                polarity=EvidencePolarity.SUPPORTS,
+                analysis_family="static-tool-analysis",
+                producer=_identifier_safe(candidate.source, "static-tool"),
+                independence_key=_sanitize_text(
+                    f"{candidate.source}:{candidate.path}:{candidate.line}",
+                    cap=512,
+                ),
+                summary=summary,
+                source_artifact_ids=(artifact_id,),
+                reason_codes=("STATIC_TOOL_SUPPORT",),
+            )
+        )
+        d2_supported = True
+
+    if not records:
+        records.append(
+            _adjudication_record(
+                subject_id=hypothesis_id,
+                layer="hypothesis-raised",
+                level=EvidenceLevel.D1,
+                polarity=EvidencePolarity.SUPPORTS,
+                summary=(
+                    f"Platform raised {cwe} hypothesis for {finding.target_id} "
+                    f"at {path}:{finding.line} without D2 static corroboration."
+                ),
+                reason_code="HYPOTHESIS_RAISED",
+                source_artifact_ids=("target-" + short,),
+            )
+        )
+
+    signal_record_id = "ev" + _short_digest(
+        _canonical_json({"layer": "aep-signal", "subject_id": signal_id})
+    )
+    issue_record_id = "ev" + _short_digest(
+        _canonical_json({"layer": "aep-issue", "subject_id": issue_id})
+    )
+    records.append(
+        _audit_subject_record(
+            evidence_id=signal_record_id,
+            subject_kind=EvidenceSubjectKind.SIGNAL,
+            subject_id=signal_id,
+            summary=(
+                f"Scout selected {finding.target_id} at {path}:{finding.line} "
+                f"({cwe})."
+            ),
+            reason_code="PLATFORM_TARGET_SELECTED",
+            artifact_id="target-" + short,
+        )
+    )
+    records.append(
+        _audit_subject_record(
+            evidence_id=issue_record_id,
+            subject_kind=EvidenceSubjectKind.SECURITY_ISSUE,
+            subject_id=issue_id,
+            summary=f"Investigation unit opened for {finding.target_id}.",
+            reason_code="PLATFORM_ISSUE_OPENED",
+            artifact_id="target-" + short,
+        )
+    )
+
+    signal = Signal(
+        signal_id=signal_id,
+        fingerprint=digest,
+        rule_id=platform_rule_id(cwe),
+        analysis_family="platform-adjudication",
+        evidence_kind="scout-target",
+        location=location,
+        evidence_ids=(signal_record_id,),
+        reason_codes=("PLATFORM_TARGET_SELECTED",),
+        cwe_ids=(cwe,),
+    )
+    issue = SecurityIssue(
+        issue_id=issue_id,
+        identity_digest=digest,
+        root_cause_class="platform-target",
+        sink_identity="sink-" + short,
+        trust_boundary="unassessed",
+        primary_location=location,
+        signal_ids=(signal_id,),
+        evidence_ids=(issue_record_id,),
+        reason_codes=("PLATFORM_ISSUE_OPENED",),
+        cwe_ids=(cwe,),
+    )
+    trigger = _sanitize_text(finding.hypothesis_reason, cap=512)
+    claim = _sanitize_text(
+        f"{cwe} hypothesis at {path}:{finding.line}: "
+        f"{finding.hypothesis_reason}",
+        cap=_MAX_TEXT_BYTES,
+    ) or _sanitize_text(
+        f"{cwe} hypothesis at {path}:{finding.line}.", cap=512
+    )
+    hypothesis = VulnerabilityHypothesis(
+        hypothesis_id=hypothesis_id,
+        issue_id=issue_id,
+        status=(
+            HypothesisStatus.STATICALLY_SUPPORTED
+            if d2_supported
+            else HypothesisStatus.PROPOSED
+        ),
+        claim=claim,
+        security_invariant=_sanitize_text(
+            f"No attacker-controlled {cwe} violation at {path}:{finding.line}.",
+            cap=512,
+        ),
+        required_proof_kind=RequiredProofKind.RUNTIME_BEHAVIOR,
+        capability_requirements=("local-execution",),
+        target_location=location,
+        source_locations=(),
+        critical_path=(),
+        trigger_conditions=(trigger,) if trigger else (),
+        input_constraints=(),
+        evidence_ids=tuple(
+            sorted(
+                record.evidence_id
+                for record in records
+                if record.subject_id == hypothesis_id
+                and record.subject_kind
+                is EvidenceSubjectKind.VULNERABILITY_HYPOTHESIS
+            )
+        ),
+        reason_codes=("PLATFORM_HYPOTHESIS_RAISED",),
+        cwe_ids=(cwe,),
+    )
+    return signal, issue, hypothesis, records
+
+
 def platform_review_to_aep(
     outcome: PlatformReviewOutcome,
     *,
     snapshot_sha256: str,
     repository: str,
-) -> None:
+) -> AuditEvidencePackage:
     """Fold one platform review into the audit evidence package (task T2).
 
-    Placeholder only: T2 will emit the D0-D2 ``AuditEvidencePackage`` that
-    the VEPs produced by :func:`finding_to_vep` pin through
-    ``source_aep``.
+    This emits the D0-D2 ``AuditEvidencePackage`` that the VEPs produced by
+    :func:`finding_to_vep` pin through ``source_aep``.  Mapping:
+
+    ===================================  =====================================
+    platform review fact                 AEP field
+    ===================================  =====================================
+    ``outcome.findings`` (per finding)   one Signal + SecurityIssue +
+                                         VulnerabilityHypothesis + D0-D2
+                                         records in ``evidence``
+    static tool records (non-ASan)       D2 SUPPORTS bound to the hypothesis
+    ASan runtime records                 excluded (audit bundle admits
+                                         D0-D2 only; runtime proof lives
+                                         in the VEP)
+    ``stats.experiment_count``           ``budget.tool_runs``
+    scout + specialist + critic calls    ``budget.model_calls``
+    (unmetered)                          ``budget.model_tokens`` /
+                                         ``budget.wall_clock_ms`` = 0
+    distinct ``targets[].path``          ``coverage.analyzed_file_count``
+    analyzed paths + ``translation_units union`` ``coverage.in_scope_file_count``
+    diagnostics ``"coverage gap: X"``    ``coverage_gaps`` (code
+                                         ``COVERAGE_GAP``, detail ``X``)
+    STATICALLY_SUPPORTED hypotheses      ``mining_eligible_hypothesis_ids``
+    eligible / hypotheses / none         ``audit_outcome`` completed /
+                                         no_supported_attack_surface /
+                                         no_actionable_hypothesis
+    ===================================  =====================================
+
+    Deviations forced by the frozen contract vocabulary: ``AuditBudget``
+    carries no byte/line meters or upper bounds (facts, not quota
+    decisions), and ``AuditOutcome.INCOMPLETE`` is unused because it
+    demands coverage gaps the platform diagnostics cannot guarantee.  The
+    repository-profile id is a deterministic stand-in (the platform has no
+    profile artifact yet).  The package is validated by the real
+    ``AuditEvidencePackage`` constructor; failures propagate (fail-closed).
     """
 
-    raise NotImplementedError("platform_review_to_aep lands with task T2")
+    if not isinstance(outcome, PlatformReviewOutcome):
+        raise ValueError("outcome must be a PlatformReviewOutcome")
+    if not isinstance(snapshot_sha256, str) or not snapshot_sha256:
+        raise ValueError("snapshot_sha256 must be a non-empty string")
+    if not isinstance(repository, str) or not repository:
+        raise ValueError("repository must be a non-empty string")
+
+    signals: dict[str, Signal] = {}
+    issues: dict[str, SecurityIssue] = {}
+    hypotheses: dict[str, VulnerabilityHypothesis] = {}
+    records: list[EvidenceRecord] = []
+    for finding in outcome.findings:
+        signal, issue, hypothesis, finding_records = _aep_finding_objects(
+            finding, snapshot_sha256=snapshot_sha256, repository=repository
+        )
+        signals[signal.signal_id] = signal
+        issues[issue.issue_id] = issue
+        hypotheses[hypothesis.hypothesis_id] = hypothesis
+        records.extend(finding_records)
+
+    eligible = tuple(
+        sorted(
+            hypothesis_id
+            for hypothesis_id, hypothesis in hypotheses.items()
+            if hypothesis.status is HypothesisStatus.STATICALLY_SUPPORTED
+        )
+    )
+    if eligible:
+        audit_outcome = AuditOutcome.COMPLETED
+    elif not hypotheses:
+        audit_outcome = AuditOutcome.NO_ACTIONABLE_HYPOTHESIS
+    else:
+        audit_outcome = AuditOutcome.NO_SUPPORTED_ATTACK_SURFACE
+
+    analyzed = {_normalized_path(target.path) for target in outcome.targets}
+    in_scope = analyzed | {
+        _normalized_path(unit) for unit in outcome.translation_units
+    }
+    coverage = AuditCoverage(
+        in_scope_file_count=len(in_scope),
+        analyzed_file_count=len(analyzed),
+    )
+    budget = AuditBudget(
+        tool_runs=outcome.stats.experiment_count,
+        model_calls=(
+            outcome.stats.scout_calls
+            + outcome.stats.specialist_calls
+            + outcome.stats.critic_calls
+        ),
+        model_tokens=0,
+        wall_clock_ms=0,
+    )
+
+    gaps: list[AuditCoverageGap] = []
+    seen_details: set[str] = set()
+    for diagnostic in outcome.diagnostics:
+        if not diagnostic.startswith(_COVERAGE_GAP_PREFIX):
+            continue
+        detail = _sanitize_text(
+            diagnostic[len(_COVERAGE_GAP_PREFIX):], cap=_AEP_MAX_DETAIL_BYTES
+        )
+        if not detail or detail in seen_details:
+            continue
+        seen_details.add(detail)
+        gaps.append(AuditCoverageGap(gap_code=_COVERAGE_GAP_CODE, detail=detail))
+    gaps.sort(key=lambda gap: (gap.gap_code, gap.detail.encode("utf-8")))
+
+    profile_material = _canonical_json(
+        {"repository": repository, "snapshot_sha256": snapshot_sha256}
+    )
+    return AuditEvidencePackage(
+        schema_version=SCHEMA_VERSION,
+        package_status=AuditPackageStatus.SEALED,
+        revision=1,
+        audit_depth=AuditDepth.INITIAL,
+        audit_outcome=audit_outcome,
+        evidence=EvidenceDomainBundle(
+            schema_version=SCHEMA_VERSION,
+            signals=tuple(sorted(signals.values(), key=lambda s: s.signal_id)),
+            security_issues=tuple(
+                sorted(issues.values(), key=lambda issue: issue.issue_id)
+            ),
+            vulnerability_hypotheses=tuple(
+                sorted(
+                    hypotheses.values(), key=lambda hypothesis: hypothesis.hypothesis_id
+                )
+            ),
+            evidence=_dedupe_sorted(records),
+        ),
+        coverage=coverage,
+        budget=budget,
+        repository_profile_artifact_ids=(
+            "profile-platform-" + _short_digest(profile_material),
+        ),
+        mining_eligible_hypothesis_ids=eligible,
+        coverage_gaps=tuple(gaps),
+    )
+
+
+def _review_material(
+    outcome: PlatformReviewOutcome,
+    *,
+    snapshot_sha256: str,
+    repository: str,
+    kind: str,
+    extra: Mapping[str, Any] | None = None,
+) -> str:
+    """Canonical digest material for one deterministic stand-in reference."""
+
+    material: dict[str, Any] = {
+        "diagnostics": list(outcome.diagnostics),
+        "kind": kind,
+        "repository": repository,
+        "snapshot_sha256": snapshot_sha256,
+        "stats": {
+            "critic_calls": outcome.stats.critic_calls,
+            "experiment_count": outcome.stats.experiment_count,
+            "finding_count": outcome.stats.finding_count,
+            "lead_count": outcome.stats.lead_count,
+            "scout_calls": outcome.stats.scout_calls,
+            "specialist_calls": outcome.stats.specialist_calls,
+            "target_count": outcome.stats.target_count,
+        },
+        "targets": [target.target_id for target in outcome.targets],
+    }
+    if extra is not None:
+        material.update(extra)
+    return _canonical_json(material)
+
+
+def _stand_in_link(
+    kind: SummaryReferenceKind,
+    id_prefix: str,
+    material: str,
+) -> ArtifactLink:
+    """Deterministic stand-in link (T1 pattern: pinned when real artifacts land)."""
+
+    return ArtifactLink(
+        kind=kind,
+        artifact_id=id_prefix + _short_digest(material),
+        content_digest=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        schema_version=SCHEMA_VERSION,
+    )
+
+
+def platform_review_to_workflow_summary(
+    outcome: PlatformReviewOutcome,
+    *,
+    snapshot_sha256: str,
+    repository: str,
+) -> WorkflowSummary:
+    """Summarize one platform review as a V4 chain workflow summary (T2).
+
+    Mapping:
+
+    ===================================  =====================================
+    platform review fact                 WorkflowSummary field
+    ===================================  =====================================
+    (fixed)                              ``source`` = chain
+    ``cancelled ... review started`` /
+    deadline / scout-unavailable
+    pre-start diagnostics                ``execution_status`` cancelled / failed
+    anything else (incl. degraded
+    best-effort diagnostics)             ``execution_status`` succeeded
+    per finding -> :func:`finding_to_vep`  one ``evidence`` ArtifactLink whose
+                                         artifact_id is the VEP hypothesis_id
+                                         and whose content_digest is the real
+                                         canonical VEP payload digest
+    scout / specialist / critic roles    three ``stage_attempts`` links with
+                                         the role call counters folded into
+                                         the deterministic digest
+    ===================================  =====================================
+
+    Vocabulary deviations forced by the frozen contract: there is no
+    ``AGENT`` source kind, so the chain kind is used (the platform emits
+    typed frozen artifacts); ``ExecutionStatus`` has no degraded value and
+    degradation is a quality fact, not an execution failure; chain-source
+    summaries must not carry ``legacy_artifact_ids``, so finding
+    fingerprints ride inside the workflow/security-outcome digest material
+    instead.  ``workflow``/``security_outcome`` are deterministic stand-in
+    links (same policy as T1's ``source_aep``/``oracle`` stand-ins) until
+    the platform mints those artifacts; VEP evidence links are real
+    content-addressed references.  Required-mode hard failures raise
+    ``RuntimeError`` inside the orchestrator before any outcome exists, so
+    they cannot be summarized here.  Findings the VEP constructor rejects
+    (``abstain``, unknown states, malformed fields) are rejected here too
+    (fail-closed); more than 64 findings exceed the frozen evidence cap.
+    """
+
+    if not isinstance(outcome, PlatformReviewOutcome):
+        raise ValueError("outcome must be a PlatformReviewOutcome")
+    if not isinstance(snapshot_sha256, str) or not snapshot_sha256:
+        raise ValueError("snapshot_sha256 must be a non-empty string")
+    if not isinstance(repository, str) or not repository:
+        raise ValueError("repository must be a non-empty string")
+    if (
+        not outcome.targets
+        and not outcome.findings
+        and outcome.leads_considered == 0
+        and outcome.stats.scout_calls == 0
+        and not outcome.diagnostics
+    ):
+        raise ValueError(
+            "platform review outcome carries no audit facts to summarize"
+        )
+
+    if _CANCELLED_PRESTART in outcome.diagnostics:
+        execution_status = ExecutionStatus.CANCELLED
+    elif any(
+        diagnostic.startswith(prefix)
+        for diagnostic in outcome.diagnostics
+        for prefix in _FAILED_PRESTART_PREFIXES
+    ):
+        execution_status = ExecutionStatus.FAILED
+    else:
+        execution_status = ExecutionStatus.SUCCEEDED
+
+    evidence: list[ArtifactLink] = []
+    evidence_digests: list[str] = []
+    for finding in outcome.findings:
+        vep = finding_to_vep(
+            finding, snapshot_sha256=snapshot_sha256, repository=repository
+        )
+        digest = compute_content_digest(vep.to_dict())
+        evidence_digests.append(digest)
+        evidence.append(
+            ArtifactLink(
+                kind=SummaryReferenceKind.VULNERABILITY_EVIDENCE_PACKAGE,
+                artifact_id=vep.hypothesis_id,
+                content_digest=digest,
+                schema_version=SCHEMA_VERSION,
+            )
+        )
+    evidence.sort(key=lambda link: link.artifact_id)
+
+    workflow_link = _stand_in_link(
+        SummaryReferenceKind.WORKFLOW,
+        "wf-platform-",
+        _review_material(
+            outcome,
+            snapshot_sha256=snapshot_sha256,
+            repository=repository,
+            kind="lima.workflow",
+        ),
+    )
+    security_link = _stand_in_link(
+        SummaryReferenceKind.SECURITY_OUTCOME,
+        "sec-platform-",
+        _review_material(
+            outcome,
+            snapshot_sha256=snapshot_sha256,
+            repository=repository,
+            kind="lima.security-outcome",
+            extra={"evidence_digests": evidence_digests},
+        ),
+    )
+    role_calls = {
+        "scout": outcome.stats.scout_calls,
+        "specialist": outcome.stats.specialist_calls,
+        "critic": outcome.stats.critic_calls,
+    }
+    stage_attempts = [
+        _stand_in_link(
+            SummaryReferenceKind.STAGE_ATTEMPT,
+            "attempt-" + role + "-",
+            _review_material(
+                outcome,
+                snapshot_sha256=snapshot_sha256,
+                repository=repository,
+                kind="lima.stage-attempt",
+                extra={"calls": role_calls[role], "role": role},
+            ),
+        )
+        for role in _STAGE_ROLES
+    ]
+    stage_attempts.sort(key=lambda link: link.artifact_id)
+
+    return WorkflowSummary(
+        schema_version=SCHEMA_VERSION,
+        source=SummarySourceKind.CHAIN,
+        execution_status=execution_status,
+        workflow=workflow_link,
+        security_outcome=security_link,
+        run_manifest=None,
+        stage_attempts=tuple(stage_attempts),
+        evidence=tuple(evidence),
+        legacy_artifact_ids=(),
+    )

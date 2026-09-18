@@ -670,7 +670,10 @@ class EndToEndTests(unittest.TestCase):
         self.assertIsNone(report["cost_usd"])
         vulnerable = report["cases"][0]["revisions"]["vulnerable"]
         self.assertGreater(vulnerable["usage"]["calls"], 0)
-        self.assertGreater(vulnerable["elapsed_seconds"], 0.0)
+        # time.monotonic() on Windows py3.11 has ~15.6ms granularity; a fast
+        # fake-model run can legitimately measure 0.0. The script contract
+        # is "finite non-negative", so assert against the contract.
+        self.assertGreaterEqual(vulnerable["elapsed_seconds"], 0.0)
         self.assertEqual({"llm-candidate": 1}, vulnerable["verification_state_counts"])
 
         identity = report["identity"]

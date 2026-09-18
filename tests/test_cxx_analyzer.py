@@ -2691,8 +2691,14 @@ class BuildScanContainerTests(unittest.TestCase):
             fingerprint = RepositoryWorkspace(repository).inventory().fingerprint()
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
                 # No analyzer temp root override: plists must be staged in the
-                # sandbox-writable scratch, exactly like production.
-                result = build_scan.run_build_scan(snapshot, BuildScanTests._settings())
+                # sandbox-writable scratch, exactly like production. The
+                # coverage run exercises the administrator-trusted generation
+                # path; the default-off gate itself is covered by
+                # TrustedGenerationContainerTests.
+                result = build_scan.run_build_scan(
+                    snapshot,
+                    BuildScanTests._settings(trusted_build_context_generation=True),
+                )
 
         found = {(finding.cwe, finding.path, finding.symbol) for finding in result.findings}
         expected = {
@@ -3270,6 +3276,7 @@ class SanitizerContainerTests(unittest.TestCase):
                 build_steps=(),
                 step_timeout_seconds=90,
                 max_output_bytes=1_048_576,
+                trusted_build_context_generation=True,
             )
             with prepare_snapshot(import_root, "team/project", fingerprint, work_root) as snapshot:
                 build = run_build_scan(snapshot, settings, sanitizer_enabled=True)

@@ -422,7 +422,10 @@ describe("task detail report surface", () => {
     expect(details!.textContent).toContain("反驳 0");
     expect(details!.textContent).toContain("无证据 0");
     // 零调用红线：PASS 全覆盖必须显示确定性证明注记，不得显示已调用。
-    expect(screen.getByText("确定性证明 · 未调用 LLM")).toBeVisible();
+    // toBeVisible is unreliable here: jsdom cannot fully resolve antd's
+    // dev-only :where() styles, and getComputedStyle reports the element
+    // hidden. Presence in the document carries the intended meaning.
+    expect(screen.getByText("确定性证明 · 未调用 LLM")).toBeInTheDocument();
     expect(details!.textContent).not.toContain("LLM 调用：");
     // 审计区不含任何修复入口（任务级修复按钮不变）。
     expect(within(details as HTMLElement).queryAllByRole("button")).toEqual([]);

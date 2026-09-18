@@ -91,11 +91,11 @@
 - Modify: `tests/test_cxx_agents.py`
 
 **Steps:**
-- [ ] C0.2.1 RED：注册含新 CWE 的 pack 后 `cxx_agents` 门禁放行；现有 4 类行为
+- [x] C0.2.1 RED：注册含新 CWE 的 pack 后 `cxx_agents` 门禁放行；现有 4 类行为
   不变
-- [ ] C0.2.2 GREEN → 目标回归（test_cxx_agents + test_agent_orchestrator）
+- [x] C0.2.2 GREEN → 目标回归（test_cxx_agents + test_agent_orchestrator）
 - [ ] C0.2.3 里程碑全量（宿主 + 容器）——**阶段 0 完成点**
-- [ ] C0.2.4 提交：`refactor: source agent CWE gate from the pack registry`
+- [x] C0.2.4 提交：`refactor: source agent CWE gate from the pack registry`
 - [ ] C0.2.5 PR + issue 同步（Closes #187 + 勾 epic）
 
 ---

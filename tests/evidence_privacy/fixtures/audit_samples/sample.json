@@ -1,0 +1,7 @@
+{"_known_values_header": ["QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMg==", "c2VjcmV0LXRva2VuLWZvci1kZWVwLWxldmVsLXRlc3QtMTIzNDU2Nzg5MGFi", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v", "https://svc-usr:SapphoWren42@db-host.internal.svc/backup"],
+ "entries": [
+   {"id": 1, "token": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMg=="},
+   {"id": 2, "nested": {"deep": {"auth": "c2VjcmV0LXRva2VuLWZvci1kZWVwLWxldmVsLXRlc3QtMTIzNDU2Nzg5MGFi"}}},
+   {"id": 3, "note": "nothing sensitive here"},
+   {"id": 4, "endpoint": "https://svc-usr:SapphoWren42@db-host.internal.svc/backup"}
+ ]}

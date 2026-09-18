@@ -324,3 +324,10 @@ Python 解释器：`python`（3.12.x，基线亲测可用）。
 | `vault`（raw 保留） | **不设**（IP-0017 定义 port，默认 disabled） | — | FR-N05-04 归 IP-0017 |
 
 `SINK_KINDS = frozenset({"storage","log","prompt","api","export"})` 为 IP-0015 冻结集合；未知值一律 `UNKNOWN_SINK` 拒绝。
+
+## 编号勘误记录（DR-IP-0015-04，2026-09-12）
+
+依 Maintainer 2026-09-12 编号裁定：本 Packet（含 §5 Not-covered、§10 后续序列、附录 A/B 归属标注）及 #94 轨道其他文档中的 **"IP-0016" 字样统一解释为 #94-S2（Content Conformance，全局编号待分配）；"IP-0017" 字样统一解释为 #94-S3（Vault/Audit，全局编号待分配）**。全局编号 IP-0016 已固定分配给 Issue #60（Repository Profile Layer 1）。
+
+本勘误为记录性：不改变 IP-0015 的范围、接口、断言或文件边界，不触发重新冻结。历史文本原文保留；自即日起新增文本一律使用本地阶段名（#94-S2/#94-S3），全局编号仅在新 Packet 正式启动时由 Coordinator 原子分配。详见 `docs/LIMA_DR-IP-0015-04_Numbering_Erratum_2026-09-12.md`。
+

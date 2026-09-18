@@ -1425,6 +1425,13 @@ class OpenatChainTests(unittest.TestCase):
         # chain must reject the intermediate symlink with exit 2 and stderr
         # target-invalid:symlink-component; zero report output and zero
         # reads inside b (sentinel absent).
+        # Packet v1.7 / Maintainer R17 errno contract: the symlink-component
+        # CATEGORY is asserted, not the errno -- whether the platform's
+        # combined open(O_RDONLY|O_DIRECTORY|O_NOFOLLOW) returns ELOOP or
+        # ENOTDIR, the ENOTDIR path must run the one-shot lstat-style
+        # diagnostic (os.stat(component, dir_fd=parent_fd,
+        # follow_symlinks=False) -> S_ISLNK) and still classify as
+        # symlink-component; single stderr line, fail-closed, no retry.
         if IS_WINDOWS_PLATFORM:
             with tempfile.TemporaryDirectory() as tmp:
                 target = pathlib.Path(tmp)
@@ -1449,6 +1456,8 @@ class OpenatChainTests(unittest.TestCase):
             result = run_script(str(target))
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("target-invalid:symlink-component", result.stderr)
+            stderr_lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+            self.assertEqual(len(stderr_lines), 1, result.stderr)
             self.assertEqual(result.stdout.strip(), "", result.stdout)
             self.assertNotIn(sentinel, result.stdout + result.stderr)
 
@@ -1457,6 +1466,11 @@ class OpenatChainTests(unittest.TestCase):
         # from cwd=target produce findings equivalent to the absolute form;
         # (b) final-component symlink -> target-invalid:symlink-component;
         # (c) plain-file target -> target-invalid:not-a-directory.
+        # Packet v1.7 / Maintainer R17: the three scenario -> category
+        # assertions below are errno-agnostic (ELOOP and ENOTDIR+diagnostic
+        # both yield symlink-component; ENOTDIR+not-S_ISLNK yields
+        # not-a-directory); each rejection is exactly one stderr line with
+        # zero stdout.
         if IS_WINDOWS_PLATFORM:
             # R10 platform probe fires first on Windows: exit 2 with the
             # platform-unsupported line for any legal target.
@@ -1511,16 +1525,32 @@ class OpenatChainTests(unittest.TestCase):
                     sorted(f for f in collect_key_values(abs_report, "fingerprint")),
                 )
             # (b) final-component symlink -> symlink-component rejection.
+            # Packet v1.7 / R17: category pinned, errno-agnostic -- ELOOP or
+            # ENOTDIR + one-shot S_ISLNK diagnostic must both land here.
             link_path = target.parent / (target.name + "-link")
             os.symlink(target, link_path)
             final_link = run_script(str(link_path))
             self.assertEqual(final_link.returncode, 2, final_link.stderr)
             self.assertIn("target-invalid:symlink-component", final_link.stderr)
+            self.assertEqual(
+                len([ln for ln in final_link.stderr.splitlines() if ln.strip()]),
+                1,
+                final_link.stderr,
+            )
+            self.assertEqual(final_link.stdout.strip(), "", final_link.stdout)
             # (c) plain-file target -> not-a-directory rejection.
+            # Packet v1.7 / R17: ENOTDIR + diagnostic shows NOT S_ISLNK ->
+            # not-a-directory (distinct from the symlink category above).
             file_target = target / "s1.txt"
             plain = run_script(str(file_target))
             self.assertEqual(plain.returncode, 2, plain.stderr)
             self.assertIn("target-invalid:not-a-directory", plain.stderr)
+            self.assertEqual(
+                len([ln for ln in plain.stderr.splitlines() if ln.strip()]),
+                1,
+                plain.stderr,
+            )
+            self.assertEqual(plain.stdout.strip(), "", plain.stdout)
 
 
 class SuffixPreFilterTests(unittest.TestCase):

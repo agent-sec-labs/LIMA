@@ -1,0 +1,35 @@
+# ResInsight build recipe (LIMA workstream A, task A3).
+#
+# Produce the analysis context package (main-agent flow, adjust paths):
+#   docker build -t lima-builder-resinsight:latest deploy/build-recipes/resinsight
+#   python -c "
+#   from pathlib import Path
+#   from lima.build_recipe import BuildRecipe, run_recipe_in_container
+#   recipe = BuildRecipe.from_file(Path('deploy/build-recipes/resinsight/recipe.yaml'))
+#   manifest = run_recipe_in_container(
+#       recipe,
+#       Path('repositories/ResInsight'),
+#       work_dir=Path('output/context-packages/resinsight'),
+#       revision='<git sha of the source tree>')
+#   print(manifest.context_hash, manifest.totals)"
+#
+# Qt5 lives in the Debian multi-arch include directory on amd64; the hdf5
+# root covers the /usr/include/hdf5/serial layout Debian uses.
+schema_version: 1
+name: resinsight-v1
+image: lima-builder-resinsight:latest
+repository: OPM/ResInsight
+source_mount: /src
+configure:
+  - ["cmake", "-S", ".", "-B", "build",
+     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+     "-DCMAKE_BUILD_TYPE=Debug"]
+compdb_path: "build/compile_commands.json"
+generated_globs:
+  - "build/*.h"
+  - "build/**/*.h"
+include_roots:
+  - {container: "/usr/include/x86_64-linux-gnu/qt5", package: "headers/qt5"}
+  - {container: "/usr/include/hdf5", package: "headers/hdf5"}
+  - {container: "/usr/include/boost", package: "headers/boost"}
+  - {container: "/usr/include/eigen3", package: "headers/eigen3"}

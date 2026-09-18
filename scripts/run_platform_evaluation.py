@@ -68,7 +68,12 @@ from lima.uaf_orchestrator import (  # noqa: E402
     UAF_FINDING_STATES,
     UAF_POSITIVE_STATES,
 )
-from lima.vuln_packs import MEMORY_PACK, runtime_markers  # noqa: E402
+from lima.vuln_packs import (  # noqa: E402
+    list_packs,
+    registry_cwe_vocabulary,
+    registry_driver_templates,
+    registry_runtime_markers,
+)
 from lima.workspace import RepositoryWorkspace  # noqa: E402
 
 VALIDITY_BOUNDARY = (
@@ -105,9 +110,19 @@ _LICENSE_KEYS = frozenset({"spdx", "note"})
 _PLATFORM_STATES = frozenset(UAF_FINDING_STATES) | {"abstain", "rejected", "none"}
 PLATFORM_POSITIVE_STATES = UAF_POSITIVE_STATES
 _CASE_KINDS = frozenset({"direct", "revisable", "clean"})
-_VULN_PACKS = frozenset({"memory"})
-# The pack's own PoC driver template names plus the neutral generic hint.
-_DRIVER_HINTS = frozenset({"generic"}) | frozenset(MEMORY_PACK.driver_templates)
+_VULN_PACKS = frozenset(list_packs())
+
+
+def _driver_hints() -> frozenset[str]:
+    """Registered packs' PoC driver template names plus the generic hint."""
+
+    return frozenset({"generic"}) | registry_driver_templates()
+
+
+def _allowed_case_cwes() -> frozenset[str]:
+    """The closed case CWE vocabulary: registered packs plus 'none'."""
+
+    return registry_cwe_vocabulary() | {"none"}
 _MAX_TITLE_BYTES = 200
 _MAX_RATIONALE_BYTES = 4_096
 _MAX_LICENSE_BYTES = 256
@@ -219,7 +234,7 @@ def _validate_version(version: object, label: str) -> None:
     fields = _exact_fields(version, _VERSION_KEYS, label)
     if fields["kind"] != "source-pair":
         raise ValueError(f"{label} kind must be source-pair")
-    if fields["driver_hint"] not in _DRIVER_HINTS:
+    if fields["driver_hint"] not in _driver_hints():
         raise ValueError(f"{label} driver_hint is outside the closed domain")
     files = fields["files"]
     if not isinstance(files, dict) or not files:
@@ -240,8 +255,7 @@ def _validate_case(case: object) -> None:
     _bounded_text(fields["title"], "case title", _MAX_TITLE_BYTES)
     if fields["vuln_pack"] not in _VULN_PACKS:
         raise ValueError("case vuln_pack is outside the closed domain")
-    allowed_cwes = set(MEMORY_PACK.cwe_ids) | {"none"}
-    if fields["cwe"] not in allowed_cwes:
+    if fields["cwe"] not in _allowed_case_cwes():
         raise ValueError("case cwe is outside the closed CWE vocabulary")
     if fields["kind"] not in _CASE_KINDS:
         raise ValueError("case kind is outside the closed domain")
@@ -1019,7 +1033,7 @@ def _experiment_hit(observation: Any, cwe: str) -> bool:
     error_type = getattr(observation, "error_type", None)
     if not isinstance(error_type, str) or not error_type:
         return False
-    markers = runtime_markers(MEMORY_PACK).get(cwe, ())
+    markers = registry_runtime_markers().get(cwe, ())
     lowered = error_type.lower()
     return any(marker in lowered for marker in markers)
 

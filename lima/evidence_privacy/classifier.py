@@ -256,6 +256,26 @@ def _collect_entries(
     return severity
 
 
+def _require_tenant(tenant_id: str, tenant_key: bytes) -> None:
+    """G3' §17.G3': classification requires a valid explicit tenant context.
+
+    The no-tenant deterministic mode is abolished: a missing, empty, or
+    wrongly-typed tenant fails closed with ``MISSING_TENANT_KEY`` at
+    ``classify.tenant`` instead of computing correlatable keyless
+    fingerprints. ``sanitize_for_sink`` is unaffected (its tenant is validated
+    non-empty before this module is reached).
+    """
+    if (
+        not isinstance(tenant_id, str)
+        or not tenant_id
+        or not isinstance(tenant_key, bytes)
+        or not tenant_key
+    ):
+        raise PrivacyError(
+            PrivacyErrorCode.MISSING_TENANT_KEY, field_path="classify.tenant"
+        )
+
+
 def classify_payload(
     payload: EvidencePayload,
     policy: TenantPolicy,
@@ -263,7 +283,13 @@ def classify_payload(
     tenant_id: str = "",
     tenant_key: bytes = b"",
 ) -> ClassificationManifest:
-    """Classify ``payload`` and return its manifest (Packet §8.7)."""
+    """Classify ``payload`` and return its manifest (Packet §8.7; G3' §17.G3').
+
+    An explicit valid tenant (non-empty ``str`` id + non-empty ``bytes`` key)
+    is mandatory; empty or invalid tenant material raises
+    ``MISSING_TENANT_KEY`` at ``classify.tenant`` (fail-closed).
+    """
+    _require_tenant(tenant_id, tenant_key)
     entries: list[FingerprintRecord] = []
     if payload.payload_kind == "structured_json":
         severity = _collect_entries(

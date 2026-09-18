@@ -82,6 +82,40 @@ def list_packs() -> tuple[str, ...]:
     return tuple(sorted(_PACKS))
 
 
+def registry_packs() -> tuple[VulnPack, ...]:
+    """Registered packs in registration order."""
+
+    return tuple(_PACKS.values())
+
+
+def registry_cwe_vocabulary() -> frozenset[str]:
+    """The closed platform vocabulary: union of cwe_ids over all packs."""
+
+    vocabulary: frozenset[str] = frozenset()
+    for pack in _PACKS.values():
+        vocabulary = vocabulary | pack.cwe_ids
+    return vocabulary
+
+
+def registry_runtime_markers() -> dict[str, tuple[str, ...]]:
+    """The merged CWE -> error-type marker table over all packs."""
+
+    merged: dict[str, tuple[str, ...]] = {}
+    for pack in _PACKS.values():
+        for cwe, markers in runtime_markers(pack).items():
+            merged[cwe] = merged.get(cwe, ()) + tuple(markers)
+    return merged
+
+
+def registry_driver_templates() -> frozenset[str]:
+    """The union of PoC driver template names over all packs."""
+
+    templates: frozenset[str] = frozenset()
+    for pack in _PACKS.values():
+        templates = templates | frozenset(pack.driver_templates)
+    return templates
+
+
 from .memory import MEMORY_PACK  # noqa: E402 -- data module needs VulnPack above
 
 register_pack(MEMORY_PACK)
@@ -92,6 +126,10 @@ __all__ = [
     "VulnPack",
     "get_pack",
     "list_packs",
+    "registry_cwe_vocabulary",
+    "registry_driver_templates",
+    "registry_packs",
+    "registry_runtime_markers",
     "register_pack",
     "runtime_markers",
 ]

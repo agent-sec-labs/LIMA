@@ -31,8 +31,8 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
+from lima import agent_orchestrator
 from lima.agent_orchestrator import (
-    _SYSTEM_PLATFORM_SPECIALIST,
     PLATFORM_HYPOTHESIS_FIELDS,
     PlatformFormatError,
     _experiment_hit,
@@ -197,18 +197,19 @@ class AsanMarkerEquivalenceTests(unittest.TestCase):
 
 
 class OrchestratorPackWiringTests(unittest.TestCase):
-    """The orchestrator consumes the pack; no second hard-coded table."""
+    """The orchestrator consumes the registry; no second hard-coded table."""
 
-    def test_orchestrator_uses_pack_markers(self):
+    def test_orchestrator_uses_registry_markers(self):
         import lima.agent_orchestrator as orchestrator
+        from lima.vuln_packs import registry_runtime_markers
 
-        # The matching table is derived from the pack, not re-hard-coded.
+        # The matching table is derived from the registry, not re-hard-coded.
         self.assertEqual(
-            dict(runtime_markers(MEMORY_PACK)),
-            orchestrator._ASAN_CWE_MARKERS,
+            registry_runtime_markers(),
+            orchestrator._platform_runtime_markers(),
         )
         source = inspect.getsource(orchestrator)
-        self.assertIn("MEMORY_PACK", source)
+        self.assertIn("registry_runtime_markers", source)
         self.assertNotIn('"use-after-free"', source)
         self.assertNotIn('"double-free"', source)
         self.assertNotIn('"buffer-overflow"', source)
@@ -240,16 +241,18 @@ class OrchestratorPackWiringTests(unittest.TestCase):
         forged = reply.replace("CWE-476", "CWE-999")
         with self.assertRaises(PlatformFormatError):
             parse_hypothesis_reply(forged, known)
-        # The Specialist prompt carries the pack knowledge and the extended
-        # closed CWE enumeration; the legacy enumeration stays verbatim.
-        for cwe in MEMORY_PACK.cwe_ids:
-            self.assertIn(cwe, _SYSTEM_PLATFORM_SPECIALIST)
+        # The Specialist prompt carries the pack knowledge and the
+        # registry-derived closed CWE enumeration, sorted for determinism.
+        specialist_prompt = agent_orchestrator._system_platform_specialist()
+        for cwe in agent_orchestrator._platform_cwe_vocabulary():
+            self.assertIn(cwe, specialist_prompt)
         self.assertIn(
-            '"cwe":"CWE-416|CWE-415|CWE-787|CWE-125|CWE-476|CWE-190"',
-            _SYSTEM_PLATFORM_SPECIALIST,
+            '"cwe":"'
+            + "|".join(sorted(agent_orchestrator._platform_cwe_vocabulary()))
+            + '"',
+            specialist_prompt,
         )
-        self.assertIn(MEMORY_PACK.specialist_prompt_addendum,
-                      _SYSTEM_PLATFORM_SPECIALIST)
+        self.assertIn(MEMORY_PACK.specialist_prompt_addendum, specialist_prompt)
 
 
 class SeedPatternTests(unittest.TestCase):

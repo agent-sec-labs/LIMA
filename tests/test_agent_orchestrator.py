@@ -1162,5 +1162,98 @@ def target_experiments(outcome):
     return entries
 
 
+class RegistryDrivenPlatformVocabularyTests(unittest.TestCase):
+    """The platform CWE vocabulary comes from the pack registry, not MEMORY_PACK.
+
+    Registering a probe pack at runtime must extend the Specialist schema
+    enum, the closed-vocabulary gate, the Specialist prompt addendum and
+    the experiment hit markers without touching the orchestrator; restoring
+    the registry must close the vocabulary again.
+    """
+
+    def setUp(self):
+        import lima.vuln_packs as vuln_packs
+
+        self._vuln_packs = vuln_packs
+        self._saved_packs = dict(vuln_packs._PACKS)
+
+    def tearDown(self):
+        self._vuln_packs._PACKS.clear()
+        self._vuln_packs._PACKS.update(self._saved_packs)
+
+    def _register_probe(self):
+        from lima.vuln_packs import VulnPack
+
+        self._vuln_packs.register_pack(VulnPack(
+            name="probe-pack",
+            cwe_ids=frozenset({"CWE-999"}),
+            specialist_prompt_addendum=" PROBE-ADDENDUM-MARKER",
+            seed_patterns=(),
+            driver_templates=(),
+            asan_markers={"CWE-999": ("probe-error-type",)},
+            integer_overflow_markers={},
+        ))
+
+    @staticmethod
+    def _hypothesis_raw(cwe):
+        return json.dumps({
+            "target_id": "t1",
+            "hypothesis": "probe hypothesis text",
+            "trigger_path": ["a.cpp:1"],
+            "cwe": cwe,
+            "driver_code": "int main() { return 0; }",
+            "experiment_design": "run the probe driver",
+            "unresolved_assumptions": [],
+        })
+
+    def test_production_vocabulary_is_the_six_memory_cwes(self):
+        from lima import agent_orchestrator as orchestrator
+
+        self.assertEqual(
+            frozenset({
+                "CWE-416", "CWE-415", "CWE-787", "CWE-125", "CWE-476", "CWE-190",
+            }),
+            orchestrator._platform_cwe_vocabulary(),
+        )
+
+    def test_registered_pack_extends_closed_vocabulary(self):
+        from lima import agent_orchestrator as orchestrator
+
+        self._register_probe()
+        hypothesis = orchestrator.parse_hypothesis_reply(
+            self._hypothesis_raw("CWE-999"), frozenset({"t1"}),
+        )
+        self.assertEqual("CWE-999", hypothesis.cwe)
+
+    def test_registered_pack_enters_schema_enum_and_specialist_prompt(self):
+        from lima import agent_orchestrator as orchestrator
+
+        self._register_probe()
+        self.assertIn("CWE-999", orchestrator._platform_schema())
+        self.assertIn(
+            "PROBE-ADDENDUM-MARKER", orchestrator._system_platform_specialist(),
+        )
+
+    def test_registered_pack_markers_confirm_experiment_hit(self):
+        from types import SimpleNamespace
+
+        from lima import agent_orchestrator as orchestrator
+
+        self._register_probe()
+        observation = SimpleNamespace(
+            ok=True, stage="run", error_type="PROBE-ERROR-TYPE",
+            exit_code=1, faulting_line=None,
+        )
+        self.assertTrue(orchestrator._experiment_hit(observation, "CWE-999"))
+
+    def test_unknown_cwe_stays_rejected_without_the_probe_pack(self):
+        from lima import agent_orchestrator as orchestrator
+
+        with self.assertRaises(orchestrator.PlatformFormatError):
+            orchestrator.parse_hypothesis_reply(
+                self._hypothesis_raw("CWE-999"), frozenset({"t1"}),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

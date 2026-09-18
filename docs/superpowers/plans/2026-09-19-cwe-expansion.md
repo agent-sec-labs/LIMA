@@ -56,8 +56,8 @@
 - Add: 本计划文档
 
 **Steps:**
-- [ ] 0.1 用户确认后入库：`docs: plan CWE expansion C-line (epic #185)`
-- [ ] 0.2 推送后在 Epic #185 评论挂本计划链接（docs/ 路径 + 分支名）
+- [x] 0.1 用户确认后入库：`docs: plan CWE expansion C-line (epic #185)`
+- [x] 0.2 推送后在 Epic #185 评论挂本计划链接（docs/ 路径 + 分支名）
 
 ---
 
@@ -70,13 +70,16 @@
 - Modify: `lima/agent_orchestrator.py`（`:158` marker 表、`:186` `_PLATFORM_SCHEMA`
   枚举串、`:194` 提示词拼接、`:316` cwe 校验）
 - Modify: `lima/vuln_packs/__init__.py`（如需新增注册表并集辅助函数）
-- Modify: `tests/test_agent_orchestrator.py`、`tests/test_vuln_packs.py`
+- Modify: `tests/test_agent_orchestrator.py`、`tests/test_vuln_packs.py`、
+  `tests/test_platform_evaluation.py`
+- Modify: `scripts/run_platform_evaluation.py`（实施中发现第 5 处消费方：
+  `_VULN_PACKS`/`_DRIVER_HINTS`/case cwe 门禁/marker 查找同样注册表化）
 
 **Steps:**
-- [ ] C0.1.1 RED：测试临时注册假 pack（含新造 CWE id）→ 断言其出现在 Specialist
+- [x] C0.1.1 RED：测试临时注册假 pack（含新造 CWE id）→ 断言其出现在 Specialist
   枚举串、通过 cwe 校验、marker 并入命中表；卸载后不残留
-- [ ] C0.1.2 GREEN → 全量 golden 对比（零行为变化）
-- [ ] C0.1.3 提交：`refactor: drive platform CWE vocabulary from the vuln pack registry`
+- [x] C0.1.2 GREEN → 全量 golden 对比（零行为变化）
+- [x] C0.1.3 提交：`refactor: drive platform CWE vocabulary from the vuln pack registry`
 - [ ] C0.1.4 PR + issue 同步（Closes #186 + 勾 epic）
 
 ---

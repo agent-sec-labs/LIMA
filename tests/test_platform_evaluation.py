@@ -930,10 +930,10 @@ class FakeLlmEndToEndTests(unittest.TestCase):
     def test_non_security_pair_is_filtered_by_the_hypothesis_contract(self):
         module = self.module
         # Fixture premise: the scripted specialist proposes a CWE outside the
-        # memory pack -- exactly the closed-vocabulary rejection the design
-        # pins for competition note 3.
+        # registry vocabulary -- exactly the closed-vocabulary rejection the
+        # design pins for competition note 3.
         script = module._SPECIALIST_SCRIPTS["non-security-filter"]
-        self.assertNotIn(script["cwe"], module.MEMORY_PACK.cwe_ids)
+        self.assertNotIn(script["cwe"], module._allowed_case_cwes())
         for revision in module.REVISIONS:
             with self.subTest(revision=revision):
                 record = self._run("non-security-filter", revision)

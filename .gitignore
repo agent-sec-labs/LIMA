@@ -20,12 +20,14 @@ htmlcov/
 .pytest_cache/
 output/
 evaluation_cache/
+.cache/
 repositories/*
 !repositories/.gitkeep
 !repositories/README.md
 *.log
 .vscode/
 .idea/
+.worktrees/
 .DS_Store
 Thumbs.db
 

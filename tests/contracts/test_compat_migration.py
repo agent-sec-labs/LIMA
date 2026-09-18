@@ -59,6 +59,13 @@ _MINIMAL_DICT = {
     "evidence_kind": "line",
     "verification_state": "candidate",
     "evidence_records": [],
+    # Platform-added additive fields (post-merge refresh)
+    "language": "",
+    "symbol": "",
+    "analysis_mode": "",
+    "candidate_id": "",
+    "agent_role": "",
+    "trigger_path": [],
 }
 
 _FULL_RECORDS = [
@@ -68,6 +75,7 @@ _FULL_RECORDS = [
         "path": "src/runner.py",
         "line": 42,
         "snippet": "subprocess.run(cmd, shell=True)",
+        "tool_run_id": "",
     },
     {
         "source": "semgrep",
@@ -75,6 +83,7 @@ _FULL_RECORDS = [
         "path": "src/api/handler.py",
         "line": 17,
         "snippet": "cmd = request.json['cmd']",
+        "tool_run_id": "",
     },
 ]
 
@@ -94,6 +103,13 @@ _FULL_DICT = {
     "evidence_kind": "line",
     "verification_state": "confirmed",
     "evidence_records": _FULL_RECORDS,
+    # Platform-added additive fields (post-merge refresh)
+    "language": "",
+    "symbol": "",
+    "analysis_mode": "",
+    "candidate_id": "",
+    "agent_role": "",
+    "trigger_path": [],
 }
 
 

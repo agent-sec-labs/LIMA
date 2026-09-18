@@ -149,6 +149,35 @@ export interface SemanticTriage {
   latency_ms?: number;
 }
 
+/**
+ * UAF v2 审计摘要（report.collaboration.uaf_v2，设计 §14）。
+ * 全部字段可选：旧报告无此键、新报告早期返回载荷缺 stats，前端渐进读取。
+ */
+export interface UafV2Summary {
+  mode?: string;
+  status?: string;
+  translation_units?: string[];
+  stats?: {
+    tu_count?: number;
+    candidate_count?: number;
+    pass?: number;
+    refuted?: number;
+    unknown?: number;
+    llm_invoked?: number;
+    llm_calls?: number;
+  };
+  states?: Record<string, number>;
+  broker?: Record<string, number>;
+  diagnostics?: string[];
+  candidates?: {
+    candidate_id?: string;
+    path?: string;
+    state?: string;
+    proof?: string;
+    rejected_reason?: string;
+  }[];
+}
+
 export interface ScanReport {
   repository?: string;
   risk?: string;
@@ -164,6 +193,7 @@ export interface ScanReport {
     workspace_truncated?: boolean;
     skipped?: Record<string, number>;
     semantic_triage?: SemanticTriage;
+    uaf_v2?: UafV2Summary;
     import_policy?: {
       resolved_revision?: string;
       cache_hit?: boolean;

@@ -38,6 +38,10 @@ class EvidenceRecord:
     rule_id: str = ""
     cwe: str = ""
     confidence: float = 0.0
+    language: str = ""
+    symbol: str = ""
+    analysis_mode: str = ""
+    tool_run_id: str = ""
 
 
 @dataclass
@@ -58,8 +62,17 @@ class Finding:
     fingerprint: str = ""
     verification_state: str = "candidate"
     evidence_records: List[EvidenceRecord] = field(default_factory=list)
+    language: str = ""
+    symbol: str = ""
+    analysis_mode: str = ""
+    automatic_repair: Optional[bool] = None
+    candidate_id: str = ""
+    agent_role: str = ""
+    trigger_path: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if isinstance(self.severity, str):
+            self.severity = Severity(self.severity.lower().strip())
         self.cwe = self.cwe.upper().strip()
         self.source = self.source.strip() or "unknown"
         self.evidence_kind = self.evidence_kind.strip() or "line"
@@ -83,6 +96,9 @@ class Finding:
                 rule_id=self.rule_id,
                 cwe=self.cwe,
                 confidence=self.confidence,
+                language=self.language,
+                symbol=self.symbol,
+                analysis_mode=self.analysis_mode,
             ))
 
     def to_dict(self) -> Dict[str, Any]:

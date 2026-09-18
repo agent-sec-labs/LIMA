@@ -1,13 +1,19 @@
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import Mock, patch
 
+from lima.cxx_memory import CxxAnalysisResult
+from lima.models import Finding, Severity
 from lima.repository_scanner import RepositoryScanner
 from lima.workspace import RepositoryWorkspace
+from scripts import scan_repository
 
 
 def _cp1252_environment():
@@ -20,6 +26,32 @@ def _cp1252_environment():
 
 
 class RepositoryWorkspaceTests(unittest.TestCase):
+    def test_inventory_includes_all_supported_cxx_extensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supported = [
+                "main.c", "main.cc", "main.cpp", "main.cxx", "main.h",
+                "main.hh", "main.hpp", "main.hxx", "toolchain.cmake",
+                "configure.ac", "Makefile.am", "config.h.in", "macros.m4",
+                "messages.po", "messages.pot", "resources/app.css",
+                "resources/tpls.html", "config/browsers.list",
+                "config/goaccess.conf", "lib/Makefile.inc", "po/LINGUAS",
+                "po/Makevars", "Makefile", "config.mk", "CMakeLists.txt",
+            ]
+            for name in supported:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# bounded text input\n", encoding="utf-8")
+            for name in ("compiled.obj", "program.exe", "run-tool", "configure"):
+                (root / name).write_text("excluded input\n", encoding="utf-8")
+            (root / "binary.in").write_bytes(b"text\0binary")
+
+            inventory = RepositoryWorkspace(root).inventory()
+
+            self.assertEqual(sorted(supported), sorted(item.path for item in inventory.files))
+            self.assertEqual(4, inventory.skipped["unsupported-extension"])
+            self.assertEqual(1, inventory.skipped["binary"])
+
     def test_import_area_is_not_recursively_scanned(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -55,6 +87,60 @@ class RepositoryWorkspaceTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["findings"][0]["rule_id"], "SEC-EVAL")
+            self.assertEqual("off", payload["collaboration"]["cxx_memory"]["mode"])
+
+    def test_scan_repository_cli_requires_repository_key_for_cxx_analysis(self):
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "scan_repository.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable, str(script), str(repository),
+                    "--cxx-memory", "auto", "--sast", "off",
+                ],
+                cwd=project_root,
+                capture_output=True,
+                encoding="utf-8",
+                env=_cp1252_environment(),
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("--repository-key is required", completed.stderr)
+
+    def test_scan_repository_cli_rejects_unsafe_cxx_repository_key(self):
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "scan_repository.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable, str(script), str(repository),
+                    "--cxx-memory", "auto", "--repository-key", "../escape",
+                    "--sast", "off",
+                ],
+                cwd=project_root,
+                capture_output=True,
+                encoding="utf-8",
+                env=_cp1252_environment(),
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("invalid --repository-key", completed.stderr)
 
     def test_scan_cli_can_gate_only_verified_findings(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -92,6 +178,62 @@ class RepositoryWorkspaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(2, run("--verified-only").returncode)
+
+    def test_scan_cli_verified_only_includes_build_verified_cxx_finding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+            finding = Finding(
+                rule_id="cxx.double-free",
+                severity=Severity.HIGH,
+                title="Potential double free",
+                explanation="free called twice",
+                path="main.cpp",
+                line=1,
+                evidence="free(p)",
+                fix="",
+                test="Run the configured test",
+                confidence=0.84,
+                cwe="CWE-415",
+                source="clang",
+                evidence_kind="line",
+                verification_state="build-verified",
+                language="c++",
+                symbol="main",
+                analysis_mode="build-backed",
+                automatic_repair=False,
+            )
+            adapter = Mock()
+            adapter.analyze.return_value = CxxAnalysisResult(
+                status="completed",
+                tool_runs=[{"tool": "clang", "status": "completed"}],
+                findings=[finding],
+                coverage={"build_backed_files": 1},
+                diagnostics=[],
+            )
+
+            with (
+                patch.object(
+                    scan_repository,
+                    "CxxMemoryAnalyzerClient",
+                    return_value=adapter,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = scan_repository.main([
+                    str(repository),
+                    "--format", "json",
+                    "--sast", "off",
+                    "--dataflow", "off",
+                    "--cxx-memory", "auto",
+                    "--repository-key", "team/project",
+                    "--verified-only",
+                    "--fail-on", "high",
+                ])
+
+            self.assertEqual(2, exit_code)
 
     def test_inventory_is_bounded_deterministic_and_skips_sensitive_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "direct-new-delete-uaf",
+      "title": "Straight-line new/delete dereference UAF pair",
+      "kind": "direct-uaf",
+      "origin": "synthetic",
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {"verdict": "PASS", "final_state": "fact-verified", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/packet.cpp": "e38ddf7f52149d3080279b5035d0f14b5736168c48d797aeb04c0e4f3807bd27"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/packet.cpp": "6715bee0510796d404c13df7e9818ff5f4c62f6721f50801d649a4ad197e033b"
+        }
+      },
+      "selection_rationale": "Straight-line C++ pair: the vulnerable revision dereferences p->size after delete p on one unconditional block, and the fixed revision removes the post-release read so no release/use pair exists.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "direct-malloc-free-uaf",
+      "title": "Straight-line malloc/free member-access UAF pair",
+      "kind": "direct-uaf",
+      "origin": "synthetic",
+      "language_standard": "c11",
+      "expected": {
+        "vulnerable": {"verdict": "PASS", "final_state": "fact-verified", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/session.c": "0338f47cf227e4ee1358ed57f7630c4a2968fdfcb4cf9099e38e301fc4ae2b5c"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/session.c": "0161054d19efe9b1a36fe037965d7e5e9463c192613cddc6a9b50a87ba333eae"
+        }
+      },
+      "selection_rationale": "Straight-line C pair: the vulnerable revision reads s->id after free(s) inside one unconditional block, and the fixed revision removes the post-release member access so the generator yields no candidate.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "guarded-same-block-uaf",
+      "title": "Release and use inside one guarded block pair",
+      "kind": "guarded-same-block-uaf",
+      "origin": "synthetic",
+      "language_standard": "c++14",
+      "expected": {
+        "vulnerable": {"verdict": "PASS", "final_state": "fact-verified", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/frame.cpp": "0e9dc10d31a1b29e04ebc316368419fa70b1d5b1a2657b13aba67fe472106385"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/frame.cpp": "afba995cae61ba3e85e031382cb2e477e468668b5c9fcec71fa6f3650c06ebb6"
+        }
+      },
+      "selection_rationale": "Measured per the implemented Task 7 P5 whitelist (a): delete f and the read f->id share one cfg block with no conditional edge between them, so path feasibility is satisfied and the proof is PASS (fact-verified); the fixed revision removes the in-block read.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "rebind-counterexample-uaf",
+      "title": "Rebind after release refutes the witness pair",
+      "kind": "rebind-counterexample",
+      "origin": "synthetic",
+      "language_standard": "c11",
+      "expected": {
+        "vulnerable": {"verdict": "REFUTED", "final_state": "rejected", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/cursor.c": "90bba3e63e4210a4d9a8f7dd63a1e8bc4bef05083dae5b48df7da8a30f47b2ed"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/cursor.c": "e09a0634e95186cadd1b6fb91dc6cd30b5bace39291b884ea2dbf30c0d556238"
+        }
+      },
+      "selection_rationale": "Deterministic counterexample pair: the vulnerable revision rebinds p to a fresh node between free(p) and the read, so P6 refutes the witness and the candidate becomes a rejected audit record; the fixed revision removes both the rebind and the read.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "unreachable-use-uaf",
+      "title": "Use block ordered before the release block pair",
+      "kind": "unreachable-use",
+      "origin": "synthetic",
+      "language_standard": "c11",
+      "expected": {
+        "vulnerable": {"verdict": "REFUTED", "final_state": "rejected", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/ring.c": "7186d90caec3d6ff9f2eab0d56daaefc7f9f49ffbb5688b2f9353e64d9b3f71e"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/ring.c": "ed53720adaffbc2bfb88f65d3b2eb9b506a94a3eea6befe12d7d7005302c9a53"
+        }
+      },
+      "selection_rationale": "Restricted-CFG counterexample pair: the canned sidecar wire models the serialized form whose use block (1) precedes the release block (2), so P5 structural reachability refutes the candidate; the fixed revision saves the head before the conditional free. Real Clang extraction of the modeled shape stays covered by the Task 4 container tests.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "predicated-unknown-uaf",
+      "title": "Two independent branch predicates pair",
+      "kind": "predicated-unknown",
+      "origin": "synthetic",
+      "language_standard": "c11",
+      "expected": {
+        "vulnerable": {"verdict": "UNKNOWN", "final_state": "abstain", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/sample.c": "aabe0d26ffbb4d242a6aa8220d7624cba092188fcf387f92b2e9ae695918c6e3"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/sample.c": "d14df49772d79080a3f06a438c4a08f1143b5a69e7d0e6fe91ca720a13c463b9"
+        }
+      },
+      "selection_rationale": "Deterministic UNKNOWN pair without LLM support: the free sits under x > 10 and the read under the independent x <= 10 predicate, so P5 path feasibility stays unknown; off mode abstains with zero calls and the honest scripted Specialist/Critic both abstain in auto mode. The fixed revision reads the value before the conditional free.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    },
+    {
+      "id": "semantic-unknown-alias-uaf",
+      "title": "Alias chain with a missing source anchor pair",
+      "kind": "deterministic-unknown-needs-llm",
+      "origin": "synthetic",
+      "language_standard": "c11",
+      "expected": {
+        "vulnerable": {"verdict": "UNKNOWN", "final_state": "semantic-supported", "candidates": 1},
+        "fixed": {"verdict": "none", "final_state": "none", "candidates": 0}
+      },
+      "vulnerable": {
+        "kind": "source-pair",
+        "files": {
+          "src/bridge.c": "c71a733e4312b8710596f318530a0201879556f7d6f82897f5c65c33e8422675"
+        }
+      },
+      "fixed": {
+        "kind": "source-pair",
+        "files": {
+          "src/bridge.c": "844e00b4772bc3f02cf0985829c45304e1708a693314669d83cc5784d9a2205b"
+        }
+      },
+      "selection_rationale": "Design section 16 mandatory case: the canned sidecar wire records free(q) as releasing the object allocated to b while the alias-copy fact for q carries no source anchor (the launder hop is outside the supported alias syntax), so P2 and P6 stay unknown and only the Specialist/Critic branch can decide; the fake LLM script supports the candidate with a real fact id and the fixed revision reads b->v before the release. Real-model runs must exercise this case non-zero-call evidence before claiming integration verification.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "note": "Synthetic fixture authored in this repository; no third-party code."
+      }
+    }
+  ]
+}

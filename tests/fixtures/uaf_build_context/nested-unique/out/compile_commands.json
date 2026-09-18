@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "src/main.c",
+    "arguments": ["clang", "-c", "-DNESTED=1", "src/main.c"]
+  }
+]

@@ -1,0 +1,22 @@
+[
+  {
+    "cve_id": "CVE-2099-0001",
+    "component": "third_party/sample-lib",
+    "affected_paths": [
+      "third_party/sample-lib/src/*.cpp"
+    ],
+    "introduced_commit": "",
+    "fixed_commit": "",
+    "summary": "SAMPLE ONLY: format-demo placeholder entry (no real advisory behind it); commits unknown on purpose so the commit key stays skippable. Used by tests/test_agent_report.py."
+  },
+  {
+    "cve_id": "CVE-2099-0002",
+    "component": "third_party/sample-json",
+    "affected_paths": [
+      "third_party/sample-json/lib/*.c"
+    ],
+    "introduced_commit": "1111111111111111111111111111111111111111",
+    "fixed_commit": "2222222222222222222222222222222222222222",
+    "summary": "SAMPLE ONLY: format-demo placeholder entry (no real advisory behind it); carries placeholder commit hashes so the commit-window key is exercised. Used by tests/test_agent_report.py."
+  }
+]

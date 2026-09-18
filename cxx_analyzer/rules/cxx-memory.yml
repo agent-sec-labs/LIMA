@@ -1,0 +1,140 @@
+rules:
+  - id: cxx.source.oob-write.constant-index
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow fixed-index write requires runtime confirmation.
+    metadata:
+      cwe: CWE-787
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: |
+              int $ARRAY[2] = ...;
+              $ARRAY[2] = $VALUE;
+          - pattern: |
+              int *$PTR = malloc(sizeof(int) * 2);
+              $PTR[2] = $VALUE;
+          - pattern: |
+              std::array<int, 2> $ARRAY = ...;
+              $ARRAY[2] = $VALUE;
+  - id: cxx.source.oob-read.fixed-return
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow fixed-index read requires runtime confirmation.
+    metadata:
+      cwe: CWE-125
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: |
+              int $ARRAY[2] = ...;
+              return $ARRAY[2];
+          - pattern: |
+              int *$PTR = malloc(sizeof(int) * 2);
+              return $PTR[2];
+          - pattern: |
+              int *$PTR = (int *)malloc(sizeof(int) * 2);
+              return $PTR[2];
+          - pattern: |
+              std::array<int, 2> $ARRAY = ...;
+              int $RESULT = $ARRAY[2];
+  - id: cxx.source.use-after-free.reused-pointer
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow post-release reuse requires runtime confirmation.
+    metadata:
+      cwe: CWE-416
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  free($PTR);
+                  ...
+                  return $PTR[0];
+              - pattern-not: |
+                  free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  return $PTR[0];
+          - patterns:
+              - pattern: |
+                  delete $PTR;
+                  ...
+                  return *$PTR;
+              - pattern-not: |
+                  delete $PTR;
+                  ...
+                  $PTR = ...;
+                  ...
+                  return *$PTR;
+          - patterns:
+              - pattern: |
+                  std::free($PTR);
+                  ...
+                  $PTR[0] = $VALUE;
+              - pattern-not: |
+                  std::free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  $PTR[0] = $VALUE;
+  - id: cxx.source.double-free.same-pointer
+    languages: [c, cpp]
+    severity: ERROR
+    message: Narrow repeated release requires runtime confirmation.
+    metadata:
+      cwe: CWE-415
+      candidate: true
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  free($PTR);
+                  ...
+                  free($PTR);
+              - pattern-not: |
+                  free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  free($PTR);
+          - patterns:
+              - pattern: |
+                  delete $PTR;
+                  ...
+                  delete $PTR;
+              - pattern-not: |
+                  delete $PTR;
+                  ...
+                  $PTR = ...;
+                  ...
+                  delete $PTR;
+          - patterns:
+              - pattern: |
+                  std::free($PTR);
+                  ...
+                  std::free($PTR);
+              - pattern-not: |
+                  std::free($PTR);
+                  ...
+                  $PTR = ...;
+                  ...
+                  std::free($PTR);

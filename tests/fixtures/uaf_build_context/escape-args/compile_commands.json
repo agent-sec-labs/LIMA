@@ -1,0 +1,17 @@
+[
+  {
+    "directory": ".",
+    "file": "src/a.c",
+    "arguments": ["clang", "-c", "../escape.h", "src/a.c"]
+  },
+  {
+    "directory": ".",
+    "file": "src/b.c",
+    "arguments": ["clang", "-c", "@resp.rsp", "src/b.c"]
+  },
+  {
+    "directory": ".",
+    "file": "src/c.c",
+    "arguments": ["clang", "-c", "-Xclang", "-load", "src/c.c"]
+  }
+]

@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "src/main.c",
+    "command": "clang -c -DFOO=1 -std=c11 src/main.c -o main.o"
+  }
+]

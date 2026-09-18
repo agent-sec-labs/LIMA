@@ -4,8 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Staged C/C++ integration stacks target codex/* branches before main.
+    branches: [main, "codex/**"]
   workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 3'
 
 permissions:
   contents: read
@@ -243,3 +246,315 @@ jobs:
           test "${{ needs.security-baseline.result }}" = "success"
           test "${{ needs.frontend-tests.result }}" = "success"
           test "${{ needs.frontend-e2e.result }}" = "success"
+  cxx-sidecar-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build the pinned Sidecar test image
+        run: >-
+          docker build --file cxx_analyzer/Dockerfile --target test
+          --tag lima-cxx-analyzer:test .
+      - name: Exercise all 24 fixtures without network access
+        run: >-
+          docker run --rm --network none --read-only
+          --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002
+          --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002
+          --cap-drop ALL --security-opt no-new-privileges:true
+          --user 10002:10002 lima-cxx-analyzer:test
+          python -m unittest -v
+          tests.test_cxx_analyzer.SourceScanContainerTests
+          tests.test_cxx_analyzer.BuildScanContainerTests
+          tests.test_cxx_analyzer.SanitizerContainerTests
+      - name: Validate Compose security constraints
+        env:
+          LIMA_POSTGRES_PASSWORD: ci-only-database-password
+          LIMA_AUTH_SECRET: ci-only-auth-secret-with-at-least-32-bytes
+          LIMA_BOOTSTRAP_ADMIN_PASSWORD: ci-only-admin-password
+        run: docker compose config --quiet
+      - name: Build LIMA and Sidecar runtime images
+        run: |
+          docker build --target runtime --tag lima:ci .
+          docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:ci .
+      - name: Start LIMA and Sidecar on an internal-only network
+        run: |
+          docker network create --internal lima-cxx-ci
+          docker run --detach --name lima-cxx-analyzer --network lima-cxx-ci \
+            --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
+            --mount type=bind,source="${PWD}/tests/fixtures/cxx_memory",target=/repositories/fixtures,readonly \
+            lima-cxx-analyzer:ci
+          docker run --detach --name lima-cxx-app --network lima-cxx-ci \
+            --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount type=bind,source="${PWD}/tests/fixtures/cxx_memory",target=/repositories/fixtures,readonly \
+            --env LIMA_REPOSITORY_IMPORT_ROOT=/repositories \
+            --env LIMA_DB_PATH=/tmp/lima.db \
+            --env LIMA_CXX_MEMORY_MODE=required \
+            --env LIMA_CXX_ANALYZER_URL=http://lima-cxx-analyzer:8090 \
+            --env LIMA_AUTH_REQUIRED=true \
+            --env LIMA_AUTH_SECRET=ci-only-auth-secret-with-at-least-32-bytes \
+            --env LIMA_BOOTSTRAP_ADMIN_USERNAME=admin \
+            --env LIMA_BOOTSTRAP_ADMIN_PASSWORD=ci-only-admin-password \
+            lima:ci
+      - name: Probe the real LIMA-to-Sidecar protocol
+        run: |
+          for attempt in $(seq 1 30); do
+            docker exec lima-cxx-app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()" && break
+            if [ "$attempt" = 30 ]; then exit 1; fi
+            sleep 2
+          done
+          docker exec lima-cxx-app python -c "import json; from pathlib import Path; from lima.cxx_memory import CxxMemoryAnalyzerClient; from lima.workspace import RepositoryWorkspace; root=Path('/repositories/fixtures'); assert len(json.loads((root/'manifest.json').read_text())) == 24; inventory=RepositoryWorkspace(root).inventory(); snapshot=inventory.fingerprint(); result=CxxMemoryAnalyzerClient('http://lima-cxx-analyzer:8090',300,2097152).analyze('fixtures',snapshot,('source-only',),inventory=inventory); assert result.status == 'completed'"
+      - name: Stop isolated integration containers
+        if: always()
+        run: |
+          docker rm --force lima-cxx-app lima-cxx-analyzer 2>/dev/null || true
+          docker network rm lima-cxx-ci 2>/dev/null || true
+
+  public-cxx-memory-evaluation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        case-id:
+          - curl-curl-cve-2026-8925
+          - podofo-podofo-cve-2025-9394
+          - goaccess-cve-2026-55777
+          - goaccess-cve-2026-54715
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/cxx-memory/archives
+          key: cxx-memory-archives-${{ hashFiles('evaluation_data/cxx_memory_cases.json') }}
+      - name: Select one committed case and its trusted administrator argv
+        id: case
+        run: >-
+          python scripts/prepare_cxx_memory_evaluation_case.py
+          --cases evaluation_data/cxx_memory_cases.json
+          --case-id "${{ matrix.case-id }}"
+          --github-output "$GITHUB_OUTPUT"
+      - name: Build the analyzer and prepare shared cache
+        env:
+          LIMA_CXX_BUILD_STEPS_JSON: ${{ steps.case.outputs.build_steps_json }}
+          LIMA_CXX_TEST_STEPS_JSON: ${{ steps.case.outputs.test_steps_json }}
+        run: |
+          mkdir -p .cache/cxx-memory/repositories output
+          docker build --file cxx_analyzer/Dockerfile --target runtime --tag lima-cxx-analyzer:eval .
+          ANALYZER_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' lima-cxx-analyzer:eval)"
+          printf 'ANALYZER_IMAGE_DIGEST=%s\n' "$ANALYZER_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          ANALYZER_BASE_IMAGE_DIGEST="$(docker image inspect --format '{{.Id}}' public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250)"
+          printf 'ANALYZER_BASE_IMAGE_DIGEST=%s\n' "$ANALYZER_BASE_IMAGE_DIGEST" >> "$GITHUB_ENV"
+          docker image inspect lima-cxx-analyzer:eval > output/image-inspect.json
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-toolchain-packages.txt > output/debian-packages.txt
+          docker run --rm --network none --read-only --cap-drop ALL \
+            lima-cxx-analyzer:eval cat \
+            /usr/local/share/lima/analyzer-python-packages.txt > output/python-packages.txt
+          docker network create --internal lima-cxx-public
+          docker run --detach --name lima-cxx-public-analyzer --network lima-cxx-public \
+            --read-only --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
+            --env LIMA_CXX_AUTO_CMAKE=false \
+            --env LIMA_CXX_BUILD_STEPS_JSON \
+            --env LIMA_CXX_TEST_STEPS_JSON \
+            --mount type=bind,source="${PWD}/.cache/cxx-memory/repositories",target=/repositories,readonly \
+            lima-cxx-analyzer:eval
+      - name: Run pinned public pairs from a separate evaluator
+        env:
+          LIMA_CXX_EVALUATION_CASE_ID: ${{ matrix.case-id }}
+        run: |
+          for attempt in $(seq 1 30); do
+            docker exec lima-cxx-public-analyzer python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()" && break
+            if [ "$attempt" = 30 ]; then exit 1; fi
+            sleep 2
+          done
+          docker create --name lima-cxx-evaluator \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env LIMA_CXX_EVALUATION_CASE_ID \
+            --mount type=bind,source="${PWD}",target=/workspace,readonly \
+            --mount type=bind,source="${PWD}/.cache/cxx-memory",target=/cache \
+            --mount type=bind,source="${PWD}/output",target=/output \
+            --workdir /workspace \
+            public.ecr.aws/docker/library/python:3.11-slim@sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250 \
+            python scripts/run_cxx_memory_evaluation.py \
+              --cases evaluation_data/cxx_memory_cases.json --cache-dir /cache \
+              --output /output/cxx-memory-evaluation.json \
+              --analyzer-url http://lima-cxx-public-analyzer:8090 \
+              --analyzer-image-digest "$ANALYZER_IMAGE_DIGEST" \
+              --analyzer-base-image-digest "$ANALYZER_BASE_IMAGE_DIGEST" \
+              --fail-under-precision 0.0
+          docker network connect lima-cxx-public lima-cxx-evaluator
+          docker start --attach lima-cxx-evaluator
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: evaluation-report-${{ matrix.case-id }}
+          path: output/cxx-memory-evaluation.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: debian-packages-${{ matrix.case-id }}
+          path: output/debian-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: python-packages-${{ matrix.case-id }}
+          path: output/python-packages.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: image-inspect-${{ matrix.case-id }}
+          path: output/image-inspect.json
+          if-no-files-found: warn
+      - name: Stop public evaluation containers
+        if: always()
+        run: |
+          docker rm --force lima-cxx-evaluator lima-cxx-public-analyzer 2>/dev/null || true
+          docker network rm lima-cxx-public 2>/dev/null || true
+
+  cxx-llm-agent-evaluation:
+    # 真实模型评测只在手动/定时任务运行，不在普通 PR 消耗 Token；
+    # 普通 PR 只跑 tests.test_cxx_llm_agent_evaluation 的 Fake-LLM 合同测试
+    #（随 unit-tests 全量执行，零网络、零密钥）。
+    # 凭证接线说明：tests.test_ci_contract 要求 ci.yml 保持 secretless（禁止任何
+    # 凭证引用），因此本 job 默认不携带密钥，未配置时以 provider-not-configured
+    # 跳过。启用真实调用：在下方两个 env 块把与 lima/config.py Provider 环境同名的
+    # 密钥变量绑定到仓库 Secret，并同步收窄 tests.test_ci_contract 的 secretless
+    # 断言范围。逐步操作见 docs/CXX_LLM_AGENT_ANALYSIS.md 的“CI 接线”一节。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        case-id:
+          - cwe-787-scratch-store-oob-write
+          - cwe-125-sample-window-oob-read
+          - cwe-416-session-release-uaf
+          - cwe-415-buffer-teardown-double-free
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check the opt-in provider configuration before any model call
+        # 双保险：job 级 if 已限定 schedule/workflow_dispatch，此步再挡一次未
+        # 接线的运行——零配置时跳过并说明，绝不静默降级成空报告或零调用报告。
+        if: github.event_name != 'pull_request'
+        env:
+          LIMA_LLM_PROVIDER: ${{ vars.LIMA_LLM_PROVIDER }}
+          LIMA_LLM_BASE_URL: ${{ vars.LIMA_LLM_BASE_URL }}
+          LIMA_CXX_AGENT_MODEL: ${{ vars.LIMA_CXX_AGENT_MODEL }}
+          LIMA_LLM_MODEL: ${{ vars.LIMA_LLM_MODEL }}
+        run: |
+          if [ -z "$LIMA_LLM_BASE_URL" ]; then
+            echo "provider-not-configured: no LIMA_LLM_BASE_URL repository variable is set;"
+            echo "the real-model C/C++ agent evaluation stays skipped until the opt-in"
+            echo "provider wiring from docs/CXX_LLM_AGENT_ANALYSIS.md ('CI 接线') is applied."
+            exit 0
+          fi
+      - name: Evaluate one pinned pair against the configured provider
+        if: github.event_name != 'pull_request'
+        env:
+          LIMA_LLM_PROVIDER: ${{ vars.LIMA_LLM_PROVIDER }}
+          LIMA_LLM_BASE_URL: ${{ vars.LIMA_LLM_BASE_URL }}
+          LIMA_CXX_AGENT_MODEL: ${{ vars.LIMA_CXX_AGENT_MODEL }}
+          LIMA_LLM_MODEL: ${{ vars.LIMA_LLM_MODEL }}
+        run: |
+          if [ -z "$LIMA_LLM_BASE_URL" ]; then
+            echo "provider-not-configured: nothing to evaluate."
+            exit 0
+          fi
+          mkdir -p output
+          python scripts/run_cxx_llm_agent_evaluation.py \
+            --cases evaluation_data/cxx_llm_agent_cases.json \
+            --case-id "${{ matrix.case-id }}" \
+            --output "output/cxx-llm-agent-evaluation-${{ matrix.case-id }}.json"
+      - name: Upload the raw structured report and identity manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cxx-llm-agent-evaluation-${{ matrix.case-id }}
+          path: output/cxx-llm-agent-evaluation-*.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  uaf-v2-evaluation:
+    # UAF v2 配对基准（Task 12）：只在手动/定时任务运行，不进入 PR 路径；
+    # 普通 PR 的覆盖由 tests.test_uaf_v2_evaluation 的 Fake-LLM 合同测试
+    #（随 unit-tests 全量执行，零网络、零密钥）承担。
+    # 凭证接线说明：tests.test_ci_contract 要求 ci.yml 保持 secretless，本 job
+    # 出厂不带任何凭证；--fake-llm 步骤离线跑全部固定对，真实模型步骤在未配置
+    # LIMA_LLM_BASE_URL 时以 provider-not-configured 明确跳过（不静默降级）。
+    # 启用真实调用：仿照 cxx-llm-agent-evaluation 的接线说明，把与
+    # lima/config.py Provider 环境同名的密钥变量绑定到仓库 Secret，并同步
+    # 收窄 tests.test_ci_contract 的 secretless 断言范围。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run the offline fake-LLM evaluation over every committed pair
+        # 双保险之一：本步骤无条件离线，验证评测器、清单钉死与指标可重算。
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p output
+          python scripts/run_uaf_v2_evaluation.py \
+            --cases evaluation_data/uaf_v2_cases.json \
+            --fake-llm --mode auto \
+            --output output/uaf-v2-evaluation-fake.json
+      - name: Evaluate the pinned pairs against the configured provider
+        # 双保险之二：真实模型只在显式接线后运行；零配置时跳过并说明，
+        # 绝不产出静默的零调用报告。UNKNOWN 样例（semantic-unknown-alias-uaf、
+        # predicated-unknown-uaf）在 required 模式下必须产生非零真实调用，
+        # 否则任务失败——这是设计 §16 的真实模型验收红线。
+        if: github.event_name != 'pull_request'
+        env:
+          LIMA_LLM_PROVIDER: ${{ vars.LIMA_LLM_PROVIDER }}
+          LIMA_LLM_BASE_URL: ${{ vars.LIMA_LLM_BASE_URL }}
+          LIMA_CXX_AGENT_MODEL: ${{ vars.LIMA_CXX_AGENT_MODEL }}
+          LIMA_LLM_MODEL: ${{ vars.LIMA_LLM_MODEL }}
+        run: |
+          if [ -z "$LIMA_LLM_BASE_URL" ]; then
+            echo "provider-not-configured: no LIMA_LLM_BASE_URL repository variable is set;"
+            echo "the real-model UAF v2 evaluation stays skipped until the opt-in"
+            echo "provider wiring is applied (see docs/CXX_LLM_AGENT_ANALYSIS.md)."
+            exit 0
+          fi
+          python scripts/run_uaf_v2_evaluation.py \
+            --cases evaluation_data/uaf_v2_cases.json \
+            --mode required \
+            --output output/uaf-v2-evaluation-real.json
+      - name: Upload the UAF v2 evaluation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: uaf-v2-evaluation
+          path: output/uaf-v2-evaluation-*.json
+          if-no-files-found: warn
+          retention-days: 30
+

@@ -2,6 +2,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
+from urllib.parse import urlsplit
 
 
 _DOTENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -183,11 +184,30 @@ class Settings:
     repository_scan_max_files: int = 5000
     repository_scan_max_file_bytes: int = 512 * 1024
     repository_scan_max_total_bytes: int = 20 * 1024 * 1024
+    cxx_memory_mode: str = "auto"
+    cxx_analyzer_url: str = "http://cxx-analyzer:8090"
+    cxx_analysis_timeout_seconds: int = 300
+    cxx_max_response_bytes: int = 2 * 1024 * 1024
+    cxx_agent_mode: str = "off"
+    cxx_agent_model: str = ""
+    cxx_agent_max_candidates: int = 100
+    cxx_agent_max_calls: int = 40
+    cxx_agent_max_context_files: int = 12
+    cxx_agent_max_context_lines: int = 1200
+    cxx_agent_max_output_bytes: int = 1048576
+    cxx_agent_timeout_seconds: int = 600
+    cxx_agent_parallelism: int = 3
+    cxx_agent_dialogue_rounds: int = 2
     repository_scan_llm_mode: str = "off"
     repository_scan_llm_timeout_seconds: int = 60
     repository_scan_llm_max_candidates: int = 6
     repository_scan_llm_max_context_chars: int = 36_000
     repository_scan_llm_max_completion_tokens: int = 3_000
+
+    def effective_cxx_agent_model(self) -> str:
+        """The C/C++ agent model, falling back to the shared LLM model."""
+
+        return self.cxx_agent_model.strip() or self.llm_model.strip()
 
     def resolved_llm(self) -> Dict[str, object]:
         """Resolve a named provider to the existing OpenAI-compatible transport."""
@@ -308,6 +328,46 @@ class Settings:
             self.repository_scan_llm_max_completion_tokens,
         ) < 1:
             raise ValueError("repository scan limits must be positive")
+        if self.cxx_memory_mode not in {"auto", "off", "required"}:
+            raise ValueError("LIMA_CXX_MEMORY_MODE must be auto, off or required")
+        parsed_cxx_analyzer_url = urlsplit(self.cxx_analyzer_url)
+        try:
+            cxx_analyzer_port = parsed_cxx_analyzer_url.port
+        except ValueError as exc:
+            raise ValueError("LIMA_CXX_ANALYZER_URL contains an invalid port") from exc
+        if (
+            parsed_cxx_analyzer_url.scheme not in {"http", "https"}
+            or not parsed_cxx_analyzer_url.hostname
+            or (
+                cxx_analyzer_port is not None
+                and not 0 <= cxx_analyzer_port <= 65535
+            )
+            or parsed_cxx_analyzer_url.username is not None
+            or parsed_cxx_analyzer_url.password is not None
+            or parsed_cxx_analyzer_url.query
+            or parsed_cxx_analyzer_url.fragment
+        ):
+            raise ValueError(
+                "LIMA_CXX_ANALYZER_URL must be an HTTP(S) URL without user info, query or fragment"
+            )
+        if self.cxx_agent_mode not in {"off", "auto", "required"}:
+            raise ValueError("LIMA_CXX_AGENT_MODE must be off, auto or required")
+        if self.cxx_agent_mode == "required" and not self.effective_cxx_agent_model():
+            raise ValueError(
+                "LIMA_CXX_AGENT_MODEL (or LIMA_LLM_MODEL) is required when "
+                "LIMA_CXX_AGENT_MODE is required"
+            )
+        if min(
+            self.cxx_agent_max_candidates,
+            self.cxx_agent_max_calls,
+            self.cxx_agent_max_context_files,
+            self.cxx_agent_max_context_lines,
+            self.cxx_agent_max_output_bytes,
+            self.cxx_agent_timeout_seconds,
+            self.cxx_agent_parallelism,
+            self.cxx_agent_dialogue_rounds,
+        ) < 1:
+            raise ValueError("C/C++ agent budgets must be positive")
         if min(
             self.repository_cache_ttl_seconds,
             self.repository_cache_quota_bytes,
@@ -447,6 +507,26 @@ class Settings:
             repository_scan_max_total_bytes=_int(
                 "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES", 20 * 1024 * 1024
             ),
+            cxx_memory_mode=os.getenv("LIMA_CXX_MEMORY_MODE", "auto").strip().lower(),
+            cxx_analyzer_url=os.getenv(
+                "LIMA_CXX_ANALYZER_URL", "http://cxx-analyzer:8090"
+            ).rstrip("/"),
+            cxx_analysis_timeout_seconds=_int(
+                "LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS", 300
+            ),
+            cxx_max_response_bytes=_int("LIMA_CXX_MAX_RESPONSE_BYTES", 2 * 1024 * 1024),
+            cxx_agent_mode=os.getenv("LIMA_CXX_AGENT_MODE", "off").strip().lower(),
+            cxx_agent_model=os.getenv("LIMA_CXX_AGENT_MODEL", "").strip(),
+            cxx_agent_max_candidates=_int("LIMA_CXX_AGENT_MAX_CANDIDATES", 100),
+            cxx_agent_max_calls=_int("LIMA_CXX_AGENT_MAX_CALLS", 40),
+            cxx_agent_max_context_files=_int("LIMA_CXX_AGENT_MAX_CONTEXT_FILES", 12),
+            cxx_agent_max_context_lines=_int("LIMA_CXX_AGENT_MAX_CONTEXT_LINES", 1200),
+            cxx_agent_max_output_bytes=_int(
+                "LIMA_CXX_AGENT_MAX_OUTPUT_BYTES", 1048576
+            ),
+            cxx_agent_timeout_seconds=_int("LIMA_CXX_AGENT_TIMEOUT_SECONDS", 600),
+            cxx_agent_parallelism=_int("LIMA_CXX_AGENT_PARALLELISM", 3),
+            cxx_agent_dialogue_rounds=_int("LIMA_CXX_AGENT_DIALOGUE_ROUNDS", 2),
             repository_scan_llm_mode=os.getenv(
                 "LIMA_REPOSITORY_SCAN_LLM_MODE", "off"
             ).strip().lower(),

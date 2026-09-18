@@ -19,6 +19,19 @@ from .models import Finding, Severity
 from .reviewer import LocalRuleReviewer, Reviewer
 from .runtime import AgentLoop, AgentRuntime, AgentTool, RuntimeNode, ToolRegistry
 
+# Message vocabulary shared by every collaboration surface (the Python
+# multi-agent coordinator below and the C/C++ agent pipeline).  Messages are
+# persisted through ``TaskStore.record_agent_message`` and can be queried by
+# kind via ``TaskStore.list_agent_messages``.
+KIND_ASSIGNMENT = "assignment"
+KIND_SPECIALIST_EVIDENCE = "specialist_evidence"
+KIND_PEER_CHALLENGE = "peer_challenge"
+KIND_EVIDENCE_REPORT = "evidence_report"
+KIND_VERIFICATION_DECISION = "verification_decision"
+KIND_ARBITRATION_DECISION = "arbitration_decision"
+KIND_AGENT_FAILURE = "agent_failure"
+KIND_RETRY_REQUEST = "retry_request"
+
 
 @dataclass
 class AgentMessage:

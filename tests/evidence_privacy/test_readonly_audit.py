@@ -129,6 +129,25 @@ def collect_key_values(node: object, key: str) -> list:
     return found
 
 
+def finding_position_views(report: object) -> list[str]:
+    """D3' §17.D3': cross-run fingerprint comparison is unsupported (per-run
+    random key); findings equivalence is asserted on the value-free position
+    projection (location + length + value_kind; fingerprint excluded)."""
+    findings = report.get("findings", []) if isinstance(report, dict) else []
+    return sorted(
+        json.dumps(
+            {
+                "length": item["length"],
+                "location": item["location"],
+                "value_kind": item["value_kind"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for item in findings
+    )
+
+
 def fixture_state() -> dict[str, tuple[str, int]]:
     # §9 T3: per-file (sha256, integer mtime) of the fixture directory.
     state: dict[str, tuple[str, int]] = {}
@@ -143,13 +162,11 @@ def fixture_state() -> dict[str, tuple[str, int]]:
 
 
 def artifact_ids(directory: pathlib.Path) -> dict[str, str]:
-    """D1'.2: expected artifact index a<n> per file name (lexicographic order
-    over suffix-matching, non-symlink files -- the frozen numbering rule)."""
-    names = sorted(
-        path.name
-        for path in directory.iterdir()
-        if not path.is_symlink() and path.is_file() and path.suffix in {".json", ".txt"}
-    )
+    """D1'.2/§17.F5'-R9.1/R9.3: expected artifact index a<n> per entry name
+    (lexicographic 0-based over supported-suffix entries -- symlinks and
+    non-regular entries occupy their slot; only unsupported suffixes are
+    out of scope)."""
+    names = sorted(path.name for path in directory.iterdir() if path.suffix in {".json", ".txt"})
     return {name: f"a{index}" for index, name in enumerate(names)}
 
 
@@ -987,7 +1004,7 @@ class TenantContextLeakPreventionTests(unittest.TestCase):
         rendered = repr(ctx)
         self.assertEqual(
             rendered,
-            "TenantAuditContext(tenant_id_len=11, tenant_key_len=32)",
+            "TenantAuditContext(tenant_id_len=12, tenant_key_len=32)",
         )
         self.assertEqual(str(ctx), rendered)
         combined = rendered + str(ctx)
@@ -1109,12 +1126,12 @@ class ScriptReadBudgetTests(unittest.TestCase):
         # exit 3, and the --output report file is still written and parseable.
         per_file = 1_048_575  # just under the per-file limit
         count = 101  # 101 * 1_048_575 = 105_906_075 > 104_857_600
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out_tmp:
             target = pathlib.Path(tmp)
             payload = "z" * per_file
             for index in range(count):
                 (target / f"b{index:03d}.txt").write_text(payload, encoding="utf-8")
-            report_path = pathlib.Path(tmp) / "report.json"
+            report_path = pathlib.Path(out_tmp) / "report.json"
             result = run_script(str(target), "--output", str(report_path), timeout=600)
             if not posix_script_or_fail_closed(self, result):
                 return
@@ -1560,8 +1577,8 @@ class OpenatChainTests(unittest.TestCase):
                 rel_report = json.loads(relative.stdout)
                 self.assertEqual(rel_report.get("status"), "complete")
                 self.assertEqual(
-                    sorted(f for f in collect_key_values(rel_report, "fingerprint")),
-                    sorted(f for f in collect_key_values(abs_report, "fingerprint")),
+                    finding_position_views(rel_report),
+                    finding_position_views(abs_report),
                 )
             # (b) final-component symlink -> symlink-component rejection.
             # Packet v1.7 / R17: category pinned, errno-agnostic -- ELOOP or

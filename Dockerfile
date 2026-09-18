@@ -61,7 +61,7 @@ COPY --chown=lima:lima scripts/audit_sensitive_artifacts.py ./scripts/audit_sens
 # C/C++ 分析器包与评估契约随单测进镜像（纯 Python、无额外依赖）。
 COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer
 COPY --chown=lima:lima scripts/run_cxx_memory_evaluation.py scripts/prepare_cxx_memory_evaluation_case.py ./scripts/
-COPY --chown=lima:lima scripts/run_cxx_llm_agent_evaluation.py scripts/run_platform_evaluation.py ./scripts/
+COPY --chown=lima:lima scripts/run_cxx_llm_agent_evaluation.py scripts/run_platform_evaluation.py scripts/run_uaf_v2_evaluation.py ./scripts/
 COPY --chown=lima:lima evaluation_data/cxx_memory_cases.json ./evaluation_data/cxx_memory_cases.json
 USER lima:lima
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]

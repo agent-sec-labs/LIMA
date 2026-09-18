@@ -2653,11 +2653,31 @@ class TrustedGenerationGateTests(unittest.TestCase):
 
 
 class BuildScanContainerTests(unittest.TestCase):
+    @staticmethod
+    def _skip_unless_trusted_generation_supported() -> None:
+        """Skip where the machine-provable trust probes cannot all hold.
+
+        The probes (landlock, process isolation, non-root, network isolation,
+        read-only snapshot root) describe the two-layer deployment form where
+        /work/snapshots is mounted read-only. A plain `docker run` CI stage
+        builds snapshots inside a writable tmpfs, so the read-only probe
+        fails closed by design; the coverage run only executes where the
+        deployment form actually provides every guarantee.
+        """
+        from cxx_analyzer.trust import build_generation_capabilities
+
+        missing = [name for name, ok in build_generation_capabilities().items() if not ok]
+        if missing:
+            raise unittest.SkipTest(
+                f"trusted generation requires all isolation probes; missing: {missing}"
+            )
+
     def test_build_backed_fixture_coverage_lists_every_uncovered_identity(self):
         if sys.platform != "linux":
             self.skipTest("build-backed container regression requires Linux")
         if shutil.which("cmake") is None or shutil.which("clang-14") is None:
             self.skipTest("CMake and clang-14 are required for build-backed fixtures")
+        self._skip_unless_trusted_generation_supported()
 
         import cxx_analyzer.build_scan as build_scan
 
@@ -3214,6 +3234,7 @@ class SanitizerContainerTests(unittest.TestCase):
             self.skipTest("ASan container regression requires Linux")
         if shutil.which("cmake") is None or shutil.which("clang-14") is None:
             self.skipTest("CMake and clang-14 are required for ASan fixtures")
+        BuildScanContainerTests._skip_unless_trusted_generation_supported()
 
         from cxx_analyzer.build_scan import run_build_scan
         from cxx_analyzer.sanitizer_scan import run_sanitizer_scan

@@ -80,7 +80,7 @@
   枚举串、通过 cwe 校验、marker 并入命中表；卸载后不残留
 - [x] C0.1.2 GREEN → 全量 golden 对比（零行为变化）
 - [x] C0.1.3 提交：`refactor: drive platform CWE vocabulary from the vuln pack registry`
-- [ ] C0.1.4 PR + issue 同步（Closes #186 + 勾 epic）
+- [x] C0.1.4 PR + issue 同步（Closes #186 + 勾 epic）
 
 ---
 
@@ -96,7 +96,7 @@
 - [x] C0.2.2 GREEN → 目标回归（test_cxx_agents + test_agent_orchestrator）
 - [ ] C0.2.3 里程碑全量（宿主 + 容器）——**阶段 0 完成点**
 - [x] C0.2.4 提交：`refactor: source agent CWE gate from the pack registry`
-- [ ] C0.2.5 PR + issue 同步（Closes #187 + 勾 epic）
+- [x] C0.2.5 PR + issue 同步（Closes #187 + 勾 epic）
 
 ---
 

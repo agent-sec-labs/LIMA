@@ -1416,5 +1416,72 @@ class VerificationStateTests(CoordinatorTestCase):
         )
 
 
+class RegistryVocabularyGateTests(unittest.TestCase):
+    """C0.2: the shell gate reads the pack registry vocabulary.
+
+    A candidate whose CWE is registered in any vulnerability pack flows
+    through ``_compose_verification_state`` normally (registered-but-legacy
+    classes such as CWE-476 stop being degraded shells); an unregistered
+    CWE still degrades to ``needs-human-review``.
+    """
+
+    def setUp(self):
+        import lima.vuln_packs as vuln_packs
+
+        self._vuln_packs = vuln_packs
+        self._saved_packs = dict(vuln_packs._PACKS)
+
+    def tearDown(self):
+        self._vuln_packs._PACKS.clear()
+        self._vuln_packs._PACKS.update(self._saved_packs)
+
+    def _state(self, cwe):
+        from lima.cxx_agents import _compose_verification_state
+        from lima.cxx_memory import ToolCorroboration
+
+        # Direct construction: from_untrusted_json pins the legacy pipeline's
+        # own 4-CWE contract, which is outside this task's scope.
+        candidate = CxxAgentCandidate(
+            candidate_id="registry-probe-1",
+            cwe=cwe,
+            path="src/session.cpp",
+            line=6,
+            symbol="Session::read",
+            title="T",
+            mechanism="probe mechanism",
+            trigger_path=("Session::read",),
+            confidence=0.8,
+            verification_state="llm-candidate",
+        )
+        return _compose_verification_state(
+            candidate,
+            None,
+            ToolCorroboration(state="", conflict=False, tool_run_ids=(), matched=()),
+            False,
+            False,
+        )
+
+    def test_registered_pack_cwes_are_not_degraded(self):
+        self.assertNotEqual("needs-human-review", self._state("CWE-476"))
+        self.assertNotEqual("needs-human-review", self._state("CWE-190"))
+
+    def test_runtime_registered_pack_extends_the_gate(self):
+        from lima.vuln_packs import VulnPack
+
+        self._vuln_packs.register_pack(VulnPack(
+            name="probe-pack",
+            cwe_ids=frozenset({"CWE-999"}),
+            specialist_prompt_addendum="",
+            seed_patterns=(),
+            driver_templates=(),
+            asan_markers={},
+            integer_overflow_markers={},
+        ))
+        self.assertNotEqual("needs-human-review", self._state("CWE-999"))
+
+    def test_unknown_cwe_still_degrades_without_the_probe_pack(self):
+        self.assertEqual("needs-human-review", self._state("CWE-999"))
+
+
 if __name__ == "__main__":
     unittest.main()

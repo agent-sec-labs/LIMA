@@ -111,7 +111,6 @@ from typing import Any
 
 from .agents import CollaborationBus
 from .cxx_agent_models import (
-    SUPPORTED_CWES,
     ConsensusVerdict,
     CxxAgentCandidate,
     CxxAgentCoverage,
@@ -126,6 +125,7 @@ from .cxx_agent_tools import (
     build_review_registry,
 )
 from .cxx_memory import CxxAnalysisResult, ToolCorroboration, bind_tool_evidence
+from .vuln_packs import registry_cwe_vocabulary
 from .cxx_retrieval import (
     SEED_ALLOCATION,
     SEED_CALL_NEIGHBORHOOD,
@@ -415,7 +415,7 @@ def _compose_verification_state(
 
     Branch order (design spec section 9):
 
-    1. Degraded shells (``cwe`` outside :data:`SUPPORTED_CWES`) never leave
+    1. Degraded shells (``cwe`` outside the registered pack vocabulary) never leave
        ``needs-human-review`` -- no consensus, tool or human channel upgrades
        a candidate that no LLM ever analysed.
     2. Conflicting or unsafely bound tool evidence forces
@@ -435,7 +435,7 @@ def _compose_verification_state(
        ``agent-corroborated`` > ``llm-candidate``.
     """
 
-    if candidate.cwe not in SUPPORTED_CWES:
+    if candidate.cwe not in registry_cwe_vocabulary():
         return _DEGRADED_VERIFICATION_STATE
     if corroboration.conflict:
         return _DEGRADED_VERIFICATION_STATE

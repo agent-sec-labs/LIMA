@@ -843,13 +843,25 @@ class DirFdBindingTests(unittest.TestCase):
         self.assertNotIn("os.path.join", source)
         for forbidden_form in ("os.open(path", "os.open(target", "os.open(str("):
             self.assertNotIn(forbidden_form, source)
+        # R16 §18 #30 (R11 seam acceptance condition): the seam is not only
+        # defined but actually CALLED by the main flow (call site beyond the
+        # def line) -- no test-only bypass path.
+        call_sites = re.findall(r"_read_artifacts\s*\(", source)
+        self.assertGreaterEqual(
+            len(call_sites), 2, "_read_artifacts defined but never called by main flow"
+        )
 
     def test_directory_replacement_race_isolated(self) -> None:
-        # R10 (POSIX/Linux authoritative): after the dir_fd is validated,
-        # renaming the target directory and replacing it in place with a
-        # symlink to an outside directory must not divert any read -- the
-        # seam reads the original directory inode; the outside sentinel
-        # never appears in any returned value.
+        # R10+R16 §17.F5'-R16 / §18 #25 (revised: FIVE minimum assertions;
+        # POSIX/Linux authoritative): after the dir_fd is validated, renaming
+        # the target directory and replacing it in place with a symlink to an
+        # outside directory must not divert any read.
+        # (1) POSITIVE proof of actual reading: BOTH in-directory sentinels
+        #     S1/S2 each yield findings -- a zero-read implementation cannot
+        #     pass; (2) the outside sentinel X never appears; (3) return
+        #     structure intact (artifact_count == 2, non-None, well-formed);
+        #     (4)/(5) startup-boundary and intermediate-link scenarios are
+        #     carried by OpenatChainTests (R13 §18 #27).
         if IS_WINDOWS_PLATFORM:
             self.skipTest("dir_fd binding is POSIX-only; Windows covered by fail-closed")
         import importlib.util
@@ -863,12 +875,14 @@ class DirFdBindingTests(unittest.TestCase):
             target = pathlib.Path(scan_tmp)
             external = pathlib.Path(out_tmp)
             inside_1 = "one.txt"
-            inside_2 = "two.txt"
+            inside_2 = "two.json"
+            sentinel_1 = KNOWN_SECRET_VALUES[0]
+            sentinel_2 = KNOWN_SECRET_VALUES[1]
             (target / inside_1).write_text(
-                "bearer " + KNOWN_SECRET_VALUES[0] + "\n", encoding="utf-8"
+                "bearer " + sentinel_1 + "\n", encoding="utf-8"
             )
             (target / inside_2).write_text(
-                "bearer " + KNOWN_SECRET_VALUES[1] + "\n", encoding="utf-8"
+                json.dumps({"token": sentinel_2}), encoding="utf-8"
             )
             (external / "outside.txt").write_text(
                 "external " + KNOWN_SECRET_VALUES[3] + "\n", encoding="utf-8"
@@ -882,12 +896,27 @@ class DirFdBindingTests(unittest.TestCase):
             finally:
                 os.close(dir_fd)
             rendered = repr(result) + json.dumps(result, default=str, sort_keys=True)
-            # The outside sentinel never reaches any returned value.
-            for value in (KNOWN_SECRET_VALUES[3],):
-                self.assertNotIn(value, rendered)
+            # R16 (2): the outside sentinel never reaches any returned value.
+            self.assertNotIn(KNOWN_SECRET_VALUES[3], rendered)
             assert_zero_secret(self, rendered, "race-isolated seam result")
-            # Both in-scope relative names were processed (sized container).
+            # R16 (3): return structure intact -- non-None, sized container
+            # of exactly the two in-scope artifacts. artifact_count == 2 is a
+            # §18 #25 minimum assertion: an absent field must NOT silently
+            # pass (guards against "crashed into an empty object" passes).
             self.assertIsNotNone(result)
+            counts = [c for c in collect_key_values(result, "artifact_count") if isinstance(c, int)]
+            self.assertTrue(counts, "seam result must carry artifact_count (R16 #25 item 3)")
+            self.assertEqual(counts[0], 2, counts)
+            # R16 (1): POSITIVE actual-read proof -- BOTH in-directory
+            # sentinels each produce findings (distinct fingerprints). A
+            # zero-read implementation returns no findings and FAILS here.
+            fingerprints = [f for f in collect_key_values(result, "fingerprint") if isinstance(f, str)]
+            self.assertGreaterEqual(
+                len(fingerprints), 2, "zero-read or partial-read implementation: no findings for S1/S2"
+            )
+            self.assertGreaterEqual(
+                len(set(fingerprints)), 2, "S1 and S2 must yield distinct fingerprints"
+            )
 
     def test_windows_platform_fail_closed_no_report(self) -> None:
         # R10 §18 #25 (Windows): any legal target -> exit 2, single
@@ -1023,13 +1052,18 @@ class ScriptReadBudgetTests(unittest.TestCase):
             self.assertEqual(report.get("status"), "complete")
 
     def test_file_budget_truncation_bounded_output(self) -> None:
-        # R9 §18 #24 (revised from the R8 wording, [v1.4-erratum] via R12):
-        # single-pass enumeration + bounded top-K lexicographic selection.
-        # 10_005 files; the 5 lexicographically LARGEST names carry unique
-        # sentinels -> they are evicted from the 10_000 selection set and
-        # must contribute zero findings; the truncation summary is EXACTLY
-        # ONE fixed-shape entry truncated-at=a9999; stderr single line; no
-        # per-file a10000+ entries; incomplete + exit 3.
+        # R9+R14 §18 #24 (revised from the R8 wording, [v1.4-erratum] via
+        # R12; R14 adds the supported-suffix qualification): single-pass
+        # enumeration + bounded top-K lexicographic selection over
+        # SUPPORTED-SUFFIX (.json/.txt) entries only -- the file-budget
+        # trigger condition is "supported-suffix entry count > 10,000".
+        # 10_005 .txt files (all supported suffix); the 5 lexicographically
+        # LARGEST names carry unique sentinels -> they are evicted from the
+        # 10_000 selection set and must contribute zero findings; the
+        # truncation summary is EXACTLY ONE fixed-shape entry
+        # truncated-at=a9999; stderr single line; no per-file a10000+
+        # entries; incomplete + exit 3. Mixed-suffix variant = R14 §18 #28
+        # (SuffixPreFilterTests).
         import base64
 
         evicted_sentinels = [
@@ -1366,6 +1400,230 @@ class SameHandleReadTests(unittest.TestCase):
             self.assertEqual(counters["builtin_open"], 0, "builtins.open used for reading")
             # Two artifacts, each opened exactly once via os.open.
             self.assertEqual(counters["os_open"], 2, counters)
+
+
+class OpenatChainTests(unittest.TestCase):
+    """R13 §17.F5'-R13 / §18 #27: per-component openat chain for the target
+    directory handle (intermediate-directory symlink closure)."""
+
+    def test_source_locks_component_openat_chain(self) -> None:
+        # R13 (RED on dfa0f85 -- main opens the target by path, single-shot):
+        # the target directory handle must be obtained via a per-component
+        # openat chain -- O_DIRECTORY|O_NOFOLLOW on every component open,
+        # dir_fd= chaining, and zero single-shot by-path opens of the target.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("O_NOFOLLOW", source)
+        self.assertIn("O_DIRECTORY", source)
+        self.assertIn("dir_fd=", source)
+        for forbidden_form in ("os.open(target", "os.open(str(target", "os.open(path"):
+            self.assertNotIn(forbidden_form, source)
+
+    def test_intermediate_directory_symlink_rejected(self) -> None:
+        # R13 §18 #27.1 (POSIX authoritative; Windows covered by the R10
+        # platform fail-closed branch -- the probe fires before the chain):
+        # target = t/a/b where t/a is a symlink to t_real/a -- the component
+        # chain must reject the intermediate symlink with exit 2 and stderr
+        # target-invalid:symlink-component; zero report output and zero
+        # reads inside b (sentinel absent).
+        if IS_WINDOWS_PLATFORM:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = pathlib.Path(tmp)
+                (target / "s.txt").write_text("plain\n", encoding="utf-8")
+                result = run_script(str(target))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(PLATFORM_UNSUPPORTED_MSG, result.stderr)
+                self.assertEqual(result.stdout.strip(), "")
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            real = base / "t_real"
+            (real / "a" / "b").mkdir(parents=True)
+            sentinel = KNOWN_SECRET_VALUES[0]
+            (real / "a" / "b" / "inside.txt").write_text(
+                "bearer " + sentinel + "\n", encoding="utf-8"
+            )
+            link_root = base / "t"
+            link_root.mkdir()
+            os.symlink(real / "a", link_root / "a")
+            target = link_root / "a" / "b"
+            result = run_script(str(target))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("target-invalid:symlink-component", result.stderr)
+            self.assertEqual(result.stdout.strip(), "", result.stdout)
+            self.assertNotIn(sentinel, result.stdout + result.stderr)
+
+    def test_anchor_and_error_category_variants(self) -> None:
+        # R13 §18 #27.2 (POSIX): (a) relative anchor forms "./" and "." run
+        # from cwd=target produce findings equivalent to the absolute form;
+        # (b) final-component symlink -> target-invalid:symlink-component;
+        # (c) plain-file target -> target-invalid:not-a-directory.
+        if IS_WINDOWS_PLATFORM:
+            # R10 platform probe fires first on Windows: exit 2 with the
+            # platform-unsupported line for any legal target.
+            with tempfile.TemporaryDirectory() as tmp:
+                target = pathlib.Path(tmp)
+                (target / "s.txt").write_text("plain\n", encoding="utf-8")
+                result = run_script(str(target))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(PLATFORM_UNSUPPORTED_MSG, result.stderr)
+            return
+        import subprocess as _sp
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as ext:
+            target = pathlib.Path(tmp)
+            external = pathlib.Path(ext)
+            sentinel = KNOWN_SECRET_VALUES[1]
+            (target / "s1.txt").write_text(
+                "bearer " + KNOWN_SECRET_VALUES[0] + "\n", encoding="utf-8"
+            )
+            (target / "s2.txt").write_text(
+                "bearer " + sentinel + "\n", encoding="utf-8"
+            )
+            (external / "decoy.txt").write_text(
+                "external " + KNOWN_SECRET_VALUES[3] + "\n", encoding="utf-8"
+            )
+
+            def run_cwd(cli_target: str) -> _sp.CompletedProcess:
+                return _sp.run(  # noqa: S603 - frozen repo script, argv pinned
+                    [sys.executable, str(SCRIPT_PATH), cli_target],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=str(target),
+                    env=env,
+                    timeout=120,
+                )
+
+            # (a) relative anchor forms: "./" and "." produce findings
+            # equivalent to the absolute-path form.
+            absolute = run_script(str(target))
+            self.assertEqual(absolute.returncode, 0, absolute.stderr)
+            abs_report = json.loads(absolute.stdout)
+            for relative_form in ("./", "."):
+                relative = run_cwd(relative_form)
+                self.assertEqual(relative.returncode, 0, relative.stderr)
+                rel_report = json.loads(relative.stdout)
+                self.assertEqual(rel_report.get("status"), "complete")
+                self.assertEqual(
+                    sorted(f for f in collect_key_values(rel_report, "fingerprint")),
+                    sorted(f for f in collect_key_values(abs_report, "fingerprint")),
+                )
+            # (b) final-component symlink -> symlink-component rejection.
+            link_path = target.parent / (target.name + "-link")
+            os.symlink(target, link_path)
+            final_link = run_script(str(link_path))
+            self.assertEqual(final_link.returncode, 2, final_link.stderr)
+            self.assertIn("target-invalid:symlink-component", final_link.stderr)
+            # (c) plain-file target -> not-a-directory rejection.
+            file_target = target / "s1.txt"
+            plain = run_script(str(file_target))
+            self.assertEqual(plain.returncode, 2, plain.stderr)
+            self.assertIn("target-invalid:not-a-directory", plain.stderr)
+
+
+class SuffixPreFilterTests(unittest.TestCase):
+    """R14 §17.F5'-R14 / §18 #28: supported-suffix pre-filter on the
+    selection set (out-of-scope suffixes cannot consume the file budget)."""
+
+    def test_unsupported_suffixes_do_not_consume_quota(self) -> None:
+        # R14 (RED on dfa0f85 -- main counts every directory entry toward
+        # selection): 10_000 .bin entries (all lexicographically BELOW the
+        # single sentinel .txt, so an unfiltered top-K would evict it) + 1
+        # sentinel z-sentinel.txt -> the sentinel MUST be audited; no
+        # file-budget truncation; complete + exit 0; artifact_count == 1 and
+        # the single index a0; .bin entries contribute zero warnings.
+        # R14 grep lock (§18 #28 ".bin ... zero open/warning/index +
+        # grep lock"): the supported-suffix set stays a script-layer
+        # constant (_ARTIFACT_SUFFIXES, name anchored on main) so the
+        # selection gate cannot silently widen to other suffixes.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("_ARTIFACT_SUFFIXES", source)
+        sentinel = KNOWN_SECRET_VALUES[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            for index in range(10_000):
+                (target / f"b{index:05d}.bin").write_bytes(b"\x00\x01binary-payload")
+            (target / "z-sentinel.txt").write_text(
+                "bearer " + sentinel + "\n", encoding="utf-8"
+            )
+            result = run_script(str(target), timeout=600)
+            if not posix_script_or_fail_closed(self, result):
+                return
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report.get("status"), "complete")
+            self.assertEqual(report.get("incomplete_reasons", []), [])
+            self.assertEqual(report.get("artifact_count", None), 1)
+            source_paths = [str(p) for p in collect_key_values(report, "source_path")]
+            self.assertEqual(source_paths, ["a0"], source_paths)
+            fingerprints = collect_key_values(report, "fingerprint")
+            self.assertTrue(fingerprints, "sentinel .txt must be audited (R14)")
+            combined = result.stdout + result.stderr
+            self.assertNotIn(".bin", combined)
+            self.assertEqual(
+                [line for line in result.stderr.splitlines() if line.strip()],
+                [],
+                "unsupported-suffix entries must be silently ignored (R14)",
+            )
+
+
+class FindingsBudgetTests(unittest.TestCase):
+    """R15 §17.F5'-R15 / §18 #29: report-level findings total cap
+    max_report_findings = 10_000 (script-layer aggregation point)."""
+
+    def test_findings_capped_at_report_budget(self) -> None:
+        # R15 (RED on dfa0f85 -- build_audit_report appends unboundedly):
+        # 3 .json fixtures x 4_000 bare-base64 members (12_000 > 10_000),
+        # processed in a<n> ascending order -> report findings length is
+        # EXACTLY 10_000; incomplete_reasons carries EXACTLY ONE
+        # scan:findings-budget:truncated-at=a<n> (a0/a1 full + a2 partial:
+        # truncated-at=a1 under the ascending-order processing rule); stderr
+        # exactly one findings-budget summary line and zero per-file entries;
+        # exit 3 + status incomplete; report JSON still produced and bounded.
+        import base64
+
+        # R15 grep lock: the cap is a script-layer constant named per
+        # §17.F5'-R15.1 (same family as max_files_per_scan); RED on dfa0f85
+        # where no such constant exists.
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("max_report_findings", source)
+
+        def member_payload(index: int) -> str:
+            return base64.b64encode(
+                f"findings-budget-member-{index:05d}-0123456789abcdef".encode()
+            ).decode()
+
+        members = {f"m{index:05d}": member_payload(index) for index in range(4_000)}
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            for name in ("f0.json", "f1.json", "f2.json"):
+                (target / name).write_text(
+                    json.dumps(members), encoding="utf-8"
+                )
+            result = run_script(str(target), timeout=600)
+            if not posix_script_or_fail_closed(self, result):
+                return
+            self.assertEqual(result.returncode, 3, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report.get("status"), "incomplete")
+            findings = report.get("findings", [])
+            self.assertEqual(len(findings), 10_000, len(findings))
+            reasons = report.get("incomplete_reasons", [])
+            summaries = [r for r in reasons if r.startswith("scan:findings-budget")]
+            self.assertEqual(len(summaries), 1, reasons)
+            # §18 #29 exact value under the frozen ascending-a<n> processing
+            # order: a0/a1 contribute 4,000 each, the cap hits 10,000 while
+            # processing a2 -> the last fully processed artifact is a1.
+            self.assertEqual(summaries[0], "scan:findings-budget:truncated-at=a1")
+            budget_lines = [
+                line for line in result.stderr.splitlines() if "findings-budget" in line
+            ]
+            self.assertEqual(len(budget_lines), 1, result.stderr)
+            self.assertLessEqual(len(result.stderr.strip().splitlines()), 2)
+            # Report boundedness proxy: findings count == the cap.
+            self.assertLessEqual(len(json.dumps(report)), 6_000_000)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -52,6 +52,7 @@ COPY --chown=lima:lima frontend/src ./frontend/src
 COPY --chown=lima:lima frontend/e2e/audit-lifecycle.spec.ts ./frontend/e2e/
 COPY --chown=lima:lima .gitignore README.md ./
 COPY --chown=lima:lima docs/DEVELOPER_HANDOFF.md docs/GITHUB_COLLABORATION.md ./docs/
+COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0020_Vault_Audit.md ./docs/
 COPY --chown=lima:lima docs/adr ./docs/adr
 COPY --chown=lima:lima schemas ./schemas
 COPY --chown=lima:lima docs/assets ./docs/assets

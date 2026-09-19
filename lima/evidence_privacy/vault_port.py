@@ -67,13 +67,27 @@ class VaultPortConfig:
     audit_access_required: bool = True
 
 
+def _backend_metadata(config: VaultPortConfig) -> dict[str, object]:
+    """F4' §17.F4': backend evidence as length/registration metadata only.
+
+    The backend name is caller-supplied free text and may carry secret
+    material, so rejections never echo it; ``backend_len``/``backend_registered``
+    are the only sanctioned backend facts (no ``backend`` key is emitted).
+    """
+    backend = config.backend
+    if backend is None:
+        return {"backend_len": None, "backend_registered": False}
+    return {
+        "backend_len": len(backend),
+        "backend_registered": backend in VAULT_BACKEND_PORT_NAMES,
+    }
+
+
 def _rejection(config: VaultPortConfig, field_path: str) -> PrivacyError:
-    """Value-free ``POLICY_ERROR`` carrying only enabled/backend metadata (§8.1.5)."""
-    return PrivacyError(
-        PrivacyErrorCode.POLICY_ERROR,
-        field_path=field_path,
-        context={"enabled": config.enabled, "backend": config.backend},
-    )
+    """Value-free ``POLICY_ERROR`` carrying only metadata (§8.1.5, F4' §17.F4')."""
+    context: dict[str, object] = {"enabled": config.enabled}
+    context.update(_backend_metadata(config))
+    return PrivacyError(PrivacyErrorCode.POLICY_ERROR, field_path=field_path, context=context)
 
 
 def validate_vault_config(config: VaultPortConfig) -> None:
@@ -104,14 +118,15 @@ def validate_vault_config(config: VaultPortConfig) -> None:
         raise _rejection(config, "vault.backend")
     # Rule 4: enabled without a positive TTL.
     if config.ttl_seconds is None or config.ttl_seconds <= 0:
+        context: dict[str, object] = {
+            "enabled": config.enabled,
+            "ttl_seconds": config.ttl_seconds,
+        }
+        context.update(_backend_metadata(config))
         raise PrivacyError(
             PrivacyErrorCode.POLICY_ERROR,
             field_path="vault.ttl_seconds",
-            context={
-                "enabled": config.enabled,
-                "backend": config.backend,
-                "ttl_seconds": config.ttl_seconds,
-            },
+            context=context,
         )
     # Rule 5: encryption must be required.
     if not config.encryption_required:

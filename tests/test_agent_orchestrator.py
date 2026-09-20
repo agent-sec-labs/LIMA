@@ -29,9 +29,10 @@ Red lines pinned here:
 import inspect
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lima.agent_repro_tools import ExperimentObservation, _observation_from_response
 from lima.agent_scout import ScoutLead
@@ -57,8 +58,11 @@ from lima.workspace import RepositoryWorkspace
 
 try:  # platform module under test (RED until implemented)
     from lima.agent_orchestrator import (
+        PlatformFormatError,
         _experiment_hit,
+        _platform_round,
         _repro_driver_relative_path,
+        parse_hypothesis_reply,
         run_platform_review,
     )
 except ImportError:  # pragma: no cover - RED phase
@@ -1040,6 +1044,98 @@ class DeadlineBoundsTests(unittest.TestCase):
         _run(llm_transport=transport, workbench=workbench, timeout=77)
         self.assertEqual({77}, set(transport.timeouts))
         self.assertEqual([None], workbench.timeouts)
+
+
+class HardDeadlineAbstainTests(unittest.TestCase):
+    """Round 3: a passed deadline forbids the next send, never shrinks it.
+
+    The ``or 1`` idiom turned the helpers' ``None`` ("must not send") into
+    a fresh 1-second call; these tests pin the corrected contract.
+    """
+
+    def test_no_format_repair_after_deadline(self):
+        # The reviewer probe: the first reply is malformed and the deadline
+        # has already passed -- the repair request must never leave.
+        calls = []
+
+        def transport(provider, base_url, api_key, payload, timeout,
+                      extra_headers=None, max_bytes=None):
+            calls.append(timeout)
+            return "not a platform reply"
+
+        with patch(
+            "lima.uaf_llm_branch.post_chat_completion_text", transport,
+        ):
+            with self.assertRaises(PlatformFormatError) as raised:
+                _platform_round(
+                    RESOLVED_LLM, "system-prompt", "user-context", 5,
+                    CxxAgentBudget(max_calls=4, max_output_bytes=65536),
+                    [0], parse_hypothesis_reply, frozenset({LEAD.lead_id}),
+                    time.monotonic() - 0.5,
+                )
+        self.assertEqual([5], calls)
+        self.assertIn("deadline", str(raised.exception))
+
+    def test_repair_still_sent_without_deadline(self):
+        # Control: no aggregate deadline -> the one allowed repair goes
+        # out with the caller's timeout and the round completes.
+        calls = []
+
+        def transport(provider, base_url, api_key, payload, timeout,
+                      extra_headers=None, max_bytes=None):
+            calls.append(timeout)
+            if len(calls) == 1:
+                return "not a platform reply"
+            return hypothesis_json()
+
+        with patch(
+            "lima.uaf_llm_branch.post_chat_completion_text", transport,
+        ):
+            hypothesis = _platform_round(
+                RESOLVED_LLM, "system-prompt", "user-context", 5,
+                CxxAgentBudget(max_calls=4, max_output_bytes=65536),
+                [0], parse_hypothesis_reply, frozenset({LEAD.lead_id}),
+            )
+        self.assertEqual([5, 5], calls)
+        self.assertEqual(LEAD.lead_id, hypothesis.target_id)
+
+    def test_scout_entry_abstains_once_deadline_passes(self):
+        # Entry gate passes; by the Scout call the deadline has expired.
+        # The Scout must never be invoked and the run degrades to an empty
+        # outcome instead of sending a 1-second request.
+        fake_time = MagicMock()
+        fake_time.monotonic.side_effect = [1000.0, 1000.0, 1010.0]
+        root = tempfile.mkdtemp(suffix="-agent-orchestrator")
+        try:
+            workspace = _write_cxx_repo(root)
+            with patch("lima.agent_orchestrator.time", fake_time), patch(
+                "lima.agent_scout.post_chat_completion_text", GuardTransport(),
+            ):
+                outcome = run_platform_review(
+                    None,
+                    workspace,
+                    repository_key=REPO_KEY,
+                    snapshot_hash=SNAPSHOT,
+                    translation_units=(UNIT,),
+                    mode="auto",
+                    budget=CxxAgentBudget(max_calls=4, max_output_bytes=65536),
+                    llm_config=dict(RESOLVED_LLM),
+                    repro_workbench=FakeWorkbench([]),
+                    leads=(LEAD,),
+                    timeout=60,
+                    deadline_seconds=5.0,
+                )
+        finally:
+            _rmtree(root)
+        self.assertEqual((), outcome.targets)
+        self.assertEqual((), outcome.findings)
+        self.assertTrue(
+            any(
+                "deadline-exceeded before the scout review" in item
+                for item in outcome.diagnostics
+            ),
+            outcome.diagnostics,
+        )
 
 
 class FpDisciplineTests(unittest.TestCase):

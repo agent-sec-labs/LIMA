@@ -452,6 +452,63 @@ class ReproWorkbenchTests(unittest.TestCase):
         self.assertEqual(1, len(client.calls))
 
 
+class ClientCompatibilityTests(unittest.TestCase):
+    """The timeout capability is decided before the call, never probed by
+    retrying: every experiment executes exactly one client invocation.
+
+    Round-3 acceptance contract: a ``TypeError`` raised *inside* a
+    timeout-aware client surfaces as a program error and must not be
+    mistaken for a legacy 4-argument signature (which would re-run the
+    experiment without a timeout and mask the bug).
+    """
+
+    def test_new_style_client_internal_typeerror_is_not_masked(self):
+        class TimeoutAwareBrokenClient:
+            def __init__(self):
+                self.calls = []
+
+            def repro_compile_run(self, repository_key, snapshot_sha256,
+                                  source_files, driver_code, *, timeout=None):
+                self.calls.append(timeout)
+                raise TypeError("client bug, not a signature problem")
+
+        client = TimeoutAwareBrokenClient()
+        with self.assertRaises(TypeError):
+            workbench_with(client).run_experiment(
+                REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE, timeout=9,
+            )
+        self.assertEqual([9], client.calls)
+
+    def test_new_style_client_receives_effective_timeout(self):
+        class RecordingClient:
+            def __init__(self, response):
+                self.response = response
+                self.calls = []
+
+            def repro_compile_run(self, repository_key, snapshot_sha256,
+                                  source_files, driver_code, *, timeout=None):
+                self.calls.append(timeout)
+                return self.response
+
+        client = RecordingClient(canned_repro_response())
+        workbench = ReproWorkbench(client, CxxAgentBudget(), default_timeout=45)
+        workbench.run_experiment(
+            REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE, timeout=9,
+        )
+        workbench.run_experiment(REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE)
+        self.assertEqual([9, 45], client.calls)
+
+    def test_legacy_client_executed_once_without_timeout(self):
+        # FakeAnalyzerClient is the legacy 4-argument shape: the workbench
+        # must not force a timeout keyword onto it, and must call it once.
+        client = FakeAnalyzerClient(canned_repro_response())
+        observation = workbench_with(client).run_experiment(
+            REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE, timeout=9,
+        )
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual("run", observation.stage)
+
+
 class AgentToolFactoryTests(unittest.TestCase):
     def test_as_agent_tool_schema_exact(self):
         client = FakeAnalyzerClient(canned_repro_response())

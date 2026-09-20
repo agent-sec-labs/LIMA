@@ -37,6 +37,7 @@ Security and budget discipline:
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -61,7 +62,13 @@ _HEX64 = frozenset("0123456789abcdef")
 
 
 class ReproAnalyzerClient(Protocol):
-    """The one Task 1 client method the workbench needs (injected)."""
+    """The one Task 1 client method the workbench needs (injected).
+
+    Clients MAY accept a keyword-only ``timeout`` (the deadline-bounded
+    per-call wire timeout); the workbench detects the capability once, by
+    signature inspection before any call, so every experiment executes
+    exactly one client invocation.
+    """
 
     def repro_compile_run(
         self,
@@ -70,6 +77,25 @@ class ReproAnalyzerClient(Protocol):
         source_files: tuple[str, ...],
         driver_code: str,
     ) -> ReproResponse: ...
+
+
+def _accepts_timeout_keyword(method: Any) -> bool:
+    """True when ``method``'s signature binds a ``timeout`` keyword.
+
+    Pure signature inspection -- the method body never runs -- so a
+    ``TypeError`` raised *inside* a timeout-aware client surfaces as a real
+    program error instead of being mistaken for a legacy signature (which
+    would re-run the experiment without a timeout).  Unintrospectable
+    callables are treated as legacy: one call, client-owned wire timeout.
+    """
+
+    try:
+        inspect.signature(method).bind(
+            "repository", "snapshot", (), "driver", timeout=1,
+        )
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -262,6 +288,11 @@ class ReproWorkbench:
             raise ValueError("default_timeout must be a positive integer")
         self._client = analyzer_client
         self._budget = budget
+        # Capability decided once by signature inspection, before any call:
+        # every experiment then executes exactly one client invocation.
+        self._client_accepts_timeout = _accepts_timeout_keyword(
+            analyzer_client.repro_compile_run
+        )
         # Requested per-experiment wall-clock ceiling for orchestration;
         # the wire timeout stays owned by the injected Task 1 client.
         self.default_timeout = default_timeout
@@ -287,9 +318,10 @@ class ReproWorkbench:
         ``timeout`` is the caller's orchestration ceiling for this one
         experiment (the deadline-bounded step timeout; ``None`` keeps
         :attr:`default_timeout`).  It is forwarded to the client as a
-        per-call wire timeout when the client accepts one, so the real
-        transport is bounded by the same deadline that bounds
-        orchestration.
+        per-call wire timeout when the client's signature accepts one
+        (decided once at construction by pure signature inspection), so
+        the real transport is bounded by the same deadline that bounds
+        orchestration -- and a client call failure is never retried.
         """
 
         repo = _require_text(repository_key, "repository_key")
@@ -308,16 +340,16 @@ class ReproWorkbench:
         effective_timeout = timeout if timeout is not None else self.default_timeout
         self._budget.consume(calls=1, bytes=len(driver.encode("utf-8")))
         try:
-            response = self._client.repro_compile_run(
-                repo, snapshot, sources, driver, timeout=effective_timeout
-            )
-        except TypeError:
-            # Legacy 4-argument clients without the timeout parameter:
-            # fall back to the client-level wire timeout.
-            try:
-                response = self._client.repro_compile_run(repo, snapshot, sources, driver)
-            except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
-                return _degraded_observation(exc)
+            if self._client_accepts_timeout:
+                response = self._client.repro_compile_run(
+                    repo, snapshot, sources, driver, timeout=effective_timeout
+                )
+            else:
+                # Legacy 4-argument client: the wire timeout stays owned by
+                # the client itself.
+                response = self._client.repro_compile_run(
+                    repo, snapshot, sources, driver
+                )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             return _degraded_observation(exc)
         observation = _observation_from_response(response)

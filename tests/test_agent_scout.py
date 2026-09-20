@@ -26,8 +26,9 @@ pinned here:
 
 import json
 import re
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lima.agent_scout import (
     SCOUT_BATCH_SIZE,
@@ -612,6 +613,132 @@ class InputContractTests(unittest.TestCase):
                 ScoutTarget("lead-01", "src/a.cpp", 3, "reason", "certain")
         with self.subTest("AgentBudgetExceeded is a budget signal"):
             self.assertTrue(issubclass(AgentBudgetExceeded, RuntimeError))
+
+
+class DeadlineTests(unittest.TestCase):
+    """The absolute deadline bounds every send, batch and format repair.
+
+    Round-3 acceptance contract: the deadline is not converted into a
+    smaller timeout once it has passed -- it forbids the next send, and the
+    unjudged leads stay unresolved with ``deadline-exceeded``.
+    """
+
+    def _deadline_review(self, leads, transport, clock_values, deadline,
+                         timeout=60):
+        clock = MagicMock()
+        clock.monotonic.side_effect = clock_values
+        with patch(
+            "lima.agent_scout.post_chat_completion_text", transport,
+        ), patch("lima.agent_scout.time", clock):
+            return review_leads(
+                leads,
+                llm_config=dict(RESOLVED),
+                workspace_reader=FakeReader({"src/a.cpp": A_CPP}),
+                budget=CxxAgentBudget(max_calls=12, max_output_bytes=1_000_000),
+                timeout=timeout,
+                deadline=deadline,
+            )
+
+    def test_expired_deadline_sends_nothing(self):
+        transport = GuardTransport()
+        report = self._deadline_review(
+            [_lead(number) for number in range(1, 4)],
+            transport,
+            [time.monotonic()],
+            time.monotonic() - 1,
+        )
+        self.assertEqual(0, len(transport.calls))
+        self.assertEqual(0, report.calls_used)
+        self.assertEqual("deadline-exceeded", report.degradation)
+        self.assertEqual((), report.targets)
+        self.assertEqual((), report.discards)
+        self.assertEqual(
+            ("lead-01", "lead-02", "lead-03"),
+            tuple(lead.lead_id for lead in report.unresolved_leads),
+        )
+
+    def test_deadline_stops_between_batches(self):
+        # Batch 1 (leads 1-5) sends within the deadline; before batch 2 the
+        # remaining budget is re-derived, found expired, and nothing more
+        # is sent -- leads 6-8 stay unresolved.
+        reply = json.dumps([
+            _target_entry(f"lead-0{number}", "release precedes use", "high")
+            for number in range(1, 6)
+        ])
+        transport = FakeTransport(reply)
+        report = self._deadline_review(
+            [_lead(number) for number in range(1, 9)],
+            transport,
+            [1000.0, 1000.1, 1010.0],
+            deadline=1005.0,
+        )
+        self.assertEqual(1, len(transport.calls))
+        # The one send that did happen was bounded by the deadline remainder.
+        self.assertEqual(4, transport.calls[0]["timeout"])
+        self.assertEqual(1, report.calls_used)
+        self.assertEqual(5, len(report.targets))
+        self.assertEqual("deadline-exceeded", report.degradation)
+        self.assertEqual(
+            ("lead-06", "lead-07", "lead-08"),
+            tuple(lead.lead_id for lead in report.unresolved_leads),
+        )
+
+    def test_deadline_forbids_format_repair(self):
+        # The first reply is malformed; by the time the repair would be
+        # sent the deadline has passed, so the repair never goes out and
+        # the batch stays unresolved.
+        transport = FakeTransport("not json")
+        report = self._deadline_review(
+            [_lead(number) for number in range(1, 6)],
+            transport,
+            [1000.0, 1000.1, 1010.0],
+            deadline=1005.0,
+        )
+        self.assertEqual(1, len(transport.calls))
+        self.assertEqual(1, report.calls_used)
+        self.assertEqual("deadline-exceeded", report.degradation)
+        self.assertEqual((), report.targets)
+        self.assertEqual(
+            tuple(f"lead-0{number}" for number in range(1, 6)),
+            tuple(lead.lead_id for lead in report.unresolved_leads),
+        )
+
+    def test_no_deadline_keeps_caller_timeout(self):
+        # Control: without a deadline the wire timeout travels unchanged
+        # for the normal send and the repair alike.
+        transport = FakeTransport("not json", json.dumps([_target_entry("lead-01")]))
+        with patch("lima.agent_scout.post_chat_completion_text", transport):
+            report = review_leads(
+                [_lead(1)],
+                llm_config=dict(RESOLVED),
+                workspace_reader=FakeReader({"src/a.cpp": A_CPP}),
+                budget=CxxAgentBudget(max_calls=12, max_output_bytes=1_000_000),
+                timeout=77,
+            )
+        self.assertEqual(2, len(transport.calls))
+        self.assertEqual({77}, {call["timeout"] for call in transport.calls})
+        self.assertEqual(("lead-01",), tuple(
+            target.lead_id for target in report.targets
+        ))
+
+    def test_deadline_argument_validation(self):
+        with patch(
+            "lima.agent_scout.post_chat_completion_text", GuardTransport(),
+        ):
+            with self.subTest("bool is not a deadline"):
+                with self.assertRaises(ValueError):
+                    review_leads(
+                        [_lead(1)], llm_config=dict(RESOLVED),
+                        workspace_reader=FakeReader({"src/a.cpp": A_CPP}),
+                        budget=CxxAgentBudget(), deadline=True,
+                    )
+            with self.subTest("text is not a deadline"):
+                with self.assertRaises(ValueError):
+                    review_leads(
+                        [_lead(1)], llm_config=dict(RESOLVED),
+                        workspace_reader=FakeReader({"src/a.cpp": A_CPP}),
+                        budget=CxxAgentBudget(), deadline="soon",
+                    )
 
 
 if __name__ == "__main__":

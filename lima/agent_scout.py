@@ -39,6 +39,7 @@ Security stance (mirrors ``lima.uaf_llm_branch``):
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -60,6 +61,7 @@ __all__ = [
     "SCOUT_BATCH_SIZE",
     "SCOUT_ROLE",
     "ScoutContractError",
+    "ScoutDeadlineExceeded",
     "ScoutDiscard",
     "ScoutEntry",
     "ScoutFormatError",
@@ -99,6 +101,7 @@ _DEG_CONTRACT_VIOLATION = "contract-violation"
 _DEG_INVALID_REPLY = "invalid-reply"
 _DEG_BUDGET_EXHAUSTED = "budget-exhausted"
 _DEG_ROUNDS_EXHAUSTED = "rounds-exhausted"
+_DEG_DEADLINE_EXCEEDED = "deadline-exceeded"
 _DEGRADATIONS = frozenset({
     "",
     _DEG_MODE_OFF,
@@ -107,6 +110,7 @@ _DEGRADATIONS = frozenset({
     _DEG_INVALID_REPLY,
     _DEG_BUDGET_EXHAUSTED,
     _DEG_ROUNDS_EXHAUSTED,
+    _DEG_DEADLINE_EXCEEDED,
 })
 
 _UNTRUSTED_DATA_RULE = (
@@ -137,6 +141,31 @@ class ScoutFormatError(ValueError):
 
 class ScoutContractError(ValueError):
     """Reply references a lead_id not provided; never repaired."""
+
+
+class ScoutDeadlineExceeded(Exception):
+    """The aggregate review deadline passed before a wire send.
+
+    Raised by the transport helper *before* anything is charged or sent;
+    the review loop stops and leaves the unjudged leads unresolved.
+    """
+
+
+def _bounded_wire_timeout(timeout: int, deadline: float | None) -> int | None:
+    """The wire timeout for the next scout send, bounded by the deadline.
+
+    Same contract as the orchestrator's ``_bounded_step_timeout``:
+    ``None`` means the deadline already passed and the caller must not
+    send at all; a fractional remainder floors onto the one-second wire
+    minimum so the timeout stays a positive integer.
+    """
+
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    return max(1, min(timeout, int(remaining)))
 
 
 # ------------------------------------------------------------------ records
@@ -423,9 +452,20 @@ def _post_scout_messages(
     timeout: int,
     budget: CxxAgentBudget,
     state: list[int],
+    deadline: float | None = None,
 ) -> str:
-    """One wire round trip: calls + context bytes before send, bytes on arrival."""
+    """One wire round trip: calls + context bytes before send, bytes on arrival.
 
+    The remaining aggregate deadline is re-derived here -- at every send,
+    not once per run -- and a passed deadline raises
+    :class:`ScoutDeadlineExceeded` before anything is charged or sent.
+    """
+
+    wire_timeout = _bounded_wire_timeout(timeout, deadline)
+    if wire_timeout is None:
+        raise ScoutDeadlineExceeded(
+            "the aggregate review deadline passed before this send"
+        )
     provider, base_url, api_key, model, headers = parts
     payload = {
         "model": model,
@@ -441,7 +481,7 @@ def _post_scout_messages(
     budget.consume(calls=1, bytes=context_bytes)
     state[0] += 1
     content = post_chat_completion_text(
-        provider, base_url, api_key, payload, timeout,
+        provider, base_url, api_key, payload, wire_timeout,
         extra_headers=headers, max_bytes=budget.max_output_bytes,
     )
     budget.consume(bytes=len(content.encode("utf-8")))
@@ -514,11 +554,18 @@ def _scout_round(
     budget: CxxAgentBudget,
     state: list[int],
     known_lead_ids: frozenset[str],
+    deadline: float | None = None,
 ) -> tuple[ScoutEntry, ...]:
-    """One strict reply round with exactly one format repair."""
+    """One strict reply round with exactly one format repair.
+
+    Both sends re-derive their wire timeout from the same absolute
+    ``deadline``; when it has passed the repair never goes out.
+    """
 
     try:
-        raw = _post_scout_messages(parts, message_pairs, timeout, budget, state)
+        raw = _post_scout_messages(
+            parts, message_pairs, timeout, budget, state, deadline,
+        )
     except LLMResponseFormatError:
         failure = ("missing completion content", "")
     else:
@@ -538,7 +585,9 @@ def _scout_round(
     # Contract violations and transport/budget failures propagate unchanged;
     # only a second shape failure escapes as ScoutFormatError.
     return parse_scout_reply(
-        _post_scout_messages(parts, repaired, timeout, budget, state),
+        _post_scout_messages(
+            parts, repaired, timeout, budget, state, deadline,
+        ),
         known_lead_ids,
     )
 
@@ -555,6 +604,7 @@ def review_leads(
     mode: str = "auto",
     max_rounds: int = 3,
     timeout: int = 60,
+    deadline: float | None = None,
 ) -> ScoutReport:
     """Run the scout review loop over the triage leads.
 
@@ -571,6 +621,13 @@ def review_leads(
     ``required`` any provider, contract, reply-shape or budget failure
     raises ``RuntimeError`` instead. A normal abstention (everything
     discarded, or rounds/budget stopping the loop) is a legal completion.
+
+    ``deadline`` is an absolute ``time.monotonic()`` clock value shared by
+    every wire send: before each batch, each normal request and each format
+    repair the remaining budget is re-derived, and once it has passed no
+    further send happens -- the unjudged leads stay unresolved with the
+    ``deadline-exceeded`` degradation (a legal completion in every mode;
+    the deadline is an orchestration bound, not a provider failure).
     """
 
     items = tuple(leads)
@@ -584,6 +641,10 @@ def review_leads(
     _check_reader(workspace_reader)
     _check_budget(budget)
     _check_timeout(timeout)
+    if deadline is not None and (
+        isinstance(deadline, bool) or not isinstance(deadline, int | float)
+    ):
+        raise ValueError("deadline must be a monotonic clock value or None")
     if isinstance(max_rounds, bool) or not isinstance(max_rounds, int) \
             or max_rounds < 1:
         raise ValueError("max_rounds must be a positive integer")
@@ -615,6 +676,11 @@ def review_leads(
 
     rounds_used = 0
     while pending and rounds_used < max_rounds:
+        if _bounded_wire_timeout(timeout, deadline) is None:
+            # Deadline passed between batches: nothing is charged or sent;
+            # the trailing block records the leftovers unresolved.
+            note(_DEG_DEADLINE_EXCEEDED)
+            break
         batch = tuple(pending[:SCOUT_BATCH_SIZE])
         del pending[:SCOUT_BATCH_SIZE]
         rounds_used += 1
@@ -624,7 +690,14 @@ def review_leads(
         try:
             entries = _scout_round(
                 parts, message_pairs, timeout, budget, state, known_ids,
+                deadline,
             )
+        except ScoutDeadlineExceeded:
+            # The deadline passed inside this batch (normal send or repair):
+            # the whole loop stops, the popped batch stays unresolved.
+            unresolved.extend(batch)
+            note(_DEG_DEADLINE_EXCEEDED)
+            break
         except AgentBudgetExceeded:
             unresolved.extend(batch)
             note(_DEG_BUDGET_EXHAUSTED)

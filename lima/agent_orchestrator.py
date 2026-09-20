@@ -885,7 +885,15 @@ def _platform_round(
         return parse(raw, known_target_ids)
     except PlatformFormatError as exc:
         failure = str(exc)
-    repaired_timeout = _bounded_step_timeout(timeout, deadline) or 1
+    repaired_timeout = _bounded_step_timeout(timeout, deadline)
+    if repaired_timeout is None:
+        # ``None`` is the contract's "deadline passed, must not send" state:
+        # the repair is forbidden, so the round degrades on the failure we
+        # already hold (the caller maps this to an abstain).
+        raise PlatformFormatError(
+            f"deadline exceeded before the format repair could be sent "
+            f"({failure})"
+        )
     repaired = (
         user
         + "\n\nYour previous reply was not a valid platform reply ("
@@ -1358,6 +1366,11 @@ def run_platform_review(
         if not given_leads:
             return _empty_outcome(("no-leads-available",), units)
 
+    scout_timeout = _bounded_step_timeout(timeout, deadline)
+    if scout_timeout is None:
+        return _empty_outcome(
+            ("deadline-exceeded before the scout review",), units,
+        )
     try:
         report: ScoutReport = review_leads(
             given_leads,
@@ -1365,7 +1378,8 @@ def run_platform_review(
             workspace_reader=workspace,
             budget=run_budget,
             mode=mode,
-            timeout=_bounded_step_timeout(timeout, deadline) or 1,
+            timeout=scout_timeout,
+            deadline=deadline,
         )
     except ValueError as exc:
         if mode == MODE_REQUIRED:

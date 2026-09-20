@@ -491,6 +491,20 @@ class ClientContractTests(unittest.TestCase):
             result.stage = "compile"
 
     @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
+    def test_repro_compile_run_per_call_timeout_reaches_opener(self, _uuid4):
+        # Round-3 acceptance contract: the deadline-bounded per-call wire
+        # timeout overrides the client-level default on the real transport.
+        opener = RecordingOpener(valid_repro_response_payload())
+        client = repro_client(opener)
+
+        client.repro_compile_run(
+            REPOSITORY_KEY, SNAPSHOT_SHA256, SOURCE_FILES, DRIVER_CODE,
+            timeout=7,
+        )
+
+        self.assertEqual(7, opener.timeout)
+
+    @patch("lima.cxx_memory.uuid.uuid4", return_value=REQUEST_ID)
     def test_clean_run_response_accepted(self, _uuid4):
         payload = valid_repro_response_payload()
         payload.update({"stage": "run", "ok": True, "exit_code": 0, "asan_report": None})

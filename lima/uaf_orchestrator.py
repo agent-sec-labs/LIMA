@@ -651,7 +651,7 @@ def review_uaf(
             or dialogue_rounds < 0:
         raise ValueError("dialogue_rounds must be a non-negative integer")
     if deadline is not None and (
-        isinstance(deadline, bool) or not isinstance(deadline, (int, float))
+        isinstance(deadline, bool) or not isinstance(deadline, int | float)
     ):
         raise ValueError("deadline must be a monotonic timestamp or None")
 
@@ -665,6 +665,21 @@ def review_uaf(
 
     def _cancelled() -> bool:
         return bool(should_cancel is not None and should_cancel())
+
+    def _branch_timeout() -> int | None:
+        """The semantic-branch timeout capped by the remaining deadline.
+
+        ``None`` means the deadline already passed; a fractional remainder
+        floors onto the one-second wire minimum so the timeout contract
+        stays a positive integer.
+        """
+
+        if deadline is None:
+            return timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return max(1, min(timeout, int(remaining)))
 
     if _expired():
         return UafReviewOutcome(
@@ -748,10 +763,13 @@ def review_uaf(
                 return _abstain_outcome("deadline-exceeded")
             if _cancelled():
                 return _abstain_outcome("cancelled")
+            branch_timeout = _branch_timeout()
+            if branch_timeout is None:
+                return _abstain_outcome("deadline-exceeded")
             return _semantic_outcome(
                 item["candidate"], item["unit"], item["proof"],
                 _bounded_snippet(workspace, item["candidate"]), resolved_llm,
-                run_budget, mode, rounds, timeout,
+                run_budget, mode, rounds, branch_timeout,
             )
 
         if workers > 1:

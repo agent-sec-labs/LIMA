@@ -55,6 +55,7 @@ MAX_RAW_TAIL_CHARS = 800
 MAX_DIAGNOSTIC_CHARS = 500
 MAX_ERROR_TYPE_CHARS = 120
 MAX_DEGRADED_DIAGNOSTIC_CHARS = 500
+MAX_FRAME_TEXT_CHARS = 400
 
 _HEX64 = frozenset("0123456789abcdef")
 
@@ -82,6 +83,13 @@ class ExperimentObservation:
     escaped protocol diagnostics; ``raw_tail`` is the escaped tail of the
     diagnostic stream (driver stderr proxy), at most ``MAX_RAW_TAIL_CHARS``
     characters.
+
+    ``ok`` keeps its wire meaning -- "the tested binary exited cleanly with
+    no ASan report" -- so a real sanitizer hit always arrives as
+    ``ok=False``.  The frame-identity fields (``faulting_file``/
+    ``faulting_function``/``freed_file``/``allocated_file``, ``None``
+    without a symbolized frame) carry where the crash landed so consumers
+    can bind the evidence to the audited target instead of the PoC driver.
     """
 
     ok: bool
@@ -93,6 +101,10 @@ class ExperimentObservation:
     allocated_line: int | None
     diagnostics: tuple[str, ...]
     raw_tail: str
+    faulting_file: str | None = None
+    faulting_function: str | None = None
+    freed_file: str | None = None
+    allocated_file: str | None = None
 
 
 def _escape_text(text: str | None, limit: int) -> str | None:
@@ -118,6 +130,16 @@ def _frame_line(frame: Any) -> int | None:
     return None
 
 
+def _frame_text(frame: Any, key: str) -> str | None:
+    """Defensively extract escaped text (file/function) from one frame."""
+
+    if isinstance(frame, dict):
+        value = frame.get(key)
+        if isinstance(value, str) and value:
+            return _escape_text(value, MAX_FRAME_TEXT_CHARS)
+    return None
+
+
 def _observation_from_response(response: ReproResponse) -> ExperimentObservation:
     """Distill one strictly validated ``ReproResponse`` for the agent."""
 
@@ -127,16 +149,23 @@ def _observation_from_response(response: ReproResponse) -> ExperimentObservation
         _escape_text(item, MAX_DIAGNOSTIC_CHARS) for item in response.diagnostics
     )
     raw_tail = _escape_text("\n".join(response.diagnostics), MAX_RAW_TAIL_CHARS) or ""
+    faulting_frame = report.get("faulting_frame")
+    freed_frame = report.get("freed_by_frame")
+    allocated_frame = report.get("allocated_by_frame")
     return ExperimentObservation(
         ok=response.ok,
         stage=response.stage,
         exit_code=response.exit_code,
         error_type=error_type,
-        faulting_line=_frame_line(report.get("faulting_frame")),
-        freed_line=_frame_line(report.get("freed_by_frame")),
-        allocated_line=_frame_line(report.get("allocated_by_frame")),
+        faulting_line=_frame_line(faulting_frame),
+        freed_line=_frame_line(freed_frame),
+        allocated_line=_frame_line(allocated_frame),
         diagnostics=diagnostics,
         raw_tail=raw_tail,
+        faulting_file=_frame_text(faulting_frame, "file"),
+        faulting_function=_frame_text(faulting_frame, "function"),
+        freed_file=_frame_text(freed_frame, "file"),
+        allocated_file=_frame_text(allocated_frame, "file"),
     )
 
 
@@ -161,12 +190,20 @@ def observation_payload_bytes(observation: ExperimentObservation) -> int:
     """UTF-8 byte size of the variable observation text charged to the budget.
 
     Exact billing proxy: the escaped variable strings an observation adds
-    to the model context (error type, diagnostics, raw tail) joined by
-    newlines.  Fixed-structure fields (flags, stage, line numbers) form the
-    envelope and are not billed, mirroring the ``cxx_agent_tools`` rule.
+    to the model context (error type, the faulting frame's file -- it
+    travels on through the experiment ledger -- diagnostics, raw tail)
+    joined by newlines.  Fixed-structure fields (flags, stage, line
+    numbers) and the frame texts no consumer renders (function,
+    freed/allocated files) form the envelope and are not billed, mirroring
+    the ``cxx_agent_tools`` rule.
     """
 
-    parts = [observation.error_type or "", *observation.diagnostics, observation.raw_tail]
+    parts = [
+        observation.error_type or "",
+        observation.faulting_file or "",
+        *observation.diagnostics,
+        observation.raw_tail,
+    ]
     return len("\n".join(parts).encode("utf-8"))
 
 
@@ -189,7 +226,7 @@ def _require_snapshot_hash(value: Any) -> str:
 def _require_source_files(source_files: Any) -> tuple[str, ...]:
     """Normalize and validate the source set with the Task 1 rules."""
 
-    if isinstance(source_files, str) or not isinstance(source_files, (list, tuple)):
+    if isinstance(source_files, str) or not isinstance(source_files, list | tuple):
         raise ValueError("source_files must be a list or tuple of relative POSIX paths")
     try:
         return _validate_repro_requested_sources(tuple(source_files))
@@ -235,6 +272,8 @@ class ReproWorkbench:
         snapshot_hash: str,
         source_files,
         driver_code: str,
+        *,
+        timeout: int | None = None,
     ) -> ExperimentObservation:
         """Run one sandboxed ASan compile-and-run as a budgeted agent step.
 
@@ -244,12 +283,27 @@ class ReproWorkbench:
         protocol failures degrade to a ``transport-failed`` observation
         while the pre-send charge stays (nothing is refunded).  A locally
         rejected request never reaches the client.
+
+        ``timeout`` is the caller's orchestration ceiling for this one
+        experiment (the deadline-bounded step timeout; ``None`` keeps
+        :attr:`default_timeout`).  Exactly like :attr:`default_timeout`
+        it caps orchestration, not the wire: the transport timeout stays
+        owned by the injected Task 1 client.
         """
 
         repo = _require_text(repository_key, "repository_key")
         snapshot = _require_snapshot_hash(snapshot_hash)
         sources = _require_source_files(source_files)
         driver = _require_driver_code(driver_code)
+        if (
+            timeout is not None
+            and (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, int)
+                or timeout <= 0
+            )
+        ):
+            raise ValueError("timeout must be a positive integer or None")
         self._budget.consume(calls=1, bytes=len(driver.encode("utf-8")))
         try:
             response = self._client.repro_compile_run(repo, snapshot, sources, driver)

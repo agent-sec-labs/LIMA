@@ -48,6 +48,7 @@ import tempfile
 import time
 import unittest.mock
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -55,7 +56,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lima import agent_scout, uaf_llm_branch  # noqa: E402
+from lima import (  # noqa: E402
+    agent_orchestrator,
+    agent_scout,
+    uaf_llm_branch,
+)
 from lima.agent_orchestrator import run_platform_review  # noqa: E402
 from lima.agent_repro_tools import ExperimentObservation  # noqa: E402
 from lima.agent_scout import ScoutLead  # noqa: E402
@@ -68,7 +73,7 @@ from lima.uaf_orchestrator import (  # noqa: E402
     UAF_FINDING_STATES,
     UAF_POSITIVE_STATES,
 )
-from lima.vuln_packs import MEMORY_PACK, runtime_markers  # noqa: E402
+from lima.vuln_packs import MEMORY_PACK  # noqa: E402
 from lima.workspace import RepositoryWorkspace  # noqa: E402
 
 VALIDITY_BOUNDARY = (
@@ -694,8 +699,11 @@ def _observation(
             faulting_line=None, freed_line=None, allocated_line=None,
             diagnostics=(), raw_tail="",
         )
+    # Protocol-possible shape: a parsed ASan report forces ok=False (the
+    # binary died under the sanitizer); the faulting file is bound to the
+    # audited source by the fake workbench below.
     return ExperimentObservation(
-        ok=True, stage="run", exit_code=-9, error_type=error_type,
+        ok=False, stage="run", exit_code=1, error_type=error_type,
         faulting_line=faulting_line, freed_line=freed_line,
         allocated_line=allocated_line, diagnostics=(), raw_tail=raw_tail,
     )
@@ -777,9 +785,15 @@ class FakePlatformWorkbench:
         )
         key = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()
         observation = self._hitting.get(key)
-        if observation is not None:
-            return observation
-        return _observation(None)
+        if observation is None:
+            return _observation(None)
+        # A driver that reaches the fault crashes inside the audited
+        # source file, mirroring the real Sidecar's target-bound ASan
+        # frames; the crash never lands in the staged driver itself.
+        sources = tuple(source_files)
+        if observation.error_type is not None and sources:
+            return replace(observation, faulting_file=sources[0])
+        return observation
 
 
 # ------------------------------------------------------------- fake sidecar
@@ -1009,19 +1023,17 @@ def scripted_platform_transport(
 # ------------------------------------------------------------------- runner
 
 
-def _experiment_hit(observation: Any, cwe: str) -> bool:
-    """Evaluation-side mirror of the platform's runtime-hit predicate."""
+def _experiment_hit(observation: Any, cwe: str, *, target_path: str = "") -> bool:
+    """Evaluation-side mirror of the platform's runtime-hit predicate.
 
-    if not getattr(observation, "ok", False):
-        return False
-    if getattr(observation, "stage", "") != "run":
-        return False
-    error_type = getattr(observation, "error_type", None)
-    if not isinstance(error_type, str) or not error_type:
-        return False
-    markers = runtime_markers(MEMORY_PACK).get(cwe, ())
-    lowered = error_type.lower()
-    return any(marker in lowered for marker in markers)
+    Delegates to the production predicate so the mirror can never drift
+    from the platform contract (run-stage ASan report of the hypothesized
+    class, faulting frame bound to the audited target file).
+    """
+
+    return agent_orchestrator._experiment_hit(
+        observation, cwe, target_path=target_path,
+    )
 
 
 def _driver_digest(driver_code: str) -> str:
@@ -1195,18 +1207,20 @@ def _poc_stability_probe(case_id: str, revision: str, outcome: Any, *,
 
     driver = ""
     cwe = ""
+    target_path = ""
     for item in outcome.targets:
         if any(entry["hit"] for entry in item.experiment_log) and item.poc_driver_code:
             driver = item.poc_driver_code
             cwe = item.cwe
+            target_path = item.path
             break
     if not driver:
         return None
     workbench = workbench_class(case_id, revision)
     hits = 0
     for _ in range(_STABILITY_RUNS):
-        observation = workbench.run_experiment("", "", (), driver)
-        hits += int(_experiment_hit(observation, cwe))
+        observation = workbench.run_experiment("", "", (target_path,), driver)
+        hits += int(_experiment_hit(observation, cwe, target_path=target_path))
     return {"runs": _STABILITY_RUNS, "hits": hits, "stable": hits == _STABILITY_RUNS}
 
 

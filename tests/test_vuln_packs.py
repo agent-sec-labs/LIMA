@@ -157,35 +157,41 @@ class AsanMarkerEquivalenceTests(unittest.TestCase):
             self.assertEqual("CWE-190", cwe)
 
     def test_hit_semantics_unchanged_for_legacy_and_extended_for_new(self):
+        # Protocol-possible shape: a parsed ASan report forces ok=False and
+        # the faulting frame binds to the audited target file.
         def observation(error_type):
             return ExperimentObservation(
-                ok=True, stage="run", exit_code=-9, error_type=error_type,
+                ok=False, stage="run", exit_code=1, error_type=error_type,
                 faulting_line=LEAD_LINE, freed_line=None, allocated_line=None,
-                diagnostics=(), raw_tail="",
+                diagnostics=(), raw_tail="", faulting_file=UNIT,
             )
 
         # Legacy four: byte-for-byte the pre-pack behaviour.
         self.assertTrue(_experiment_hit(
-            observation("heap-use-after-free"), "CWE-416"))
+            observation("heap-use-after-free"), "CWE-416", target_path=UNIT))
         self.assertTrue(_experiment_hit(
-            observation("double-free"), "CWE-415"))
+            observation("double-free"), "CWE-415", target_path=UNIT))
         self.assertTrue(_experiment_hit(
-            observation("heap-buffer-overflow"), "CWE-787"))
+            observation("heap-buffer-overflow"), "CWE-787", target_path=UNIT))
         self.assertTrue(_experiment_hit(
-            observation("heap-buffer-overflow"), "CWE-125"))
+            observation("heap-buffer-overflow"), "CWE-125", target_path=UNIT))
         self.assertFalse(_experiment_hit(
-            observation("heap-use-after-free"), "CWE-787"))
+            observation("heap-use-after-free"), "CWE-787", target_path=UNIT))
         # New classes: SEGV confirms a null-deref hypothesis; the UBSan
         # signed-integer-overflow marker confirms CWE-190.
         self.assertTrue(_experiment_hit(
-            observation("SEGV on unknown address 0x000000000000"), "CWE-476"))
+            observation("SEGV on unknown address 0x000000000000"), "CWE-476",
+            target_path=UNIT))
         self.assertTrue(_experiment_hit(
-            observation("signed-integer-overflow"), "CWE-190"))
+            observation("signed-integer-overflow"), "CWE-190",
+            target_path=UNIT))
         # Cross-class hits still do not confirm.
         self.assertFalse(_experiment_hit(
-            observation("SEGV on unknown address 0x000000000000"), "CWE-416"))
+            observation("SEGV on unknown address 0x000000000000"), "CWE-416",
+            target_path=UNIT))
         self.assertFalse(_experiment_hit(
-            observation("signed-integer-overflow"), "CWE-787"))
+            observation("signed-integer-overflow"), "CWE-787",
+            target_path=UNIT))
         # A clean run confirms nothing, for any class.
         clean = ExperimentObservation(
             ok=True, stage="run", exit_code=0, error_type=None,
@@ -193,7 +199,7 @@ class AsanMarkerEquivalenceTests(unittest.TestCase):
             diagnostics=(), raw_tail="",
         )
         for cwe in MEMORY_PACK.cwe_ids:
-            self.assertFalse(_experiment_hit(clean, cwe))
+            self.assertFalse(_experiment_hit(clean, cwe, target_path=UNIT))
 
 
 class OrchestratorPackWiringTests(unittest.TestCase):
@@ -446,11 +452,14 @@ class FakeWorkbench:
 def segv_hit():
     """A null dereference surfaces as SEGV on a low unknown address."""
 
+    # Protocol-possible shape (ok=False with a parsed report); the faulting
+    # frame binds to the audited target file, never to the PoC driver.
     return ExperimentObservation(
-        ok=True, stage="run", exit_code=-11,
+        ok=False, stage="run", exit_code=1,
         error_type="SEGV on unknown address 0x000000000000",
         faulting_line=LEAD_LINE, freed_line=None, allocated_line=None,
         diagnostics=(), raw_tail="The signal is caused by a READ memory access.",
+        faulting_file=UNIT,
     )
 
 

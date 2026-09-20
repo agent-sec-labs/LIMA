@@ -383,6 +383,61 @@ class ReproWorkbenchTests(unittest.TestCase):
         self.assertIn("\\n", observation.raw_tail)
         self.assertIn("\\u202e", observation.raw_tail)
 
+    def test_observation_extracts_file_and_function(self):
+        # A report carrying all three frames: file and function arrive for
+        # the faulting frame, the file for freed/allocated frames.
+        report = asan_report_payload(
+            faulting_frame={
+                "function": "read_field",
+                "file": "src/caf\u00e9.cpp",
+                "line": 12,
+                "column": 9,
+            },
+            freed_by_frame={
+                "function": "release",
+                "file": "src/session.c",
+                "line": 8,
+                "column": 5,
+            },
+            allocated_by_frame={
+                "function": "acquire",
+                "file": "src/session.c",
+                "line": 4,
+                "column": 9,
+            },
+        )
+        observation = workbench_with(
+            FakeAnalyzerClient(canned_repro_response(asan_report=report))
+        ).run_experiment(REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE)
+
+        # Frame file/function are wire-derived text: repr-escaped like
+        # every other observation field (non-ASCII becomes a visible
+        # literal, never a raw byte in the model context).
+        self.assertEqual("'src/caf\\xe9.cpp'", observation.faulting_file)
+        self.assertEqual("'read_field'", observation.faulting_function)
+        self.assertEqual("'src/session.c'", observation.freed_file)
+        self.assertEqual("'src/session.c'", observation.allocated_file)
+
+        # Missing frames leave the corresponding file/function unset.
+        partial = asan_report_payload(freed_by_frame=None)
+        observation = workbench_with(
+            FakeAnalyzerClient(canned_repro_response(asan_report=partial))
+        ).run_experiment(REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE)
+        self.assertIsNone(observation.freed_file)
+        self.assertIsNone(observation.allocated_file)
+        self.assertEqual("'main'", observation.faulting_function)
+
+        # Compile failures carry no report at all: everything stays unset.
+        observation = workbench_with(
+            FakeAnalyzerClient(canned_repro_response(
+                stage="compile", asan_report=None,
+            ))
+        ).run_experiment(REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE)
+        self.assertIsNone(observation.faulting_file)
+        self.assertIsNone(observation.faulting_function)
+        self.assertIsNone(observation.freed_file)
+        self.assertIsNone(observation.allocated_file)
+
     def test_budget_exhausted_response_is_dropped(self):
         # Enough headroom for the pre-send call + driver charge but not for
         # the observation: the request is sent, the response arrives and is

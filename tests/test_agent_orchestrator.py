@@ -33,12 +33,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lima.agent_repro_tools import ExperimentObservation
+from lima.agent_repro_tools import ExperimentObservation, _observation_from_response
 from lima.agent_scout import ScoutLead
 from lima.cxx_agent_models import CxxAgentCandidate
 from lima.cxx_agent_tools import CxxAgentBudget
 from lima.cxx_memory import (
     CxxAnalysisResult,
+    ReproResponse,
     UafFactsResponse,
     uaf_facts_bundle_sha256,
 )
@@ -55,7 +56,11 @@ from lima.uaf_orchestrator import UAF_FINDING_STATES, UAF_STATE_CONFIDENCE
 from lima.workspace import RepositoryWorkspace
 
 try:  # platform module under test (RED until implemented)
-    from lima.agent_orchestrator import run_platform_review
+    from lima.agent_orchestrator import (
+        _experiment_hit,
+        _repro_driver_relative_path,
+        run_platform_review,
+    )
 except ImportError:  # pragma: no cover - RED phase
     run_platform_review = None
 
@@ -265,6 +270,7 @@ class ScriptedPlatformTransport:
         self.specialist = list(specialist)
         self.critic = list(critic)
         self.calls = []
+        self.timeouts = []
 
     @property
     def specialist_calls(self):
@@ -283,6 +289,7 @@ class ScriptedPlatformTransport:
     def __call__(self, provider, base_url, api_key, payload, timeout,
                  extra_headers=None, max_bytes=None):
         self.calls.append(payload)
+        self.timeouts.append(timeout)
         system = payload["messages"][0]["content"]
         if SPECIALIST_ROLE in system:
             queue = self.specialist
@@ -339,40 +346,133 @@ def critic_json(
 
 
 # ------------------------------------------------------------- experiments
-
-
-_CLEAN = dict(
-    ok=True, stage="run", exit_code=0, error_type=None, faulting_line=None,
-    freed_line=None, allocated_line=None, diagnostics=(), raw_tail="",
-)
-_COMPILE_FAIL = dict(
-    ok=False, stage="compile", exit_code=1, error_type=None,
-    faulting_line=None, freed_line=None, allocated_line=None,
-    diagnostics=("error: unknown type name 'x'",), raw_tail="error: ...",
-)
+#
+# Every fixture below travels the real ReproResponse ->
+# ExperimentObservation conversion: the Sidecar contract makes ``ok=False``
+# the only possible state for a parsed ASan report, and the faulting
+# frame's file carries the identity the hit judgment binds to.
 
 
 def clean_run():
-    return ExperimentObservation(**_CLEAN)
-
-
-def compile_failure():
-    return ExperimentObservation(**_COMPILE_FAIL)
-
-
-def uaf_hit(faulting_line=30):
-    return ExperimentObservation(
-        ok=True, stage="run", exit_code=-9, error_type="heap-use-after-free",
-        faulting_line=faulting_line, freed_line=20, allocated_line=10,
-        diagnostics=(), raw_tail="READ of size 4 at 0x602 ... freed by ...",
+    return observation_from(
+        repro_response(ok=True, exit_code=0, asan_report=None, diagnostics=())
     )
 
 
+def compile_failure():
+    return observation_from(
+        repro_response(
+            stage="compile",
+            asan_report=None,
+            diagnostics=("error: unknown type name 'x'",),
+        )
+    )
+
+
+def uaf_hit(faulting_line=30):
+    report = _asan_report_with_faulting_file(UNIT)
+    report["faulting_frame"]["line"] = faulting_line
+    report["freed_by_frame"] = {
+        "function": "leak", "file": UNIT, "line": 20, "column": 5,
+    }
+    report["allocated_by_frame"] = {
+        "function": "leak", "file": UNIT, "line": 10, "column": 26,
+    }
+    return observation_from(repro_response(asan_report=report))
+
+
 def overflow_hit():
-    return ExperimentObservation(
-        ok=True, stage="run", exit_code=-9,
-        error_type="heap-buffer-overflow", faulting_line=30, freed_line=None,
-        allocated_line=10, diagnostics=(), raw_tail="WRITE of size 1 ...",
+    report = _asan_report_with_faulting_file(UNIT)
+    report["error_type"] = "heap-buffer-overflow"
+    report["access"] = "WRITE"
+    report["faulting_frame"]["line"] = 30
+    report["allocated_by_frame"] = {
+        "function": "leak", "file": UNIT, "line": 10, "column": 26,
+    }
+    return observation_from(repro_response(asan_report=report))
+
+
+# ---------------------------------------------- real-chain repro fixtures
+
+_DEFAULT_DRIVER = "int main() { return 0; }"
+
+
+def _asan_report_with_faulting_file(file):
+    """A wire-shaped ASan report whose faulting frame sits in ``file``."""
+
+    return {
+        "error_type": "heap-use-after-free",
+        "access": "READ",
+        "access_size": 4,
+        "faulting_frame": {
+            "function": "leak", "file": file, "line": 30, "column": 21,
+        },
+        "freed_by_frame": None,
+        "allocated_by_frame": None,
+        "raw_report_sha256": "f" * 64,
+    }
+
+
+def repro_response(**changes) -> ReproResponse:
+    """A contract-shaped ``/v1/repro`` response over the real wire dict."""
+
+    fields = {
+        "request_id": "00000000-0000-0000-0000-0000000000f1",
+        "snapshot_sha256": SNAPSHOT,
+        "stage": "run",
+        "ok": False,
+        "exit_code": 1,
+        "asan_report": {
+            "error_type": "heap-use-after-free",
+            "access": "READ",
+            "access_size": 4,
+            "faulting_frame": {
+                "function": "leak", "file": UNIT, "line": 30, "column": 21,
+            },
+            "freed_by_frame": {
+                "function": "leak", "file": UNIT, "line": 20, "column": 5,
+            },
+            "allocated_by_frame": {
+                "function": "leak", "file": UNIT, "line": 10, "column": 26,
+            },
+            "raw_report_sha256": "f" * 64,
+        },
+        "diagnostics": (
+            "ERROR: AddressSanitizer: heap-use-after-free on 0x602 ...",
+        ),
+        "driver_sha256": "1" * 64,
+        "binary_sha256": "2" * 64,
+        "elapsed_seconds": 0.125,
+    }
+    fields.update(changes)
+    return ReproResponse(**fields)
+
+
+def observation_from(response: ReproResponse) -> ExperimentObservation:
+    """The real ``ReproResponse -> ExperimentObservation`` conversion."""
+
+    return _observation_from_response(response)
+
+
+def driver_self_crash(driver=_DEFAULT_DRIVER):
+    """The PoC driver's own UAF: the target file itself stays safe."""
+
+    return observation_from(
+        repro_response(
+            asan_report=_asan_report_with_faulting_file(
+                _repro_driver_relative_path(driver),
+            ),
+        )
+    )
+
+
+def unknown_file_crash():
+    """A crash in a file that is neither the target nor the driver."""
+
+    return observation_from(
+        repro_response(
+            asan_report=_asan_report_with_faulting_file("src/other.c"),
+        )
     )
 
 
@@ -389,6 +489,25 @@ class FakeWorkbench:
         self.calls.append((
             repository_key, snapshot_hash, tuple(source_files), driver_code,
         ))
+        return self.observations.pop(0)
+
+
+class DeadlineWorkbench:
+    """``run_experiment`` double recording the deadline-bounded timeout.
+
+    The orchestrator only passes the ``timeout`` keyword when a deadline is
+    active, mirroring the real workbench's optional orchestration ceiling.
+    """
+
+    def __init__(self, observations):
+        self.observations = list(observations)
+        self.timeouts = []
+
+    def run_experiment(
+        self, repository_key, snapshot_hash, source_files, driver_code,
+        timeout=None,
+    ):
+        self.timeouts.append(timeout)
         return self.observations.pop(0)
 
 
@@ -461,6 +580,8 @@ def _run(
     source_mode="repository",
     budget=None,
     units=(UNIT,),
+    timeout=60,
+    deadline_seconds=None,
 ):
     """Run one offline platform review over a temp workspace."""
 
@@ -470,6 +591,27 @@ def _run(
     run_budget = budget if budget is not None else CxxAgentBudget(
         max_calls=64, max_output_bytes=1_048_576,
     )
+
+    def _review():
+        return run_platform_review(
+            analyzer,
+            workspace,
+            repository_key=REPO_KEY,
+            snapshot_hash=snapshot,
+            translation_units=units,
+            mode=mode,
+            budget=run_budget,
+            llm_config=dict(
+                RESOLVED_LLM if llm_config is None else llm_config
+            ),
+            repro_workbench=workbench,
+            leads=leads,
+            dialogue_rounds=dialogue_rounds,
+            source_mode=source_mode,
+            timeout=timeout,
+            deadline_seconds=deadline_seconds,
+        )
+
     try:
         with patch(
             "lima.agent_scout.post_chat_completion_text",
@@ -480,39 +622,9 @@ def _run(
                     "lima.uaf_llm_branch.post_chat_completion_text",
                     llm_transport,
                 ):
-                    outcome = run_platform_review(
-                        analyzer,
-                        workspace,
-                        repository_key=REPO_KEY,
-                        snapshot_hash=snapshot,
-                        translation_units=units,
-                        mode=mode,
-                        budget=run_budget,
-                        llm_config=dict(
-                            RESOLVED_LLM if llm_config is None else llm_config
-                        ),
-                        repro_workbench=workbench,
-                        leads=leads,
-                        dialogue_rounds=dialogue_rounds,
-                        source_mode=source_mode,
-                    )
+                    outcome = _review()
             else:
-                outcome = run_platform_review(
-                    analyzer,
-                    workspace,
-                    repository_key=REPO_KEY,
-                    snapshot_hash=snapshot,
-                    translation_units=units,
-                    mode=mode,
-                    budget=run_budget,
-                    llm_config=dict(
-                        RESOLVED_LLM if llm_config is None else llm_config
-                    ),
-                    repro_workbench=workbench,
-                    leads=leads,
-                    dialogue_rounds=dialogue_rounds,
-                    source_mode=source_mode,
-                )
+                outcome = _review()
     finally:
         _rmtree(root)
     return outcome
@@ -610,6 +722,128 @@ class RuntimeEvidenceDisciplineTests(unittest.TestCase):
                 ),
                 "no runtime evidence without an executed matching ASan hit",
             )
+
+
+class RealChainHitContractTests(unittest.TestCase):
+    """Hits are judged only on protocol-possible observations (P1 fixes).
+
+    The Sidecar contract defines ``ok`` as "the tested binary exited
+    cleanly", so a parsed ASan report forces ``ok=False``; execution is
+    proven by the ``run`` stage plus the report itself.  Identity binding:
+    the faulting frame must land in the Scout target file -- a crash inside
+    the model-generated driver, or in a file that is neither target nor
+    driver, must never confirm the target.
+    """
+
+    def _hit(self, observation, cwe="CWE-416", target_path=UNIT):
+        return _experiment_hit(
+            observation, cwe,
+            target_path=target_path,
+            driver_paths=(_repro_driver_relative_path(_DEFAULT_DRIVER),),
+        )
+
+    def test_real_asan_report_hits_target(self):
+        observation = observation_from(repro_response())
+        # The protocol shape: a parsed ASan report forces ok=False.
+        self.assertIs(False, observation.ok)
+        self.assertEqual("run", observation.stage)
+        self.assertEqual("'heap-use-after-free'", observation.error_type)
+        self.assertEqual(f"'{UNIT}'", observation.faulting_file)
+        self.assertEqual("'leak'", observation.faulting_function)
+        self.assertTrue(self._hit(observation))
+        # ASan may spell the frame file absolutely or bare: the binding is
+        # a normalized suffix match ("session.c" binds "src/session.c").
+        for file in (f"/srv/snapshot/{UNIT}", UNIT.rsplit("/", 1)[-1]):
+            with self.subTest(faulting_file=file):
+                self.assertTrue(self._hit(
+                    observation_from(
+                        repro_response(
+                            asan_report=_asan_report_with_faulting_file(file),
+                        )
+                    )
+                ))
+
+    def test_clean_run_does_not_hit(self):
+        observation = observation_from(
+            repro_response(ok=True, exit_code=0, asan_report=None, diagnostics=())
+        )
+        self.assertIs(True, observation.ok)
+        self.assertIsNone(observation.error_type)
+        self.assertIsNone(observation.faulting_file)
+        self.assertFalse(self._hit(observation))
+
+    def test_compile_failure_does_not_hit(self):
+        observation = observation_from(
+            repro_response(
+                stage="compile",
+                asan_report=None,
+                diagnostics=("driver.cpp:1:1: error: unknown type name 'x'",),
+            )
+        )
+        self.assertEqual("compile", observation.stage)
+        self.assertIs(False, observation.ok)
+        self.assertFalse(self._hit(observation))
+
+    def test_driver_self_crash_does_not_hit(self):
+        staged = _repro_driver_relative_path(_DEFAULT_DRIVER)
+        observation = driver_self_crash()
+        self.assertEqual(f"'{staged}'", observation.faulting_file)
+        self.assertFalse(
+            self._hit(observation),
+            "a crash inside the PoC driver must not confirm the target",
+        )
+
+    def test_unknown_file_crash_does_not_hit(self):
+        observation = unknown_file_crash()
+        self.assertEqual("'src/other.c'", observation.faulting_file)
+        self.assertFalse(
+            self._hit(observation),
+            "a crash in a file that is neither target nor driver must be "
+            "refused, not guessed at",
+        )
+
+    def test_unbound_caller_never_hits(self):
+        # Without a target to bind to, no hit may be judged.
+        self.assertFalse(
+            _experiment_hit(observation_from(repro_response()), "CWE-416")
+        )
+
+    def test_frame_without_file_never_hits(self):
+        report = _asan_report_with_faulting_file(UNIT)
+        report["faulting_frame"] = None  # no symbolized frame at all
+        observation = observation_from(repro_response(asan_report=report))
+        self.assertIsNone(observation.faulting_file)
+        self.assertFalse(self._hit(observation))
+
+    def test_driver_self_crash_never_confirms_end_to_end(self):
+        outcome = _run(
+            llm_transport=ScriptedPlatformTransport(
+                [hypothesis_json()], [critic_json()],
+            ),
+            workbench=FakeWorkbench([driver_self_crash()]),
+        )
+        target = outcome.targets[0]
+        self.assertFalse(target.experiment_log[0]["hit"])
+        self.assertEqual("semantic-supported", target.state)
+        self.assertFalse(any(
+            record.kind == "runtime" and record.source == "asan"
+            for record in target.evidence_records
+        ))
+
+    def test_unknown_file_crash_never_confirms_end_to_end(self):
+        outcome = _run(
+            llm_transport=ScriptedPlatformTransport(
+                [hypothesis_json()], [critic_json()],
+            ),
+            workbench=FakeWorkbench([unknown_file_crash()]),
+        )
+        target = outcome.targets[0]
+        self.assertFalse(target.experiment_log[0]["hit"])
+        self.assertNotEqual("runtime-confirmed", target.state)
+        self.assertFalse(any(
+            record.kind == "runtime" and record.source == "asan"
+            for record in target.evidence_records
+        ))
 
 
 class NoProofGateTests(unittest.TestCase):
@@ -758,6 +992,54 @@ class RevisionBoundTests(unittest.TestCase):
                 workbench=FakeWorkbench([]),
                 dialogue_rounds=0,
             )
+
+
+class DeadlineBoundsTests(unittest.TestCase):
+    """P2-3.3: the deadline bounds every step, not just the start gates."""
+
+    def test_deadline_bounds_step_timeouts(self):
+        # Base timeout far above the deadline: every Specialist/Critic
+        # round and every sandbox experiment must receive a timeout no
+        # larger than the seconds remaining at that step boundary.
+        workbench = DeadlineWorkbench([clean_run(), clean_run()])
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json(driver="int first() { return 0; }")],
+            critic=[critic_json(
+                assessment="revise-experiment",
+                revised_driver="int revised() { FREE_THEN_USE; }",
+            )],
+        )
+        deadline_seconds = 5.0
+        outcome = _run(
+            llm_transport=transport,
+            workbench=workbench,
+            timeout=600,
+            deadline_seconds=deadline_seconds,
+        )
+        # The full hypothesis -> experiment -> critic -> experiment chain
+        # actually ran, so the assertion below covers both step kinds.
+        self.assertEqual(1, outcome.stats.specialist_calls)
+        self.assertEqual(1, outcome.stats.critic_calls)
+        self.assertEqual(2, outcome.stats.experiment_count)
+        self.assertTrue(transport.timeouts)
+        for step_timeout in transport.timeouts:
+            self.assertGreaterEqual(step_timeout, 1)
+            self.assertLessEqual(step_timeout, deadline_seconds)
+        self.assertEqual(2, len(workbench.timeouts))
+        for step_timeout in workbench.timeouts:
+            self.assertIsNotNone(step_timeout)
+            self.assertGreaterEqual(step_timeout, 1)
+            self.assertLessEqual(step_timeout, deadline_seconds)
+
+        # No deadline: the caller's timeout travels unchanged and no
+        # experiment timeout keyword is forced onto the workbench.
+        workbench = DeadlineWorkbench([clean_run()])
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json()], critic=[critic_json()],
+        )
+        _run(llm_transport=transport, workbench=workbench, timeout=77)
+        self.assertEqual({77}, set(transport.timeouts))
+        self.assertEqual([None], workbench.timeouts)
 
 
 class FpDisciplineTests(unittest.TestCase):

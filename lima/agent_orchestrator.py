@@ -17,9 +17,12 @@ Frozen semantics implemented here:
 - The agents are the detection subject.  Nothing becomes a finding without a
   Specialist hypothesis bound to a Scout target; instruments only grade it.
 - ``runtime-confirmed`` is reachable only through an executed ASan experiment
-  (``ok`` on the ``run`` stage) whose error type matches the hypothesized CWE
-  bug class; the observation is bound as a D3 SUPPORTS broker verdict.  A
-  clean run, a transport failure or a different bug class caps the target at
+  on the ``run`` stage whose error type matches the hypothesized CWE bug class
+  and whose faulting frame binds to the Scout target file (``ok`` is the
+  wire's clean-exit flag, so a hit is necessarily ``ok=False``); the
+  observation is bound as a D3 SUPPORTS broker verdict.  A clean run, a
+  transport failure, a different bug class, a crash inside the PoC driver or
+  in a file that is neither target nor driver caps the target at
   ``semantic-supported`` (Critic consensus, (D1, SUPPORTS)) or abstains.
 - The proof instrument is consulted at most once per target when certified
   facts and a matching candidate exist; PASS grades ``fact-verified``,
@@ -747,11 +750,26 @@ def _runtime_subject_id(
     return hashlib.sha256(material).hexdigest()
 
 
-def _experiment_hit(observation: Any, cwe: str) -> bool:
-    """A hit is an executed experiment with the hypothesized ASan class."""
+def _experiment_hit(
+    observation: Any,
+    cwe: str,
+    target_path: str | None = None,
+    driver_paths: Any = None,
+) -> bool:
+    """A hit is an executed run-stage ASan crash bound to the Scout target.
 
-    if not getattr(observation, "ok", False):
-        return False
+    ``ok`` keeps its wire meaning ("the tested binary exited cleanly"), so
+    a real sanitizer hit is necessarily ``ok=False``: the Sidecar only
+    emits an ASan error type when it parsed a complete report, and the
+    ``run`` stage plus that report already prove the experiment executed.
+    Identity binding: the faulting frame must land in the Scout target
+    file (normalized suffix match, so an absolute or bare ASan spelling of
+    the same file binds).  A crash inside one of the staged PoC drivers,
+    in a file that is neither target nor driver, a report without a
+    symbolized frame, or a caller with no target to bind to is refused --
+    never guessed at.
+    """
+
     if getattr(observation, "stage", "") != "run":
         return False
     error_type = getattr(observation, "error_type", None)
@@ -759,7 +777,69 @@ def _experiment_hit(observation: Any, cwe: str) -> bool:
         return False
     markers = _ASAN_CWE_MARKERS.get(cwe, ())
     lowered = error_type.lower()
-    return any(marker in lowered for marker in markers)
+    if not any(marker in lowered for marker in markers):
+        return False
+    if not isinstance(target_path, str) or not target_path:
+        return False
+    faulting_file = getattr(observation, "faulting_file", None)
+    if not isinstance(faulting_file, str) or not faulting_file:
+        return False
+    if any(_paths_bind(faulting_file, path) for path in driver_paths or ()):
+        return False
+    return _paths_bind(faulting_file, target_path)
+
+
+_DRIVER_STAGE_DIRECTORY: Final = "build"
+_DRIVER_STAGE_PREFIX: Final = "repro_driver_"
+_DRIVER_STAGE_SUFFIX: Final = ".cpp"
+
+
+def _repro_driver_relative_path(driver_code: str) -> str:
+    """The Sidecar's content-derived staging path for one repro driver.
+
+    ``cxx_analyzer.repro.run_repro`` stages every driver into the
+    request-private build root under
+    ``build/repro_driver_<sha256(driver)[:8]>.cpp``; the staging path never
+    crosses the wire, so the orchestrator mirrors the frozen rule to
+    recognize a crash inside the driver itself.
+    """
+
+    tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+    return (
+        f"{_DRIVER_STAGE_DIRECTORY}/{_DRIVER_STAGE_PREFIX}{tag}"
+        f"{_DRIVER_STAGE_SUFFIX}"
+    )
+
+
+def _normalized_source_path(text: Any) -> str:
+    """Normalize one source-path spelling for identity binding.
+
+    Tolerates the repr-escaped form every wire-derived observation field
+    carries (surrounding single quotes) and Windows separators.  The
+    comparison stays case-sensitive: ASan frames echo back the exact
+    compile-argument spelling of the same file the platform requested.
+    """
+
+    if not isinstance(text, str) or not text:
+        return ""
+    if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
+        text = text[1:-1]
+    segments = [
+        segment
+        for segment in text.replace("\\", "/").split("/")
+        if segment not in ("", ".")
+    ]
+    return "/".join(segments)
+
+
+def _paths_bind(candidate: Any, anchor: Any) -> bool:
+    """True when one source-path spelling binds to the other."""
+
+    left = _normalized_source_path(candidate)
+    right = _normalized_source_path(anchor)
+    if not left or not right:
+        return False
+    return left == right or left.endswith("/" + right) or right.endswith("/" + left)
 
 
 def _experiment_entry(
@@ -775,6 +855,7 @@ def _experiment_entry(
         "exit_code": observation.exit_code,
         "error_type": observation.error_type,
         "faulting_line": observation.faulting_line,
+        "faulting_file": getattr(observation, "faulting_file", None),
         "hit": hit,
     }
 
@@ -850,6 +931,53 @@ def _capped_platform(state: str, source_mode: str) -> str:
 # ------------------------------------------------------------------- engine
 
 
+def _remaining_budget(deadline: float | None) -> float | None:
+    """Seconds left before the review deadline (``None`` = no deadline)."""
+
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _bounded_step_timeout(
+    base_timeout: int, deadline: float | None,
+) -> int | None:
+    """The wire timeout for the next agent step, bounded by the deadline.
+
+    ``None`` means the deadline already passed -- the caller must abstain
+    instead of sending anything.  A fractional remainder floors onto the
+    one-second wire minimum so the timeout contract stays a positive
+    integer while every step boundary re-checks the bound.
+    """
+
+    remaining = _remaining_budget(deadline)
+    if remaining is None:
+        return base_timeout
+    if remaining <= 0:
+        return None
+    return max(1, min(base_timeout, int(remaining)))
+
+
+def _abstain_finding(target: ScoutTarget, reason: str) -> PlatformFinding:
+    """The no-attempt finding for one target (deadline/cancel/budget)."""
+
+    return PlatformFinding(
+        target_id=target.lead_id,
+        path=target.path,
+        line=target.line,
+        symbol="",
+        cwe="",
+        state="abstain",
+        hypothesis_reason="",
+        poc_driver_code="",
+        experiment_log=(),
+        identity=None,
+        evidence_records=(),
+        proof_verdict="",
+        rejected_reason=reason,
+    )
+
+
 def _process_target(
     target: ScoutTarget,
     *,
@@ -863,6 +991,7 @@ def _process_target(
     mode: str,
     dialogue_rounds: int,
     timeout: int,
+    deadline: float | None,
     source_mode: str,
     repro_workbench: Any,
     tool_analysis: Any,
@@ -886,8 +1015,11 @@ def _process_target(
         fact_lines=fact_lines,
         snippet=snippet,
     )
+    step_timeout = _bounded_step_timeout(timeout, deadline)
+    if step_timeout is None:
+        return _abstain_finding(target, "deadline-exceeded")
     hypothesis: Hypothesis = _platform_round(
-        resolved_llm, _SYSTEM_PLATFORM_SPECIALIST, base_context, timeout,
+        resolved_llm, _SYSTEM_PLATFORM_SPECIALIST, base_context, step_timeout,
         budget, specialist_calls, parse_hypothesis_reply, target_ids,
     )
 
@@ -903,10 +1035,22 @@ def _process_target(
     if experiments_allowed:
         sources = (target.path,)
         for round_index in range(dialogue_rounds + 1):
+            experiment_timeout = _bounded_step_timeout(timeout, deadline)
+            if experiment_timeout is None:
+                return _abstain_finding(target, "deadline-exceeded")
+            experiment_bound = (
+                {} if deadline is None else {"timeout": experiment_timeout}
+            )
             observation = repro_workbench.run_experiment(
                 repository_key, snapshot_hash, sources, driver,
+                **experiment_bound,
             )
-            hit = _experiment_hit(observation, hypothesis.cwe)
+            hit = _experiment_hit(
+                observation,
+                hypothesis.cwe,
+                target_path=target.path,
+                driver_paths=(_repro_driver_relative_path(driver),),
+            )
             experiment_log.append(
                 _experiment_entry(round_index, driver, observation, hit)
             )
@@ -915,6 +1059,9 @@ def _process_target(
                 break
             if round_index == dialogue_rounds:
                 break
+            critic_timeout = _bounded_step_timeout(timeout, deadline)
+            if critic_timeout is None:
+                return _abstain_finding(target, "deadline-exceeded")
             critic = _platform_round(
                 resolved_llm, _SYSTEM_PLATFORM_CRITIC,
                 build_critic_context(
@@ -922,7 +1069,8 @@ def _process_target(
                     hypothesis=hypothesis,
                     experiment_log=tuple(experiment_log),
                 ),
-                timeout, budget, critic_calls, parse_critic_reply, target_ids,
+                critic_timeout, budget, critic_calls, parse_critic_reply,
+                target_ids,
             )
             if critic.assessment == "hypothesis-wrong":
                 break
@@ -934,6 +1082,9 @@ def _process_target(
                 continue
             break
     else:
+        step_timeout = _bounded_step_timeout(timeout, deadline)
+        if step_timeout is None:
+            return _abstain_finding(target, "deadline-exceeded")
         critic = _platform_round(
             resolved_llm, _SYSTEM_PLATFORM_CRITIC,
             build_critic_context(
@@ -941,7 +1092,7 @@ def _process_target(
                 hypothesis=hypothesis,
                 experiment_log=(),
             ),
-            timeout, budget, critic_calls, parse_critic_reply, target_ids,
+            step_timeout, budget, critic_calls, parse_critic_reply, target_ids,
         )
 
     # Instrument consultation (never a gate): the proof engine and the
@@ -1074,6 +1225,12 @@ def run_platform_review(
     a key covering the snapshot hash, the full target, both mode dimensions
     and ``dialogue_rounds``: a hit skips the target's LLM rounds and sandbox
     experiments entirely, and its cached evidence travels with the finding.
+
+    ``deadline_seconds`` (optional wall-clock budget) threads through every
+    step of the per-target loop: each Specialist/Critic round and each
+    sandbox experiment receives a timeout capped by the seconds remaining
+    at that step boundary, and an expired deadline abstains the target with
+    ``deadline-exceeded`` instead of sending anything further.
     """
 
     if not isinstance(workspace, RepositoryWorkspace):
@@ -1109,7 +1266,7 @@ def run_platform_review(
         raise ValueError("timeout must be a positive integer")
     if deadline_seconds is not None and (
         isinstance(deadline_seconds, bool)
-        or not isinstance(deadline_seconds, (int, float))
+        or not isinstance(deadline_seconds, int | float)
         or deadline_seconds <= 0
     ):
         raise ValueError("deadline_seconds must be a positive number or None")
@@ -1150,7 +1307,8 @@ def run_platform_review(
     )
 
     def _expired() -> bool:
-        return deadline is not None and time.monotonic() >= deadline
+        remaining = _remaining_budget(deadline)
+        return remaining is not None and remaining <= 0
 
     def _cancelled() -> bool:
         return bool(should_cancel is not None and should_cancel())
@@ -1239,21 +1397,7 @@ def run_platform_review(
         diagnostics.append(reason)
 
     def _abstain(target: ScoutTarget, reason: str) -> PlatformFinding:
-        return PlatformFinding(
-            target_id=target.lead_id,
-            path=target.path,
-            line=target.line,
-            symbol="",
-            cwe="",
-            state="abstain",
-            hypothesis_reason="",
-            poc_driver_code="",
-            experiment_log=(),
-            identity=None,
-            evidence_records=(),
-            proof_verdict="",
-            rejected_reason=reason,
-        )
+        return _abstain_finding(target, reason)
 
     def _cache_key(target: ScoutTarget) -> str:
         return cache.key_for(*_target_cache_fingerprints(
@@ -1315,6 +1459,7 @@ def run_platform_review(
                 mode=mode,
                 dialogue_rounds=dialogue_rounds,
                 timeout=timeout,
+                deadline=deadline,
                 source_mode=source_mode,
                 repro_workbench=repro_workbench,
                 tool_analysis=tool_analysis,

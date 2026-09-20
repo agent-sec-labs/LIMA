@@ -4,7 +4,7 @@
 >
 > 面向对象：ZCode 主会话（唯一派发调度者）
 >
-> 上游设计：`docs/LIMA_THREE_AGENT_GROUP_ARCHITECTURE_AND_WORKFLOW_PLAN.md`（该文件当前未入库；正式入库时与本文件同批提交，见第 12 节阶段 D 的 8 文件清单）
+> 上游设计：`docs/LIMA_THREE_AGENT_GROUP_ARCHITECTURE_AND_WORKFLOW_PLAN.md`（该文件已与本文件同批入库，见第 12 节阶段 D 的 10 文件清单）
 >
 > 适用范围：三智能体组（需求接口组 / 业务交付组 / 审阅汇报组）的影子运行与后续正式采用
 >

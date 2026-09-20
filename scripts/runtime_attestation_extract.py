@@ -5,6 +5,9 @@
   python runtime_attestation_extract.py --session-id <sess_id> \
       [--agent-id probe-flash=agent_xxx --agent-id probe-tl-low=agent_yyy ...]
 
+--session-id 接受 sess_ 前缀或裸 UUID，内部统一规范化为 sess_<uuid> 后
+再定位 rollout 与 agents 目录；--session-id 缺失同样属于退出码 6（BINDING/USAGE）。
+
 D.0.2.1 要求：
 - 必须显式 --session-id；禁止从近若干小时任意主回合猜测会话参照；
 - 三个探针 Agent ID 必须位于 --session-id 对应的 agents 目录
@@ -156,11 +159,17 @@ def check_agent(probe, agent_id, ref):
 
 
 def main():
+    argv = sys.argv[1:]
+    if not any(a in ("-h", "--help") for a in argv) and \
+            not any(a == "--session-id" or a.startswith("--session-id=") for a in argv):
+        print("BINDING-ERROR：--session-id 缺失（须显式提供 <sess_id>；退出码 6=BINDING/USAGE）")
+        sys.exit(EXIT_BINDING)
     ap = argparse.ArgumentParser(description="D.0.2.1 Runtime Attestation 抽取（显式会话与 Agent 绑定）")
-    ap.add_argument("--session-id", required=True, help="探针所在会话 ID（sess_...）")
+    ap.add_argument("--session-id", required=True, help="探针所在会话 ID（sess_... 或裸 UUID）")
     ap.add_argument("--agent-id", action="append", default=[],
                     metavar="PROBE=AGENT_ID", help="覆盖默认探针 Agent 绑定，可多次")
     args = ap.parse_args()
+    session_id = "sess_" + normalize_session(args.session_id)
 
     bindings = dict(DEFAULT_AGENT_IDS)
     for spec in args.agent_id:
@@ -170,7 +179,7 @@ def main():
         name, aid = spec.split("=", 1)
         bindings[name.strip()] = aid.strip()
 
-    ref, err = session_reference(args.session_id)
+    ref, err = session_reference(session_id)
     if ref is None:
         kind, msg = err
         print(f"{'BINDING-ERROR' if kind == 'BINDING' else kind}（会话参照未通过，子代理不进行比较）：{msg}")
@@ -179,7 +188,7 @@ def main():
 
     missing = mismatch = incomplete = ambiguous = False
     for probe in ("probe-flash", "probe-tl-low", "probe-tl-max"):
-        berr = validate_binding(args.session_id, probe, bindings[probe])
+        berr = validate_binding(session_id, probe, bindings[probe])
         if berr:
             print(f"\n== {probe}（{bindings[probe]}）==\n  BINDING-ERROR：{berr}")
             sys.exit(EXIT_BINDING)

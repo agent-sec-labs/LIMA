@@ -166,7 +166,7 @@ class ClientHealthContractTests(unittest.TestCase):
 
         class Response(io.BytesIO):
             def __init__(self, body: object):
-                if isinstance(body, (bytes, bytearray)):
+                if isinstance(body, bytes | bytearray):
                     super().__init__(bytes(body))
                 else:
                     super().__init__(json.dumps(body).encode("utf-8"))

@@ -163,7 +163,7 @@ def _hex_digest(value: Any, field_name: str) -> str:
 
 
 def _confidence(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError("confidence must be a number")
     try:
         number = float(value)

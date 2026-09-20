@@ -161,7 +161,7 @@ def _run_git(
     constants and never part of the whitelisted argv.
     """
 
-    if isinstance(args, (str, bytes)):
+    if isinstance(args, str | bytes):
         raise ImpactMiningError(
             "git arguments must be a list of strings, not a single string"
         )

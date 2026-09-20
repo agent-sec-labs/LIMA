@@ -364,7 +364,7 @@ class FactBundleExpectation:
             _hex_digest(self.build_context_hash, "build_context_hash")
         if self.repository_root != "":
             _safe_relative_path(self.repository_root, "repository_root")
-        if not isinstance(self.allowed_tool_runs, (frozenset, set)):
+        if not isinstance(self.allowed_tool_runs, frozenset | set):
             raise ValueError("allowed_tool_runs must be a frozenset of run names")
         normalized = frozenset(
             _bounded_text(run, f"allowed_tool_runs[{index}]")

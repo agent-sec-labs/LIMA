@@ -998,7 +998,7 @@ class CxxMemoryAnalyzerClient:
         elapsed = experiment["elapsed_seconds"]
         if (
             isinstance(elapsed, bool)
-            or not isinstance(elapsed, (int, float))
+            or not isinstance(elapsed, int | float)
             or elapsed < 0
         ):
             raise CxxAnalyzerProtocolError(

@@ -8,7 +8,7 @@ AND every capability of a two-column checklist holds:
 
 1. Machine-provable capabilities, probed at runtime by this module and
    each implemented as an independent fail-closed probe (unreadable or
-   unknown always means False): ``landlock`` (Landlock ABI), 
+   unknown always means False): ``landlock`` (Landlock ABI),
    ``process_isolation`` (audited seccomp denylist), ``non_root`` (uid),
    ``network_isolated`` (no interface besides loopback) and
    ``snapshot_readonly`` (read-only mount under the snapshot work root).

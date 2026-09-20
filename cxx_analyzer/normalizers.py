@@ -79,7 +79,7 @@ class NormalizedFinding:
         if set(values) != expected:
             raise ValueError("finding fields do not match the response schema")
         if isinstance(producer_run_ids, str) or not isinstance(
-            producer_run_ids, (list, tuple)
+            producer_run_ids, list | tuple
         ):
             raise ValueError("producer run ids must be a sequence")
         producers = tuple(producer_run_ids)

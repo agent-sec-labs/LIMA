@@ -129,8 +129,8 @@ def build_compile_argv(
     writable build root.  Every path must be a safe relative POSIX path.
     """
 
-    if isinstance(source_files, (str, bytes)) or not isinstance(
-        source_files, (list, tuple)
+    if isinstance(source_files, str | bytes) or not isinstance(
+        source_files, list | tuple
     ):
         raise ValueError("repro source files must be a sequence of relative paths")
     if not source_files or len(source_files) > MAX_REPRO_SOURCES:
@@ -261,8 +261,8 @@ def _validate_driver_code(driver_code: object) -> str:
 
 
 def _validate_sources(source_files: object, snapshot: PreparedSnapshot) -> tuple[str, ...]:
-    if isinstance(source_files, (str, bytes)) or not isinstance(
-        source_files, (list, tuple)
+    if isinstance(source_files, str | bytes) or not isinstance(
+        source_files, list | tuple
     ):
         raise ValueError("repro source files must be a sequence of relative paths")
     if not source_files or len(source_files) > MAX_REPRO_SOURCES:

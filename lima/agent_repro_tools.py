@@ -286,9 +286,10 @@ class ReproWorkbench:
 
         ``timeout`` is the caller's orchestration ceiling for this one
         experiment (the deadline-bounded step timeout; ``None`` keeps
-        :attr:`default_timeout`).  Exactly like :attr:`default_timeout`
-        it caps orchestration, not the wire: the transport timeout stays
-        owned by the injected Task 1 client.
+        :attr:`default_timeout`).  It is forwarded to the client as a
+        per-call wire timeout when the client accepts one, so the real
+        transport is bounded by the same deadline that bounds
+        orchestration.
         """
 
         repo = _require_text(repository_key, "repository_key")
@@ -304,9 +305,19 @@ class ReproWorkbench:
             )
         ):
             raise ValueError("timeout must be a positive integer or None")
+        effective_timeout = timeout if timeout is not None else self.default_timeout
         self._budget.consume(calls=1, bytes=len(driver.encode("utf-8")))
         try:
-            response = self._client.repro_compile_run(repo, snapshot, sources, driver)
+            response = self._client.repro_compile_run(
+                repo, snapshot, sources, driver, timeout=effective_timeout
+            )
+        except TypeError:
+            # Legacy 4-argument clients without the timeout parameter:
+            # fall back to the client-level wire timeout.
+            try:
+                response = self._client.repro_compile_run(repo, snapshot, sources, driver)
+            except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
+                return _degraded_observation(exc)
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             return _degraded_observation(exc)
         observation = _observation_from_response(response)

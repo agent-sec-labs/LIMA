@@ -807,6 +807,8 @@ class CxxMemoryAnalyzerClient:
         snapshot_sha256: str,
         source_files: tuple[str, ...],
         driver_code: str,
+        *,
+        timeout: int | None = None,
     ) -> ReproResponse:
         """Request one sandboxed ASan compile-and-run under a strict contract.
 
@@ -840,7 +842,7 @@ class CxxMemoryAnalyzerClient:
                 "driver_code": validated_driver,
             }
         ).encode("utf-8")
-        payload = self._post_json(REPRO_PATH, body)
+        payload = self._post_json(REPRO_PATH, body, timeout=timeout)
         self._validate_repro_payload(payload, request_id, snapshot_sha256)
         return ReproResponse(
             request_id=payload["request_id"],
@@ -855,8 +857,19 @@ class CxxMemoryAnalyzerClient:
             elapsed_seconds=payload["experiment"]["elapsed_seconds"],
         )
 
-    def _post_json(self, path: str, body: bytes) -> Any:
-        """POST one JSON request and return the parsed, size-capped response."""
+    def _post_json(self, path: str, body: bytes, *, timeout: int | None = None) -> Any:
+        """POST one JSON request and return the parsed, size-capped response.
+
+        ``timeout`` overrides the client-level default for this single call
+        (the deadline-bounded step timeout); ``None`` keeps
+        :attr:`timeout_seconds`.
+        """
+        if (
+            timeout is not None
+            and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0)
+        ):
+            raise CxxAnalyzerProtocolError("per-call timeout must be a positive integer")
+        wire_timeout = timeout if timeout is not None else self.timeout_seconds
 
         request = urllib.request.Request(  # noqa: S310 - Settings permits only HTTP(S).
             self.base_url + path,
@@ -865,7 +878,7 @@ class CxxMemoryAnalyzerClient:
             method="POST",
         )
         try:
-            with self.opener(request, timeout=self.timeout_seconds) as response:
+            with self.opener(request, timeout=wire_timeout) as response:
                 raw_response = response.read(self.max_response_bytes + 1)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise CxxAnalyzerUnavailable("C/C++ analyzer is unavailable") from exc

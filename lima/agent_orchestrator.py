@@ -869,11 +869,14 @@ def _platform_round(
     counter: list[int],
     parse,
     known_target_ids: frozenset[str],
+    deadline: float | None = None,
 ):
     """One strict platform reply round with exactly one format repair.
 
     The wire path is the preserved :func:`send_semantic_request` contract:
     one call charged before each round trip, reply bytes charged on arrival.
+    The format-repair call re-derives its timeout from the same absolute
+    ``deadline`` so it cannot exceed the aggregate budget.
     """
 
     counter[0] += 1
@@ -882,6 +885,7 @@ def _platform_round(
         return parse(raw, known_target_ids)
     except PlatformFormatError as exc:
         failure = str(exc)
+    repaired_timeout = _bounded_step_timeout(timeout, deadline) or 1
     repaired = (
         user
         + "\n\nYour previous reply was not a valid platform reply ("
@@ -891,7 +895,7 @@ def _platform_round(
     )
     counter[0] += 1
     return parse(
-        send_semantic_request(resolved, system, repaired, timeout, budget),
+        send_semantic_request(resolved, system, repaired, repaired_timeout, budget),
         known_target_ids,
     )
 
@@ -1020,7 +1024,7 @@ def _process_target(
         return _abstain_finding(target, "deadline-exceeded")
     hypothesis: Hypothesis = _platform_round(
         resolved_llm, _SYSTEM_PLATFORM_SPECIALIST, base_context, step_timeout,
-        budget, specialist_calls, parse_hypothesis_reply, target_ids,
+        budget, specialist_calls, parse_hypothesis_reply, target_ids, deadline,
     )
 
     experiments_allowed = (
@@ -1070,7 +1074,7 @@ def _process_target(
                     experiment_log=tuple(experiment_log),
                 ),
                 critic_timeout, budget, critic_calls, parse_critic_reply,
-                target_ids,
+                target_ids, deadline,
             )
             if critic.assessment == "hypothesis-wrong":
                 break
@@ -1093,6 +1097,7 @@ def _process_target(
                 experiment_log=(),
             ),
             step_timeout, budget, critic_calls, parse_critic_reply, target_ids,
+            deadline,
         )
 
     # Instrument consultation (never a gate): the proof engine and the
@@ -1360,7 +1365,7 @@ def run_platform_review(
             workspace_reader=workspace,
             budget=run_budget,
             mode=mode,
-            timeout=timeout,
+            timeout=_bounded_step_timeout(timeout, deadline) or 1,
         )
     except ValueError as exc:
         if mode == MODE_REQUIRED:

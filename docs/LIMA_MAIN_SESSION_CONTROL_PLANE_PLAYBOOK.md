@@ -325,8 +325,9 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
   5. commit / push / PR 由 Maintainer 逐项授权（PR 标题遵守 PI-DR5，
      禁 close/fix/resolve 关键字）。
 
-阶段 D 后续批次收口登记（2026-09-20，PR #200 合并后收口批次；入库载体
-  merge commit f1f9028）：
+阶段 D 后续批次收口登记（2026-09-20，PR #200 合并后收口批次）。控制面
+  入库基线：PR #200，merge commit f1f9028461acf618f9b14cb66869ee2d2998f0c7；
+  本收口登记的入库载体：PR #202（撰写时尚未合并，merge commit 待定，不作预填）：
   - 严格新会话六 Agent 加载 smoke check：可发现性 PASS（六个 Agent 均由
     新会话 Agent 注册表发现并加载）；frontmatter 可解析 6/6 PASS；name 与
     文件名一致 6/6 PASS；工具白名单与定义一致 6/6 PASS；model/thoughtLevel

@@ -1,6 +1,6 @@
 # LIMA 控制面采纳验证总结（脱敏审计摘要，2026-09-20）
 
-- 文档类型：三智能体组控制面（阶段 B / B.1 / C / D.0.x / 阶段 D 后续批次）验证结果的审计摘要，属 PR #200 合并后 review follow-ups 收口件；入库载体为 PR #200（merge commit f1f9028461acf618f9b14cb66869ee2d2998f0c7）。
+- 文档类型：三智能体组控制面（阶段 B / B.1 / C / D.0.x / 阶段 D 后续批次）验证结果的审计摘要，属 PR #200 合并后 review follow-ups 收口件。控制面入库基线：PR #200，merge commit `f1f9028461acf618f9b14cb66869ee2d2998f0c7`；本验证总结的入库载体：PR #202（撰写时尚未合并，merge commit 待定，不作预填）。
 - 上位文档：`docs/LIMA_MAIN_SESSION_CONTROL_PLANE_PLAYBOOK.md`（§2.1 运行证明合同、§11 影子边界、§12 阶段推进与收口登记）、`docs/LIMA_Runtime_Attestation_Baseline_2026-09-20.md`（正式 Attestation 状态权威表）。
 - 脱敏口径：本文件不含机器绝对路径、Token、凭据、完整会话提示词或敏感原文；原始过程证据在仓库外证据目录（类别与哈希锚定见 §7），不入库。证据位置以"主检出同级目录名"相对描述。
 - 口径硬规则：本摘要不把旁证升级为正式运行证明；一切正式 Attestation 状态以 Runtime Baseline §3 为准；本文只记录"做了什么、结果是什么、还缺什么"。

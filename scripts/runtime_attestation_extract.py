@@ -6,7 +6,8 @@
       [--agent-id probe-flash=agent_xxx --agent-id probe-tl-low=agent_yyy ...]
 
 --session-id 接受 sess_ 前缀或裸 UUID，内部统一规范化为 sess_<uuid> 后
-再定位 rollout 与 agents 目录；--session-id 缺失同样属于退出码 6（BINDING/USAGE）。
+再定位 rollout 与 agents 目录；--session-id 缺失及其他参数用法错误均属于
+退出码 6（BINDING/USAGE），不会落入 argparse 默认的退出码 2。
 
 D.0.2.1 要求：
 - 必须显式 --session-id；禁止从近若干小时任意主回合猜测会话参照；
@@ -22,7 +23,7 @@ D.0.2.1 要求：
 2=存在 ROUTING-MISMATCH（含主会话 requested≠response）；3=两者兼有；
 4=AMBIGUOUS（会话 main_turn 运行配置不一致，或同 Agent ID 多 rollout 候选）；
 5=INCOMPLETE-FIELDS（记录缺关键字段）；6=BINDING/USAGE 错误（session-id 缺失、
-会话 rollout 不存在或无 main_turn、Agent ID 不在该会话 agents 目录、
+参数用法错误、会话 rollout 不存在或无 main_turn、Agent ID 不在该会话 agents 目录、
 metadata.json 缺失或探针 profile 不匹配）。"""
 
 import argparse
@@ -40,6 +41,15 @@ DEFAULT_AGENT_IDS = {
     "probe-tl-max": "agent_f5f0baca-4e75-44e7-8d1c-e74c64778978",
 }
 EXIT_OK, EXIT_MISSING, EXIT_MISMATCH, EXIT_BOTH, EXIT_AMBIGUOUS, EXIT_INCOMPLETE, EXIT_BINDING = range(7)
+
+
+class BindingParser(argparse.ArgumentParser):
+    """argparse 用法错误（含 --session-id 缺值）统一按 BINDING/USAGE 处理（退出码 6），
+    不落入 argparse 默认退出码 2——2 在本契约中专属 ROUTING-MISMATCH。"""
+
+    def error(self, message):
+        print(f"BINDING-ERROR：参数用法错误（{message}；退出码 6=BINDING/USAGE）")
+        sys.exit(EXIT_BINDING)
 
 
 def sha256(path):
@@ -164,7 +174,7 @@ def main():
             not any(a == "--session-id" or a.startswith("--session-id=") for a in argv):
         print("BINDING-ERROR：--session-id 缺失（须显式提供 <sess_id>；退出码 6=BINDING/USAGE）")
         sys.exit(EXIT_BINDING)
-    ap = argparse.ArgumentParser(description="D.0.2.1 Runtime Attestation 抽取（显式会话与 Agent 绑定）")
+    ap = BindingParser(description="D.0.2.1 Runtime Attestation 抽取（显式会话与 Agent 绑定）")
     ap.add_argument("--session-id", required=True, help="探针所在会话 ID（sess_... 或裸 UUID）")
     ap.add_argument("--agent-id", action="append", default=[],
                     metavar="PROBE=AGENT_ID", help="覆盖默认探针 Agent 绑定，可多次")

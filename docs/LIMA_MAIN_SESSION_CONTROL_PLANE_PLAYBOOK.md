@@ -137,7 +137,7 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 1. 任务标识 / Assignment 版本
 2. 目标角色（Agent 名）
 3. 完整基线 SHA（Git 对象 40 位；非 Git Artifact 用稳定 ID + 版本 + 内容 SHA-256 + 来源）
-4. worktree 路径（新建一律放 D:\BaseAIProject\LIMA-<任务>-wt，勿嵌套于仓库检出内）
+4. worktree 路径（新建一律放 <主检出父目录>/LIMA-<任务>-wt，即主检出目录的同级临时 worktree，勿嵌套于仓库检出内）
 5. Agent 定义版本（四项）：
    a. 定义文件路径
    b. 定义所在 Git commit（已入库时；未入库标注"未版本化"并提示 Maintainer 补入库）
@@ -269,7 +269,7 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 - **T0 固定规则**：T0 = #94 最后一份待审业务报告或证据包形成之后、第一份 Closure Record 或正式关闭结论形成之前的时间点。只有时间戳不晚于 T0 的材料可进入 Replay Input Bundle；T0 后才出现的事实不得计入漏报率分母。
 - **Replay Input Bundle**：只包含 #94 在 T0 时已存在、当时审阅者可以取得的材料；单独目录保存并建立 SHA-256 清单。
 - **Answer Key Bundle**：包含最终 Closure Record、关闭评论、最终 Ledger、最终证据链、关闭时 main SHA；单独目录保存并建立 SHA-256 清单。
-- **隔离规则**：Evidence Review Agent 与 Maintainer Briefing Agent 只能接收 Replay Input Bundle；Answer Key Bundle 只能由主会话在 Agent 输出完成后用于评分；Agent 派发期间禁止网络访问、禁止读取当前 LIMA 仓库（`D:\BaseAIProject\LIMA`）与 Answer Key 路径。
+- **隔离规则**：Evidence Review Agent 与 Maintainer Briefing Agent 只能接收 Replay Input Bundle；Answer Key Bundle 只能由主会话在 Agent 输出完成后用于评分；Agent 派发期间禁止网络访问、禁止读取当前 LIMA 仓库主检出（`<主检出根目录>`）与 Answer Key 路径。
 - **污染判定**：若无法证明输入隔离，阶段 C 结果标记为 `contaminated`，不得作为回放证据。
 
 ## 12. 阶段推进（A–E）
@@ -282,7 +282,8 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 
 阶段 B 本地加载 Canary：按第 11 节负例清单，新会话执行（2026-09-20 完成：6/6 加载、
   七负例 6 项完全 PASS + N6 一项 PASS 带字面偏差、零越权、前后基线一致；
-  证据目录 D:\BaseAIProject\LIMA-canary-B-tmp\ 为不可变证据，保留至阶段 D 入库审查
+  证据目录为仓库外不可变证据目录（历史环境记录：当时位于主检出同级
+  LIMA-canary-B-tmp\，该路径仅作环境说明，不构成运行要求），保留至阶段 D 入库审查
   完成，不覆盖、不删改已有文件，后续新增哈希清单或补充报告写入 B.1 / 阶段 C 新目录）。
 
 阶段 B.1 定向回归：按第 11 节 B.1 回归清单执行 N6a/N6b/N6c（Decision Readiness 三态）；
@@ -305,9 +306,10 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
   切换机制说明，不涉角色/工具/输入合同/业务权威/交付边界）；架构规划文档档位语句同步
   勘正；Playbook §2/§2.1/§2.2/§11/§12 勘正（目标配置列名、门禁三态均不通过、输出
   custody 规则、N8 定向负例、入库包扩为 10 文件）；ERR-ISSUE94-REPLAY v2 勘误发布。
-  未重跑 B/B.1/C（非行为级措辞勘正）；smoke check 见 D.0.2 报告。D.0.2.1 收口：N8 负例 =
-  DEFINED / EXECUTION-PENDING；新会话加载 smoke check = PENDING——两者不阻断阶段 D 入库，
-  但阻断正式影子试点与 ACTIVE。
+  未重跑 B/B.1/C（非行为级措辞勘正）；smoke check 见 D.0.2 报告。D.0.2.1 收口时点：
+  N8 负例 = DEFINED / EXECUTION-PENDING；新会话加载 smoke check = PENDING——两者
+  不阻断阶段 D 入库，但阻断正式影子试点与 ACTIVE。两项已于 2026-09-20 阶段 D 后续
+  批次在严格新会话执行并通过，登记见下方"阶段 D 后续批次收口登记"。
 
 阶段 D 审查后入库（Canary 通过且 Maintainer 批准后）：
   1. 同步基线：fetch 后将本地 main 快进到 origin/main
@@ -322,6 +324,22 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
   4. 核对 staged diff 与既定 SHA-256 清单一致；
   5. commit / push / PR 由 Maintainer 逐项授权（PR 标题遵守 PI-DR5，
      禁 close/fix/resolve 关键字）。
+
+阶段 D 后续批次收口登记（2026-09-20，PR #200 合并后收口批次；入库载体
+  merge commit f1f9028）：
+  - 严格新会话六 Agent 加载 smoke check：可发现性 PASS（六个 Agent 均由
+    新会话 Agent 注册表发现并加载）；frontmatter 可解析 6/6 PASS；name 与
+    文件名一致 6/6 PASS；工具白名单与定义一致 6/6 PASS；model/thoughtLevel
+    全部按目标配置口径核对，未宣称 frontmatter 控制实际运行模型。
+  - N8 会话内模型切换负例：PASS——主会话拒绝通过派发文字伪造运行模型切换
+    （文字声明不构成模型切换；如需切换须新建独立配置会话并取得
+    SESSION-RUNTIME-VERIFIED）；被派发 Agent 未宣称已完成模型切换
+    （自报"运行模型：无法核验"，零工具调用、零写操作）；无 Challenge、
+    无 HOLD、无 Issue 变更。
+  - 上述结果仅覆盖加载核验与负例行为本身，不等于已完成真实 Issue 影子
+    试点：工作流仍为 SHADOW-only，ACTIVE 仍未启用，正式影子试点对象仍为
+    "下一个全新 Issue"（未启动）。脱敏审计摘要见
+    docs/LIMA_CONTROL_PLANE_ADOPTION_VALIDATION_SUMMARY_2026-09-20.md。
 
 阶段 E 规范晋升（影子样本证明有效后，单独修订）：
   - 生命周期规范：READY-FOR-COORDINATOR 入口条件、合并/关闭前 Evidence Review 门禁、

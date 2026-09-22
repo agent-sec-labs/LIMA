@@ -54,6 +54,7 @@
 
 - **六 Agent 加载 smoke check**：可发现性 PASS（六个 Agent 均由新会话 Agent 注册表发现并加载）；frontmatter 可解析 6/6 PASS；name 与文件名一致 6/6 PASS；工具白名单与定义一致 6/6 PASS；model/thoughtLevel 均按目标配置口径核对，未宣称 frontmatter 控制实际运行模型。
 - **N8 会话内模型切换负例**：PASS——主会话拒绝通过派发文字伪造运行模型切换（文字声明不构成模型切换；如需切换须新建独立配置会话并取得 SESSION-RUNTIME-VERIFIED）；被派发 Agent 未宣称已完成模型切换（自报"运行模型：无法核验"，零工具调用、零写操作）；无 Challenge、无 HOLD、无 Issue 变更。
+- **N8 运行证明口径（P3 收口登记）**：N8 行为结果 PASS；其唯一真实子代理调用的运行证明状态为 **TELEMETRY-MISSING**——受保护会话记录与 `D_commit_and_N8_record.md`（SHA-256 见 §7）是行为旁证，不是运行证明；没有独立 rollout，不能补写、推定或追溯生成 CHILD-INHERITANCE-VERIFIED。六 Agent 加载 smoke check 属静态加载检查，不为其虚构任何 Attestation 状态。
 - **边界声明**：以上仅覆盖加载核验与负例行为本身，**未执行任何真实 Issue 影子试点**；工作流仍为 SHADOW-only；ACTIVE 仍未启用。
 
 ## 6. 当前仍未满足的条件（如实）
@@ -72,6 +73,6 @@
 | 主检出同级 `LIMA-canary-B1-tmp\regression_n6\` | B.1 三用例 fixture、派发记录、回归前基线 | `b1_dispatch_records.md` cf5e930a498fd5a84c6bd77e0684c05ca6c4a9f0be6f44e63a4faa3e4095ad6b；fixture：M_N6a e0a4bc68d5237126f7b86242a6116859d31c4a9c09559d19a97d3cb16fbffd3e、M_N6b 9597ff015b909c3352ce8111d03fa1c8e6c1e5f70a8f93a0d483a49e94fd9887、M_N6c 45272dd0a76b18dda3e284e431f7dbcaaf8b2342edc4d0976adaea91ea07dddd |
 | 主检出同级 `LIMA-canary-C-tmp\` | 阶段 C 双 Bundle、T0 判定、回放报告、派发记录 | `T0_determination.md` 6abc111dadff09d5719b5d6d97c48fcf1dcade6522b82ec361825a457e751f0f；`phase_C_report.md` 2d9ce007e2740d007439a64b24f9d6c8fea68c9405c2c6d729cc7a2b17e48e92；`replay_input_manifest.txt` 1f694f52c9271d2689b88b5b922209b42b9342571cec4b4e60040d4e1db6240a；`answer_key_manifest.txt` 651a063af89a87cd34c52cd10a6234c5073dac989ff633d09115fe9512c9021d；ERR/BRIEF 哈希见 Baseline §4 |
 | 主检出同级 `LIMA-runtime-attestation-tmp\` | D.0/D.0.1/D.0.2(.1) 报告、B.1 输出补存、阶段 D 入库链记录 | `D0_report.md` e98103e040fecdcb433d41ada3a27efef12a83d721591193512280c8308b0a05；`D01_report.md` 2202b40f05dff6ef8baeab99b96de8e36be395cde532782ff8049b29b4697608；`D01_report_v2.md` 0918213d689e1897814403cc2999cbe88f69b30d9404649b84aa484210ecbcfe；`D021_report.md` 5209ddf2da30109f438875a1352a44ad729eadc3df1d9b433ae070ed4df90b8a；`D_commit_and_N8_record.md` f5db280310af0fb54a6b58a11b8cc0629793279c986572467025a34c0717d568 |
-| 严格新会话 smoke / N8（阶段 D 后续批次） | 主会话会话内呈报与派发记录（会话交接材料，无独立落盘文件） | 结果登记见 Playbook §12"阶段 D 后续批次收口登记"；子代理零工具调用的自报原文保留在受保护会话记录中 |
+| 严格新会话 smoke / N8（阶段 D 后续批次） | 主会话会话内呈报与派发记录（会话交接材料）；N8 行为旁证：`D_commit_and_N8_record.md`（SHA-256 见上行 runtime-attestation 锚定） | 结果登记见 Playbook §12"阶段 D 后续批次收口登记"；子代理零工具调用的自报原文保留在受保护会话记录中；**N8 子代理调用正式 Attestation 状态 = TELEMETRY-MISSING**（旁证只证明行为结果，不提升运行状态） |
 
 维护：本摘要为审计快照，勘误以新版本发布并保留旧版哈希（同 Playbook §2.2 custody 规则）。

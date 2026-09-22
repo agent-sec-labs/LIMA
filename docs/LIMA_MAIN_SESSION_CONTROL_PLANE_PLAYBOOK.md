@@ -337,6 +337,13 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
     SESSION-RUNTIME-VERIFIED）；被派发 Agent 未宣称已完成模型切换
     （自报"运行模型：无法核验"，零工具调用、零写操作）；无 Challenge、
     无 HOLD、无 Issue 变更。
+  - N8 运行证明口径（P3 收口登记）：N8 唯一真实子代理调用的正式
+    Attestation 状态为 TELEMETRY-MISSING（无可用 rollout/model_io 记录；
+    行为旁证 D_commit_and_N8_record.md 只证明 N8 行为结果，不提升运行
+    状态）；六 Agent 可发现性、frontmatter、name 与工具白名单检查属
+    静态加载检查，非模型调用，不适用 CHILD-INHERITANCE-VERIFIED 等
+    调用级状态，也不为其虚构任何 Attestation 状态；该登记不改变 N8
+    行为测试 PASS，SHADOW-only 与 ACTIVE 门禁不变。
   - 上述结果仅覆盖加载核验与负例行为本身，不等于已完成真实 Issue 影子
     试点：工作流仍为 SHADOW-only，ACTIVE 仍未启用，正式影子试点对象仍为
     "下一个全新 Issue"（未启动）。脱敏审计摘要见

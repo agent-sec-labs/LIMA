@@ -22,7 +22,7 @@
 
 规则：**一个历史调用只能有一个正式 Attestation 状态**；VERIFIED 与 TELEMETRY-MISSING 不得并列。ACTIVE 下承担门禁作用的 Evidence Review 在 TELEMETRY-MISSING / RUNTIME-UNVERIFIED / ROUTING-MISMATCH 时均不能通过或释放门禁。调度器 rollout 存在轮转——**Attestation 必须在子代理结束后立即提取**。
 
-## 3. 历史调用正式状态汇总（截至 2026-09-20 D.0.2.1）
+## 3. 历史调用正式状态汇总（截至 2026-09-22 阶段 D 后续批次收口）
 
 | 调用 | Agent | 正式状态 | 依据（提取时锚定） |
 |---|---|---|---|
@@ -32,6 +32,7 @@
 | 探针 probe-tl-max | probe-tl-max | **CHILD-INHERITANCE-VERIFIED（rollout 级验证）** | 唯一保有 rollout：requested=GLM-5.3=response、output_config={effort:max}、thinking enabled，与会话参照逐字段一致（rollout SHA-256 134a953fbc2937fde6b8b592adf821e421d2c2651a75c88e202a8ef9f9699d90） |
 | 探针 probe-tl-low | probe-tl-low | **TELEMETRY-MISSING** | 无 rollout（已轮转）。Maintainer 历史观察（不提升正式状态）：曾观察到 request/response=GLM-5.3、effort=max |
 | 探针 probe-flash | probe-flash | **TELEMETRY-MISSING** | 无 rollout。应用日志旁证（不提升正式状态）：派发窗口出站请求 modelId=GLM-5.3（零 Flash 出站）；返回输出 PROBE-OK |
+| 阶段 D 后续批次 N8 | lima-maintainer-briefing | **TELEMETRY-MISSING** | 该调用没有可用 rollout/model_io 记录；Agent 首行"运行模型：无法核验"仅为自报，不构成 Attestation 证明。行为旁证（只证明 N8 行为结果，不提升运行 Attestation 状态）：`D_commit_and_N8_record.md`，SHA-256 f5db280310af0fb54a6b58a11b8cc0629793279c986572467025a34c0717d568 |
 
 ## 4. raw / published custody 锚定（阶段 C 与 B.1）
 

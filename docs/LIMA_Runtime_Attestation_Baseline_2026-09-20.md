@@ -8,7 +8,7 @@
 
 当前 ZCode 调度器下，**运行配置所有权在主会话，子智能体继承主会话的模型与推理配置**。Agent 定义 frontmatter 的 `model` / `thoughtLevel` 仅为**目标配置或兼容性元数据**，不构成运行证明。
 
-探针依据（2026-09-20，探针项目会话；分层证据表述）：三个无工具探针 frontmatter 分别声明 `glm-5.3-flash` 与 `thoughtLevel: low/max`。**probe-tl-max = rollout 级验证**（requested=GLM-5.3=response、output_config.effort=max、thinking enabled，与会话参照逐字段一致）；**probe-tl-low = Maintainer 历史观察**（曾观察到 GLM-5.3 / effort=max），正式状态 TELEMETRY-MISSING；**probe-flash = 应用日志与 PROBE-OK 旁证**（派发窗口出站 modelId=GLM-5.3、零 Flash 出站），正式状态 TELEMETRY-MISSING。三者的 request/response/effort 不构成均已正式验证的结论；thoughtLevel 差异不产生可区分请求字段的判断以 tl-max 的 rollout 级证据与 Maintainer 对 low 的历史观察共同支撑。
+探针依据（2026-09-20，探针项目会话；分层证据表述）：三个无工具探针 frontmatter 分别声明 `glm-5.3-flash` 与 `thoughtLevel: low/max`。**probe-tl-max = rollout 级验证**（requested=GLM-5.3=response、output_config.effort=max、thinking enabled，与会话参照逐字段一致）；**probe-tl-low = Maintainer 历史观察**（曾观察到 GLM-5.3 / effort=max），正式状态 TELEMETRY-MISSING；**probe-flash = 应用日志与 PROBE-OK 旁证**（派发窗口出站 modelId=GLM-5.3、零 Flash 出站），正式状态 TELEMETRY-MISSING。三者的 request/response/effort 不构成均已正式验证的结论；正式状态以第 3 节表为准（probe-tl-max 为 rollout 级 CHILD-INHERITANCE-VERIFIED，probe-tl-low 与 probe-flash 均为 TELEMETRY-MISSING）。「thoughtLevel 差异不产生可区分请求字段」这一判断，由 tl-max 的 rollout 级正式证据与两项非正式旁证（tl-low 的 Maintainer 历史观察、flash 的应用日志与 PROBE-OK 返回）共同支撑；旁证不提升对应探针的正式状态。
 
 ## 2. 状态集（四态 + 一异常态）
 

@@ -24,6 +24,7 @@ Expected RED before implementation (product module absent):
 """
 
 import ast
+import contextlib
 import copy
 import dataclasses
 import enum
@@ -42,7 +43,6 @@ from lima.baseline_run_spec import (
     load_baseline_run_spec,
     validate_baseline_manifest,
 )
-
 from lima.contracts.errors import ContractError
 
 _COMMIT_SHA_A = "1" * 40
@@ -1004,6 +1004,202 @@ class TestAssumptionD2DatasetRoleConflict(_FrozenSpecTestCase):
             ],
         }
         return manifest, from_mapping(mapping)
+
+
+class TestDeepImmutability(_FrozenSpecTestCase):
+    """MF-IP-0024-01 regression: constructed specs must be deeply immutable.
+
+    Behavior-only invariants (internal container types are not pinned): any
+    mutation attempt against the repositories collection or its entries, the
+    datasets collection or its entries, or any machine_profile field must
+    either raise or leave the spec with no observable change; after every
+    failed attempt ``canonical_bytes()`` and ``content_digest()`` must be
+    unchanged. The mapping passed to ``from_mapping`` and the mutable plain
+    JSON copy returned by ``to_canonical_value()`` may be mutated freely
+    without affecting the spec, and specs returned by
+    ``load_baseline_run_spec`` obey the same deep immutability.
+    """
+
+    _REPLACEMENT_COMMIT = "9" * 40
+    _REPLACEMENT_FINGERPRINT = "9" * 64
+
+    def _assert_spec_stable(self, spec, attempts):
+        before_bytes = spec.canonical_bytes()
+        before_digest = spec.content_digest()
+        for index, attempt in enumerate(attempts):
+            with self.subTest(attempt=index):
+                # A raised error is an acceptable fail-closed outcome; a
+                # silent observable change is the defect under test.
+                with contextlib.suppress(Exception):
+                    attempt()
+                self.assertEqual(spec.canonical_bytes(), before_bytes)
+                self.assertEqual(spec.content_digest(), before_digest)
+
+    def test_spec_repositories_collection_and_entries_are_deeply_immutable(self):
+        spec = from_mapping(_spec_mapping())
+        repositories = spec.repositories
+        first = repositories[0]
+        extra = {"identity": "extra-team/extra-repo", "commit_sha": "8" * 40}
+        self._assert_spec_stable(
+            spec,
+            [
+                lambda: repositories.append(extra),
+                lambda: repositories.insert(0, dict(extra)),
+                lambda: repositories.extend([dict(extra)]),
+                lambda: repositories.pop(),
+                lambda: repositories.clear(),
+                lambda: repositories.__delitem__(0),
+                lambda: repositories.__setitem__(0, dict(extra)),
+                lambda: first.__setitem__("identity", "mutated-owner/mutated-repo"),
+                lambda: first.__setitem__("commit_sha", self._REPLACEMENT_COMMIT),
+                lambda: first.__setitem__("unfrozen_extra", "value"),
+                lambda: first.__delitem__("identity"),
+                lambda: first.update(
+                    {"identity": "u-owner/u-repo", "commit_sha": "7" * 40}
+                ),
+                lambda: first.pop("commit_sha", None),
+                lambda: setattr(first, "identity", "attr-owner/attr-repo"),
+            ],
+        )
+
+    def test_spec_datasets_collection_and_entries_are_deeply_immutable(self):
+        spec = from_mapping(_spec_mapping())
+        datasets = spec.datasets
+        first = datasets[0]
+        extra = {
+            "name": "extra-set",
+            "fingerprint": "8" * 64,
+            "role": "development",
+        }
+        self._assert_spec_stable(
+            spec,
+            [
+                lambda: datasets.append(extra),
+                lambda: datasets.insert(0, dict(extra)),
+                lambda: datasets.extend([dict(extra)]),
+                lambda: datasets.pop(),
+                lambda: datasets.clear(),
+                lambda: datasets.__delitem__(0),
+                lambda: datasets.__setitem__(0, dict(extra)),
+                lambda: first.__setitem__("name", "mutated-set"),
+                lambda: first.__setitem__("fingerprint", self._REPLACEMENT_FINGERPRINT),
+                lambda: first.__setitem__("role", "development"),
+                lambda: first.__setitem__("unfrozen_extra", "value"),
+                lambda: first.__delitem__("fingerprint"),
+                lambda: first.update({"name": "u-set", "fingerprint": "7" * 64}),
+                lambda: setattr(first, "name", "attr-set"),
+            ],
+        )
+
+    def test_spec_machine_profile_fields_are_deeply_immutable(self):
+        spec = from_mapping(_spec_mapping())
+        profile = spec.machine_profile
+        self._assert_spec_stable(
+            spec,
+            [
+                lambda: profile.__setitem__("cores", 999999),
+                lambda: profile.__setitem__("ram_gb", 0),
+                lambda: profile.__setitem__("cpu_arch", "aarch64"),
+                lambda: profile.__setitem__("cpu_model", "mutated-cpu"),
+                lambda: profile.__setitem__("profile_id", "mutated-profile"),
+                lambda: profile.__setitem__("unfrozen_extra", "value"),
+                lambda: profile.__delitem__("cores"),
+                lambda: profile.pop("ram_gb", None),
+                lambda: profile.update({"cores": 1, "os_family": "windows"}),
+                lambda: profile.clear(),
+                lambda: setattr(profile, "cores", 42),
+                lambda: setattr(spec, "machine_profile", {}),
+            ],
+        )
+
+    def test_canonical_bytes_and_digest_unchanged_after_combined_mutation_barrage(self):
+        spec = from_mapping(_spec_mapping())
+        before_bytes = spec.canonical_bytes()
+        before_digest = spec.content_digest()
+        attempts = (
+            lambda: spec.repositories.append(
+                {"identity": "barrage-team/barrage-repo", "commit_sha": "6" * 40}
+            ),
+            lambda: spec.repositories[0].__setitem__("commit_sha", "5" * 40),
+            lambda: spec.datasets[0].__setitem__("fingerprint", "4" * 64),
+            lambda: spec.machine_profile.__setitem__("cores", 64),
+            lambda: setattr(spec, "seed", 0),
+        )
+        for attempt in attempts:
+            # A raised error is acceptable; a silent change is the defect.
+            with contextlib.suppress(Exception):
+                attempt()
+        self.assertEqual(spec.canonical_bytes(), before_bytes)
+        self.assertEqual(spec.content_digest(), before_digest)
+
+    def test_input_mapping_mutation_after_construction_does_not_affect_spec(self):
+        mapping = _spec_mapping()
+        spec = from_mapping(mapping)
+        before_bytes = spec.canonical_bytes()
+        before_digest = spec.content_digest()
+        mapping["repositories"].append(
+            {"identity": "late-owner/late-repo", "commit_sha": "3" * 40}
+        )
+        mapping["repositories"][0]["commit_sha"] = self._REPLACEMENT_COMMIT
+        mapping["repositories"][0]["identity"] = "late-mutation/late-mutation"
+        mapping["datasets"].append(
+            {"name": "late-set", "fingerprint": "2" * 64, "role": "development"}
+        )
+        mapping["datasets"][0]["fingerprint"] = self._REPLACEMENT_FINGERPRINT
+        mapping["machine_profile"]["cores"] = 999999
+        mapping["seed"] = 0
+        self.assertEqual(spec.canonical_bytes(), before_bytes)
+        self.assertEqual(spec.content_digest(), before_digest)
+
+    def test_to_canonical_value_returns_mutable_json_copy_isolated_from_spec(self):
+        spec = from_mapping(_spec_mapping())
+        before_bytes = spec.canonical_bytes()
+        before_digest = spec.content_digest()
+        value = spec.to_canonical_value()
+        self.assertIsInstance(value, dict)
+        self.assertIsInstance(value["repositories"], list)
+        self.assertIsInstance(value["machine_profile"], dict)
+        # The copy must remain a plain, serializable, mutable JSON subset.
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        value["seed"] = 0
+        value["repositories"].append(
+            {"identity": "copy-team/copy-repo", "commit_sha": "1" * 40}
+        )
+        value["repositories"][0]["commit_sha"] = self._REPLACEMENT_COMMIT
+        value["datasets"][0]["role"] = "development"
+        value["machine_profile"]["cores"] = 12345
+        # Mutating the returned copy must not observably change the spec.
+        self.assertEqual(spec.canonical_bytes(), before_bytes)
+        self.assertEqual(spec.content_digest(), before_digest)
+
+    def test_loaded_spec_is_deeply_immutable(self):
+        original = from_mapping(_spec_mapping())
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "loaded-spec.json"
+            path.write_bytes(original.canonical_bytes())
+            loaded = load_baseline_run_spec(str(path))
+        extra = {"identity": "load-team/load-repo", "commit_sha": "0" * 40}
+        self._assert_spec_stable(
+            loaded,
+            [
+                lambda: loaded.repositories.append(extra),
+                lambda: loaded.repositories[0].__setitem__(
+                    "commit_sha", self._REPLACEMENT_COMMIT
+                ),
+                lambda: loaded.repositories[0].__setitem__(
+                    "identity", "load-owner/load-repo"
+                ),
+                lambda: loaded.datasets[0].__setitem__(
+                    "fingerprint", self._REPLACEMENT_FINGERPRINT
+                ),
+                lambda: loaded.datasets.append(
+                    {"name": "load-set", "fingerprint": "9" * 64, "role": "calibration"}
+                ),
+                lambda: loaded.machine_profile.__setitem__("cores", 32),
+                lambda: loaded.machine_profile.__setitem__("cpu_arch", "aarch64"),
+                lambda: loaded.machine_profile.__delitem__("profile_id"),
+            ],
+        )
 
 
 if __name__ == "__main__":

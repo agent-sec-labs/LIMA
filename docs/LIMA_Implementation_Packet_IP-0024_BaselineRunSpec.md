@@ -313,3 +313,54 @@ AC → Test → Result：逐 AC 附命令与输出摘要
 - 本 Packet 关键字段无 TBD；冻结测试已按 §7 交付并形成 Frozen Test Commit（SHA、测试文件 SHA-256、required test count=61、假设标注句记录于 commit message 与交付返回）。
 - 状态 `READY-FOR-CODE` 的激活条件（Assignment Handoff）：检查点结论落定 + Coordinator 签发 Implementation Assignment（product allowlist = `lima/baseline_run_spec.py` 单文件）+ Frozen Test Commit 可按 SHA 获取 + RED 有效。
 - 本 Packet 对 #204 为 foundation 贡献；#57 保持打开；本 IP 不宣告任何 Issue 完成，PR 不使用自动关闭关键字。
+
+## 12. CORRECTIVE-1：深层不可变性缺陷、合法解冻与新冻结（2026-09-24 追加；本节为追加记录，§1-§11 历史内容不删改）
+
+### 12.1 缺陷记录（MF-IP-0024-01）
+
+- 缺陷：`lima/baseline_run_spec.py` 的 `BaselineRunSpec`（frozen dataclass）持有裸可变容器 `repositories: list[dict[str, str]]`、`datasets: list[dict[str, str]]`、`machine_profile: dict[str, str | int]`（实现 commit `43de1109dafc131702eae6c6669e4707e3160e97` 中 L409-L414 附近）；`to_canonical_value()` 直接读取这些容器，构造后嵌套修改静默成功且 `canonical_bytes()`/`content_digest()` 随之改变，违反"冻结输入身份"目标（AC-1/AC-2 的不变量基础）。
+- 三方独立复现：主会话（digest `2e1c7936…` → `b866fc9a…`）、Coordinator（digest `18720124…` → `7527c4a0…`）、P&V 本轮亲验（digest `af237e6c801b1f276f8414cc4ab7843deab2ede79f6a420f7190e7fa00651192` → `9742cd04c190eeaca97c9f1c1730a4b56d4bc58863419552e1ea0ff2134220b3`，最小脚本嵌套修改 commit_sha/append dataset/修改 cores 全部静默生效）。
+- 附带发现：`tests/test_v4_baseline.py` 在 ruff 0.16.5（repo pyproject select 含 `I`）下存在 I001（import 块空行）；此前"加空行"版本曾在**陈旧缓存**下假通过——本节起该文件一切 ruff 证据运行必须带 `--no-cache`。
+
+### 12.2 解冻理由与 DR 授权链（合法解冻，按 P&V 责任书 §3/生命周期 §22"Frozen test 错误"路径）
+
+授权链：Maintainer 自审裁定 **MF-IP-0024-01**（缺陷成立、需冻结面扩充）→ Coordinator 签发 **Corrective Assignment IP-0024-CORRECTIVE-1 v1.0**（2026-09-24，DR 授权源=MF-IP-0024-01）→ 本 P&V 按派发执行第一阶段。
+
+**旧冻结撤销声明**：e59a585 → 8ad7278 → 43de110 链上对 `tests/test_v4_baseline.py` 的冻结状态撤销（仅 tests 部分；Packet 历史内容与既有 61 项测试的断言/语义不删改——既有 11 个 test class 的 AST 逐字节等价已证明，见 §12.4）。撤销后按授权扩充新测试并重新 RED，产生新 Frozen Test Commit（§12.5）。
+
+### 12.3 新增冻结面：深层不可变性契约（TestDeepImmutability*，仅验行为不钉内部容器实现）
+
+实现可自选内部表示（tuple/自定义容器/深拷贝等），但必须满足：
+
+1. 构造后对 `spec.repositories`（集合与任一条目）、`spec.datasets`（集合与任一条目）、`spec.machine_profile`（任一字段）的修改尝试**要么抛异常、要么无可观察变化**；
+2. 所有失败修改尝试之后 `canonical_bytes()` 与 `content_digest()` 不变；
+3. `from_mapping` 输入的原始 dict/list 在构造后被修改不影响 spec（输入隔离）；
+4. `to_canonical_value()` 返回**可变纯 dict/list JSON 子集**副本，修改该副本不影响 spec（副本隔离，副本本身必须可变）；
+5. `load_baseline_run_spec` 返回对象满足相同深层不可变性；
+6. 既有 61 项测试零改动（以 AST 等价证明执行，非运行时测试）。
+
+新增测试清单（7 方法，总数 61+7=68）与不变量映射：
+
+| 方法 | 不变量 | 43de110 上 RED 状态 |
+|---|---|---|
+| test_spec_repositories_collection_and_entries_are_deeply_immutable | ①② | RED（14 条 subTest 失败：append/insert/extend/pop/clear/del/setitem 集合级与条目级全部静默生效） |
+| test_spec_datasets_collection_and_entries_are_deeply_immutable | ①② | RED（14 条 subTest 失败） |
+| test_spec_machine_profile_fields_are_deeply_immutable | ①② | RED（12 条 subTest 失败） |
+| test_canonical_bytes_and_digest_unchanged_after_combined_mutation_barrage | ② | RED（组合弹幕后 bytes/digest 漂移） |
+| test_input_mapping_mutation_after_construction_does_not_affect_spec | ③ | 已满足（validator 构建新容器；保留为防回归锚点） |
+| test_to_canonical_value_returns_mutable_json_copy_isolated_from_spec | ④ | 已满足（返回新建纯树；保留为防回归锚点） |
+| test_loaded_spec_is_deeply_immutable | ⑤ | RED（8 条 subTest 失败） |
+
+### 12.4 RED 证据与既有面不变证明（2026-09-24，worktree @ 43de110）
+
+- 勘改前基线：`python -m unittest -q tests.test_v4_baseline` → Ran 61 / OK（exit 0）；新增测试后定向：`Ran 68 tests, FAILED (failures=49, exit 1)`，49 条失败**全部**位于 TestDeepImmutability 的 5 个 RED 方法（14+14+12+1+8），既有 61 项与新类中 2 个锚点项全过；失败模式全部为 `assertEqual(spec.canonical_bytes(), before_bytes)` / `content_digest` 漂移——由深层可变性缺陷本身触发，非导入/环境损坏（模块导入正常、63 项 ok 可证）。
+- 全量：`python -m unittest discover -s tests` → `Ran 1509 tests, FAILED (failures=49, skipped=4)`（1441 既有 + 61 冻结项全过；失败均为新 RED；skip=4 零新增）。此为本阶段预期状态；**实现修复归 Implementation 轮**，不得为全量变绿做任何产品修改。
+- 既有面不变（不变量⑥）：43de110 blob 与勘改后文件逐 class 比较，既有 11 个 class 的 `ast.dump` 逐字节一致；模块级非 class 非 import 语句一致；新增恰为 TestDeepImmutability 一个类；总方法数 68。
+- 质量门禁：`ruff 0.16.5`；`python -m ruff check --no-cache tests/test_v4_baseline.py` → All checks passed（exit 0）；`--select I --no-cache` 复核 → 通过；`compileall` 通过；`git diff --check` 干净。I001 修复=删除两段 from-import 间空行（本文件本轮唯一非测试性改动；修正了此前陈旧缓存下的假通过）。
+
+### 12.5 新 Frozen Test Commit 登记
+
+- 本 CORRECTIVE-1 commit（追加于 `43de1109dafc131702eae6c6669e4707e3160e97` 之后，不 amend、不 force）为新 Frozen Test Commit 登记点；完整 SHA 见 commit 链与 P&V 交付记录。
+- 冻结面：`tests/test_v4_baseline.py`（68 方法 = 既有 61 + TestDeepImmutability 7）；本文件新 SHA-256 = `2c75ad8bc11991a76781aefa84f04c73d5331a2d89723b572c26a7780826ce4e`；勘改前（43de110）SHA-256 = `6a5a767b9a451f56968779fd95c55fe6081d73d5d8a9dfddd95ba7178fd18ff8`。
+- 本轮文件边界：仅 `tests/test_v4_baseline.py`（I001 修复 + 新增类）与本 Packet 追加节；产品文件零改动。
+- 交付后本文件恢复只读；Implementation 轮按本节契约修复 `lima/baseline_run_spec.py`（product allowlist 不变：单文件）。

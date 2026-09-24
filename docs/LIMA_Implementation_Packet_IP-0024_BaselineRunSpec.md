@@ -364,3 +364,16 @@ AC → Test → Result：逐 AC 附命令与输出摘要
 - 冻结面：`tests/test_v4_baseline.py`（68 方法 = 既有 61 + TestDeepImmutability 7）；本文件新 SHA-256 = `2c75ad8bc11991a76781aefa84f04c73d5331a2d89723b572c26a7780826ce4e`；勘改前（43de110）SHA-256 = `6a5a767b9a451f56968779fd95c55fe6081d73d5d8a9dfddd95ba7178fd18ff8`。
 - 本轮文件边界：仅 `tests/test_v4_baseline.py`（I001 修复 + 新增类）与本 Packet 追加节；产品文件零改动。
 - 交付后本文件恢复只读；Implementation 轮按本节契约修复 `lima/baseline_run_spec.py`（product allowlist 不变：单文件）。
+
+### 12.6 第三阶段独立验证结果（2026-09-24 追加；Final Commit 登记）
+
+- **Final Commit**：`7ff29efa56b878272b351377b850ac527eaec22c`（parent=`d9e914fbc56a28e9f58fe69af5e9648251195fff`，纯追加 ancestry 亲验；修复方式=私有 `_FrozenSequence`（内 tuple）/`_FrozenMapping`（内 dict 快照+`__slots__`+全量变异方法显式 `TypeError`）；`canonical_bytes()`/`content_digest()` 每次从冻结字段现算）。
+- **P&V 独立验证命令与计数**（worktree @ 7ff29ef，亲验）：
+  - `python -m unittest -q tests.test_v4_baseline` → `Ran 68 tests / OK`，exit 0（含 §12.3 五个原 RED 方法全部转绿）；
+  - `python -m unittest discover -s tests` → `Ran 1509 tests / OK (skipped=4)`，exit 0（1441 既有 + 68 冻结全过；skip 基线 4 零新增）；
+  - `python -m ruff check --no-cache tests/test_v4_baseline.py lima/baseline_run_spec.py` → All checks passed（exit 0）；
+  - `python -m compileall -q lima scripts tests` → exit 0；`python -m bandit -q lima/baseline_run_spec.py` → exit 0；`git diff --check` → 干净。
+- **边界核验**：`43de110..HEAD` 恰 3 文件（本 Packet、`lima/baseline_run_spec.py`、`tests/test_v4_baseline.py`）；`d9e914f..HEAD` 恰 1 文件（`lima/baseline_run_spec.py`，Implementation 未越界）；HEAD 上 `tests/test_v4_baseline.py` blob SHA-256 = `2c75ad8bc11991a76781aefa84f04c73d5331a2d89723b572c26a7780826ce4e`（冻结测试未被 Implementation 改动）。
+- **退化实现抽查**：dataclass 字段恰为 7 个冻结契约字段（无 digest/canonical 缓存字段）；`canonical_bytes()`=`canonical_encode(self.to_canonical_value())`、`content_digest()`=`compute_content_digest(self.canonical_bytes())` 均现算返回，无构造期预计算存储被直接返回。
+- **三态结论（逐项）**：定向 68/68 全绿=满足；全量 1509 OK skipped=4=满足；ruff --no-cache 双文件零错误=满足；compileall/bandit/diff --check=满足；文件边界与冻结面不变=满足；无退化实现=满足；未验证项=无。
+- **本节 commit**：本验证记录以追加普通 commit 落盘（[IP-0024][CORRECTIVE-1]，完整 SHA 见 commit 链与 P&V 交付记录）；不 push、不改 PR/Issue。CORRECTIVE-1 验收面到此闭合，后续合并/PR 决策归 Coordinator。

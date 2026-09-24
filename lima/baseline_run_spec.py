@@ -12,6 +12,12 @@ The module is a pure offline library: deterministic, secretless, no network,
 no environment reads, and no auto-detection of any machine property.  The
 canonical encoding and digest are delegated entirely to
 ``lima.contracts.codec``; this module never implements its own encoder.
+
+Constructed specs are deeply immutable (MF-IP-0024-01 regression): every
+mutating operation against the spec, its entry collections, an entry, or a
+machine-profile field fails closed, and the canonical bytes and digest are
+always recomputed fresh from the frozen field content so they can never
+disagree with it.
 """
 
 import dataclasses
@@ -159,6 +165,163 @@ class BaselineRunSpecError(ValueError):
 
 def _fail(code: BaselineRunSpecErrorCode, field_path: str) -> NoReturn:
     raise BaselineRunSpecError(code, field_path)
+
+
+class _FrozenMapping:
+    """A read-only, JSON-compatible view over one validated field mapping.
+
+    Reads (subscript, ``len``, iteration, membership, ``get``/``keys``/
+    ``values``/``items``) behave like a plain ``dict`` whose values are
+    already-validated immutable scalars.  Every mutating operation and every
+    attribute assignment fails closed with ``TypeError``.  Equality holds
+    for another frozen view with equal items or an equal plain ``dict``.
+    """
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: dict[str, str | int]) -> None:
+        object.__setattr__(self, "_items", dict(items))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __getitem__(self, key: str) -> str | int:
+        return self._items[key]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._items
+
+    def keys(self):
+        return self._items.keys()
+
+    def values(self):
+        return self._items.values()
+
+    def items(self):
+        return self._items.items()
+
+    def get(self, key: str, default: object = None) -> object:
+        return self._items.get(key, default)
+
+    def __setitem__(self, key: str, value: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def update(self, *args: object, **kwargs: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def pop(self, *args: object, **kwargs: object) -> object:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def popitem(self) -> tuple[str, object]:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def setdefault(self, *args: object, **kwargs: object) -> object:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def clear(self) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _FrozenMapping):
+            return self._items == other._items
+        if isinstance(other, dict):
+            return self._items == other
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return repr(self._items)
+
+
+class _FrozenSequence:
+    """A read-only, JSON-compatible view over one validated field list.
+
+    Reads (subscript, ``len``, iteration, membership, ``index``/``count``)
+    behave like a plain ``tuple`` of frozen mappings.  Every mutating
+    operation and every attribute assignment fails closed with ``TypeError``.
+    Equality holds for another frozen view with equal items or an equal
+    plain ``list``/``tuple``.
+    """
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: list[_FrozenMapping]) -> None:
+        object.__setattr__(self, "_items", tuple(items))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __getitem__(self, index: int | slice) -> object:
+        return self._items[index]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._items
+
+    def index(self, value: object, *args: int) -> int:
+        return self._items.index(value, *args)
+
+    def count(self, value: object) -> int:
+        return self._items.count(value)
+
+    def __setitem__(self, index: int, value: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __delitem__(self, index: int) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def append(self, item: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def insert(self, index: int, item: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def extend(self, items: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def pop(self, *args: int, **kwargs: int) -> object:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def clear(self) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def remove(self, item: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def sort(self, *args: object, **kwargs: object) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def reverse(self) -> None:
+        raise TypeError("baseline run spec fields are deeply immutable")
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _FrozenSequence):
+            return self._items == other._items
+        if isinstance(other, list) or isinstance(other, tuple):
+            return list(self._items) == list(other)
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return repr(list(self._items))
 
 
 def _require_fields(
@@ -322,12 +485,12 @@ def _normalize_identity(value: str) -> str | None:
     return _normalize_local_key(candidate)
 
 
-def _validate_repositories(value: object) -> list[dict[str, str]]:
+def _validate_repositories(value: object) -> _FrozenSequence:
     if not isinstance(value, list):
         _fail(BaselineRunSpecErrorCode.INVALID_FIELD_TYPE, "$.repositories")
     if not value:
         _fail(BaselineRunSpecErrorCode.INVALID_FIELD_VALUE, "$.repositories")
-    repositories: list[dict[str, str]] = []
+    repositories: list[_FrozenMapping] = []
     seen_identities: set[str] = set()
     for index, element in enumerate(value):
         prefix = f"$.repositories[{index}]"
@@ -345,16 +508,16 @@ def _validate_repositories(value: object) -> list[dict[str, str]]:
             _fail(BaselineRunSpecErrorCode.DUPLICATE_REPOSITORY, f"{prefix}.identity")
         seen_identities.add(normalized)
         commit_sha = _validate_commit_sha(element["commit_sha"], f"{prefix}.commit_sha")
-        repositories.append({"identity": identity, "commit_sha": commit_sha})
-    return repositories
+        repositories.append(_FrozenMapping({"identity": identity, "commit_sha": commit_sha}))
+    return _FrozenSequence(repositories)
 
 
-def _validate_datasets(value: object) -> list[dict[str, str]]:
+def _validate_datasets(value: object) -> _FrozenSequence:
     if not isinstance(value, list):
         _fail(BaselineRunSpecErrorCode.INVALID_FIELD_TYPE, "$.datasets")
     if not value:
         _fail(BaselineRunSpecErrorCode.INVALID_FIELD_VALUE, "$.datasets")
-    datasets: list[dict[str, str]] = []
+    datasets: list[_FrozenMapping] = []
     for index, element in enumerate(value):
         prefix = f"$.datasets[{index}]"
         if not isinstance(element, dict):
@@ -368,11 +531,13 @@ def _validate_datasets(value: object) -> list[dict[str, str]]:
         role = element["role"]
         if role not in _DATASET_ROLES:
             _fail(BaselineRunSpecErrorCode.INVALID_FIELD_VALUE, f"{prefix}.role")
-        datasets.append({"name": name, "fingerprint": fingerprint, "role": role})
-    return datasets
+        datasets.append(
+            _FrozenMapping({"name": name, "fingerprint": fingerprint, "role": role})
+        )
+    return _FrozenSequence(datasets)
 
 
-def _validate_machine_profile(value: object) -> dict[str, str | int]:
+def _validate_machine_profile(value: object) -> _FrozenMapping:
     if not isinstance(value, dict):
         _fail(BaselineRunSpecErrorCode.INVALID_FIELD_TYPE, "$.machine_profile")
     _require_fields(value, _MACHINE_PROFILE_FIELDS, "$.machine_profile")
@@ -392,7 +557,7 @@ def _validate_machine_profile(value: object) -> dict[str, str | int]:
         elif not isinstance(item, str):
             _fail(BaselineRunSpecErrorCode.INVALID_FIELD_TYPE, field_path)
         profile[field] = item
-    return profile
+    return _FrozenMapping(profile)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -402,41 +567,39 @@ class BaselineRunSpec:
     Instances are constructed through :func:`from_mapping` (or
     :func:`load_baseline_run_spec`) so that every field carries the validated
     schema-v1 shape.  ``machine_profile`` is declarative (D-1): declared
-    values only, never probed from the host.
+    values only, never probed from the host.  The nested field containers are
+    deeply immutable read-only views: JSON-compatible reads (subscript,
+    ``len``, iteration, membership, equality) are supported, while every
+    mutation attempt fails closed and never changes the canonical bytes or
+    digest, which are always recomputed from the frozen content.
     """
 
     schema_version: int
-    repositories: list[dict[str, str]]
-    datasets: list[dict[str, str]]
+    repositories: _FrozenSequence
+    datasets: _FrozenSequence
     analyzer_fingerprint: str
     config_digest: str
     seed: int
-    machine_profile: dict[str, str | int]
+    machine_profile: _FrozenMapping
 
     def to_canonical_value(self) -> dict[str, JSONValue]:
-        """Return the codec JSONValue subset covering every frozen field."""
+        """Return a fresh, mutable, plain JSON subset copy of every field.
+
+        The returned tree is a newly built ``dict``/``list`` structure that
+        shares no mutable state with the spec; mutating it can never affect
+        the spec, its canonical bytes, or its digest.
+        """
 
         return {
             "schema_version": self.schema_version,
             "repositories": [
-                {
-                    "identity": repository["identity"],
-                    "commit_sha": repository["commit_sha"],
-                }
-                for repository in self.repositories
+                dict(repository.items()) for repository in self.repositories
             ],
-            "datasets": [
-                {
-                    "name": dataset["name"],
-                    "fingerprint": dataset["fingerprint"],
-                    "role": dataset["role"],
-                }
-                for dataset in self.datasets
-            ],
+            "datasets": [dict(dataset.items()) for dataset in self.datasets],
             "analyzer_fingerprint": self.analyzer_fingerprint,
             "config_digest": self.config_digest,
             "seed": self.seed,
-            "machine_profile": dict(self.machine_profile),
+            "machine_profile": dict(self.machine_profile.items()),
         }
 
     def canonical_bytes(self) -> bytes:

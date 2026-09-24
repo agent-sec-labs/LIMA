@@ -1,7 +1,7 @@
-"""Frozen acceptance tests for IP-0023: versioned BaselineRunSpec (Source Issue #204).
+"""Frozen acceptance tests for IP-0024: versioned BaselineRunSpec (Source Issue #204).
 
 Contract under test (frozen by Coordinator Assignment v1.0, 2026-09-24; see
-docs/LIMA_Implementation_Packet_IP-0023_BaselineRunSpec.md):
+docs/LIMA_Implementation_Packet_IP-0024_BaselineRunSpec.md):
 
 - ``lima/baseline_run_spec.py`` must expose BaselineRunSpecErrorCode (str-Enum),
   BaselineRunSpecError (independent Exception with ``code`` + ``field_path``),

@@ -1,12 +1,12 @@
-# LIMA Implementation Packet — IP-0023 BaselineRunSpec（冻结基线输入身份）
+# LIMA Implementation Packet — IP-0024 BaselineRunSpec（冻结基线输入身份）
 
-> Packet ID：IP-0023（SHADOW-PILOT V4-I01a）
-> Packet 版本：1.0（2026-09-24）
-> 状态：`READY-FOR-CODE`（受 SHADOW-PILOT Maintainer 检查点约束，见 §0/§11）
+> Packet ID：IP-0024（SHADOW-PILOT V4-I01a）
+> Packet 版本：1.1（2026-09-24：Maintainer 检查点采纳 D-0～D-4；行政性编号勘正 IP-0023→IP-0024，见 §0.1）
+> 状态：`READY-FOR-CODE`（Maintainer 检查点 2026-09-24 已采纳 D-0～D-4，不再回问；Implementation 派发待 Coordinator Assignment）
 > Packet 作者：lima-packet-verification（P&V）
-> Coordinator Assignment：v1.0（2026-09-24 lima-coordinator 签发；主会话核对授权后按原内容派发）
+> Coordinator Assignment：v1.0（2026-09-24 lima-coordinator 签发；主会话核对授权后按原内容派发；其 IP-0023 编号表述已被检查点裁定取代，见 §0.1）
 > 精确基线：`87f867096ec604e269142380ac1c4a3dcc57d25a`（完整 40 位）
-> 工作分支：`codex/ip-0023-v4-baseline-run-spec`（worktree `D:\BaseAIProject\LIMA-ip-0023-pv-wt`）
+> 工作分支：`codex/ip-0023-v4-baseline-run-spec`（worktree `D:\BaseAIProject\LIMA-ip-0023-pv-wt`；名称中的 ip-0023 为历史误标，不构成权威 Packet ID，见 §0.1）
 > Source Issue：#204（父任务 #57，保持打开）
 
 ## 0. 假设标注（强制声明）
@@ -20,6 +20,14 @@ D-1/D-2/D-3/D-4 为冻结时采用的 Coordinator 推荐假设，Maintainer 检�
 - **D-4（假设，选 A）**：不落盘生产 `evaluation_data/v4/baseline_manifest.json`（留 #57 PR1）；manifest 校验消费的 fixture 由测试内联提供。
 
 推翻通道：检查点结论（经主会话转达）→ DR 授权 → 更新 Packet → 撤销旧冻结状态 → 重新 RED → 新 Frozen Test Commit；旧证据保留。
+
+### 0.1 检查点裁定与编号勘正登记（2026-09-24，Maintainer，经主会话转达）
+
+- **D-0～D-4 全部采纳推荐值**：单 PR 拓扑；声明式抽象 machine profile（仅 str/int，禁 float 与自动探测）；角色限定 `external-holdout`、`calibration`、`development` 并按 normalized repository identity 判交；纯新增库模块（本轮不接 CLI、不修改既有生产路径）；本轮不创建生产 manifest，只交付 schema、构造、规范化与校验能力。**以上事项不再回问 Maintainer。**
+- **编号勘正 IP-0023 → IP-0024**：Maintainer 拒绝复用 IP-0023——该编号已被既有 ENTRY60 closure 证据链明确预留（`docs/LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md`）。本 Packet 权威 Packet ID 自本版（v1.1）起为 **IP-0024**；Assignment v1.0 原文的 IP-0023 表述以本裁定为准（事实优先级：已批准 Decision > Coordinator Assignment 的编号表述）。
+- **行政性勘正执行方式**：追加普通 commit（不 amend、不 force-push、不关闭或重建 PR #205）；Packet 文件重命名为 `docs/LIMA_Implementation_Packet_IP-0024_BaselineRunSpec.md` 并更新内部编号与自引用路径；`tests/test_v4_baseline.py` 仅修改头部 Packet ID/路径说明文字，可执行测试逻辑零变化（去除模块 docstring 后 AST 逐字节等价，证据见勘正 commit 与 P&V 交付记录）；PR #205 标题/正文改用 IP-0024 由主会话执行。
+- **分支名说明**：`codex/ip-0023-v4-baseline-run-spec` 与 worktree `D:\BaseAIProject\LIMA-ip-0023-pv-wt` 名称中的 ip-0023 为历史误标，不构成权威 Packet ID。
+- **冻结链登记**：原 Frozen Test Commit `e59a585637fcac442c08165d4c39721a2212c6bd`（tests/test_v4_baseline.py SHA-256 `f44e12a3ca6840e54675e8885e7f7e9e71662da997398874645d838f7679a6ee`，61 方法，有效 RED）保留为历史证据；编号勘正 commit 追加于其后，成为新的 Frozen Test Commit 登记点（完整 SHA 见 commit 链与 P&V 交付记录）。测试语义在勘正中零变化，故不触发解冻-重 RED 流程。
 
 ## 1. 需求映射（Packet 头）
 
@@ -79,10 +87,11 @@ FR/AC/NFR 编号由本 Packet 依 Coordinator Assignment v1.0 对 Issue 正文�
 | DI-010 | Code/CI | `.github/workflows/ci.yml`（quality-contracts L40 `python -m unittest -v tests.test_ci_contract`；unit-tests L64 `python scripts/run_ci_tests.py`；merge-gate job ~L222）+ `scripts/run_ci_tests.py`（unittest discover -s tests -v） | 基线 87f8670（亲读） | AC-8：新测试文件自动纳入 CI，无需改 runner/tests/test_ci_contract.py | evidence | 无冲突 |
 | DI-011 | Standard | `docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md`、`docs/LIMA_ISSUE_TO_IP_TO_PR_TO_CLOSURE_LIFECYCLE.md` | 基线 87f8670 | 交付流程、验证证据标准、PR 文案约束 | normative（流程） | D-0 对"Packet 先入 main"的偏离已获 Assignment 授权 |
 | DI-012 | Finding | 冻结前基线绿证明（本次亲验，worktree D:\BaseAIProject\LIMA-ip-0023-pv-wt @ 87f8670）：`python -m compileall -q lima scripts tests` exit 0；`python -m unittest discover -s tests` → `Ran 1441 tests … OK (skipped=4)` exit 0 | 2026-09-24 | 冻结前提；零新增 skip 基线 = 4 | evidence | 无冲突 |
+| DI-013 | Decision | Maintainer 检查点裁定（2026-09-24，经主会话转达）：D-0～D-4 全部采纳推荐值；拒绝复用 IP-0023（ENTRY60 closure 证据链预留），权威 Packet ID 改为 IP-0024；授权行政性编号勘正（追加普通 commit） | 2026-09-24 | D-0～D-4 终值、Packet ID、勘正执行方式与边界 | normative（高于 Assignment v1.0 的编号表述） | 与 Assignment v1.0 的 IP-0023 表述冲突 → 以本裁定为准（事实优先级 1 > 2，登记于 §0.1） |
 
 ## 3. Explicitly Rejected Inputs
 
-1. `docs/LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md` 中历史占位的"IP-0023（closure IP）"编号语义：属另一任务线（ENTRY60-CLOSURE-1）的历史文档；本 Packet 按 Assignment v1.0 采用 IP-0023 编号。已提请主会话/Coordinator 留意编号复用事实（见交付返回消息），不构成停止条件。
+1. `docs/LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md` 中的 "IP-0023（closure IP）" 编号语义：该编号为 ENTRY60 closure 证据链明确预留，**不归属于本任务**；本 Packet 权威 ID 为 IP-0024（Maintainer 检查点 2026-09-24 裁定，见 §0.1）。本条目记录该编号归属冲突的最终处置，不再对 IP-0023 语义做任何引用。
 2. `docs/LIMA_V4_Issue代码级实施约束与测试矩阵.md` 中 #57 的 BaselineRunResult（wall time p50/p95、queue wait、CPU/RSS/IO、token/费用、expert minutes、precision/recall proxy、failure taxonomy）：属 #57 PR2/PR3，本轮不冻结、不实现。
 3. #57 正文 BaselineRunSpec 输入中的 cold/warm 运行模式字段：#204 范围 9 条不含，Assignment 字段清单亦无 → 拒绝进入本轮 schema（防止 schema 后续破坏性变更，届时按 minor/major 版本演进处理）。
 4. 生产 `evaluation_data/v4/baseline_manifest.json` 落盘、真实公开样本清单填充、`benchmarks/v4/baseline/` 目录创建（D-4 选 A）：留 #57 PR1。
@@ -198,7 +207,7 @@ manifest 形状：`{schema_version: 1, datasets: [{name, fingerprint, role, lice
 **Files to Add（本 Frozen Test Commit，P&V 交付）**
 
 - `tests/test_v4_baseline.py`（P&V 独占，含内联 fixture，不建独立 fixture 目录）
-- `docs/LIMA_Implementation_Packet_IP-0023_BaselineRunSpec.md`（本文件）
+- `docs/LIMA_Implementation_Packet_IP-0024_BaselineRunSpec.md`（本文件；2026-09-24 由 IP-0023 文件名行政性勘正而来，见 §0.1）
 
 **Files to Add（Implementation 轮，预声明）**
 
@@ -214,7 +223,7 @@ manifest 形状：`{schema_version: 1, datasets: [{name, fingerprint, role, lice
 
 **Symbol-to-File Map**：§5.1 全部公共符号 → `lima/baseline_run_spec.py` 单文件；冻结测试 → `tests/test_v4_baseline.py`；Packet → 本文件。
 
-**冲突分析**：无其他活动 IP 占用上述文件；`lima/contracts/**` 全只读；#57 PR1（未来）是 `validate_baseline_manifest` 的生产 manifest 消费者，接口以本 Packet §5.7 为准。IP 编号 "IP-0023" 与 `docs/LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md` 的历史占位撞号，已按 Assignment 采用并记录（§3.1）。
+**冲突分析**：无其他活动 IP 占用上述文件；`lima/contracts/**` 全只读；#57 PR1（未来）是 `validate_baseline_manifest` 的生产 manifest 消费者，接口以本 Packet §5.7 为准。IP 编号归属：IP-0023 为 ENTRY60 closure 证据链预留（`docs/LIMA_DR-C1_ENTRY60-CLOSURE-1_Erratum_2026-09-13.md`），本 Packet 采用 IP-0024（Maintainer 检查点 2026-09-24 裁定，见 §0.1；分支名中的 ip-0023 为历史误标）。
 
 ## 7. 测试矩阵（tests/test_v4_baseline.py，冻结）
 
@@ -266,7 +275,7 @@ python -m bandit -q lima/baseline_run_spec.py     # 实现时追加
 ```bash
 git diff --check
 git diff --name-only --diff-filter=ACMRTUXB 87f867096ec604e269142380ac1c4a3dcc57d25a..HEAD
-# Frozen Test Commit 时 ⊆ {docs/LIMA_Implementation_Packet_IP-0023_BaselineRunSpec.md, tests/test_v4_baseline.py}
+# Frozen Test Commit 时 ⊆ {docs/LIMA_Implementation_Packet_IP-0024_BaselineRunSpec.md, tests/test_v4_baseline.py}
 # Implementation final 时 ⊆ 上述两项 + lima/baseline_run_spec.py（AC-6：生产扫描逻辑与既有 evaluator 语义零变化）
 ```
 
@@ -287,7 +296,7 @@ git diff --name-only --diff-filter=ACMRTUXB 87f867096ec604e269142380ac1c4a3dcc57
 ## 10. Completion Summary 模板（Implementation 交付时）
 
 ```text
-IP / 状态：IP-0023 / VERIFICATION
+IP / 状态：IP-0024 / VERIFICATION
 Base / Frozen Test Commit / final commit：<SHA 列表>
 修改文件与公共符号：lima/baseline_run_spec.py（§5.1 九符号）
 AC → Test → Result：逐 AC 附命令与输出摘要

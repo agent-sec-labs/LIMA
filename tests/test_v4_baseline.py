@@ -1202,5 +1202,56 @@ class TestDeepImmutability(_FrozenSpecTestCase):
         )
 
 
+    def test_standard_attribute_paths_expose_no_mutable_builtin_containers(self):
+        """No mutable builtin container may be reachable via attribute access.
+
+        Walks the spec and the objects reachable from its frozen fields
+        (field containers and repository/dataset entries) and, for every
+        dict/list/set/bytearray found through a standard (non-dunder)
+        attribute, attempts representative mutations. Implementation
+        names and container types are not pinned: the invariant is that
+        any such attempt either raises or leaves ``canonical_bytes()`` and
+        ``content_digest()`` unchanged. Dunder attributes such as
+        ``__dict__`` and interpreter-level tampering (``object.__setattr__``,
+        ctypes) are explicitly out of scope.
+        """
+        spec = from_mapping(_spec_mapping())
+        before_bytes = spec.canonical_bytes()
+        before_digest = spec.content_digest()
+        targets = [spec, spec.repositories, spec.datasets, spec.machine_profile]
+        targets.extend(spec.repositories)
+        targets.extend(spec.datasets)
+        for target in targets:
+            for name in dir(target):
+                if name.startswith("__"):
+                    continue
+                try:
+                    value = getattr(target, name)
+                except Exception:  # noqa: S112 -- probing; inaccessible attrs are skipped
+                    continue
+                if not isinstance(value, (dict, list, set, bytearray)):
+                    continue
+                with self.subTest(target=type(target).__name__, attribute=name):
+                    with contextlib.suppress(Exception):
+                        self._mutate_builtin_container(value)
+                    self.assertEqual(spec.canonical_bytes(), before_bytes)
+                    self.assertEqual(spec.content_digest(), before_digest)
+
+    @staticmethod
+    def _mutate_builtin_container(container):
+        if isinstance(container, dict):
+            container["__immutability_probe__"] = "probe"
+            for key in list(container)[:1]:
+                container[key] = "probe-replacement"
+        elif isinstance(container, list):
+            container.append("probe")
+            if container:
+                container[0] = "probe-replacement"
+        elif isinstance(container, set):
+            container.add("__immutability_probe__")
+        elif isinstance(container, bytearray):
+            container.extend(b"probe")
+
+
 if __name__ == "__main__":
     unittest.main()

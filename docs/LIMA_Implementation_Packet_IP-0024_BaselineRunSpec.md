@@ -377,3 +377,26 @@ AC → Test → Result：逐 AC 附命令与输出摘要
 - **退化实现抽查**：dataclass 字段恰为 7 个冻结契约字段（无 digest/canonical 缓存字段）；`canonical_bytes()`=`canonical_encode(self.to_canonical_value())`、`content_digest()`=`compute_content_digest(self.canonical_bytes())` 均现算返回，无构造期预计算存储被直接返回。
 - **三态结论（逐项）**：定向 68/68 全绿=满足；全量 1509 OK skipped=4=满足；ruff --no-cache 双文件零错误=满足；compileall/bandit/diff --check=满足；文件边界与冻结面不变=满足；无退化实现=满足；未验证项=无。
 - **本节 commit**：本验证记录以追加普通 commit 落盘（[IP-0024][CORRECTIVE-1]，完整 SHA 见 commit 链与 P&V 交付记录）；不 push、不改 PR/Issue。CORRECTIVE-1 验收面到此闭合，后续合并/PR 决策归 Coordinator。
+
+## 13. CORRECTIVE-2：标准属性可达可变容器缺陷与新冻结（2026-09-24 追加；仅追加，§1-§12 历史内容不删改）
+
+### 13.1 Maintainer 增量自审裁定（权威，2026-09-24，经主会话转达；本轮无 Coordinator 派发，按裁定直接执行）
+
+- **ERR-IP-0024-v2 对 MF-IP-0024-01 的 CLOSED 判定不成立**：`faa6597` 的 `_FrozenMapping._items` 仍是普通 dict——`spec.repositories[0]._items["commit_sha"]=…`、`spec.datasets[0]._items["role"]=…`、`spec.machine_profile._items["cores"]=…` 可直接修改冻结内容并改变 digest。**MF-IP-0024-01 保持 OPEN**。
+- 三方复现：主会话 digest `2e1c7936…`→`56bc3663…`（三路全通）；P&V 本轮亲验 digest `af237e6c801b1f276f8414cc4ab7843deab2ede79f6a420f7190e7fa00651192`→`8c02916c77373ab60b1a76673a8d0ce3552d5347bd30485cf7841bf04de0dbc8`。
+- **SF-PROCESS-02 追加教训**：已实证仍可破坏核心不变量的路径，不得因字段以下划线开头而降级为非阻断观察（下划线命名不是 Python 访问控制）。
+- §12.6 "CORRECTIVE-1 验收面闭合"的表述被本裁定推翻，以本节为准（§12.6 原文按仅追加纪律保留）。
+
+### 13.2 解冻理由与新冻结登记
+
+- 授权链：Maintainer 增量自审裁定（2026-09-24）→ 主会话按 Corrective Assignment 派发【最小修复轮第一阶段：P&V】→ 本 P&V 执行。d9e914f→faa6597 链上 `tests/test_v4_baseline.py` 冻结面再次解冻，扩充**恰一个**回归方法后重新 RED 并登记新 Frozen Test Commit（本节所在 CORRECTIVE-2 commit，完整 SHA 见 commit 链与 P&V 交付记录）。
+- 新增契约（补充 §12.3，不钉实现名/类型）：任何通过**标准属性访问**（非 dunder）可达的内部状态中不得存在可修改的内建容器（dict/list/set/bytearray）——对它们的修改尝试要么抛异常要么 canonical_bytes()/content_digest() 无可观察变化；不要求抵抗 `object.__setattr__`、ctypes 或解释器级恶意篡改。
+
+### 13.3 新方法、RED 证据与既有面不变证明（worktree @ faa6597，2026-09-24 亲验）
+
+- 新方法（唯一新增）：`TestDeepImmutability.test_standard_attribute_paths_expose_no_mutable_builtin_containers`（附 class 内私有助手 `_mutate_builtin_container`）；总测试数 **69**。
+- 有效 RED：`python -m unittest -v tests.test_v4_baseline.TestDeepImmutability` → `Ran 8 / FAILED (failures=4)`，4 条 subTest 失败全部为 `target='_FrozenMapping', attribute='_items'`（即裁定三路对应的 4 个 dict 实例），失败模式=变异静默成功后 bytes/digest 漂移——由 _items 可变路径本身触发；同类其余 7 方法全过。定向全文件：`Ran 69 / FAILED (failures=4)`（既有 68 全过）；全量：`Ran 1510 / FAILED (failures=4, skipped=4)`（1441 既有 + 68 冻结全过，skip=4 零新增）。实现修复归下一阶段。
+- 既有面不变：勘改前后 AST 对比——既有 68 个 test 方法逐字节等价、TestDeepImmutability 以外的全部 class 逐字节等价、新增 test 方法恰 1 个、删除 0。
+- 质量门禁：`ruff 0.16.5`；`python -m ruff check --no-cache tests/test_v4_baseline.py` → All checks passed（exit 0）；compileall 通过；`git diff --check` 干净。
+- Digest 登记：`tests/test_v4_baseline.py` 勘改前（faa6597）SHA-256 `2c75ad8bc11991a76781aefa84f04c73d5331a2d89723b572c26a7780826ce4e` → 新 `4eeb86036c981615a96b7be70df29a7eedaf7aaa488d7d2676d0ed24f83fa4ed`；required test count = 69。
+- 本轮文件边界：仅 `tests/test_v4_baseline.py`（新增 1 方法 + 1 个带理由 noqa）与本 Packet 追加节；产品文件零改动。

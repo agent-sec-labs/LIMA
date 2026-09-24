@@ -400,3 +400,9 @@ AC → Test → Result：逐 AC 附命令与输出摘要
 - 质量门禁：`ruff 0.16.5`；`python -m ruff check --no-cache tests/test_v4_baseline.py` → All checks passed（exit 0）；compileall 通过；`git diff --check` 干净。
 - Digest 登记：`tests/test_v4_baseline.py` 勘改前（faa6597）SHA-256 `2c75ad8bc11991a76781aefa84f04c73d5331a2d89723b572c26a7780826ce4e` → 新 `4eeb86036c981615a96b7be70df29a7eedaf7aaa488d7d2676d0ed24f83fa4ed`；required test count = 69。
 - 本轮文件边界：仅 `tests/test_v4_baseline.py`（新增 1 方法 + 1 个带理由 noqa）与本 Packet 追加节；产品文件零改动。
+
+### 13.4 CORRECTIVE-2 结果记录（Briefing 替代；主会话按 Maintainer 裁定四追加，2026-09-24）
+
+- 定向 Evidence Review **ERR-IP-0024-v3**（supersedes v2；v1/v2 保留；Record SHA-256 `12b7519b70b8095e3455ad3be0ce32240755f31757bcd9c666797351361af4a5`）：21 一致 / 0 不一致 / 0 无法核验——三路 `_items` 通路亲证封闭（`_items`=tuple，六种变异全 AttributeError）、64/64 变异弹幕全阻断且 digest/canonical bytes 逐字节稳定、标准属性闭包（68 对象）零可变内建容器；**MF-IP-0024-01 最终判定 CLOSED**（v2 的"带外观察"降级判定错误已由 v3 勘误取代）。
+- 质量/CI（ER 亲跑 + 主会话复验双源）：定向 69/69、全量 1510 OK（skipped=4 零新增）、`ruff 0.16.5` `--no-cache` 双文件零错误、bandit/compileall/`git diff --check` 全过；CI @`276cadf` 11/11 全绿（含 merge-gate）。
+- 本节即本轮 Briefing 产物（按裁定四不调用 Briefing Agent）；CORRECTIVE-2 验收面闭合，合并/PR 决策按 Maintainer 裁定五的条件授权执行。

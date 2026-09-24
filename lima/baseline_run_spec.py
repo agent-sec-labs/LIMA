@@ -170,17 +170,24 @@ def _fail(code: BaselineRunSpecErrorCode, field_path: str) -> NoReturn:
 class _FrozenMapping:
     """A read-only, JSON-compatible view over one validated field mapping.
 
-    Reads (subscript, ``len``, iteration, membership, ``get``/``keys``/
-    ``values``/``items``) behave like a plain ``dict`` whose values are
-    already-validated immutable scalars.  Every mutating operation and every
-    attribute assignment fails closed with ``TypeError``.  Equality holds
-    for another frozen view with equal items or an equal plain ``dict``.
+    Content is stored as an immutable tuple of key-value pairs, so no mutable
+    builtin container (``dict``/``list``/``set``/``bytearray``) is reachable
+    through any attribute.  Reads (subscript, ``len``, iteration,
+    membership, ``get``/``keys``/``values``/``items``) behave like a plain
+    ``dict`` whose values are already-validated immutable scalars, resolved
+    by a linear scan over at most a handful of frozen fields.  Every
+    mutating operation and every attribute assignment fails closed with
+    ``TypeError``.  Equality holds for another frozen view with equal items
+    or an equal plain ``dict`` (order-insensitive, like ``dict`` equality).
     """
 
     __slots__ = ("_items",)
 
     def __init__(self, items: dict[str, str | int]) -> None:
-        object.__setattr__(self, "_items", dict(items))
+        object.__setattr__(self, "_items", tuple(items.items()))
+
+    def _as_dict(self) -> dict[str, str | int]:
+        return dict(self._items)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise TypeError("baseline run spec fields are deeply immutable")
@@ -189,28 +196,34 @@ class _FrozenMapping:
         raise TypeError("baseline run spec fields are deeply immutable")
 
     def __getitem__(self, key: str) -> str | int:
-        return self._items[key]
+        for item_key, item_value in self._items:
+            if item_key == key:
+                return item_value
+        raise KeyError(key)
 
     def __iter__(self):
-        return iter(self._items)
+        return iter(self._as_dict())
 
     def __len__(self) -> int:
         return len(self._items)
 
     def __contains__(self, key: object) -> bool:
-        return key in self._items
+        return any(item_key == key for item_key, _ in self._items)
 
-    def keys(self):
-        return self._items.keys()
+    def keys(self) -> tuple[str, ...]:
+        return tuple(item_key for item_key, _ in self._items)
 
-    def values(self):
-        return self._items.values()
+    def values(self) -> tuple[str | int, ...]:
+        return tuple(item_value for _, item_value in self._items)
 
-    def items(self):
-        return self._items.items()
+    def items(self) -> tuple[tuple[str, str | int], ...]:
+        return self._items
 
     def get(self, key: str, default: object = None) -> object:
-        return self._items.get(key, default)
+        for item_key, item_value in self._items:
+            if item_key == key:
+                return item_value
+        return default
 
     def __setitem__(self, key: str, value: object) -> None:
         raise TypeError("baseline run spec fields are deeply immutable")
@@ -235,13 +248,13 @@ class _FrozenMapping:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, _FrozenMapping):
-            return self._items == other._items
+            return self._as_dict() == other._as_dict()
         if isinstance(other, dict):
-            return self._items == other
+            return self._as_dict() == other
         return NotImplemented
 
     def __repr__(self) -> str:
-        return repr(self._items)
+        return repr(self._as_dict())
 
 
 class _FrozenSequence:

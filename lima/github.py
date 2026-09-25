@@ -9,7 +9,7 @@ import random
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict
 
 _COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")

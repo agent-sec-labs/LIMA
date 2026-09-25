@@ -1,6 +1,4 @@
-import ast
 import io
-import os
 import tempfile
 import unittest
 import zipfile

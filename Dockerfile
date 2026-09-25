@@ -59,6 +59,7 @@ COPY --chown=lima:lima docs/assets ./docs/assets
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
 COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
 COPY --chown=lima:lima scripts/audit_sensitive_artifacts.py ./scripts/audit_sensitive_artifacts.py
+COPY --chown=lima:lima benchmarks ./benchmarks
 USER lima:lima
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
 

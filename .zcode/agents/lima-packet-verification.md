@@ -49,6 +49,27 @@ Packet 必须无歧义回答：本轮交付什么、不交付什么；要新增/
 2. **有效 RED**：证明每个失败由缺失交付触发，而不是由测试自身的 arrange 缺陷、环境问题或错误断言触发。对明显高风险的冻结面，先在临时位置试运行再冻结。
 3. **冻结**：产生 Frozen Test Commit，记录完整 40 位 SHA、验收面摘要与必须运行的命令。冻结后测试只读。
 4. **实现期间测试需要改变时必须先停下取得授权**：第一步是向 Coordinator 提交 Decision Request（说明缺陷证据、影响面、建议方案）；**经 Coordinator 裁定授权后**，才依次执行：更新 Packet/Decision Record → 撤销旧冻结状态 → 重新产生 RED → 创建新的 Frozen Test Commit。未获授权前冻结面保持原样，不得先行修改。**禁止在同一实现提交中悄悄修测试**，不得由实施者自行调整测试以取得通过。
+   - **机械测试修正的一次性授权（Mechanical Test Correction Allowance）**：当 Assignment 明示 `ALLOWED_ONCE` 时，你可以**不新增 Coordinator 调用**自行纠正一次纯测试机械缺陷并重新冻结，前提全部满足：不改变产品语义/公共接口/错误码/文件范围；只修 fixture/arrange/import/lint/测试基础设施错误；旧 Frozen Commit 保留；修正前缺陷证据+修正后有效 RED+新 Frozen Commit 完整记录；Implementation 未参与测试修改。产品行为、验收语义或文件范围问题仍走 Decision Request；授权仅一次，用尽即止。
+
+### 3.1 Pre-Freeze Harness Gate（Frozen Test Commit 前必须全部通过）
+
+1. 测试文件可以完整 import 与 collect（不得存在任何加载期错误）；
+2. 使用最小 NotImplemented stub 或临时桩模块，让所有 fixture、helper、参数组合至少执行到产品行为断言处（区分"fixture 缺陷"与"行为缺失"）；
+3. fixture 签名、参数数量、subTest 数据构造不得被 ModuleNotFoundError 掩蔽；
+4. Ruff 一律 `--no-cache`（陈旧缓存会假通过）；
+5. Ruff 必须在**产品模块缺席态**与**最小桩模块存在态**分别运行并双双通过（isort 的 first-party 分类依赖模块存在性，单态通过不可作为证据）；
+6. 临时桩必须位于临时目录且不得进入 Frozen Commit；
+7. RED 必须逐项归因于缺失产品行为，不能来自 arrange/import/lint 失败；
+8. 冻结测试方法预算默认不超过 35；超过时须在 Packet 中解释行为覆盖收益。
+
+### 3.2 核心承诺 invariant checklist（immutable / deterministic / fail-closed / secretless 等核心承诺必查）
+
+- 顶层属性（含 frozen dataclass 装饰与 slots）；
+- 嵌套容器（集合与条目两级）；
+- 私有 backing storage（如 `_items` 等内部存储）；
+- `__dict__` / `vars()` / slots 存在性；
+- 输入副本与输出副本隔离（from_mapping 输入、to_canonical_value 返回值）；
+- 禁止用缓存 digest/bytes 结果掩盖可变状态。
 
 ## 4. 独立验证职责（对 Implementation Final）
 

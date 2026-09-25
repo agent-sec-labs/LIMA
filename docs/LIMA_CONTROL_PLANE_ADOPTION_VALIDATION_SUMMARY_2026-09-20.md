@@ -76,3 +76,25 @@
 | 严格新会话 smoke / N8（阶段 D 后续批次） | 主会话会话内呈报与派发记录（会话交接材料）；N8 行为旁证：`D_commit_and_N8_record.md`（SHA-256 见上行 runtime-attestation 锚定） | 结果登记见 Playbook §12"阶段 D 后续批次收口登记"；子代理零工具调用的自报原文保留在受保护会话记录中；**N8 子代理调用正式 Attestation 状态 = TELEMETRY-MISSING**（旁证只证明行为结果，不提升运行状态） |
 
 维护：本摘要为审计快照，勘误以新版本发布并保留旧版哈希（同 Playbook §2.2 custody 规则）。
+
+## 8. 两次真实 SHADOW 试点结果（OPERATIONAL SHADOW 前基线，2026-09-25 登记）
+
+### 试点一（IP-0024，Issue #204，2026-09-24/25）
+
+- 16 次 Agent 调用；约 143.6 分钟。
+- Maintainer 自审发现嵌套可变（MF-IP-0024-01 第一轮：frozen dataclass 嵌套 list/dict 可变）与 `_items` 绕过（第二轮：`_FrozenMapping._items` 普通 dict 经下划线属性可改 digest）。
+- 最终合并 PR #205（merge commit a3b2d12…），关闭 #204。
+
+### 试点二（IP-0025，Issue #206，2026-09-25）
+
+- 12 次 Agent 调用；约 115.6 分钟；1 次 Maintainer 决策（2 项输出语义打包裁定）。
+- P&V 冻结测试出现 fixture/lint 缺陷（行 719 双参调用被 import 期 RED 掩蔽；I001 依赖模块存在性），经 DR-IP-0025-FTD-01 授权纠正环修复。
+- Maintainer 自审发现 `__dict__` 绕过（MF-IP-0025-01 + MF-IP-0024-02），同一 slots 修正跨 IP-0024/IP-0025 修复（PR #207，merge commit 1f688c2…）。
+- 最终合并 PR #207，关闭 #204（重开后）/#206。
+
+### 结论（治理复盘裁定原文口径）
+
+- 六 Agent 架构**可用于正常 OPERATIONAL SHADOW**；
+- **尚不足以启用 ACTIVE**；
+- Maintainer 自审和 CI 继续是正式合并门禁；
+- 三条流程教训 SF-PROCESS-01/02/03 已进入规范（分别落入 Playbook §3.2/§12、Evidence Review 定义 §3.1、P&V 定义 §3.1/§3.2 与 Coordinator 定义 §4.1）。

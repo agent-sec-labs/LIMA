@@ -87,6 +87,28 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 | `ACTIVE` | 意图记录可进入 Coordinator | 可创建 Evidence Challenge 与 PROVISIONAL-HOLD |
 
 - **当前阶段只允许 SHADOW**；ACTIVE 的启用前提是第 12 节阶段 E（生命周期规范与责任书完成规范晋升）。
+- **ACTIVE 不会因完成任意数量 SHADOW 闭环而自动开启**；启用门槛见第 12 节阶段 E 的 OPERATIONAL SHADOW 后续门槛。
+
+### 3.1 Execution Authorization（执行授权字段，独立于 Operating Mode；OPERATIONAL SHADOW）
+
+每个派发消息除 `Operating Mode: SHADOW | ACTIVE` 外，另携带独立字段：
+
+```text
+Execution Authorization: OBSERVE_ONLY | MAINTAINER_AUTHORIZED
+```
+
+- **SHADOW + OBSERVE_ONLY**：Intent 输出不得触发业务派发，仅记录影子结果（对照用途）。
+- **SHADOW + MAINTAINER_AUTHORIZED**：主会话可以按 **Maintainer 明确授权**派发 Coordinator/P&V/Implementation、创建分支与 PR，并在自审 + merge-gate CI 通过后执行**已授权**的合并。权限来源必须记录为 Maintainer 授权（授权原文引用），**不得写成 Intent 自动触发或 Evidence Review 状态**。
+- 两种 SHADOW 下 Evidence Review 都只能输出 Shadow Finding（建议权）；最终门禁恒为 **Maintainer 自审 + merge-gate CI**。
+- 字段缺失时按 OBSERVE_ONLY 处理并在派发记录中标注。
+
+### 3.2 精简纠正路由（OPERATIONAL SHADOW）
+
+- **报告文字错误**：责任角色自行修正，不派完整业务链；
+- **机械测试缺陷且 Assignment 已授权一次修正（ALLOWED_ONCE）**：P&V 自行纠正并重新 RED（满足 Coordinator 定义 §4.1 五条件），Implementation 继续，**不再调用 Coordinator**；
+- **冻结范围内产品缺陷**：Implementation 修复 → P&V/ER 增量复核；
+- **产品语义变化**：Coordinator 裁定，必要时才进入 Maintainer；
+- 增量修复**无需**重新调用 Intent 或完整 Briefing；主会话可用 **3～5 行 Addendum** 呈报（写入 Packet 或检查点记录）。
 - **Shadow Finding**：字段与 Challenge 相同的发现记录，ID 为 `SF-<Issue或IP>-<日期>-<序号>`；不产生状态转换、不阻断任何动作，仅供影子评估（误报/漏报统计与流程改进），在本地索引登记。
 - 任何模式下，主会话都不得把意图记录的 DRAFT 提升为 READY——**状态由 Intent Agent 判定，主会话只保存并按该状态路由**。
 - Briefing 在两种模式下行为一致（转述已审阅输入），不受该字段影响。
@@ -361,6 +383,18 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
     子代理继承核验（CHILD-INHERITANCE-VERIFIED）；**不要求当前 ZCode 无法提供的
     逐 Agent frontmatter 路由证明**（frontmatter 语义见第 2.1 节运行配置所有权）；
   - 完成后方可启用 ACTIVE 模式。
+
+阶段 E 前置：OPERATIONAL SHADOW 后续门槛（2026-09-25 治理复盘裁定）：
+  - 不再创建专门"试点 Issue"；治理 PR 合并后直接在正常 Maintainer 业务 Issue 中
+    使用 OPERATIONAL SHADOW（Execution Authorization=MAINTAINER_AUTHORIZED 按第 3.1 节）。
+  - 只有**连续两个正常业务 Issue** 同时满足以下条件，才重新讨论 ACTIVE（讨论不等于启用）：
+    ① Evidence Review 后 Maintainer 未再发现 P1/P2 级漏报；
+    ② 没有无效 Frozen Test Commit 进入 Implementation；
+    ③ 每 Issue Agent 调用 ≤8 次；④ 每 Issue Agent 总耗时 ≤75 分钟；
+    ⑤ 每 Issue Maintainer 决策 ≤1 次；
+    ⑥ 合并门禁调用取得可核验 Runtime Attestation；
+    ⑦ 文件边界、Issue 作者门禁与自审+CI 全部遵守。
+  - 达到门槛也只代表"可以讨论 ACTIVE"，不自动启用。
 ```
 
 ## 13. 主会话自身的注入防线

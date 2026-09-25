@@ -907,5 +907,94 @@ class PlatformGoldenPathTests(unittest.TestCase):
         )
 
 
+try:  # production seal (review-feedback wiring)
+    from lima.platform_contracts import seal_platform_review
+except ImportError:  # pragma: no cover - RED phase
+    seal_platform_review = None
+
+
+class _FakeInventory:
+    """Minimal inventory stand-in: the seal only needs fingerprint()."""
+
+    @staticmethod
+    def fingerprint() -> str:
+        return "0" * 64
+
+
+@unittest.skipIf(
+    seal_platform_review is None, "seal_platform_review not implemented (RED)"
+)
+class SealPlatformReviewTests(unittest.TestCase):
+    """Production V4 sealing: real AEP/oracle references everywhere."""
+
+    SNAPSHOT = "1" * 64
+
+    def test_seal_pins_real_references(self) -> None:
+        outcome = _outcome()
+        bundle = seal_platform_review(
+            outcome,
+            snapshot_sha256=self.SNAPSHOT,
+            repository="team/proj",
+        )
+
+        self.assertTrue(bundle.aep_artifact_id.startswith("aep-platform-"))
+        self.assertEqual(
+            bundle.aep_content_digest,
+            compute_content_digest(bundle.aep.to_dict()),
+        )
+        finding = outcome.findings[0]
+        driver_digest = hashlib.sha256(
+            finding.poc_driver_code.encode("utf-8")
+        ).hexdigest()
+        summary_digests = {
+            link.artifact_id: link.content_digest
+            for link in bundle.workflow_summary.evidence
+        }
+        for vep in bundle.veps:
+            self.assertEqual(
+                vep.source_aep.artifact_id, bundle.aep_artifact_id
+            )
+            self.assertEqual(
+                vep.source_aep.content_digest, bundle.aep_content_digest
+            )
+            self.assertEqual(vep.oracle.content_digest, driver_digest)
+            self.assertTrue(vep.oracle.oracle_artifact_id.startswith("oracle-"))
+            self.assertEqual(
+                summary_digests[vep.hypothesis_id],
+                compute_content_digest(vep.to_dict()),
+            )
+
+    def test_scanner_seal_payload_is_bounded_and_referenced(self) -> None:
+        from lima.repository_scanner import RepositoryScanner
+
+        outcome = _outcome()
+        sealed = RepositoryScanner._seal_platform_v4(
+            outcome, "team/proj", _FakeInventory()
+        )
+
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertFalse(sealed["payloads_truncated"])
+        self.assertIn(sealed["aep"]["artifact_id"], sealed["payloads"])
+        self.assertIn("execution_status", sealed["workflow_summary"])
+        self.assertIn("content_digest", sealed["workflow_summary"])
+        for entry in sealed["veps"]:
+            self.assertIn(entry["artifact_id"], sealed["payloads"])
+            self.assertEqual(
+                entry["content_digest"],
+                compute_content_digest(
+                    sealed["payloads"][entry["artifact_id"]]
+                ),
+            )
+        scanner = RepositoryScanner.__new__(RepositoryScanner)
+        payload = scanner._platform_collaboration(
+            "auto", "completed", outcome, v4=sealed
+        )
+        self.assertIs(payload["v4"], sealed)
+        self.assertNotIn(
+            "v4",
+            scanner._platform_collaboration("auto", "completed", outcome),
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

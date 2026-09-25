@@ -168,6 +168,42 @@ class FixtureRepositoryTests(unittest.TestCase):
             tuple(sorted(set(report.known_commits))),
         )
 
+    def test_symref_and_detached_lines_are_skipped(self) -> None:
+        """Symref and detached-HEAD presentation lines never reach rev-parse.
+
+        Mirrors and CI checkouts run ``git branch -a --contains`` on a
+        detached HEAD over remote-tracking refs, producing "(HEAD detached
+        ...)" and "origin/HEAD -> origin/x" lines; mine_impact must skip
+        both instead of feeding the arrow text into ``git rev-parse``
+        (which exits 128).  The fixture pins the topology itself, so the
+        test no longer depends on whatever branch layout the surrounding
+        checkout happens to have (a detached checkout with no branch at
+        HEAD used to fail the old real-repo assertion).
+        """
+
+        repo = self.repo
+        _fixture_git(
+            repo, "update-ref", "refs/remotes/origin/main", self.shas["C"]
+        )
+        _fixture_git(
+            repo,
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        )
+        # Detach at C: ``git branch -a --contains C`` now mingles the
+        # "(HEAD detached at ...)" marker and the "origin/HEAD -> ..."
+        # symref line with the two real branch spellings.
+        _fixture_git(repo, "checkout", "--detach", self.shas["C"])
+
+        report = mine_impact(repo, "core.cpp", 2)
+
+        self.assertEqual(report.branches, ("main", "origin/main"))
+        self.assertTrue(all("->" not in b for b in report.branches))
+        self.assertTrue(all("(" not in b for b in report.branches))
+        self.assertTrue(report.known_commits)
+        self.assertEqual(report.known_commits, (self.shas["C"],))
+
     def test_since_filters_introducing_commit(self) -> None:
         self._checkout("feat")
         self.assertEqual(
@@ -226,29 +262,6 @@ class GitGuardTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.work = Path(tmp.name) / "scratch"
         self.work.mkdir()
-
-    def test_symref_and_detached_lines_are_skipped(self):
-        """Detached-HEAD and symref lines never reach rev-parse (exit 128).
-
-        Mirrors and CI checkouts run ``git branch -a --contains`` on a
-        detached HEAD, producing "(HEAD detached ...)" and
-        "origin/HEAD -> origin/x" lines; mine_impact must skip both instead
-        of feeding the arrow text into ``git rev-parse`` (which exits 128).
-
-        Anchor note: the fixture asserts against whatever the current
-        repository actually contains -- at least one branch name and at
-        least one known commit must survive the symref/detached filter,
-        and no arrow or detached-parenthesis text may leak through.
-        """
-
-        path = "lima/impact_mining.py"
-        line = 5
-        report = mine_impact(REPO_ROOT, path, line)
-
-        self.assertTrue(report.branches, "no branch names survived the filter")
-        self.assertTrue(all("->" not in b for b in report.branches), report.branches)
-        self.assertTrue(all("(" not in b for b in report.branches))
-        self.assertTrue(report.known_commits)
 
     def test_write_commands_rejected(self) -> None:
         for argv in (

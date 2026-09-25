@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import difflib
+import json
 import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Callable, Iterable, Optional
+from typing import Callable, Final, Iterable, Optional
 
 from .adjudication import adjudicate_findings
 from .agent_orchestrator import (
@@ -15,6 +16,7 @@ from .agent_orchestrator import (
     run_platform_review,
 )
 from .agent_repro_tools import ReproWorkbench
+from .contracts.codec import compute_content_digest
 from .cxx_agent_models import LEGACY_AGENT_CWES, to_agent_finding_payload
 from .cxx_agent_tools import CxxAgentBudget
 from .cxx_agents import (
@@ -35,6 +37,7 @@ from .cxx_retrieval import RetrievalBudget, retrieve_repository
 from .diff_parser import parse_unified_diff
 from .metrics import metrics
 from .models import Finding, ReviewReport, Severity
+from .platform_contracts import seal_platform_review
 from .python_analyzer import PythonAstSecurityAnalyzer
 from .python_dataflow import PythonDataflowAnalyzer
 from .reviewer import Reviewer, SecurityRuleReviewer
@@ -564,7 +567,9 @@ class RepositoryScanner:
         )
         return finding
 
-    def _platform_collaboration(self, mode: str, status: str, outcome) -> dict:
+    def _platform_collaboration(
+        self, mode: str, status: str, outcome, v4: dict | None = None,
+    ) -> dict:
         """The collaboration.platform audit payload (platform design §6)."""
 
         states: dict[str, int] = {}
@@ -589,7 +594,7 @@ class RepositoryScanner:
                 "experiments": len(item.experiment_log),
                 "rejected_reason": item.rejected_reason,
             })
-        return {
+        payload = {
             "mode": mode,
             "status": status,
             "translation_units": list(outcome.translation_units),
@@ -606,6 +611,87 @@ class RepositoryScanner:
             "broker": broker_counts,
             "diagnostics": list(outcome.diagnostics),
             "targets": audit,
+        }
+        if v4 is not None:
+            payload["v4"] = v4
+        return payload
+
+    _V4_PAYLOAD_BUDGET_BYTES: Final = 512 * 1024
+    _V4_MAX_PAYLOAD_ARTIFACTS: Final = 64
+
+    @staticmethod
+    def _seal_platform_v4(outcome, repository_key: str, inventory) -> dict:
+        """Seal the platform review into V4 artifacts (review feedback #183).
+
+        The production path mints and validates the AEP, per-finding VEPs
+        (each pinned to the real AEP reference and a driver-digest oracle
+        reference) and the workflow summary; content-addressed ids and
+        digests ride the collaboration payload, and full artifact payloads
+        travel along under a byte budget so independent stages can consume
+        the sealed chain from one report.  Sealing failures degrade to an
+        honest diagnostic and never alter detection results.
+        """
+
+        budget = RepositoryScanner._V4_PAYLOAD_BUDGET_BYTES
+        max_artifacts = RepositoryScanner._V4_MAX_PAYLOAD_ARTIFACTS
+        try:
+            bundle = seal_platform_review(
+                outcome,
+                snapshot_sha256=inventory.fingerprint(),
+                repository=repository_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - bounded honest degradation
+            metrics.inc("repository_scan_platform_v4_seal_failed_total")
+            return {
+                "status": "seal-failed",
+                "diagnostics": [str(exc)[:300]],
+            }
+        veps = []
+        payloads: dict[str, dict] = {}
+        payload_bytes = 0
+        truncated = False
+        aep_payload = bundle.aep.to_dict()
+        aep_bytes = len(json.dumps(aep_payload, sort_keys=True))
+        if aep_bytes > budget:
+            truncated = True
+        else:
+            payloads[bundle.aep_artifact_id] = aep_payload
+            payload_bytes += aep_bytes
+        for vep in bundle.veps:
+            payload_dict = vep.to_dict()
+            veps.append({
+                "artifact_id": vep.hypothesis_id,
+                "content_digest": compute_content_digest(payload_dict),
+                "verification_verdict": vep.verification_verdict.value,
+            })
+            encoded = len(json.dumps(payload_dict, sort_keys=True))
+            if (
+                truncated
+                or len(payloads) >= max_artifacts
+                or payload_bytes + encoded > budget
+            ):
+                truncated = True
+                continue
+            payloads[vep.hypothesis_id] = payload_dict
+            payload_bytes += encoded
+        return {
+            "status": "sealed",
+            "aep": {
+                "artifact_id": bundle.aep_artifact_id,
+                "content_digest": bundle.aep_content_digest,
+                "audit_outcome": bundle.aep.audit_outcome.value,
+            },
+            "workflow_summary": {
+                "execution_status": (
+                    bundle.workflow_summary.execution_status.value
+                ),
+                "content_digest": compute_content_digest(
+                    bundle.workflow_summary.to_dict()
+                ),
+            },
+            "veps": veps,
+            "payloads": payloads,
+            "payloads_truncated": truncated,
         }
 
     def _run_platform_branch(
@@ -707,7 +793,10 @@ class RepositoryScanner:
             self._merge_cxx_finding(
                 findings, cxx_finding_index, candidate_finding
             )
-        return self._platform_collaboration(mode, "completed", outcome)
+        v4 = self._seal_platform_v4(outcome, repository_key, inventory)
+        return self._platform_collaboration(
+            mode, "completed", outcome, v4=v4
+        )
 
     def scan(
         self,

@@ -53,7 +53,8 @@ import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final
 
 from lima.agent_orchestrator import (
@@ -114,10 +115,12 @@ from lima.contracts.vep import (
 )
 
 __all__ = [
+    "PlatformSealBundle",
     "finding_to_vep",
     "patch_outcome_to_rvr",
     "platform_review_to_aep",
     "platform_review_to_workflow_summary",
+    "seal_platform_review",
 ]
 
 SCHEMA_VERSION: Final = SchemaVersion(4, 0)
@@ -964,6 +967,8 @@ def platform_review_to_workflow_summary(
     *,
     snapshot_sha256: str,
     repository: str,
+    source_aep: AepReference | None = None,
+    veps: Sequence[VulnerabilityEvidencePackage] | None = None,
 ) -> WorkflowSummary:
     """Summarize one platform review as a V4 chain workflow summary (T2).
 
@@ -996,11 +1001,17 @@ def platform_review_to_workflow_summary(
     instead.  ``workflow``/``security_outcome`` are deterministic stand-in
     links (same policy as T1's ``source_aep``/``oracle`` stand-ins) until
     the platform mints those artifacts; VEP evidence links are real
-    content-addressed references.  Required-mode hard failures raise
-    ``RuntimeError`` inside the orchestrator before any outcome exists, so
-    they cannot be summarized here.  Findings the VEP constructor rejects
-    (``abstain``, unknown states, malformed fields) are rejected here too
-    (fail-closed); more than 64 findings exceed the frozen evidence cap.
+    content-addressed references.  ``source_aep`` (optional) is passed
+    through to every :func:`finding_to_vep` call so sealed summaries pin
+    the real AEP reference instead of the finding-identity stand-in;
+    ``veps`` (optional) supplies already-sealed VEPs (one per finding) so
+    the summary's evidence links address exactly the sealed payloads
+    instead of rebuilding converters with different references.
+    Required-mode hard failures raise ``RuntimeError`` inside the
+    orchestrator before any outcome exists, so they cannot be summarized
+    here.  Findings the VEP constructor rejects (``abstain``, unknown
+    states, malformed fields) are rejected here too (fail-closed); more
+    than 64 findings exceed the frozen evidence cap.
     """
 
     if not isinstance(outcome, PlatformReviewOutcome):
@@ -1031,11 +1042,25 @@ def platform_review_to_workflow_summary(
     else:
         execution_status = ExecutionStatus.SUCCEEDED
 
+    sealed_veps: list[VulnerabilityEvidencePackage] | None = None
+    if veps is not None:
+        sealed_veps = list(veps)
+        if len(sealed_veps) != len(outcome.findings):
+            raise ValueError(
+                "sealed veps must correspond one-to-one with outcome findings"
+            )
     evidence: list[ArtifactLink] = []
     evidence_digests: list[str] = []
-    for finding in outcome.findings:
-        vep = finding_to_vep(
-            finding, snapshot_sha256=snapshot_sha256, repository=repository
+    for index, finding in enumerate(outcome.findings):
+        vep = (
+            sealed_veps[index]
+            if sealed_veps is not None
+            else finding_to_vep(
+                finding,
+                snapshot_sha256=snapshot_sha256,
+                repository=repository,
+                source_aep=source_aep,
+            )
         )
         digest = compute_content_digest(vep.to_dict())
         evidence_digests.append(digest)
@@ -1101,6 +1126,83 @@ def platform_review_to_workflow_summary(
         stage_attempts=tuple(stage_attempts),
         evidence=tuple(evidence),
         legacy_artifact_ids=(),
+    )
+
+
+# --- production seal: real AEP/oracle references for every sealed VEP -------
+
+@dataclass(frozen=True)
+class PlatformSealBundle:
+    """One sealed V4 artifact chain for a platform review.
+
+    ``aep_artifact_id``/``aep_content_digest`` content-address the AEP
+    payload that every VEP pins through ``source_aep``.
+    """
+
+    aep: AuditEvidencePackage
+    aep_artifact_id: str
+    aep_content_digest: str
+    veps: tuple[VulnerabilityEvidencePackage, ...]
+    workflow_summary: WorkflowSummary
+
+
+def seal_platform_review(
+    outcome: PlatformReviewOutcome,
+    *,
+    snapshot_sha256: str,
+    repository: str,
+) -> PlatformSealBundle:
+    """Seal one platform review into a V4 chain with real references.
+
+    This is the production wiring the T1 stand-in policy pointed at: the
+    AEP minted by :func:`platform_review_to_aep` is content-addressed
+    (artifact id derived from the payload digest) and every VEP pins it
+    through ``source_aep``; the oracle reference digests the actual PoC
+    driver bytes carried by the finding.  Conversions are fail-closed: a
+    finding the frozen VEP vocabulary cannot carry (or more than 64
+    findings) propagates the ``ValueError`` to the caller instead of
+    being silently dropped.
+    """
+
+    aep = platform_review_to_aep(
+        outcome, snapshot_sha256=snapshot_sha256, repository=repository
+    )
+    aep_digest = compute_content_digest(aep.to_dict())
+    aep_reference = AepReference(
+        artifact_id="aep-platform-" + _short_digest(aep_digest),
+        content_digest=aep_digest,
+        schema_version=SCHEMA_VERSION,
+    )
+    veps: list[VulnerabilityEvidencePackage] = []
+    for finding in outcome.findings:
+        driver_digest = hashlib.sha256(
+            finding.poc_driver_code.encode("utf-8")
+        ).hexdigest()
+        veps.append(
+            finding_to_vep(
+                finding,
+                snapshot_sha256=snapshot_sha256,
+                repository=repository,
+                source_aep=aep_reference,
+                oracle=OracleReference(
+                    oracle_artifact_id="oracle-" + _short_digest(driver_digest),
+                    content_digest=driver_digest,
+                ),
+            )
+        )
+    summary = platform_review_to_workflow_summary(
+        outcome,
+        snapshot_sha256=snapshot_sha256,
+        repository=repository,
+        source_aep=aep_reference,
+        veps=tuple(veps),
+    )
+    return PlatformSealBundle(
+        aep=aep,
+        aep_artifact_id=aep_reference.artifact_id,
+        aep_content_digest=aep_digest,
+        veps=tuple(veps),
+        workflow_summary=summary,
     )
 
 

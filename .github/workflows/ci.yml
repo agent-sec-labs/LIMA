@@ -233,6 +233,7 @@ jobs:
       - security-baseline
       - frontend-tests
       - frontend-e2e
+      - cxx-sidecar-integration
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -246,6 +247,7 @@ jobs:
           test "${{ needs.security-baseline.result }}" = "success"
           test "${{ needs.frontend-tests.result }}" = "success"
           test "${{ needs.frontend-e2e.result }}" = "success"
+          test "${{ needs.cxx-sidecar-integration.result }}" = "success"
   cxx-sidecar-integration:
     runs-on: ubuntu-latest
     steps:

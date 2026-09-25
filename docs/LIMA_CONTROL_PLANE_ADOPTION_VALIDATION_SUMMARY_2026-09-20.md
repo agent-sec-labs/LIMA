@@ -55,13 +55,13 @@
 - **六 Agent 加载 smoke check**：可发现性 PASS（六个 Agent 均由新会话 Agent 注册表发现并加载）；frontmatter 可解析 6/6 PASS；name 与文件名一致 6/6 PASS；工具白名单与定义一致 6/6 PASS；model/thoughtLevel 均按目标配置口径核对，未宣称 frontmatter 控制实际运行模型。
 - **N8 会话内模型切换负例**：PASS——主会话拒绝通过派发文字伪造运行模型切换（文字声明不构成模型切换；如需切换须新建独立配置会话并取得 SESSION-RUNTIME-VERIFIED）；被派发 Agent 未宣称已完成模型切换（自报"运行模型：无法核验"，零工具调用、零写操作）；无 Challenge、无 HOLD、无 Issue 变更。
 - **N8 运行证明口径（P3 收口登记）**：N8 行为结果 PASS；其唯一真实子代理调用的运行证明状态为 **TELEMETRY-MISSING**——受保护会话记录与 `D_commit_and_N8_record.md`（SHA-256 见 §7）是行为旁证，不是运行证明；没有独立 rollout，不能补写、推定或追溯生成 CHILD-INHERITANCE-VERIFIED。六 Agent 加载 smoke check 属静态加载检查，不为其虚构任何 Attestation 状态。
-- **边界声明**：以上仅覆盖加载核验与负例行为本身，**未执行任何真实 Issue 影子试点**；工作流仍为 SHADOW-only；ACTIVE 仍未启用。
+- **边界声明**〔截至 2026-09-20 的历史结论，已被 §8 两次试点与 OPERATIONAL SHADOW 规则取代〕：以上仅覆盖加载核验与负例行为本身，当时未执行任何真实 Issue 影子试点；当时工作流为 SHADOW-only；ACTIVE 当时未启用。**当前状态见 §8 与 §9**：两个真实 SHADOW Issue 已完成；治理冻结解除；当前进入 OPERATIONAL SHADOW；ACTIVE 仍关闭；后续两个正常业务 Issue 达标后，才可讨论 ACTIVE。
 
-## 6. 当前仍未满足的条件（如实）
+## 6. 当时仍未满足的条件〔截至 2026-09-20 的历史结论，已被 §8 取代〕
 
-- 正式影子试点：未启动；对象应为"下一个全新 Issue"，尚未选择。
-- ACTIVE：未启用；启用前提 = 阶段 E 生命周期规范与责任书规范晋升完成 + 主会话 SESSION-RUNTIME-VERIFIED + 子代理 CHILD-INHERITANCE-VERIFIED，均未满足。
-- #60 保持 PAUSED-BY-MAINTAINER（恢复须走其 Ledger 恢复门禁）；#94 仅作历史回放样本，状态保持关闭。
+- 正式影子试点：当时未启动；对象应为"下一个全新 Issue"，尚未选择。〔已由 IP-0024/#204 与 IP-0025/#206 两次真实试点完成取代。〕
+- ACTIVE：截至本文历史时点未启用；启用前提 = 阶段 E 生命周期规范与责任书规范晋升完成 + 主会话 SESSION-RUNTIME-VERIFIED + 子代理 CHILD-INHERITANCE-VERIFIED。〔当前仍未满足，ACTIVE 仍关闭；后续门槛见 Playbook §12 阶段 E 前置。〕
+- #60 保持 PAUSED-BY-MAINTAINER（恢复须走其 Ledger 恢复门禁）；#94 仅作历史回放样本，状态保持关闭。〔此条仍然有效。〕
 
 ## 7. 原始证据留存位置（类别说明与 SHA-256 锚定）
 
@@ -98,3 +98,12 @@
 - **尚不足以启用 ACTIVE**；
 - Maintainer 自审和 CI 继续是正式合并门禁；
 - 三条流程教训 SF-PROCESS-01/02/03 已进入规范（分别落入 Playbook §3.2/§12、Evidence Review 定义 §3.1、P&V 定义 §3.1/§3.2 与 Coordinator 定义 §4.1）。
+
+## 9. 治理修订定向 Canary 结果（2026-09-25，OPERATIONAL SHADOW 修订 PR #209）
+
+- **C1 PASS**（更新后 P&V 亲验）：Pre-Freeze Harness Gate 在冻结前检出 fixture 参数缺陷（NotImplemented 桩执行暴露 TypeError，冻结拒绝）。
+- **C2：PASS WITH FIXTURE CORRECTION**（双阶段结论）——第一阶段：更新后的 P&V 确实执行了双态检查，但初始测试材料未构造出"缺席态通过、存在态失败"的分化（两态同为 I001），P&V 如实返回 FAIL 并提交改进建议，**未制造假通过**；第二阶段：主会话修正 Canary fixture（isort 分节分类构造，复刻 IP-0025 机理）并机械复现——缺席态 exit 0（All checks passed）、存在态 I001/exit 1。最终判定双态门禁有效；同时证明 **Canary fixture 本身必须接受有效性检查**。
+- **C3 PASS**（更新后 ER 亲验）：Core Claim Challenge 独立反证探针检出全部三种可变路径（嵌套 dict / `_items` dict / `__dict__`），零降级；`object.__setattr__` 正确登记越约且未反向稀释约内发现。
+- **C4 PASS**（更新后 P&V 亲验）：ALLOWED_ONCE 自纠闭环成立（检出→最小修正→有效 RED→五条件核对→授权消耗一次，不新增 Coordinator 调用）。
+
+Canary 沙箱位于仓库外临时目录，已清理，不入库。

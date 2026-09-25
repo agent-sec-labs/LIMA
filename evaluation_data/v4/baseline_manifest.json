@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "datasets": [
+    {
+      "name": "lima-popular-python-calibration-v1",
+      "fingerprint": "049d69b25731e51f75a800c5c406ab2d8faef1257d7dacfb275f9734b407b986",
+      "role": "calibration",
+      "source": "evaluation_data/popular_calibration_v1.json",
+      "license": "Upstream materials (source code, diffs, commit messages, advisory text) retain their original copyrights and licenses; LIMA's annotations, selection logic, oracles, schemas, and tooling are Apache-2.0 (evaluation_data/README.md, Provenance requirements).",
+      "pinned_file": "evaluation_data/popular_calibration_v1.json",
+      "entries": [
+        {
+          "repository": "pypa/pip",
+          "commit_sha": "a52069365063ea813fe3a3f8bac90397c9426d35"
+        },
+        {
+          "repository": "danielgatis/rembg",
+          "commit_sha": "02ca21f4cae4cefc6caf5657ed41970d05f19109"
+        },
+        {
+          "repository": "yt-dlp/yt-dlp",
+          "commit_sha": "7fd74d10097833ebce0cb162e0ccf7825de9b768"
+        },
+        {
+          "repository": "MervinPraison/PraisonAI",
+          "commit_sha": "0d40fa93aadae4187651e0d48655bf5a530ed8e2"
+        },
+        {
+          "repository": "janeczku/calibre-web",
+          "commit_sha": "c53817859a0e46820a0a92bbd0697805f7e65445"
+        }
+      ]
+    },
+    {
+      "name": "lima-popular-python-external-holdout-v2",
+      "fingerprint": "23d4ef1da097e6af3d1099546d3cb6167b8964ecdc23f546ad5a835f342b284a",
+      "role": "external-holdout",
+      "source": "evaluation_data/popular_external_holdout_v2.json",
+      "license": "Upstream materials (source code, diffs, commit messages, advisory text) retain their original copyrights and licenses; LIMA's annotations, selection logic, oracles, schemas, and tooling are Apache-2.0 (evaluation_data/README.md, Provenance requirements).",
+      "pinned_file": "evaluation_data/popular_external_holdout_v2.json",
+      "entries": [
+        {
+          "repository": "gradio-app/gradio",
+          "commit_sha": "7d77024cb8f9cfd39a6468de9534e58dcfa69f49"
+        },
+        {
+          "repository": "Comfy-Org/ComfyUI",
+          "commit_sha": "35c1470935044be5610a81d46e57922a8a598c6c"
+        },
+        {
+          "repository": "python-pillow/Pillow",
+          "commit_sha": "87e788339e8746e7ceb8e901df9b0c7fda55e975"
+        },
+        {
+          "repository": "apache/airflow",
+          "commit_sha": "a0220e0fd56bee7892fac2cbd3ac833f9b236e79"
+        },
+        {
+          "repository": "langchain-ai/langchain",
+          "commit_sha": "61938a02a1e76fa6c6e8203c98a9344a179c810d"
+        }
+      ]
+    },
+    {
+      "name": "lima-real-world-pilot-v1",
+      "fingerprint": "7d88728caca8bc3387802b7bdaa09b59e5ffe1fede21a71c3d314bd63eb0c106",
+      "role": "development",
+      "source": "evaluation_data/real_world_security_cases.json",
+      "license": "Upstream materials (source code, diffs, commit messages, advisory text) retain their original copyrights and licenses; LIMA's annotations, selection logic, oracles, schemas, and tooling are Apache-2.0 (evaluation_data/README.md, Provenance requirements).",
+      "pinned_file": "evaluation_data/real_world_security_cases.json",
+      "entries": [
+        {
+          "repository": "aio-libs/aiohttp",
+          "commit_sha": "33ccdfb0a12690af5bb49bda2319ec0907fa7827"
+        },
+        {
+          "repository": "django/django",
+          "commit_sha": "6b178a3e930f72069f3cda2e6a09d1b320fc09ec"
+        },
+        {
+          "repository": "gitpython-developers/GitPython",
+          "commit_sha": "da545232d0401fb9fb7660f9ff67991996674dda"
+        }
+      ]
+    }
+  ]
+}

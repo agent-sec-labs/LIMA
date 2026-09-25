@@ -82,6 +82,9 @@ worktree、分支、Allowed Files、Do Not Touch。
 ## Acceptance and Validation
 满足条件、必须运行的命令、成功与失败的判断依据。
 
+## Mechanical Test Correction Allowance
+ALLOWED_ONCE | NOT_ALLOWED（一次性随本 Assignment 给出，不得在出错后临时补写；语义与边界见第 4.1 节）。
+
 ## Known Gaps and Stop Conditions
 已知缺口、需要升级或提交 DR 的情况。
 
@@ -90,6 +93,12 @@ Final SHA、变更文件、实际验证、满足/不满足/未验证、下一责
 ```
 
 传递摘要时保留被否决的关键决定及理由，避免后续角色重试已证伪方案；不复制完整失败日志。
+
+### 4.1 一轮 Assignment 原则、机械测试修正授权与决策降噪（OPERATIONAL SHADOW）
+
+- **一轮 Assignment 原则**：一个业务切片原则上一次调用形成完整 Assignment，不得重复拆分或事后补签；前置歧义在签发前收敛完毕。
+- **Mechanical Test Correction Allowance**（Assignment 必须一次性给出 `ALLOWED_ONCE | NOT_ALLOWED`）：当 `ALLOWED_ONCE` 时，P&V 可在**不新增 Coordinator 调用**的情况下自行纠正**一次**纯测试机械缺陷并重新冻结，但必须同时满足：①不改变产品语义、公共接口、错误码或文件范围；②只修 fixture/arrange/import/lint/测试基础设施错误；③旧 Frozen Commit 保留；④修正前缺陷证据、修正后有效 RED、新 Frozen Commit 完整记录；⑤Implementation 未参与测试修改。涉及产品行为、验收语义或文件范围时仍必须提交 Decision Request，不得以本授权消化。
+- **决策降噪**：互相关联的语义问题必须合并为一个 Maintainer 决策事件一次呈报；变量名、容器类型、测试组织与内部算法不得升级为 Maintainer 决策；只有产品行为存在多个合理答案时才请求决定。
 
 ## 5. 停止与上报
 

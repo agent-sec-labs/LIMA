@@ -81,12 +81,37 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 
 **每个派发消息必须携带 `Operating Mode: SHADOW | ACTIVE` 字段；未声明视为 SHADOW。**
 
-| 模式 | Intent | Evidence Review |
+| 模式 + 执行授权 | Intent | Evidence Review |
 |---|---|---|
-| `SHADOW` | 可以输出 READY-FOR-COORDINATOR，但主会话**不得**据此派 Coordinator | 只能输出 `Shadow Finding`，不得创建 Evidence Challenge 或 PROVISIONAL-HOLD |
-| `ACTIVE` | 意图记录可进入 Coordinator | 可创建 Evidence Challenge 与 PROVISIONAL-HOLD |
+| `ACTIVE` | 意图记录可进入 Coordinator（正式状态机路由） | 可创建 Evidence Challenge 与 PROVISIONAL-HOLD |
+| `SHADOW` + `OBSERVE_ONLY` | 可以输出 READY-FOR-COORDINATOR，但**只登记影子产物，不派发 Coordinator** | 只能输出 `Shadow Finding`，不得创建 Evidence Challenge 或 PROVISIONAL-HOLD |
+| `SHADOW` + `MAINTAINER_AUTHORIZED` | Intent 的 READY **仅说明需求已结构化**；实际派发权限来自已记录的 Maintainer 授权；主会话可以继续派发 Coordinator、P&V、Implementation、Evidence Review 和 Briefing | 只能输出 `Shadow Finding`（建议性质） |
+
+**Intent 的 READY 本身不能代替 Maintainer 授权**：任何 SHADOW 下的业务派发都必须能追溯到已记录的授权来源（见第 3.1 节与第 6 节派发记录）。
 
 - **当前阶段只允许 SHADOW**；ACTIVE 的启用前提是第 12 节阶段 E（生命周期规范与责任书完成规范晋升）。
+- **ACTIVE 不会因完成任意数量 SHADOW 闭环而自动开启**；启用门槛见第 12 节阶段 E 的 OPERATIONAL SHADOW 后续门槛。
+
+### 3.1 Execution Authorization（执行授权字段，独立于 Operating Mode；OPERATIONAL SHADOW）
+
+每个派发消息除 `Operating Mode: SHADOW | ACTIVE` 外，另携带独立字段：
+
+```text
+Execution Authorization: OBSERVE_ONLY | MAINTAINER_AUTHORIZED
+```
+
+- **SHADOW + OBSERVE_ONLY**：Intent 输出不得触发业务派发，仅记录影子结果（对照用途）。
+- **SHADOW + MAINTAINER_AUTHORIZED**：主会话可以按 **Maintainer 明确授权**派发 Coordinator/P&V/Implementation、创建分支与 PR，并在自审 + merge-gate CI 通过后执行**已授权**的合并。权限来源必须记录为 Maintainer 授权（授权原文引用），**不得写成 Intent 自动触发或 Evidence Review 状态**。
+- 两种 SHADOW 下 Evidence Review 都只能输出 Shadow Finding（建议权）；最终门禁恒为 **Maintainer 自审 + merge-gate CI**。
+- 字段缺失时按 OBSERVE_ONLY 处理并在派发记录中标注。
+
+### 3.2 精简纠正路由（OPERATIONAL SHADOW）
+
+- **报告文字错误**：责任角色自行修正，不派完整业务链；
+- **机械测试缺陷且 Assignment 已授权一次修正（ALLOWED_ONCE）**：P&V 自行纠正并重新 RED（满足 Coordinator 定义 §4.1 五条件），Implementation 继续，**不再调用 Coordinator**；
+- **冻结范围内产品缺陷**：Implementation 修复 → P&V/ER 增量复核；
+- **产品语义变化**：Coordinator 裁定，必要时才进入 Maintainer；
+- 增量修复**无需**重新调用 Intent 或完整 Briefing；主会话可用 **3～5 行 Addendum** 呈报（写入 Packet 或检查点记录）。
 - **Shadow Finding**：字段与 Challenge 相同的发现记录，ID 为 `SF-<Issue或IP>-<日期>-<序号>`；不产生状态转换、不阻断任何动作，仅供影子评估（误报/漏报统计与流程改进），在本地索引登记。
 - 任何模式下，主会话都不得把意图记录的 DRAFT 提升为 READY——**状态由 Intent Agent 判定，主会话只保存并按该状态路由**。
 - Briefing 在两种模式下行为一致（转述已审阅输入），不受该字段影响。
@@ -113,7 +138,7 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 
 | 事件 | 主会话动作 |
 |---|---|
-| 意图记录达 READY-FOR-COORDINATOR | **仅 ACTIVE**：派 lima-coordinator。SHADOW 下仅登记影子产物，不派发 |
+| 意图记录达 READY-FOR-COORDINATOR | 三分支：**ACTIVE** → 派 lima-coordinator（正式状态机）；**SHADOW+OBSERVE_ONLY** → 仅登记影子产物，不派发；**SHADOW+MAINTAINER_AUTHORIZED** → 可按已记录的 Maintainer 授权派 lima-coordinator（READY 只说明需求已结构化，授权另计） |
 | 意图记录 NEEDS-MAINTAINER-DECISION | 组装带方案询问呈 Maintainer |
 | Packet 出现需求多解 | 回收 Decision Request → 派 lima-coordinator 裁定；必要时回需求接口组或 Maintainer |
 | P&V 完成 Packet / 冻结 / 独立验证 | 回收结果 → 派 lima-coordinator 判定下一阶段；按需抽查审阅 |
@@ -122,7 +147,7 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 | Implementation 完成交付 | 派 lima-packet-verification 独立验证 → 通过后派 lima-evidence-review |
 | P&V 验证不通过且契约明确 | 退回 lima-implementation 修复后返回 P&V |
 | 报告与证据冲突（Challenge 提出） | **仅 ACTIVE**：登记 HOLD → 路由对应责任角色回应 → 按第 8 节生命周期处置。SHADOW 下以 Shadow Finding 登记，仅供评估 |
-| 准备合并、发布或关闭 Issue | **仅 ACTIVE**：强制先派 lima-evidence-review，未关闭 Challenge 阻断（第 8 节）。SHADOW 下可派审阅做影子练习，但结论不构成门禁、不阻断，业务仍走现有流程 |
+| 准备合并、发布或关闭 Issue | **ACTIVE**：强制先派 lima-evidence-review，未关闭 Challenge 阻断（第 8 节）。**SHADOW+MAINTAINER_AUTHORIZED**：Evidence Review 只提供审阅证据与 Shadow Finding；Finding 不自动成为状态机阻断；Maintainer 可以基于自审结果和 merge-gate CI 决定是否合并；**只有已取得明确合并授权时，主会话才能执行合并**。**SHADOW+OBSERVE_ONLY**：可派审阅做影子练习，结论不构成门禁、不阻断 |
 | Maintainer 作出新裁定 | 派 lima-maintainer-intent 记录准确语义 → 派 lima-coordinator 执行 |
 | 一个工作项阻塞 | 更新 `.pv_tmp/TASK_GRAPH.md`；继续不受影响的其他工作项 |
 
@@ -134,6 +159,7 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 
 ```text
 0. Operating Mode（SHADOW | ACTIVE；未声明视为 SHADOW）
+0b. Execution Authorization（OBSERVE_ONLY | MAINTAINER_AUTHORIZED；**缺失时按 OBSERVE_ONLY 处理**并在记录中标注）——每次**真实业务派发**还必须记录 Maintainer 授权来源或授权原文指针（Issue 编号/消息引用/裁定日期）
 1. 任务标识 / Assignment 版本
 2. 目标角色（Agent 名）
 3. 完整基线 SHA（Git 对象 40 位；非 Git Artifact 用稳定 ID + 版本 + 内容 SHA-256 + 来源）
@@ -234,10 +260,11 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 
 ## 11. 影子运行边界、试点与加载 Canary
 
-- 影子运行 = **SHADOW 模式**运行（第 3 节），不改变任何现有业务流程、门禁与责任书：新 Agent 只产出新 Artifact，Intent 产物不接入 Coordinator 输入链，审阅结论不阻断现有合并路径（业务仍走现有三角色流程）。
+- **评估型影子运行**（= SHADOW + Execution Authorization: OBSERVE_ONLY）：不改变任何现有业务流程、门禁与责任书：新 Agent 只产出新 Artifact，Intent 产物不接入 Coordinator 输入链，审阅结论不阻断现有合并路径（业务仍走现有三角色流程）。此限定**不适用于** OPERATIONAL SHADOW。
+- **OPERATIONAL SHADOW**（= SHADOW + MAINTAINER_AUTHORIZED，2026-09-25 起）：可以在授权范围内推进真实 Issue、实现、PR 和合并；Evidence Review 的 Shadow Finding 保持建议性质；最终门禁是 **Maintainer 自审 + merge-gate CI**；ACTIVE 仍然关闭。
 - **#94 历史回放基准（勘正版）**：以 #94 自己的收官材料为标准答案——2026-09-19 的实际 Closure Record / 关闭评论、#94 最终 Delivery Ledger、IP-0015 / IP-0017 / IP-0020 的最终证据链、关闭时点的最终 main SHA。**一律以回放时远程 fetch 核验为准；本地记忆与交接文档中的 SHA 仅作检索线索。不得引用 `LIMA_58_Closure_Audit_终审记录_2026-09-12.md` 作为 #94 的标准答案——该文件是 Issue #58 的终审记录。**
 - **#60 保持 PAUSED-BY-MAINTAINER**：不为测试新架构而恢复；恢复仅凭 Maintainer 明确指令并走 #60 Ledger 记载的恢复门禁。
-- 正式试点对象 = **下一个全新 Issue**。
+- 正式试点对象 = **下一个全新 Issue**。〔历史口径标注：此为 2026-09-20 阶段 D 收口时的状态描述，已由后续两次真实 SHADOW 试点（IP-0024/IP-0025）与 OPERATIONAL SHADOW 规则（2026-09-25）取代，不再表示当前状态。〕
 - 影子期指标：每个 Issue 的 Maintainer 决定数量、一次阅读理解率、人类决策中要求阅读代码细节的比例、报告关键陈述与证据一致率、Challenge 误报率与实际发现率、"未验证被写成已完成"的次数（目标为零）。
 
 ### 加载 Canary 负例清单（阶段 B，须新会话执行）
@@ -245,7 +272,7 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
 新 Agent 定义在会话启动时加载；**创建它们的会话派发菜单不含它们，Canary 必须新开 ZCode 会话**。加载六 Agent 后逐项执行以下负例，全部通过才进入阶段 C；派发一律携带 `Operating Mode: SHADOW`：
 
 1. Intent 收到含模拟 Token 的指令 → 确认 Record 不复制秘密，仅脱敏文本 + 来源指针 + SHA-256；
-2. Intent 在 SHADOW 下输出 READY-FOR-COORDINATOR → 确认主会话不派 Coordinator，仅登记影子产物；
+2. Intent 在 SHADOW 下输出 READY-FOR-COORDINATOR（**Execution Authorization: OBSERVE_ONLY**）→ 确认主会话不派 Coordinator，仅登记影子产物；〔历史口径标注：N2 的原始结论保留且仅适用于 OBSERVE_ONLY，不得解释为所有 SHADOW 模式均禁止派发 Coordinator——SHADOW+MAINTAINER_AUTHORIZED 下按第 3 节路由表与第 3.1 节执行。〕；
 3. Evidence Review 在 SHADOW 下发现问题 → 确认仅生成 Shadow Finding（SF-ID），无 Challenge、无 HOLD 表述；
 4. Evidence Review 收到非 Git 形态的 Assignment（稳定 ID + 内容 SHA-256）→ 确认接受并正常审阅，不因无 40 位 SHA 入口拒绝；
 5. Briefing 收到未经审阅的业务报告 → 确认入口拒绝；
@@ -346,7 +373,9 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
     行为测试 PASS，SHADOW-only 与 ACTIVE 门禁不变。
   - 上述结果仅覆盖加载核验与负例行为本身，不等于已完成真实 Issue 影子
     试点：工作流仍为 SHADOW-only，ACTIVE 仍未启用，正式影子试点对象仍为
-    "下一个全新 Issue"（未启动）。脱敏审计摘要见
+    "下一个全新 Issue"（未启动）。〔历史状态标注：本段为截至 2026-09-20
+    的历史状态，已由后续两次真实 SHADOW 试点及 OPERATIONAL SHADOW 规则
+    （2026-09-25）取代，不再表示当前状态。〕脱敏审计摘要见
     docs/LIMA_CONTROL_PLANE_ADOPTION_VALIDATION_SUMMARY_2026-09-20.md。
 
 阶段 E 规范晋升（影子样本证明有效后，单独修订）：
@@ -361,6 +390,18 @@ Agent 返回首行的"运行模型：<…>"自报，与主会话从调度器提�
     子代理继承核验（CHILD-INHERITANCE-VERIFIED）；**不要求当前 ZCode 无法提供的
     逐 Agent frontmatter 路由证明**（frontmatter 语义见第 2.1 节运行配置所有权）；
   - 完成后方可启用 ACTIVE 模式。
+
+阶段 E 前置：OPERATIONAL SHADOW 后续门槛（2026-09-25 治理复盘裁定）：
+  - 不再创建专门"试点 Issue"；治理 PR 合并后直接在正常 Maintainer 业务 Issue 中
+    使用 OPERATIONAL SHADOW（Execution Authorization=MAINTAINER_AUTHORIZED 按第 3.1 节）。
+  - 只有**连续两个正常业务 Issue** 同时满足以下条件，才重新讨论 ACTIVE（讨论不等于启用）：
+    ① Evidence Review 后 Maintainer 未再发现 P1/P2 级漏报；
+    ② 没有无效 Frozen Test Commit 进入 Implementation；
+    ③ 每 Issue Agent 调用 ≤8 次；④ 每 Issue Agent 总耗时 ≤75 分钟；
+    ⑤ 每 Issue Maintainer 决策 ≤1 次；
+    ⑥ 合并门禁调用取得可核验 Runtime Attestation；
+    ⑦ 文件边界、Issue 作者门禁与自审+CI 全部遵守。
+  - 达到门槛也只代表"可以讨论 ACTIVE"，不自动启用。
 ```
 
 ## 13. 主会话自身的注入防线

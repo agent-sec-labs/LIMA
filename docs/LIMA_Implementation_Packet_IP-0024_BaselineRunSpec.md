@@ -406,3 +406,24 @@ AC → Test → Result：逐 AC 附命令与输出摘要
 - 定向 Evidence Review **ERR-IP-0024-v3**（supersedes v2；v1/v2 保留；Record SHA-256 `12b7519b70b8095e3455ad3be0ce32240755f31757bcd9c666797351361af4a5`）：21 一致 / 0 不一致 / 0 无法核验——三路 `_items` 通路亲证封闭（`_items`=tuple，六种变异全 AttributeError）、64/64 变异弹幕全阻断且 digest/canonical bytes 逐字节稳定、标准属性闭包（68 对象）零可变内建容器；**MF-IP-0024-01 最终判定 CLOSED**（v2 的"带外观察"降级判定错误已由 v3 勘误取代）。
 - 质量/CI（ER 亲跑 + 主会话复验双源）：定向 69/69、全量 1510 OK（skipped=4 零新增）、`ruff 0.16.5` `--no-cache` 双文件零错误、bandit/compileall/`git diff --check` 全过；CI @`276cadf` 11/11 全绿（含 merge-gate）。
 - 本节即本轮 Briefing 产物（按裁定四不调用 Briefing Agent）；CORRECTIVE-2 验收面闭合，合并/PR 决策按 Maintainer 裁定五的条件授权执行。
+
+## 14. CORRECTIVE-3（MF-IP-0024-02）：实例级可写 `__dict__` 缺陷、解冻扩充与新冻结登记（2026-09-25 追加；仅追加，§1-§13 历史内容不删改）
+
+### 14.1 缺陷记录（MF-IP-0024-02；Maintainer 增量自审裁定 2026-09-25；主会话已复现；P&V 本轮亲验）
+
+- 缺陷：`lima/baseline_run_spec.py` 的 `BaselineRunSpec`（`@dataclasses.dataclass(frozen=True)`，276cadf 后 L576 附近）未用 slots，实例暴露可写 `__dict__`——`spec.__dict__["seed"] = 0` 无异常静默改写冻结状态，`canonical_bytes()`/`content_digest()` 随之漂移（P&V 亲验 @ 3d2a407：bytes/digest 均变化，canonical 输出 `"seed":20260924` → `"seed":0`）。§12/§13 两轮 CORRECTIVE 封闭了标准属性路径的内建容器可变性，但 `__dict__` 属 dunder，被两轮闭包扫描（只枚举非 dunder 属性）天然漏扫——IP-0025 侧同构缺陷 MF-IP-0025-01 并行登记（见 IP-0025 Packet §13）。
+- Source Issue #204 已重开并留言记录（远端操作归主会话）。
+- **SF-PROCESS-03 登记**：不可变性闭包扫描以后必须显式检查 `__dict__`、`vars()`、slots 和嵌套 backing storage；不能只枚举非 dunder 属性。
+
+### 14.2 解冻、授权与交付路径
+
+- 授权链：Maintainer 增量自审裁定（2026-09-25，精简修复路径：只 P&V → Implementation → 定向 ER）→ 主会话派发。`e59a585` → `d9e914f` → `ff76102` → `3d2a407` 链上对 `tests/test_v4_baseline.py` 的冻结状态撤销（仅扩充新增面；既有 69 项断言/语义零删改，AST 逐单元等价证明与双 RED 证据登记于 IP-0025 Packet §13.4，两文件同轮同证）。
+- **授权文件临时扩展（六项）**：`tests/test_v4_baseline.py`、`tests/test_v4_baseline_result.py`、IP-0025 Packet、本 Packet（本节）归 P&V 轮；`lima/baseline_run_spec.py`、`lima/baseline_run_result.py` 归 Implementation 轮。**跨 IP 修复交付声明：`lima/baseline_run_spec.py` 的本缺陷修复（MF-IP-0024-02）随 PR #207（IP-0025 交付 PR）一并交付**，不在本 IP 单开 PR；本节为此声明的登记点。
+- 远端写（push/PR #207/Issue 留言）归主会话。
+
+### 14.3 新增契约与新测试登记
+
+- 新增契约（补充 §13.2，不钉实现手段）：`BaselineRunSpec` 实例必须无 `__dict__`——`hasattr(spec,"__dict__")` 为 `False`、`vars(spec)` 抛 `TypeError`、`spec.__dict__` 访问抛 `AttributeError`；经 `__dict__` 写字段（捕获异常）后 `canonical_bytes()`/`content_digest()` 与基线逐字节一致；不要求抵抗 `object.__setattr__`/ctypes/pickle/解释器级篡改。
+- 新增测试（恰 1 方法）：`TestDeepImmutability.test_instance_has_no_writable_attribute_dict`（探针字段 `seed`）；总测试数 **70**。
+- 新 Frozen Test Commit 与 `tests/test_v4_baseline.py` 新 SHA-256（`4eeb86036c981615a96b7be70df29a7eedaf7aaa488d7d2676d0ed24f83fa4ed` → `75a74b2b259f39150e761a00cae82e97758950d1fa55a80131f705ae7309b8ba`）登记于 IP-0025 Packet §13.5（同轮双文件单 commit 冻结点）。
+- 预期实现后口径：定向 70/70、全量 `Ran 1544 OK (skipped=4)`；本 IP 修复面与 IP-0025 修复面在 PR #207 合并后由定向 ER 一并复验。

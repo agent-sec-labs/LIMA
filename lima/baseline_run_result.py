@@ -461,7 +461,7 @@ def _nearest_rank(sorted_values: list[int], r: int) -> int:
     return sorted_values[rank - 1]
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class BaselineRunResult:
     """The frozen, replayable observed result of one baseline run.
 

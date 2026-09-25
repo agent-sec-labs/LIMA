@@ -573,7 +573,7 @@ def _validate_machine_profile(value: object) -> _FrozenMapping:
     return _FrozenMapping(profile)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class BaselineRunSpec:
     """The frozen, replayable input identity of one baseline run.
 

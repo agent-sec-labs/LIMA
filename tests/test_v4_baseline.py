@@ -1252,6 +1252,34 @@ class TestDeepImmutability(_FrozenSpecTestCase):
         elif isinstance(container, bytearray):
             container.extend(b"probe")
 
+    def test_instance_has_no_writable_attribute_dict(self):
+        """MF-IP-0024-02 regression: no writable per-instance ``__dict__``.
+
+        A frozen dataclass without slots still exposes a writable
+        ``__dict__``: assigning ``spec.__dict__["seed"]`` rewrites frozen
+        state and drifts ``canonical_bytes()``/``content_digest()`` without
+        any exception. The invariant is that no ``__dict__`` exists at all,
+        so the write path is naturally unreachable (``__dict__`` attribute
+        access raises). Interpreter-level tampering (``object.__setattr__``,
+        ctypes, pickle) remains out of scope.
+        """
+        spec = from_mapping(_spec_mapping())
+        before_bytes = spec.canonical_bytes()
+        before_digest = spec.content_digest()
+        with self.subTest(probe="instance_has_no_attribute_dict"):
+            self.assertFalse(hasattr(spec, "__dict__"))
+        with self.subTest(probe="vars_rejects_instance"):
+            with self.assertRaises(TypeError):
+                vars(spec)
+        with self.subTest(probe="attribute_dict_access_unreachable"):
+            with self.assertRaises(AttributeError):
+                spec.__dict__  # noqa: B018 -- probing; raising is the assertion
+        with self.subTest(probe="digest_stable_after_dict_write_attempt"):
+            with contextlib.suppress(AttributeError):
+                spec.__dict__["seed"] = 0
+            self.assertEqual(spec.canonical_bytes(), before_bytes)
+            self.assertEqual(spec.content_digest(), before_digest)
+
 
 if __name__ == "__main__":
     unittest.main()

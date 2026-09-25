@@ -914,6 +914,34 @@ class TestDeepImmutability(_FrozenResultTestCase):
         self.assertEqual(result.canonical_bytes(), before_bytes)
         self.assertEqual(result.content_digest(), before_digest)
 
+    def test_instance_has_no_writable_attribute_dict(self):
+        """MF-IP-0025-01 regression: no writable per-instance ``__dict__``.
+
+        A frozen dataclass without slots still exposes a writable
+        ``__dict__``: assigning ``result.__dict__["status"]`` rewrites frozen
+        state and drifts ``canonical_bytes()``/``content_digest()`` without
+        any exception. The invariant is that no ``__dict__`` exists at all,
+        so the write path is naturally unreachable (``__dict__`` attribute
+        access raises). Interpreter-level tampering (``object.__setattr__``,
+        ctypes, pickle) remains out of scope.
+        """
+        result = from_mapping(_result_mapping())
+        before_bytes = result.canonical_bytes()
+        before_digest = result.content_digest()
+        with self.subTest(probe="instance_has_no_attribute_dict"):
+            self.assertFalse(hasattr(result, "__dict__"))
+        with self.subTest(probe="vars_rejects_instance"):
+            with self.assertRaises(TypeError):
+                vars(result)
+        with self.subTest(probe="attribute_dict_access_unreachable"):
+            with self.assertRaises(AttributeError):
+                result.__dict__  # noqa: B018 -- probing; raising is the assertion
+        with self.subTest(probe="digest_stable_after_dict_write_attempt"):
+            with contextlib.suppress(AttributeError):
+                result.__dict__["status"] = "tampered"
+            self.assertEqual(result.canonical_bytes(), before_bytes)
+            self.assertEqual(result.content_digest(), before_digest)
+
 
 if __name__ == "__main__":
     unittest.main()

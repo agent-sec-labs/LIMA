@@ -322,3 +322,58 @@ SHADOW 试点目标 Agent 调用 ≤6（Issue #206 SHADOW 说明）；本 IP 实
 
 - **1541→1542（3 处）**：§4 measurement、§8 注释、§10 模板中"实现后全量 Ran 1541"为算术笔误（1510 既有 + 32 冻结 = 1542），已就地勘正（行 94/242/276）。
 - **41 字符 SHA 笔误**：载体核验=Packet 正文、`tests/test_v4_baseline_result.py`、c739778 提交消息三处精确 41-hex 扫描（前后非 hex 边界）均**零命中**（Coordinator 扫描同判）；笔误载体为 F1 阶段 P&V 交付返回文本（非仓库文件），不落仓库字节。真值登记：F1 Frozen Test Commit = `c73977838b553e48593aae499c5b89e9ac49b4d4`（40 位）。
+
+## 13. CORRECTIVE（MF-DICT-01 / MF-IP-0025-01 + MF-IP-0024-02）：实例级可写 `__dict__` 缺陷、双文件合法解冻与新冻结（2026-09-25 追加；仅追加，§1-§12 历史内容不删改）
+
+### 13.1 缺陷记录（Maintainer 增量自审裁定 2026-09-25；主会话已复现；P&V 本轮亲验）
+
+- **MF-IP-0025-01**：`lima/baseline_run_result.py`（`@dataclasses.dataclass(frozen=True)`，实现 commit 3d2a407 L464 附近）未用 slots，实例暴露可写 `__dict__`——`result.__dict__["status"] = "tampered"` 无异常静默改写冻结状态，`canonical_bytes()`/`content_digest()` 随之漂移。P&V 亲验（worktree @ 3d2a407）：bytes 变化 = True、digest 变化 = True，canonical 输出 `"status":"sufficient_sample"` → `"status":"tampered"`。
+- **MF-IP-0024-02（跨 IP，随 PR #207 一并交付）**：已合并的 `lima/baseline_run_spec.py`（frozen dataclass，276cadf 后 L576 附近）同样问题——`spec.__dict__["seed"] = 0` 静默改变 canonical/digest。P&V 亲验：`"seed":20260924` → `"seed":0`。Source Issue #204 已重开并留言记录（远端操作归主会话）。
+- **根因（两缺陷同因）**：frozen dataclass 的赋值护栏（`FrozenInstanceError`）只拦截 `setattr` 协议，不拦截 `__dict__` 直写；既有 ER 闭包扫描（两文件 `test_standard_attribute_paths_expose_no_mutable_builtin_containers`，源自 IP-0024 §13.2 契约）只枚举非 dunder 属性（`dir(target)` 跳过 `__` 前缀），`__dict__` 属 dunder 天然漏扫。
+- **SF-PROCESS-03 登记（流程教训，本轮起生效）**：不可变性闭包扫描以后必须显式检查 `__dict__`、`vars()`、slots 和嵌套 backing storage；不能只枚举非 dunder 属性。
+
+### 13.2 解冻理由与授权链（合法解冻，按 P&V 责任书 §3 / 生命周期 "Frozen test 错误"路径）
+
+- 授权链：Maintainer 增量自审裁定（2026-09-25，精简修复路径：只 P&V → Implementation → 定向 ER）→ 主会话按裁定派发本 P&V 执行【解冻 + 双回归测试 + 双 RED + 新冻结 + 双 Packet 追加】。
+- **旧冻结撤销声明**：`c739778`（F1）→ `c12dffd`（F2）→ `3d2a407` 链上对 `tests/test_v4_baseline_result.py` 的冻结状态、`e59a585` → `d9e914f` → `ff76102` → `3d2a407` 链上对 `tests/test_v4_baseline.py` 的冻结状态，一并撤销（仅扩充"新增面"；既有 69+32 项断言/语义零删改，AST 逐单元等价证明见 §13.4）。撤销后按授权各扩充恰一个回归方法、重新产生 RED 并登记新 Frozen Test Commit（本节所在 commit）。
+- **授权文件临时扩展（六项；本轮 P&V 只动四项）**：`tests/test_v4_baseline.py`（+1 方法）、`tests/test_v4_baseline_result.py`（+1 方法）、本 Packet（本节追加）、IP-0024 Packet（§14 追加）归 P&V；产品两文件 `lima/baseline_run_result.py`、`lima/baseline_run_spec.py` 归 Implementation 轮（跨 IP 修复随 PR #207 交付）。
+- 远端写（push/PR #207/Issue 留言）归主会话。
+
+### 13.3 新增冻结面：实例级 `__dict__` 不可达契约（行为契约，不钉实现手段）
+
+实现可自选手段（如 `slots=True`），但 `BaselineRunResult` 与 `BaselineRunSpec` 的实例必须满足：
+
+1. `hasattr(instance, "__dict__")` 为 `False`（无可写属性字典，`__dict__` 写入路径天然不可达）；
+2. `vars(instance)` 抛 `TypeError`；
+3. `instance.__dict__` 属性访问抛 `AttributeError`；
+4. 尝试经 `__dict__` 写冻结字段（捕获异常）后 `canonical_bytes()` 与 `content_digest()` 与基线逐字节一致；
+5. 不要求抵抗 `object.__setattr__`/ctypes/pickle/解释器级篡改（维持 §5.7 范围声明）。
+
+新增测试（恰 1 方法/文件，均在 `TestDeepImmutability` 内）：
+
+| 文件 | 新方法 | 探针字段 | 映射 |
+|---|---|---|---|
+| `tests/test_v4_baseline_result.py` | `test_instance_has_no_writable_attribute_dict` | `status` | MF-IP-0025-01 / S12 / AC-3 |
+| `tests/test_v4_baseline.py` | `test_instance_has_no_writable_attribute_dict` | `seed` | MF-IP-0024-02 / IP-0024 §14 |
+
+### 13.4 双 RED 证据与既有面不变证明（2026-09-25，worktree @ `3d2a407db446d2dda6530e92a979030c112caea2`；Python 3.12.4、ruff 0.16.5 一律 `--no-cache`）
+
+- **双 RED（定向新方法 `python -m unittest -v`，两方法合计 8 条 subTest 失败）**，失败全部由 `__dict__` 存在/可写触发：
+  - `probe='instance_has_no_attribute_dict'`：`AssertionError: True is not false`（`hasattr(instance,"__dict__")` 为 True）；
+  - `probe='vars_rejects_instance'`：`AssertionError: TypeError not raised`（`vars()` 返回 dict）；
+  - `probe='attribute_dict_access_unreachable'`：`AssertionError: AttributeError not raised`（`instance.__dict__` 可达）；
+  - `probe='digest_stable_after_dict_write_attempt'`：canonical bytes 断言不等——spec 侧 `"seed":20260924` ≠ `"seed":0`、result 侧 `"status":"sufficient_sample"` ≠ `"status":"tampered"`（`__dict__` 写入静默生效后的漂移本身）。
+  - 归因证明：失败模式即缺陷复现路径（与 §13.1 亲验一致），非 arrange/导入/环境错误——两产品模块 import 正常、既有 69+32 项全过可证。
+- **定向全文件**：`python -m unittest -q tests.test_v4_baseline` → `Ran 70 tests, FAILED (failures=4, exit 1)`（既有 69 全过，唯一失败方法 = 新方法）；`tests.test_v4_baseline_result` → `Ran 33 tests, FAILED (failures=4, exit 1)`（既有 32 全过）。
+- **全量**：`python -m unittest discover -s tests` → `Ran 1544 tests, FAILED (failures=8, skipped=4)`（1542 既有全过 + 恰 2 新方法各 4 条 subTest；skip 基线 4 零新增）。此为本阶段预期状态（登记口径：实现后定向 70/70 与 33/33、全量 1544 OK skipped=4）；实现修复归 Implementation 轮（PR #207），不得为全量变绿做任何产品修改。
+- **既有面不变（AST 逐单元证明）**：勘改前后逐单元 `ast.dump` 比较——`test_v4_baseline.py` 111 个既有单元（69 test 方法 + 助手 + class 级语句）与 `test_v4_baseline_result.py` 64 个既有单元全部逐字节等价、变更 0、删除 0；模块级 `if __name__ == "__main__"` 语句 AST 等价（仅行号位移，stash 往返亲证）；新增恰 1 单元/文件（同名 `TestDeepImmutability.test_instance_has_no_writable_attribute_dict`）。方法数 69→70、32→33。
+- **质量门禁**：`python -m ruff check --no-cache tests/test_v4_baseline.py tests/test_v4_baseline_result.py` → All checks passed（exit 0；每文件恰 1 个带理由 noqa B018——探针表达式 `instance.__dict__` 裸表达式即断言本体，与既有 S112 noqa 探针先例同风格）；`--select I --no-cache` 复核通过；`python -m compileall -q` 两文件通过；`git diff --check` 干净。
+
+### 13.5 新 Frozen Test Commit 登记
+
+- 本 CORRECTIVE commit（追加于 `3d2a407db446d2dda6530e92a979030c112caea2` 之后，不 amend、不 force）为新 Frozen Test Commit 登记点；完整 40 位 SHA 与提交链见 P&V 交付记录。
+- 冻结面：`tests/test_v4_baseline.py` 70 方法（69 + 1）、`tests/test_v4_baseline_result.py` 33 方法（32 + 1）。
+- Digest 登记（SHA-256）：`tests/test_v4_baseline.py` `4eeb86036c981615a96b7be70df29a7eedaf7aaa488d7d2676d0ed24f83fa4ed`（ff76102 起）→ `75a74b2b259f39150e761a00cae82e97758950d1fa55a80131f705ae7309b8ba`（本 commit）；`tests/test_v4_baseline_result.py` `8994c380ddd0dd86b9596e51443ebdf5d542ab51f44eb1dd9f177da6d7c0c969`（c12dffd 起）→ `7c750c42c993f0b45401c5eaa507a07a66b39446b2956d80846ca293f8c51f76`（本 commit）。
+- 本轮文件边界：恰四文件（两测试文件各 +1 方法 + 本 Packet §13 + IP-0024 Packet §14）；产品文件零改动。
+- 交付后两测试文件恢复只读；Implementation 轮按 §13.3 契约修改两产品文件（`lima/baseline_run_result.py`、`lima/baseline_run_spec.py`，PR #207 载体），完成后定向 ER 复验。
+- 预期实现后口径：定向 70/70（`tests.test_v4_baseline`）与 33/33（`tests.test_v4_baseline_result`）、全量 `Ran 1544 OK (skipped=4)`。

@@ -38,7 +38,6 @@ from lima.baseline_run_result import (
     BaselineRunResultErrorCode,
     from_mapping,
 )
-
 from lima.contracts.codec import compute_content_digest
 from lima.contracts.errors import ContractError
 
@@ -716,7 +715,7 @@ class TestPercentileAggregation(_FrozenResultTestCase):
             _sample(0, mode="cold", wall_time_ms=1),
             _sample(1, mode="cold", wall_time_ms=2),
         ]
-        warm5 = _warm_samples(5, (10, 20, 30, 40, 50))
+        warm5 = _warm_samples((10, 20, 30, 40, 50))
         cases = {
             "cold_n_2": cold2 + warm5,
             "warm_n_4": _sufficient_samples()[:3] + _warm_samples((1, 2, 3, 4)),

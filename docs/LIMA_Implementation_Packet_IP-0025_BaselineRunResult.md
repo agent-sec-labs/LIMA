@@ -91,7 +91,7 @@ Upstream IP/PR/merge commits：IP-0001 Contract Foundation（lima/contracts/{cod
 
 ## 4. Goal / Non-goals
 
-**Iteration hypothesis**：基线运行的**结果侧**可以在零触碰既有 evaluator/扫描器/采集路径的前提下，以"纯新增单模块 + 冻结测试"交付为可验证、可重放、深层不可变的样本合同与聚合契约；**measurement** = 预期 RED（`lima.baseline_run_result` 模块缺失）→ 实现后定向 32/32 GREEN + 全量 1541 零回归（skip 仍 4）+ diff 恰三文件（本 Commit 两文件 + 产品单文件）。
+**Iteration hypothesis**：基线运行的**结果侧**可以在零触碰既有 evaluator/扫描器/采集路径的前提下，以"纯新增单模块 + 冻结测试"交付为可验证、可重放、深层不可变的样本合同与聚合契约；**measurement** = 预期 RED（`lima.baseline_run_result` 模块缺失）→ 实现后定向 32/32 GREEN + 全量 1542 零回归（skip 仍 4）+ diff 恰三文件（本 Commit 两文件 + 产品单文件）。
 
 **Goal**：一次基线运行的样本集合被冻结为可校验、可重放的 `BaselineRunResult`：严格 14 键样本合同（typed error 全拒绝路径）、success-wall/failure-code 配对校验、每 mode nearest-rank p50/p95 聚合、全有全无 status 策略、canonical JSON + SHA-256 digest（顺序置换不变）、深层不可变。
 
@@ -239,7 +239,7 @@ python -m unittest -v tests.test_v4_baseline_result
 python -m ruff check --no-cache tests/test_v4_baseline_result.py   # All checks passed（已亲验）
 python -m compileall -q lima scripts tests
 python -m unittest discover -s tests   # 冻结时：1510 既有全过 + 仅新增模块加载错误（RED 归因）；
-                                       # 实现后：Ran 1541, OK (skipped=4)，零新增 skip
+                                       # 实现后：Ran 1542, OK (skipped=4)，零新增 skip
 python -m ruff check --no-cache lima/baseline_run_result.py        # 实现时追加
 python -m bandit -q lima/baseline_run_result.py                    # 实现时追加
 ```
@@ -273,7 +273,7 @@ git diff --name-only --diff-filter=ACMRTUXB a3b2d12e785f359db37a804e2d11bd61c567
 IP / 状态：IP-0025 / VERIFICATION
 Base / Frozen Test Commit / final commit：<SHA 列表>
 修改文件与公共符号：lima/baseline_run_result.py（§5.1 四符号 + 三方法）
-AC → Test → Result：逐 AC 附命令与输出摘要（定向 32/32 + 全量 1541）
+AC → Test → Result：逐 AC 附命令与输出摘要（定向 32/32 + 全量 1542）
 实际命令与统计：§8 Slice 质量门禁全量（passed/failed/skipped/exit code）
 文件边界检查：git diff --name-only 结果
 安全/权限/依赖变化：无（声明性；import ⊆ §5.8 白名单）
@@ -287,3 +287,38 @@ AC → Test → Result：逐 AC 附命令与输出摘要（定向 32/32 + 全量
 - 本 Packet 关键字段无 TBD；16 条语义 + C-1..C-8 全部冻结于 §0/§5；冻结测试已按 §7 交付并形成 Frozen Test Commit（SHA、测试文件 SHA-256、required test count=32、RED 证据记录于 commit message 与 P&V 交付返回）。
 - 状态 `READY-FOR-CODE` 的激活条件：Coordinator 签发 Implementation Assignment（product allowlist = `lima/baseline_run_result.py` 单文件）+ Frozen Test Commit 可按 SHA 获取 + RED 有效。
 - 本 Packet 对 #206 为 foundation 贡献；#57/#206 保持打开；本 IP 不宣告任何 Issue 完成，PR 不使用自动关闭关键字。
+
+## 12. CORRECTIVE（DR-IP-0025-FTD-01）：冻结测试两缺陷、合法解冻与新冻结 F2（2026-09-25 追加；仅追加，§1-§11 历史内容不删改）
+
+### 12.1 缺陷记录与根因（两缺陷均属冻结测试自身，非产品行为）
+
+- **缺陷一（fixture 调用元数错误，被 import 期 RED 掩蔽）**：F1（c73977838b553e48593aae499c5b89e9ac49b4d4）的 `TestPercentileAggregation.test_status_thresholds_and_null_policy` 内保留两参调用 `warm5 = _warm_samples(5, (10, 20, 30, 40, 50))`（约行 719）——冻结前将助手签名 `_warm_samples(count, walls)` 收敛为 `_warm_samples(walls)` 时遗漏该调用点，运行期抛 `TypeError: _warm_samples() takes 1 positional argument but 2 were given`。F1 的 RED 是模块缺失导致的**收集期** import 失败（整文件未进入运行期），掩盖该 arrange 缺陷；ruff（不做实参元数检查）与 compileall（仅语法）均不可见。模块存在态复现（交付 worktree，产品文件在场）：定向 `Ran 32 tests … FAILED (errors=1)`，唯一错误即上述 TypeError（亲验）。
+- **缺陷二（isort 分区分类依赖模块存在性——第二类 I001 掩蔽）**：ruff 0.16.5 isort 依 import 目标可解析性分区：`lima/baseline_run_result.py` 缺位时 `from lima.baseline_run_result import …` 判入 third-party 段、`lima.contracts.*` 判入 first-party 段，两段间要求空行（F1 冻结时 ruff --fix 依此插入空行并判"通过"）；模块存在时两块同判 first-party、要求紧连，F1 的空行反而触发 I001（模块存在态复现，亲验）。同一字节序列无法同时满足两态。
+- **前提关系登记（DR-IP-0025-FTD-01）**：此后 `tests/test_v4_baseline_result.py` 的一切 ruff 证据一律为**模块存在态**；模块缺位态对 F2 报 I001（可修复项）属已登记前提工件，不构成门禁失败。
+
+### 12.2 解冻理由与授权链（合法解冻，按 P&V 责任书 §3 / 生命周期 §22 "Frozen test 错误"路径）
+
+授权链：Coordinator 裁决 **DR-IP-0025-FTD-01**（2026-09-25，agent_b36bcbaf）→ 主会话转达本 P&V 执行纠正性阶段（解冻修正 → 新 RED → 新 Frozen Test Commit F2）。c739778 上对 `tests/test_v4_baseline_result.py` 的冻结状态撤销；按裁决边界做恰两处字节修正（§12.3），重新产生 RED 并登记 F2（本 commit）；本 Packet §1-§11 历史内容不删改，仅本节追加与 §12.6 所列勘正。
+
+### 12.3 修正边界与 B 证明（裁决 A/B 义务，全部亲验）
+
+- 授权修正恰两处：① `test_status_thresholds_and_null_policy` 内 `_warm_samples(5, (10, 20, 30, 40, 50))` → `_warm_samples((10, 20, 30, 40, 50))`；② 删除两个 `lima.*` from-import 块之间的那一个空行。不新增/删除/重排任何 import；测试其他字节、产品文件、语义/覆盖、方法数、门禁零变化（裁决 D）。
+- **两 hunk 证明**：`git diff c739778..F2 -- tests/test_v4_baseline_result.py` 恰两个 hunk（hunk1=import 块删空行；hunk2=行 719 调用点）。
+- **AST 逐方法证明**：67 个比较单元（模块级助手/语句 + 各类方法）中，唯一不等单元为 `TestPercentileAggregation.test_status_thresholds_and_null_policy`；该方法内 dump 序列差异恰为被编辑 Call 的祖先链（FunctionDef 根 / 所在 Assign / 该 Call 本身——`ast.dump` 递归嵌入编辑子树所致）+ 被删除的唯一节点 `Constant(value=5)`；其余全部节点 dump 逐字节相同且次序相同；该 Call 位置实参 2→1、新实参恰为原第二实参、被调名 `_warm_samples`。**方法数 F1=F2=32**。
+- **指纹登记**：F1 测试文件 SHA-256 `1e6d2e3cad84fe46ceb9b8af1bc158221ef2a1431bd90cf74b993c4e63bbe578` → F2（本 commit）`8994c380ddd0dd86b9596e51443ebdf5d542ab51f44eb1dd9f177da6d7c0c969`。
+- **产品文件零触碰**：`lima/baseline_run_result.py`（未跟踪，在场）修正前后 SHA-256 均为 `38fbd94285d58b2871f2a975aac7654e5c1a72a5825eefe30c16a225bbf6166f`。
+
+### 12.4 双态证据（新 RED 判据=裁决 3；工具 Python 3.12.4 / ruff 0.16.5）
+
+- **F2 冻结态（F2 干净检出一次性 worktree 复放，判据）**：`python -m unittest -v tests.test_v4_baseline_result` → `ModuleNotFoundError: No module named 'lima.baseline_run_result'`、`FAILED (errors=1)`、exit 1；归因注记：`lima.contracts.codec` 与 `lima.baseline_run_spec` import OK、唯一缺失=目标产品模块。全量 `python -m unittest discover -s tests` → `Ran 1511 … FAILED (errors=1, skipped=4)`（唯一 error=新模块载入失败，既有 1510 全过，skip=4 零新增）。该态 ruff 对 F2 报 I001=已登记前提工件（§12.1）。实测复放结果登记于 F2 commit 后的 P&V 交付返回。
+- **模块存在态（交付 worktree，产品文件在场，实测）**：定向 `python -m unittest -q tests.test_v4_baseline_result` → `Ran 32 tests … OK`，exit 0；`python -m ruff check --no-cache tests/test_v4_baseline_result.py` → All checks passed，exit 0；全量 `python -m unittest discover -s tests` → `Ran 1542 tests … OK (skipped=4)`，exit 0。
+- **全量口径（勘正后终值）**：F2 冻结态 `Ran 1511 FAILED (errors=1 载入) skipped=4`；实现后 `Ran 1542 OK skipped=4`。
+
+### 12.5 调用预算偏差登记
+
+SHADOW 试点目标 Agent 调用 ≤6（Issue #206 SHADOW 说明）；本 IP 实际 **6→9**（含本纠正阶段），由 DR-IP-0025-FTD-01 授权链追认并在此登记。
+
+### 12.6 勘正登记
+
+- **1541→1542（3 处）**：§4 measurement、§8 注释、§10 模板中"实现后全量 Ran 1541"为算术笔误（1510 既有 + 32 冻结 = 1542），已就地勘正（行 94/242/276）。
+- **41 字符 SHA 笔误**：载体核验=Packet 正文、`tests/test_v4_baseline_result.py`、c739778 提交消息三处精确 41-hex 扫描（前后非 hex 边界）均**零命中**（Coordinator 扫描同判）；笔误载体为 F1 阶段 P&V 交付返回文本（非仓库文件），不落仓库字节。真值登记：F1 Frozen Test Commit = `c73977838b553e48593aae499c5b89e9ac49b4d4`（40 位）。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import time
 from dataclasses import dataclass, replace
@@ -314,13 +315,31 @@ class RepositoryScanner:
     ) -> Finding:
         payload = to_agent_finding_payload(candidate)
         # 两来源并存红线：agent finding 不与 Sidecar merge，candidate_id 是
-        # 唯一身份键；报告以 source 区分来源。
+        # 唯一身份键；报告以 source 区分来源。Review round 7：公开报告
+        # candidate_id 由脱敏后材料派生（内部共识键摘要原文 mechanism，
+        # 不能直接进报告）；trigger 步骤在报告边界逐条遮盖。
         payload["source"] = "cxx-agent"
-        payload["candidate_id"] = candidate.candidate_id
+        payload["trigger_path"] = [
+            privacy_text(step) for step in candidate.trigger_path
+        ]
+        public_material = json.dumps(
+            {
+                "cwe": candidate.cwe,
+                "line": candidate.line,
+                "path": candidate.path,
+                "symbol": candidate.symbol,
+                "trigger_path": payload["trigger_path"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload["candidate_id"] = (
+            "report-sha256-"
+            + hashlib.sha256(public_material.encode("utf-8")).hexdigest()
+        )
         payload["agent_role"] = "+".join(
             sorted(set(specialist_roles.get(candidate.candidate_id, ())))
         )
-        payload["trigger_path"] = list(candidate.trigger_path)
         return Finding(**payload)
 
     def _cxx_agent_collaboration(
@@ -473,15 +492,7 @@ class RepositoryScanner:
             # 零成功模型轮次且存在角色降级：设计规定的 auto 降级/required
             # 失败判据（LLM 不可用导致验证无法完成）。
             if mode == "required":
-                raise self._platform_required_error(
-                    "C++ agent pipeline failed in required mode: "
-                    "all agent roles failed",
-                    RuntimeError("; ".join(
-                        outcome.error[:120]
-                        for outcome in review.role_outcomes
-                        if outcome.error
-                    )),
-                )
+                raise self._legacy_all_roles_failed_error(review)
             metrics.inc("repository_scan_cxx_agent_unavailable_total")
             status = "llm-unavailable"
         else:
@@ -644,6 +655,26 @@ class RepositoryScanner:
         """
 
         return RuntimeError(f"{prefix}: {privacy_text(str(exc))[:300]}")
+
+    @staticmethod
+    def _legacy_all_roles_failed_error(review) -> RuntimeError:
+        """Review round 7: mask each full role error, then bound.
+
+        Truncating ``outcome.error[:120]`` before masking would cut a
+        secret below the #94 detection threshold (``privacy_text`` must
+        see the whole span); per-item and total bounds apply to the
+        already-masked text only.
+        """
+
+        return RepositoryScanner._platform_required_error(
+            "C++ agent pipeline failed in required mode: all agent roles "
+            "failed",
+            RuntimeError("; ".join(
+                privacy_text(outcome.error)[:120]
+                for outcome in review.role_outcomes
+                if outcome.error
+            )),
+        )
 
     @staticmethod
     def _seal_platform_v4(outcome, repository_key: str, inventory) -> dict:

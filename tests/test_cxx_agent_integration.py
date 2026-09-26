@@ -355,7 +355,10 @@ class RepositoryAgentTests(unittest.TestCase):
         self.assertEqual("vuln.c", finding.path)
         self.assertEqual(8, finding.line)
         self.assertEqual("leak", finding.symbol)
-        self.assertEqual(UAF_CANDIDATE.candidate_id, finding.candidate_id)
+        # Review round 7: the report carries the masked-material public id,
+        # never the internal consensus id (which digests raw mechanism).
+        self.assertTrue(finding.candidate_id.startswith("report-sha256-"))
+        self.assertNotEqual(UAF_CANDIDATE.candidate_id, finding.candidate_id)
         self.assertIn(ROLE_MEMORY_LIFETIME, finding.agent_role)
         self.assertEqual(["leak", "free", "buf[0]"], finding.trigger_path)
         self.assertIs(False, finding.automatic_repair)

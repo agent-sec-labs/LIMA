@@ -5,7 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Callable, Final, Iterable, Optional
 
@@ -555,7 +555,12 @@ class RepositoryScanner:
                 else "hypothesis"
             ),
             verification_state=item.state,
-            evidence_records=list(item.evidence_records),
+            # Review round 5: ASan raw tails ride in EvidenceRecord.snippet;
+            # mask them before the record copies reach the report.
+            evidence_records=[
+                replace(record, snippet=privacy_text(record.snippet))
+                for record in item.evidence_records
+            ],
             language="c++",
             symbol=item.symbol,
             analysis_mode=PLATFORM_SOURCE_NAME,
@@ -622,6 +627,18 @@ class RepositoryScanner:
         return payload
 
     _V4_PAYLOAD_BUDGET_BYTES: Final = 512 * 1024
+
+    @staticmethod
+    def _platform_required_error(prefix: str, exc: Exception) -> RuntimeError:
+        """Review round 5: required failures carry masked free text only.
+
+        The raised error reaches the task failure payload, dead-letter
+        queue and alerts verbatim, so the exception text passes the #94
+        mask before the raise; the cause chain keeps the original for
+        local debugging without persisting it.
+        """
+
+        return RuntimeError(f"{prefix}: {privacy_text(str(exc)[:300])}")
 
     @staticmethod
     def _seal_platform_v4(outcome, repository_key: str, inventory) -> dict:
@@ -781,9 +798,9 @@ class RepositoryScanner:
             )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             if mode == "required":
-                raise RuntimeError(
-                    f"required platform review failed on the C/C++ analyzer: "
-                    f"{exc}"
+                raise self._platform_required_error(
+                    "required platform review failed on the C/C++ analyzer",
+                    exc,
                 ) from exc
             metrics.inc("repository_scan_platform_unavailable_total")
             return {
@@ -793,8 +810,8 @@ class RepositoryScanner:
             }
         except (RuntimeError, ValueError) as exc:
             if mode == "required":
-                raise RuntimeError(
-                    f"required platform review failed: {exc}"
+                raise self._platform_required_error(
+                    "required platform review failed", exc
                 ) from exc
             metrics.inc("repository_scan_platform_failed_total")
             return {

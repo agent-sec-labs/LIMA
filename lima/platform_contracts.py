@@ -304,8 +304,16 @@ def _reproduction_runs(
     for entry in finding.experiment_log:
         if not isinstance(entry, Mapping):
             raise ValueError("experiment_log entries must be mappings")
+        # Review round 5: experiment text (error types, ASan tails) is a
+        # report exit -- mask every string field before the entry is
+        # serialized into ``detail``; digests therefore address the masked
+        # form.
+        safe_entry = {
+            key: privacy_text(value) if isinstance(value, str) else value
+            for key, value in entry.items()
+        }
         run_id = _run_artifact_id(
-            entry,
+            safe_entry,
             snapshot_sha256=snapshot_sha256,
             bound_run_id=asan_run_id if entry.get("hit") and not bound_used else None,
         )
@@ -316,7 +324,7 @@ def _reproduction_runs(
             ReproductionRun(
                 run_artifact_id=run_id,
                 outcome=_run_outcome(entry),
-                detail=_canonical_json(dict(entry))[:_MAX_TEXT_BYTES],
+                detail=_canonical_json(safe_entry)[:_MAX_TEXT_BYTES],
             ),
         )
     return tuple(sorted(runs.values(), key=lambda run: run.run_artifact_id))

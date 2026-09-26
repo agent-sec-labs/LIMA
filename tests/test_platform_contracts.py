@@ -1252,6 +1252,104 @@ class SealPlatformReviewTests(unittest.TestCase):
             privacy_text("Attacker-controlled length reaches memcpy unbounded."),
         )
 
+    def test_experiment_text_canaries_are_masked_in_all_projections(self) -> None:
+        """Review round 5: ASan snippets and experiment logs are exits too.
+
+        A canary planted in an ASan evidence snippet and in an experiment
+        entry's free-text fields must stay out of the projected Finding's
+        evidence records, the sealed V4 payloads (including reproduction
+        run details) and the complete ``ReviewReport.to_dict()``
+        serialization; required-mode failures must raise masked text only.
+        """
+
+        from lima.models import EvidenceRecord, ReviewReport
+        from lima.repository_scanner import RepositoryScanner
+
+        canary = "password = synthetic-secret-canary"
+        poisoned_record = EvidenceRecord(
+            source="asan",
+            kind="runtime",
+            path="src/example.c",
+            line=42,
+            snippet="ERROR: AddressSanitizer: " + canary,
+            rule_id="asan.repro",
+            cwe="CWE-787",
+            symbol="parse_input",
+            tool_run_id="repro-" + "0" * 24,
+        )
+        poisoned_log = {
+            "round": 1,
+            "driver_sha256": "a" * 16,
+            "stage": "run",
+            "ok": False,
+            "exit_code": 1,
+            "error_type": canary,
+            "faulting_line": 42,
+            "faulting_file": "src/example.c",
+            "hit": False,
+        }
+        finding = _plain_finding(
+            {
+                "target_id": "lead-0001",
+                "path": "src/example.c",
+                "line": 42,
+                "symbol": "parse_input",
+                "cwe": "CWE-787",
+                "state": "tool-corroborated",
+                "hypothesis_reason": "Attacker-controlled length reaches memcpy.",
+                "poc_driver_code": "int main(void) { return 0; }",
+                "experiment_log": (poisoned_log,),
+                "identity": None,
+                "evidence_records": (poisoned_record,),
+            }
+        )
+        outcome = PlatformReviewOutcome(
+            findings=(finding,),
+            targets=(finding,),
+            stats=PlatformReviewStats(1, 1, 1, 1, 1, 0, 1),
+            diagnostics=(),
+            leads_considered=1,
+            translation_units=("src/example.c",),
+        )
+        scanner = RepositoryScanner.__new__(RepositoryScanner)
+
+        projected = scanner._platform_finding(finding)
+        sealed = RepositoryScanner._seal_platform_v4(
+            outcome, "team/proj", _FakeInventory()
+        )
+        collab = scanner._platform_collaboration(
+            "auto", "completed", outcome, v4=sealed
+        )
+        report = ReviewReport(
+            repository="team/proj",
+            pull_request=None,
+            summary="s",
+            risk="low",
+            findings=[projected],
+            collaboration={"platform": collab},
+        )
+
+        for record in projected.evidence_records:
+            self.assertNotIn("synthetic-secret-canary", record.snippet)
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertNotIn(
+            "synthetic-secret-canary", json.dumps(sealed["payloads"], sort_keys=True)
+        )
+        self.assertNotIn(
+            "synthetic-secret-canary", json.dumps(report.to_dict(), sort_keys=True)
+        )
+        for entry in sealed["veps"]:
+            self.assertEqual(
+                entry["content_digest"],
+                compute_content_digest(sealed["payloads"][entry["artifact_id"]]),
+            )
+
+        failure = RepositoryScanner._platform_required_error(
+            "required platform review failed",
+            ValueError("provider died on " + canary),
+        )
+        self.assertNotIn("synthetic-secret-canary", str(failure))
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

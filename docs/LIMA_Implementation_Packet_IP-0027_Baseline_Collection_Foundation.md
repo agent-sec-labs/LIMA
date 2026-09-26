@@ -296,7 +296,7 @@ try/except ImportError 守卫下的 POSIX 分支，Windows 缺席必须优雅降
 |---|---|---|
 | `lima-popular-python-calibration-v1` | `calibration` | `049d69b25731e51f75a800c5c406ab2d8faef1257d7dacfb275f9734b407b986` |
 | `lima-popular-python-external-holdout-v2` | `external-holdout` | `23d4ef1da097e6af3d1099546d3cb6167b8964ecdc23f546ad5a835f342b284a` |
-| `lima-real-world-pilot-v1` | `development` | `7d88728caca8bc3387802b7bdaa09b59e5ffe1ede21a71c3d314bd63eb0c106` |
+| `lima-real-world-pilot-v1` | `development` | `7d88728caca8bc3387802b7bdaa09b59e5ffe1fede21a71c3d314bd63eb0c106` |
 
 #### 7.3.2 `validate_role_bindings(spec: BaselineRunSpec, manifest: object) -> None`
 

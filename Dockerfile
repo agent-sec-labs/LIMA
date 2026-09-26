@@ -64,6 +64,7 @@ COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer
 COPY --chown=lima:lima scripts/run_cxx_memory_evaluation.py scripts/prepare_cxx_memory_evaluation_case.py ./scripts/
 COPY --chown=lima:lima scripts/run_cxx_llm_agent_evaluation.py scripts/run_platform_evaluation.py scripts/run_uaf_v2_evaluation.py ./scripts/
 COPY --chown=lima:lima evaluation_data/cxx_memory_cases.json ./evaluation_data/cxx_memory_cases.json
+COPY --chown=lima:lima benchmarks ./benchmarks
 USER lima:lima
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
 

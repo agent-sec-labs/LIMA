@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "matrix_id": "lima-python-mvp-support-matrix",
+  "matrix_version": "1.0.0",
+  "scope_note": "Static support declaration for the LIMA Python MVP as of IP-0026 (Issue #210; parent #57 PR1 static foundation). Levels state only what repository-internal frozen evidence supports at this commit; no baseline execution, repository scanning, or replay is claimed by this matrix (deferred to #57 PR2/PR3). This JSON is the single source of truth; the human-readable rendering lives in docs/LIMA_Implementation_Packet_IP-0026_Baseline_Static_Foundation.md.",
+  "capabilities": [
+    {
+      "capability_key": "archetype/popular-python-calibration",
+      "level": "conditionally-supported",
+      "reason": "The frozen calibration dataset evaluation_data/popular_calibration_v1.json (5 cases: pypa/pip, danielgatis/rembg, yt-dlp/yt-dlp, MervinPraison/PraisonAI, janeczku/calibre-web) is registered in baseline manifest v1 under the calibration role with verbatim pinned identities, and the on-disk manifest passes the frozen contract offline (tests/test_v4_baseline_manifest.py). These cases were the v1 external holdout and were reclassified to calibration before v1.5 (evaluation_data/README.md and the file's selection_policy.selection_notes); they must never be re-claimed as an external holdout result.",
+      "boundary": "Static registration only: dataset identity (name + fingerprint = SHA-256 of the frozen file bytes) and entry pinning are asserted offline; no baseline run, repository scan, or replay over these repositories exists in this repository (deferred to #57 PR2/PR3). Each entry's commit_sha pins the case's vulnerable_commit (analysis-baseline semantics: the baseline is measured with the vulnerability present); every fixed_commit remains in the frozen file and is not co-registered under the same identity.",
+      "evidence": [
+        "evaluation_data/popular_calibration_v1.json",
+        "evaluation_data/v4/baseline_manifest.json",
+        "tests/test_v4_baseline_manifest.py",
+        "evaluation_data/README.md"
+      ]
+    },
+    {
+      "capability_key": "archetype/popular-python-external-holdout",
+      "level": "conditionally-supported",
+      "reason": "The active repository-disjoint frozen external holdout evaluation_data/popular_external_holdout_v2.json (5 cases: gradio-app/gradio, Comfy-Org/ComfyUI, python-pillow/Pillow, apache/airflow, langchain-ai/langchain) is registered in baseline manifest v1 under the external-holdout role; its two preregistered runs are complete and the immutable manifest remains the historical external baseline (evaluation_data/README.md). The on-disk registration passes the frozen contract offline.",
+      "boundary": "Static registration of a completed holdout only: no new external result is claimed, and re-running against this file cannot produce a fresh external claim without a re-freeze and reclassification cycle (evaluation_data/README.md). Execution, scanning, and replay are deferred to #57 PR2/PR3. Popularity snapshots are scoring metadata only and are never analyzer input (selection_policy.selection_notes).",
+      "evidence": [
+        "evaluation_data/popular_external_holdout_v2.json",
+        "evaluation_data/v4/baseline_manifest.json",
+        "tests/test_v4_baseline_manifest.py",
+        "evaluation_data/README.md"
+      ]
+    },
+    {
+      "capability_key": "archetype/real-world-pinned-pairs",
+      "level": "conditionally-supported",
+      "reason": "The frozen development dataset evaluation_data/real_world_security_cases.json registers 3 pinned public vulnerable/fixed pairs (aio-libs/aiohttp, django/django, gitpython-developers/GitPython) with archive hashes and declared isolated oracles; it is registered in baseline manifest v1 under the development role and passes the frozen contract offline.",
+      "boundary": "Static registration only, under the development role with no holdout claim; the per-case oracles are declared metadata, not executed evidence. Baseline execution over these pinned revisions is deferred to #57 PR2/PR3. Each entry's commit_sha pins the case's vulnerable_commit (analysis-baseline semantics); every fixed_commit remains in the frozen file and is not co-registered under the same identity.",
+      "evidence": [
+        "evaluation_data/real_world_security_cases.json",
+        "evaluation_data/v4/baseline_manifest.json",
+        "tests/test_v4_baseline_manifest.py"
+      ]
+    },
+    {
+      "capability_key": "archetype/empty-repository",
+      "level": "unsupported",
+      "reason": "No frozen dataset for an empty Git repository exists in evaluation_data/ and baseline manifest v1 registers none (verifiable by enumerating evaluation_data/v4/baseline_manifest.json). Creating new sample data is out of scope for this slice, so there is no repository-internal evidence of support.",
+      "boundary": "A baseline over an empty repository would require both execution tooling (#57 PR2/PR3) and a frozen dataset; neither exists in this repository. Any future support needs a new packet that ships frozen data plus execution evidence.",
+      "evidence": [
+        "evaluation_data/v4/baseline_manifest.json",
+        "docs/LIMA_Implementation_Packet_IP-0026_Baseline_Static_Foundation.md",
+        "Issue #57 (PR2/PR3 archetype coverage; no frozen empty-repository dataset in-repo)"
+      ]
+    },
+    {
+      "capability_key": "archetype/minimal-python-repository",
+      "level": "unsupported",
+      "reason": "No frozen dataset for a minimal Python repository exists in evaluation_data/ and baseline manifest v1 registers none (verifiable by enumerating evaluation_data/v4/baseline_manifest.json). Creating new sample data is out of scope for this slice, so there is no repository-internal evidence of support.",
+      "boundary": "A baseline over a minimal Python repository would require both execution tooling (#57 PR2/PR3) and a frozen dataset; neither exists in this repository. Any future support needs a new packet that ships frozen data plus execution evidence.",
+      "evidence": [
+        "evaluation_data/v4/baseline_manifest.json",
+        "docs/LIMA_Implementation_Packet_IP-0026_Baseline_Static_Foundation.md",
+        "Issue #57 (PR2/PR3 archetype coverage; no frozen minimal-python-repository dataset in-repo)"
+      ]
+    },
+    {
+      "capability_key": "archetype/llamafactory-replay",
+      "level": "unsupported",
+      "reason": "No frozen dataset and no execution evidence for the LlamaFactory repository pinned at commit 7fcf5b3b130e5713b52415bb7404c476fada9c8c exists in this repository: the identity is absent from evaluation_data/ and from baseline manifest v1 (verifiable by enumerating evaluation_data/v4/baseline_manifest.json), so registering it would fabricate a data source (Packet ruling R4).",
+      "boundary": "Real replay belongs to #57 PR3 and is excluded from this slice. If commit 7fcf5b3b130e5713b52415bb7404c476fada9c8c cannot be materialized at execution time, the run must be escalated to needs-decision per #57 FR-06; substituting the latest main branch (or any moving ref) is forbidden.",
+      "evidence": [
+        "Issue #57 FR-06 (LlamaFactory replay: an unmaterializable pinned commit 7fcf5b3b130e5713b52415bb7404c476fada9c8c goes to needs-decision; never fall back to latest main)",
+        "evaluation_data/v4/baseline_manifest.json",
+        "docs/LIMA_Implementation_Packet_IP-0026_Baseline_Static_Foundation.md"
+      ]
+    },
+    {
+      "capability_key": "registration/family-dual-registration",
+      "level": "unsupported",
+      "reason": "The frozen contract fails closed when one repository family appears under both the external-holdout and calibration roles in a single manifest (DATASET_ROLE_CONFLICT) or when the same normalized identity repeats (DUPLICATE_REPOSITORY). evaluation_data/popular_external_holdout.json (v1) and evaluation_data/popular_external_calibration_v2.json therefore cannot be co-registered alongside the family datasets already in manifest v1, and no alternate co-registration mechanism exists in this slice.",
+      "boundary": "Excluded from manifest v1 by design (see the registration notes for both files). Any co-registration mechanism is a contract-level decision that requires a new packet and must preserve the evaluation_data/README.md rule that a consumed holdout is reclassified, never double-registered.",
+      "evidence": [
+        "lima/baseline_run_spec.py",
+        "evaluation_data/README.md",
+        "evaluation_data/v4/baseline_manifest.json"
+      ]
+    },
+    {
+      "capability_key": "tooling/manifest-validation",
+      "level": "supported",
+      "reason": "Offline structural and cross-artifact validation of baseline manifests is delivered by the frozen contract lima/baseline_run_spec.py (schema v1 with typed fail-closed error codes for missing fields, invalid containers, fingerprint mismatch, role crossing, duplicate identities, and identity conflicts) and is exercised end-to-end against the on-disk manifest v1 by the frozen acceptance tests, including deep-copy mutation negatives.",
+      "boundary": "Covers static manifest structure and spec-versus-manifest agreement only; loading orchestration, CLI wiring, and any execution are #57 PR2/PR3 scope and are not claimed here.",
+      "evidence": [
+        "lima/baseline_run_spec.py",
+        "tests/test_v4_baseline_manifest.py",
+        "tests/test_v4_baseline.py",
+        "evaluation_data/v4/baseline_manifest.json"
+      ]
+    },
+    {
+      "capability_key": "tooling/pinned-commit-integrity",
+      "level": "supported",
+      "reason": "Immutable revision pinning is enforced fail-closed at spec construction: every repository entry must carry a full 40-character lowercase hex commit SHA, while abbreviated SHAs, branch/tag/moving refs, and 40-character uppercase or non-hex values are rejected with the frozen typed codes (ABBREVIATED_COMMIT_SHA_REJECTED, MOVING_REF_REJECTED, INVALID_COMMIT_SHA). The frozen acceptance tests drive these rejections offline from the on-disk manifest values, and all 13 manifest entries carry full lowercase hex SHAs.",
+      "boundary": "Syntax and immutability shape only: the contract cannot verify offline that a SHA exists in a remote repository (network access is out of scope); materialization of pinned revisions happens at #57 PR2/PR3 execution time under the #57 FR-06 needs-decision guard.",
+      "evidence": [
+        "lima/baseline_run_spec.py",
+        "tests/test_v4_baseline_manifest.py",
+        "tests/test_v4_baseline.py",
+        "evaluation_data/v4/baseline_manifest.json"
+      ]
+    },
+    {
+      "capability_key": "tooling/dataset-fingerprint-integrity",
+      "level": "supported",
+      "reason": "Dataset identity is pinned as the lowercase SHA-256 of each frozen data file's exact bytes; the frozen acceptance tests recompute all three digests offline from binary reads and assert equality with manifest v1, and spec-versus-manifest fingerprint drift fails closed (DATASET_FINGERPRINT_MISMATCH, INVALID_FINGERPRINT).",
+      "boundary": "Binds manifest identity to the frozen file bytes at rest; it does not verify the per-case vulnerable_archive_sha256/fixed_archive_sha256 archive hashes, which remain case metadata consumed at #57 PR2/PR3 execution time.",
+      "evidence": [
+        "lima/baseline_run_spec.py",
+        "tests/test_v4_baseline_manifest.py",
+        "evaluation_data/v4/baseline_manifest.json"
+      ]
+    }
+  ],
+  "coverage_gaps": [
+    {
+      "capability_key": "archetype/empty-repository",
+      "reason": "No frozen empty-repository dataset exists in evaluation_data/ and manifest v1 registers none; sample creation is out of scope for this slice, so the archetype has no evidence and stays unsupported until a future packet ships frozen data plus execution evidence."
+    },
+    {
+      "capability_key": "archetype/minimal-python-repository",
+      "reason": "No frozen minimal-Python-repository dataset exists in evaluation_data/ and manifest v1 registers none; sample creation is out of scope for this slice, so the archetype has no evidence and stays unsupported until a future packet ships frozen data plus execution evidence."
+    },
+    {
+      "capability_key": "archetype/llamafactory-replay",
+      "reason": "The LlamaFactory identity pinned at commit 7fcf5b3b130e5713b52415bb7404c476fada9c8c has no frozen dataset in evaluation_data/ and no execution evidence in-repo (Issue #57 FR-06); it is registered here as a static identity record only and must never enter baseline manifest v1 (Packet ruling R4)."
+    }
+  ],
+  "registration_notes": [
+    {
+      "file": "evaluation_data/popular_external_holdout.json",
+      "reason": "Not registered in manifest v1: all 5 repository identities of this v1 holdout are already registered under the calibration role via evaluation_data/popular_calibration_v1.json; co-registering the same family as external-holdout would trigger the frozen DATASET_ROLE_CONFLICT and contradict the completed reclassification recorded in evaluation_data/README.md and the file's own selection notes."
+    },
+    {
+      "file": "evaluation_data/popular_external_calibration_v2.json",
+      "reason": "Not registered in manifest v1: its 5 repository identities are already registered under the external-holdout role via evaluation_data/popular_external_holdout_v2.json; this file is the explicit post-hoc calibration copy of the completed v2 holdout (evaluation_data/README.md: engineering calibration only, never a new external claim), so double registration is rejected."
+    },
+    {
+      "file": "evaluation_data/security_repair_cases.json",
+      "reason": "Not registered in manifest v1: purely synthetic LIMA-authored constraint set; none of its 18 cases carries a repository field or any pinnable immutable revision, so it cannot satisfy the manifest entry contract (repository plus a full 40-character lowercase commit SHA)."
+    },
+    {
+      "file": "evaluation_data/pr_diff_100.jsonl",
+      "reason": "Not registered in manifest v1: all 100 records are synthetic-controlled (source.kind=synthetic-controlled) and none carries a full 40-character pinned commit SHA, so the file cannot satisfy immutable revision pinning; a future pinning transformation would be new data authoring, which is out of scope for this slice."
+    }
+  ]
+}

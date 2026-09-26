@@ -817,3 +817,14 @@ Implementation 在冻结范围内实现，不决定产品语义。
 项目全局是非线性任务图；每个交付单元内部仍受证据门禁约束。
 只有真正影响目标、产品行为、重大兼容性、安全或发布的事项才交 Maintainer 决定。
 ```
+
+
+## 22. OPERATIONAL SHADOW 模式补充（2026-09-25 治理复盘追加）
+
+两次真实 SHADOW 闭环（IP-0024/#204、IP-0025/#206，均合并关闭）完成后，工作流进入 OPERATIONAL SHADOW（正常业务影子运用）。本节为对 §3（运行模式）与 §17（引入步骤）的增量补充，不改变既有 SHADOW|ACTIVE 二分：
+
+- **Execution Authorization 独立字段**（OBSERVE_ONLY | MAINTAINER_AUTHORIZED）：SHADOW + MAINTAINER_AUTHORIZED 下主会话可按 Maintainer 明确授权推进真实 Issue、实现、PR 与合并；权限来源记录为 Maintainer 授权，不来自 Intent 或 Evidence Review 状态。两种 SHADOW 下 Evidence Review 均只有建议权（Shadow Finding）；最终门禁恒为 Maintainer 自审 + merge-gate CI。
+- **精简纠正路由**：报告文字错误→责任角色自修；机械测试缺陷（Assignment 已授 ALLOWED_ONCE）→P&V 自纠重 RED 不增 Coordinator 调用；冻结范围内产品缺陷→Implementation→P&V/ER 增量复核；产品语义变化→Coordinator，必要时才进 Maintainer。增量修复用 3～5 行 Addendum 呈报，不重调 Intent/完整 Briefing。
+- **角色定义增补**：Coordinator 增 Mechanical Test Correction Allowance 与一轮 Assignment/决策降噪原则；P&V 增 Pre-Freeze Harness Gate 与核心承诺 invariant checklist；Evidence Review 增 Core Claim Challenge 表与反证硬规则。
+- **ACTIVE 门槛**：连续两个正常业务 Issue 达标（无 P1/P2 漏报、无无效冻结进入实现、≤8 调用/≤75 分钟/≤1 决策、可核验 Runtime Attestation、边界全遵守）方"可讨论"，不自动启用。
+- 试点复盘数据与结论见 docs/LIMA_CONTROL_PLANE_ADOPTION_VALIDATION_SUMMARY_2026-09-20.md §8。

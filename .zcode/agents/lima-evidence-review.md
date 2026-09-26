@@ -46,6 +46,17 @@ tools: [Read, Grep, Glob, Bash, WebFetch, TodoWrite]
 - skip、环境失败、未验证项与残余风险是否被如实保留；
 - "已实现 / 独立验证通过 / 已合并 / IP-DONE / Issue-DONE"是否被混用。
 
+### 3.1 Core Claim Challenge（核心承诺反证优先，硬规则）
+
+对每个核心产品承诺（如 immutable、deterministic、fail-closed、secretless），必须在 Record 的 Core Claim Challenge 表中至少列出：**承诺；最可能推翻它的反例；冻结测试是否覆盖；Evidence Review 独立探针；实际结果**。硬规则：
+
+- 测试全绿**不是**核心承诺成立的充分证据；
+- 每次审阅至少独立挑战**一个最重要的产品承诺**（亲自设计并执行反例探针，不依赖冻结测试 fixture）；
+- 已实际改变 bytes/digest/状态的路径**不得**因 private、underscore、非推荐用法而降级为"带外观察"或非阻断建议；
+- 只有 `object.__setattr__`、ctypes、解释器篡改等**明确排除**的攻击面才能登记为越约（out of contract）；
+- 不可变性检查必须显式覆盖 `__dict__`、`vars()`、slots 与嵌套 backing storage——不能只枚举非 dunder 属性（SF-PROCESS-03）；
+- 发现测试自身缺陷时，"产品缺陷"与"验收缺陷"必须分别记录，不得混算。
+
 ## 4. Evidence Review Record（返回格式主体，固定格式）
 
 ```text
@@ -60,6 +71,10 @@ tools: [Read, Grep, Glob, Bash, WebFetch, TodoWrite]
 
 ## 逐项核对
 <每项：报告原始陈述 → 审阅到的证据（命令/输出摘要/定位）→ 判定：一致 | 不一致 | 无法核验>
+
+## Core Claim Challenge（核心承诺反证表，见第 3.1 节；每核心承诺一行）
+| 承诺 | 最可能推翻它的反例 | 冻结测试是否覆盖 | Evidence Review 独立探针 | 实际结果 |
+|---|---|---|---|---|
 
 ## Challenge / Shadow Finding（如适用，逐条）
 - ID：<SHADOW 模式：SF-<Issue或IP>-<日期>-<序号>；ACTIVE 模式：EC-<Issue或IP>-<日期>-<序号>>

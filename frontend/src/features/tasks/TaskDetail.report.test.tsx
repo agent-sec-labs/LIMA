@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp, ConfigProvider } from "antd";
 import { RouterProvider } from "react-router-dom";
@@ -120,6 +120,47 @@ const DERIVED_REPORT: TaskDetail["report"] = {
   ],
 };
 
+/** UAF v2 审计摘要载荷（report.collaboration.uaf_v2，设计 §14）。 */
+const UAF_V2_PAYLOAD = {
+  mode: "auto",
+  status: "completed",
+  translation_units: ["src/a.cpp"],
+  stats: {
+    tu_count: 1,
+    candidate_count: 1,
+    pass: 1,
+    refuted: 0,
+    unknown: 0,
+    llm_invoked: 0,
+    llm_calls: 0,
+  },
+  states: { "fact-verified": 1 },
+  broker: { support: 1, contradict: 0, "no-evidence": 0 },
+  diagnostics: [],
+};
+
+/** 带 UAF finding 的报告：徽标走前端精确匹配 map。 */
+const UAF_REPORT: TaskDetail["report"] = {
+  repository: "org/report",
+  reviewer: "repository-hybrid",
+  summary: "一个 UAF 候选。",
+  files_reviewed: ["src/a.cpp"],
+  findings: [
+    {
+      severity: "high",
+      rule_id: "cxx.uaf-v2.cwe-416",
+      cwe: "CWE-416",
+      path: "src/a.cpp",
+      line: 30,
+      title: "Use-after-free: pointer dereferenced after release",
+      verification_state: "fact-verified",
+      confidence: 0.97,
+      source: "cxx-uaf-v2",
+    },
+  ],
+  collaboration: { uaf_v2: UAF_V2_PAYLOAD },
+};
+
 describe("report domain derivation (model)", () => {
   it("derives fail-closed dispositions when adjudication is absent", () => {
     const findings = DERIVED_REPORT!.findings!;
@@ -147,6 +188,15 @@ describe("report domain derivation (model)", () => {
     expect(adjudication.overall_disposition).toBe("clear");
     expect(adjudication.auto_clear).toBe(false);
     expect(adjudication.counts.clear).toBe(2);
+  });
+
+  it("labels UAF v2 arbiter states with exact-match badges", () => {
+    expect(verificationLabel("fact-verified")).toBe("事实已验证");
+    expect(verificationLabel("semantic-supported")).toBe("语义支持 · 需复核");
+    // 子串匹配与 fail-closed fallback 保持 legacy 语义。
+    expect(verificationLabel("dataflow-verified")).toBe("数据流已验证");
+    expect(verificationLabel("corroborated")).toBe("候选 · 需复核");
+    expect(verificationLabel(undefined)).toBe("候选 · 需复核");
   });
 
   it("derives risk including clean, and labels confidence and verification", () => {
@@ -348,6 +398,85 @@ describe("task detail report surface", () => {
     expect(screen.getByText("evaluate_expression")).toBeVisible();
     expect(screen.getByText("风险不变量与模型结论一致")).toBeVisible();
     expect(screen.getByText(/模型证据：用户输入未过滤直达 eval。/)).toBeVisible();
+  });
+
+  it("renders the UAF v2 audit details for zero-call deterministic proofs", async () => {
+    stubFetch([
+      { url: "/v1/tasks/task-uaf", body: successTask({ id: "task-uaf", report: UAF_REPORT }) },
+      { url: "/v1/tasks/task-uaf/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-uaf");
+    // fact-verified 徽标走前端精确匹配 map（证据状态列）。
+    expect(await screen.findByText("事实已验证")).toBeVisible();
+    const summary = screen.getByText("C/C++ UAF v2（确定性证明）");
+    expect(summary).toBeVisible();
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    // 状态行 / stats 行 / broker 三态行。
+    expect(details!.textContent).toContain("模式 auto");
+    expect(details!.textContent).toContain("候选 1");
+    expect(details!.textContent).toContain("PASS 1");
+    expect(details!.textContent).toContain("REFUTED 0");
+    expect(details!.textContent).toContain("UNKNOWN 0");
+    expect(details!.textContent).toContain("证据仲裁：支持 1");
+    expect(details!.textContent).toContain("反驳 0");
+    expect(details!.textContent).toContain("无证据 0");
+    // 零调用红线：PASS 全覆盖必须显示确定性证明注记，不得显示已调用。
+    // toBeVisible is unreliable here: jsdom cannot fully resolve antd's
+    // dev-only :where() styles, and getComputedStyle reports the element
+    // hidden. Presence in the document carries the intended meaning.
+    expect(screen.getByText("确定性证明 · 未调用 LLM")).toBeInTheDocument();
+    expect(details!.textContent).not.toContain("LLM 调用：");
+    // 审计区不含任何修复入口（任务级修复按钮不变）。
+    expect(within(details as HTMLElement).queryAllByRole("button")).toEqual([]);
+    expect(screen.queryByRole("button", { name: "创建修复分支" })).toBeNull();
+  });
+
+  it("shows the actual LLM call count when the semantic branch ran", async () => {
+    stubFetch([
+      {
+        url: "/v1/tasks/task-uaf-llm",
+        body: successTask({
+          id: "task-uaf-llm",
+          report: {
+            ...UAF_REPORT,
+            collaboration: {
+              uaf_v2: {
+                ...UAF_V2_PAYLOAD,
+                stats: {
+                  ...UAF_V2_PAYLOAD.stats,
+                  pass: 0,
+                  unknown: 1,
+                  llm_invoked: 1,
+                  llm_calls: 4,
+                },
+              },
+            },
+          },
+        }),
+      },
+      { url: "/v1/tasks/task-uaf-llm/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-uaf-llm");
+    const details = (await screen.findByText("C/C++ UAF v2（确定性证明）")).closest("details");
+    expect(details!.textContent).toContain("LLM 调用：4");
+    expect(screen.queryByText("确定性证明 · 未调用 LLM")).toBeNull();
+  });
+
+  it("renders legacy reports without the uaf_v2 key unchanged", async () => {
+    stubFetch([
+      {
+        url: "/v1/tasks/task-legacy",
+        body: successTask({
+          id: "task-legacy",
+          report: { ...DERIVED_REPORT, collaboration: { scanned_files: 2 } },
+        }),
+      },
+      { url: "/v1/tasks/task-legacy/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-legacy");
+    expect(await screen.findByText("证据处置：确认告警")).toBeVisible();
+    expect(screen.queryByText(/C\/C\+\+ UAF v2/)).toBeNull();
   });
 
   it("shows the clean risk label when nothing crosses the threshold", async () => {

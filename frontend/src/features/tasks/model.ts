@@ -141,9 +141,18 @@ export function confidenceLabel(value: number | undefined): string {
   return `${Math.round((number <= 1 ? number : number / 100) * 100)}%`;
 }
 
-/** 证据状态：子串匹配（legacy 语义），未知态一律「候选 · 需复核」fail-closed。 */
+/** UAF v2 / agent 管线状态的精确匹配标签（后端 _verification_state_label
+ * 的前端镜像）：命中即用，未命中继续走子串匹配与 fail-closed fallback。 */
+const EXACT_VERIFICATION_STATE_LABELS: Record<string, string> = {
+  "fact-verified": "事实已验证",
+  "semantic-supported": "语义支持 · 需复核",
+};
+
+/** 证据状态：先精确匹配、再子串匹配（legacy 语义），未知态一律「候选 · 需复核」fail-closed。 */
 export function verificationLabel(value: string | undefined): string {
   const state = String(value || "candidate").toLowerCase();
+  const exact = EXACT_VERIFICATION_STATE_LABELS[state];
+  if (exact) return exact;
   if (state.includes("dataflow")) return "数据流已验证";
   if (state.includes("syntax")) return "语法约束已验证";
   if (state.includes("verified")) return "已验证";

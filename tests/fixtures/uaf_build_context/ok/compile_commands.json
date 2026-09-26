@@ -1,0 +1,18 @@
+[
+  {
+    "directory": ".",
+    "file": "src/main.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-I",
+      "include",
+      "-DFOO=1",
+      "-std=c11",
+      "-Wall",
+      "src/main.c",
+      "-o",
+      "build/main.o"
+    ]
+  }
+]

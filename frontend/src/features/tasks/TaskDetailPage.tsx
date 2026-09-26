@@ -30,6 +30,7 @@ import type {
   TaskCompletion,
   TaskDetail,
   TaskProgress,
+  UafV2Summary,
 } from "@/shared/api/types";
 import {
   ALL_STAGES,
@@ -630,6 +631,70 @@ function FeedbackPanel({ task }: { task: TaskDetail }): React.JSX.Element {
   );
 }
 
+/** UAF v2 确定性证明审计区（report.collaboration.uaf_v2，设计 §14）。
+ * 渐进读取：旧报告无 uaf_v2 键时整个区块不渲染；载荷字段全部可选。
+ * llm_invoked 只来自实际调用计数：零调用显示「LLM 调用：0」，零调用且
+ * PASS/REFUTED 全覆盖时显示「确定性证明 · 未调用 LLM」。纯审计展示，
+ * 不含任何修复入口（C/C++ 结论永不自动修复）。 */
+function UafV2Card({ summary }: { summary: UafV2Summary }): React.JSX.Element {
+  const stats = summary.stats ?? {};
+  const broker = summary.broker ?? {};
+  const states = Object.entries(summary.states ?? {});
+  const diagnostics = (summary.diagnostics ?? []).slice(0, 8);
+  const llmCalls = Number(stats.llm_calls || 0);
+  const llmInvoked = Number(stats.llm_invoked || 0);
+  const candidateCount = Number(stats.candidate_count || 0);
+  const covered = Number(stats.pass || 0) + Number(stats.refuted || 0);
+  const deterministicPass = llmCalls === 0 && llmInvoked === 0 && candidateCount > 0 && covered === candidateCount;
+  const status = String(summary.status || "unknown");
+  return (
+    <details className="uaf-v2-audit" aria-label="UAF v2 确定性证明审计">
+      <summary>
+        <Typography.Text strong>C/C++ UAF v2（确定性证明）</Typography.Text>{" "}
+        <Tag color={status === "completed" ? "blue" : "orange"}>{status}</Tag>
+      </summary>
+      <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 8 }}>
+        <Space wrap size="large">
+          <span>模式 <strong>{String(summary.mode || "off")}</strong></span>
+          <span>翻译单元 <strong>{Number(summary.translation_units?.length || stats.tu_count || 0)}</strong></span>
+          <span>候选 <strong>{candidateCount}</strong></span>
+          <span>PASS <strong>{Number(stats.pass || 0)}</strong></span>
+          <span>REFUTED <strong>{Number(stats.refuted || 0)}</strong></span>
+          <span>UNKNOWN <strong>{Number(stats.unknown || 0)}</strong></span>
+        </Space>
+        <Space wrap size="large">
+          <span>证据仲裁：支持 <strong>{Number(broker.support || 0)}</strong></span>
+          <span>反驳 <strong>{Number(broker.contradict || 0)}</strong></span>
+          <span>无证据 <strong>{Number(broker["no-evidence"] || 0)}</strong></span>
+        </Space>
+        {deterministicPass ? (
+          <Typography.Text type="success">确定性证明 · 未调用 LLM</Typography.Text>
+        ) : (
+          <span>LLM 调用：<strong>{llmCalls}</strong></span>
+        )}
+        {states.length > 0 ? (
+          <Space wrap size={4}>
+            {states.map(([state, count]) => (
+              <Tag key={state}>{verificationLabel(state)} × {count}</Tag>
+            ))}
+          </Space>
+        ) : null}
+        {diagnostics.length > 0 ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            诊断（有界）：
+            {diagnostics.map((item, index) => (
+              <span key={index} style={{ display: "block" }}>{item}</span>
+            ))}
+          </Typography.Paragraph>
+        ) : null}
+        <Typography.Text type="secondary">
+          UAF v2 结论由确定性证明链产生，不支持自动修复（automatic_repair=false）。
+        </Typography.Text>
+      </Space>
+    </details>
+  );
+}
+
 function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
   const { message, modal } = AntApp.useApp();
   const report = task.report;
@@ -654,6 +719,10 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
   const repositoryScan = String(
     (task.input as { task_type?: string } | undefined)?.task_type ?? "",
   ) === "repository_scan";
+  const uafSummary =
+    report.collaboration?.uaf_v2 && typeof report.collaboration.uaf_v2 === "object"
+      ? report.collaboration.uaf_v2
+      : null;
   const [previewBusy, setPreviewBusy] = useState(false);
   const [fixBusy, setFixBusy] = useState(false);
   const [operation, setOperation] = useState<
@@ -746,6 +815,7 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
         <Typography.Paragraph style={{ marginBottom: 0 }}>{summary}</Typography.Paragraph>
         <DispositionBanner adjudication={adjudication} />
         <SemanticTriageCard report={report} />
+        {uafSummary && <UafV2Card summary={uafSummary} />}
         <Space size="large" wrap aria-label="报告摘要">
           <span>问题总数 <strong>{findings.length}</strong></span>
           <span>严重 / 高危 <strong>{highPriority}</strong></span>

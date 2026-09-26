@@ -10,6 +10,121 @@ from .diff_parser import ParsedDiff
 from .models import Finding, Severity
 
 
+class LLMTransportError(RuntimeError):
+    """Network or HTTP failure while posting one chat completion.
+
+    Subclasses :class:`RuntimeError` so existing callers that guard reviewer
+    failures with ``except RuntimeError`` keep working unchanged.
+    """
+
+
+class LLMResponseFormatError(RuntimeError):
+    """The chat completion content was missing or not a JSON object."""
+
+
+class LLMResponseTooLarge(RuntimeError):
+    """The chat completion body exceeded the caller-provided byte limit."""
+
+
+def post_chat_completion_text(
+    provider: str,
+    base_url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int,
+    extra_headers: dict[str, str] | None = None,
+    max_bytes: int | None = None,
+) -> str:
+    """POST one chat completion and return the raw choices content text.
+
+    Shared transport for ``OpenAICompatibleReviewer`` and the strict C/C++
+    LLM client (stdlib ``urllib`` only). ``max_bytes`` bounds the response
+    body the same way as ``GitHubClient._request``: ``None`` keeps the old
+    unbounded behavior, otherwise one byte past the bound is read so an
+    oversized body is detected before decoding. Raises ``LLMTransportError``
+    for HTTP/timeout/connection failures, ``LLMResponseTooLarge`` for an
+    oversized body and ``LLMResponseFormatError`` when the choices content
+    is missing; all are :class:`RuntimeError` subclasses. The API key never
+    appears in a raised message.
+    """
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
+    ):
+        raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
+    headers = {
+        "Authorization": "Bearer " + api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    headers.update(extra_headers or {})
+    request = urllib.request.Request(
+        base_url + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if max_bytes is None:
+                body = response.read()
+            else:
+                # Read one byte past the bound so an oversized body is
+                # detected before any decoding happens.
+                body = response.read(max_bytes + 1)
+                if len(body) > max_bytes:
+                    raise LLMResponseTooLarge(
+                        f"{provider} response exceeded the {max_bytes} byte limit"
+                    )
+        parsed = json.loads(body.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(1000).decode("utf-8", errors="replace")
+        if api_key:
+            detail = detail.replace(api_key, "***")
+        raise LLMTransportError(
+            "%s API returned HTTP %d: %s" % (provider, exc.code, detail)
+        ) from exc
+    except (urllib.error.URLError, socket.timeout, ValueError, KeyError) as exc:
+        raise LLMTransportError(
+            "%s review request failed: %s" % (provider, exc)
+        ) from exc
+    try:
+        content = parsed["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LLMResponseFormatError(
+            "%s returned an invalid JSON review response" % provider
+        ) from exc
+    if not isinstance(content, str):
+        raise LLMResponseFormatError(
+            f"{provider} returned an invalid JSON review response"
+        )
+    return content
+
+
+def post_chat_completion(
+    provider: str,
+    base_url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int,
+    extra_headers: dict[str, str] | None = None,
+    max_bytes: int | None = None,
+) -> Dict[str, Any]:
+    """POST one chat completion and return its parsed JSON-object content."""
+    text = post_chat_completion_text(
+        provider, base_url, api_key, payload, timeout,
+        extra_headers=extra_headers, max_bytes=max_bytes,
+    )
+    try:
+        result = json.loads(text)
+    except ValueError as exc:
+        raise LLMResponseFormatError(
+            f"{provider} returned an invalid JSON review response"
+        ) from exc
+    if not isinstance(result, dict):
+        raise LLMResponseFormatError("%s returned a non-object JSON response" % provider)
+    return result
+
+
 class Reviewer(ABC):
     name = "reviewer"
 
@@ -274,34 +389,14 @@ class OpenAICompatibleReviewer(Reviewer):
         return self._parse_findings(result, parsed)
 
     def _request_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        headers = {
-            "Authorization": "Bearer " + self.api_key,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        headers.update(self.extra_headers)
-        request = urllib.request.Request(
-            self.base_url + "/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
+        return post_chat_completion(
+            self.provider,
+            self.base_url,
+            self.api_key,
+            payload,
+            self.timeout,
+            extra_headers=self.extra_headers,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read(1000).decode("utf-8", errors="replace")
-            raise RuntimeError("%s API returned HTTP %d: %s" % (self.provider, exc.code, detail)) from exc
-        except (urllib.error.URLError, socket.timeout, ValueError, KeyError) as exc:
-            raise RuntimeError("%s review request failed: %s" % (self.provider, exc)) from exc
-        try:
-            content = body["choices"][0]["message"]["content"]
-            result = json.loads(content)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("%s returned an invalid JSON review response" % self.provider) from exc
-        if not isinstance(result, dict):
-            raise RuntimeError("%s returned a non-object JSON response" % self.provider)
-        return result
 
     @staticmethod
     def _parse_findings(result: Dict[str, Any], parsed: ParsedDiff) -> List[Finding]:

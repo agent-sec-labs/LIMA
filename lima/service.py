@@ -3,27 +3,58 @@ import re
 import sys
 import tempfile
 import uuid
-from pathlib import Path
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
 
 from .agents import MultiAgentCoordinator
 from .auth import AuthManager
 from .config import Settings
 from .context_manager import ContextManager
+from .cxx_agent_models import LEGACY_AGENT_CWES as CXX_AGENT_LEGACY_CWES
+from .cxx_agent_tools import CxxAgentBudget
+from .cxx_agents import (
+    DIAGNOSTIC_CANCELLED,
+    DIAGNOSTIC_LLM_UNAVAILABLE,
+    LLM_ROLES,
+    ROLE_ORDER,
+    SPECIALIST_ROLES,
+    CxxAgentCoordinator,
+    bounded_diagnostics,
+)
+from .cxx_context import CxxContextIndex
+from .cxx_llm import CxxLLMClient
+from .cxx_memory import (
+    REQUESTED_LAYERS,
+    SUPPORTED_CWES,
+    CxxAnalyzerHealth,
+    CxxAnalyzerProtocolError,
+    CxxAnalyzerUnavailable,
+    CxxMemoryAnalyzerClient,
+)
+from .cxx_retrieval import RetrievalBudget, retrieve_pull_request
+from .diff_parser import parse_unified_diff
 from .evolution import EvolutionEngine
 from .fixer import SafeFixer
-from .github import GitHubAppAuthenticator, GitHubClient
+from .github import GitHubAppAuthenticator, GitHubClient, pull_request_commit_shas
+from .github_source import (
+    MODE_DIFF_ONLY,
+    MODE_LOCAL,
+    GitHubSourceProvider,
+    SourceFetchBudget,
+    snapshot_from_diff,
+)
 from .harness import ReviewHarness
-from .metrics import metrics
 from .memory import MemoryManager
-from .models import TaskState, TraceEvent
+from .metrics import metrics
+from .models import Finding, TaskState, TraceEvent
 from .observability import AlertManager, Observability
 from .postgres_store import create_store
+from .repair_preview import RepositoryRepairPreviewer
 from .report import to_markdown
 from .reviewer import (
     OpenAICompatibleReviewer, ReliabilityRuleReviewer, SecurityRuleReviewer,
 )
-from .diff_parser import parse_unified_diff
 from .skills import SkillRegistry
 from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
 from .store import utc_now
@@ -40,30 +71,44 @@ from .task_progress import (
 from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 from .repository_import import RepositoryImportPolicy
-from .repository_cache import RepositoryCache
+from .repository_cache import MANIFEST_NAME, RepositoryCache, RepositoryCacheError
 from .repair_workspace import RepairWorkspace
 from .repository_materializer import GitHubMaterializer
-from .repository_scanner import RepositoryScanner, coverage_warning_counts
+from .repository_scanner import (
+    RepositoryScanner,
+    _AgentClientProbe,
+    coverage_warning_counts,
+)
 from .repository_source import (
     GITHUB_SOURCE_TYPE,
     LOCAL_IMPORT_SOURCE_TYPE,
     RepositorySource,
     parse_repository_source,
 )
+from .uaf_orchestrator import UAF_FINDING_STATES
 from .repository_triage import (
     RepositorySemanticTriage,
     RepositorySemanticTriageError,
 )
 from .experiments import ExperimentRunner, LLM_MODES
-from .repair_preview import RepositoryRepairPreviewer
 from .real_world_evaluation import (
     LLMSecurityTriageClient,
     RealWorldSecurityEvaluator,
     SnapshotStore,
 )
-from .workspace import RepositoryWorkspace
+from .workspace import (
+    CXX_BUILD_EXTENSIONS,
+    CXX_SOURCE_EXTENSIONS,
+    DEFAULT_FILENAMES,
+    RepositoryWorkspace,
+)
 
 DOCKER_REPOSITORY_CACHE_ROOT = Path("/var/lib/lima/repository-cache")
+
+# 设计第 12 节：报告显示提示词版本。C/C++ Agent 的系统提示由 cxx_llm 按
+# 「角色 + 固定不可信数据规则 + 固定步骤 schema」组合；这里发布该组合的稳定
+# 标识，报告只记录标识与角色清单，不落提示词全文（避免巨型载荷）。
+CXX_AGENT_PROMPT_TEMPLATE = "lima-cxx-agent-system-v1"
 
 
 def classify_repository_cache_root(root: str) -> str:
@@ -97,6 +142,95 @@ def _warn_unmanaged_repository_cache_root(root: str) -> None:
             f"host disk usage is unmanaged.",
             file=sys.stderr,
         )
+
+
+def _snapshot_manifest_sha256(snapshot: Any) -> str:
+    """Manifest hash of a content snapshot's admitted files.
+
+    Algorithm: SHA-256 over the sorted ``path\\0content_sha256\\n`` records of
+    every :class:`~lima.github_source.SnapshotFile`, so the same files under
+    the same names hash identically regardless of whether the snapshot came
+    from the local tier or a GitHub fetch. Diff-only snapshots have no files
+    and never get a manifest hash.
+    """
+    digest = hashlib.sha256()
+    for item in sorted(snapshot.files, key=lambda entry: entry.path):
+        digest.update(item.path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(item.sha256.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+class _CacheCommitSource:
+    """Tier-1 local commit source over the repository snapshot cache.
+
+    Implements the :class:`~lima.github_source.LocalCommitSource` protocol:
+    an exact ``(repository, commit_sha)`` lookup against snapshots already
+    materialized from the same repository. A hit is a real local tree whose
+    identity pins the very head SHA (the cache key folds repository and
+    resolved revision); any lookup or read failure is a miss, never an
+    error, so the source chain degrades to the GitHub tier unchanged.
+    """
+
+    def __init__(self, cache: RepositoryCache) -> None:
+        self._cache = cache
+
+    def snapshot(self, repository: str, commit_sha: str) -> Mapping[str, str] | None:
+        try:
+            entry = self._cache.lookup(RepositorySource.github(repository), commit_sha)
+        except (ValueError, RepositoryCacheError):
+            return None
+        if entry is None:
+            return None
+        tree: dict[str, str] = {}
+        try:
+            for path in sorted(entry.path.rglob("*")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if path.name == MANIFEST_NAME:
+                    continue
+                try:
+                    tree[path.relative_to(entry.path).as_posix()] = path.read_text(
+                        encoding="utf-8"
+                    )
+                except (OSError, UnicodeDecodeError, ValueError):
+                    continue
+        except OSError:
+            return None
+        return tree or None
+
+
+class _CxxAgentMergeReviewer:
+    """Reviewer 包装：把 C++ agent 结论并入一次 harness 评审。
+
+    harness 在 ``_reviewing`` 组装报告并只调用一次 ``store.succeed``，因此
+    C++ finding 与 ``collaboration.cxx_agent`` 必须经由 reviewer 注入，而不是
+    成功后二次写报告——否则轮询方会看到没有 C++ 结论的中间 SUCCESS 报告。
+    Python 评审行为零变化：``review``/``review_with_context`` 透传后仅追加
+    C++ finding，``name`` 与 adjudication 语义保持不变。
+    """
+
+    def __init__(self, inner: Any, findings: list, summary: dict[str, Any]) -> None:
+        self._inner = inner
+        self._findings = list(findings)
+        self._summary = summary
+        self.name = inner.name
+
+    def review(self, diff: str, parsed: Any) -> list:
+        return list(self._inner.review(diff, parsed)) + self._findings
+
+    def review_with_context(self, task_id: str, diff: str, parsed: Any, **kwargs):
+        contextual = getattr(self._inner, "review_with_context", None)
+        if contextual is None:
+            return self.review(diff, parsed)
+        return list(contextual(task_id, diff, parsed, **kwargs)) + self._findings
+
+    def collaboration_summary(self, task_id: str) -> dict[str, Any]:
+        reader = getattr(self._inner, "collaboration_summary", None)
+        summary = reader(task_id) if reader else {}
+        summary["cxx_agent"] = self._summary
+        return summary
 
 
 class ScanProgressTracker:
@@ -228,14 +362,80 @@ class ReviewService:
         self.repository_import = RepositoryImportPolicy(
             settings.repository_import_root
         )
+        cxx_memory_adapter = None
+        if settings.cxx_memory_mode != "off":
+            cxx_memory_adapter = CxxMemoryAnalyzerClient(
+                settings.cxx_analyzer_url,
+                timeout_seconds=settings.cxx_analysis_timeout_seconds,
+                max_response_bytes=settings.cxx_max_response_bytes,
+            )
+        # C/C++ Agent 装配：单次调用方不能覆盖模型、提示词或预算（设计第 11
+        # 节），client/budget 工厂只来自 Settings；resolved_llm() 非空时才提供
+        # client 工厂，模型用 effective_cxx_agent_model() 覆盖。
+        cxx_agent_client_factory = None
+
+        def _cxx_agent_client_factory():
+            resolved = dict(self.llm_config)
+            resolved["model"] = settings.effective_cxx_agent_model()
+            return CxxLLMClient(
+                resolved, timeout=settings.cxx_agent_timeout_seconds,
+            )
+
+        def _cxx_agent_budget_factory() -> CxxAgentBudget:
+            return CxxAgentBudget(
+                max_calls=settings.cxx_agent_max_calls,
+                max_context_files=settings.cxx_agent_max_context_files,
+                max_context_lines=settings.cxx_agent_max_context_lines,
+                max_output_bytes=settings.cxx_agent_max_output_bytes,
+            )
+
+        if settings.cxx_agent_mode != "off" and self.llm_config:
+            cxx_agent_client_factory = _cxx_agent_client_factory
+        cxx_agent_budget_factory = (
+            _cxx_agent_budget_factory
+            if settings.cxx_agent_mode != "off"
+            else None
+        )
+        # UAF v2 语义分支装配：与 legacy client 工厂同源（同一 resolved
+        # provider、同一 effective_cxx_agent_model 覆盖），单次调用方同样
+        # 不能覆盖模型或端点。resolved_llm() 为空时不提供——orchestrator
+        # 按 §12.2 模式矩阵处理（auto 降级 / required 失败）。
+        cxx_uaf_llm_factory = None
+
+        def _cxx_uaf_llm_factory():
+            resolved = dict(self.llm_config)
+            resolved["model"] = settings.effective_cxx_agent_model()
+            return resolved
+
+        if settings.cxx_agent_mode != "off" and self.llm_config:
+            cxx_uaf_llm_factory = _cxx_uaf_llm_factory
+        # 报告身份（设计第 12 节）：provider/model 只在真的装配了 provider
+        # 时非空；与 client 工厂同源，未配置即留空，绝不宣称。
+        self.cxx_agent_provider = (
+            str(self.llm_config.get("provider", ""))
+            if cxx_agent_client_factory is not None
+            else ""
+        )
         # 快照缓存与物化器惰性构建：local-import-only（默认）部署在启动时
         # 不得触碰文件系统；只读根文件系统的容器只在真正需要 GitHub 物化时
         # 才创建缓存目录，届时失败表现为单个任务失败而非服务崩溃。
         self._repository_cache: RepositoryCache | None = None
         # 物化只发生在异步 worker；测试可整体替换该实例注入离线 opener。
         self.repository_materializer: GitHubMaterializer | None = None
+        # PR 三级上下文链的 tier-1 本地档（LocalCommitSource 协议）。生产默认
+        # 惰性接到 repository snapshot cache（同仓库同 head SHA 的已物化树）；
+        # 测试可整体替换注入离线实现。
+        self.cxx_pr_local_source: Any = None
         self.repository_scanner = RepositoryScanner(
-            sast_mode=settings.repository_scan_sast_mode
+            sast_mode=settings.repository_scan_sast_mode,
+            cxx_memory_mode=settings.cxx_memory_mode,
+            cxx_memory_adapter=cxx_memory_adapter,
+            cxx_agent_mode=settings.cxx_agent_mode,
+            cxx_agent_client_factory=cxx_agent_client_factory,
+            cxx_agent_budget_factory=cxx_agent_budget_factory,
+            cxx_agent_max_candidates=settings.cxx_agent_max_candidates,
+            cxx_agent_store=self.store,
+            cxx_uaf_llm_factory=cxx_uaf_llm_factory,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
         self.experiment_runner = ExperimentRunner(
@@ -427,35 +627,49 @@ class ReviewService:
     def _run_review(
         self, task_id: str, repository: str, pull_request: Optional[int],
         diff: str, tenant_id: str,
+        cxx_merge: "tuple[dict[str, Any], list[Finding]] | None" = None,
     ):
         task = self.store.get(task_id, tenant_id) or {}
         deployment = self.store.get_deployment(tenant_id, "llm-review")
         evolved = self._active_evolved_reviewers(tenant_id)
+
+        def merged(reviewer):
+            # C++ agent 结论经 reviewer 注入，保持单次 store.succeed 语义。
+            if cxx_merge is None:
+                return reviewer
+            return _CxxAgentMergeReviewer(reviewer, cxx_merge[1], cxx_merge[0])
+
         if (
             (task.get("input") or {}).get("release_lane") == "canary"
             or (deployment and deployment.get("status") == "promoted")
         ):
             candidate = self._candidate_reviewer(tenant_id)
             if candidate:
-                canary_reviewer = self._build_coordinator([
+                canary_reviewer = merged(self._build_coordinator([
                     item for item in self.registry.reviewers()
                     if not isinstance(item, OpenAICompatibleReviewer)
-                ] + evolved + [candidate])
+                ] + evolved + [candidate]))
                 harness = ReviewHarness(
                     self.store, canary_reviewer, self.settings.max_steps,
                     self.settings.timeout_seconds, observability=self.observability,
                 )
                 return harness.run(task_id, repository, pull_request, diff, tenant_id)
         if evolved:
-            tenant_reviewer = self._build_coordinator(
+            tenant_reviewer = merged(self._build_coordinator(
                 self.registry.reviewers() + evolved
-            )
+            ))
             harness = ReviewHarness(
                 self.store, tenant_reviewer, self.settings.max_steps,
                 self.settings.timeout_seconds, observability=self.observability,
             )
             return harness.run(task_id, repository, pull_request, diff, tenant_id)
-        return self.harness.run(task_id, repository, pull_request, diff, tenant_id)
+        if cxx_merge is None:
+            return self.harness.run(task_id, repository, pull_request, diff, tenant_id)
+        harness = ReviewHarness(
+            self.store, merged(self.reviewer), self.settings.max_steps,
+            self.settings.timeout_seconds, observability=self.observability,
+        )
+        return harness.run(task_id, repository, pull_request, diff, tenant_id)
 
     def _run_shadow(
         self, task_id: str, tenant_id: str, diff: str, primary_report,
@@ -621,8 +835,99 @@ class ReviewService:
         metrics.inc("reviews_enqueued_total")
         return {"task_id": task_id, "state": "PENDING", "queue": self.queue.backend}
 
+    def _enrich_cxx_agent_summary(self, summary: dict[str, Any]) -> None:
+        """Add service-owned report identity to one ``cxx_agent`` summary.
+
+        ``RepositoryScanner`` 产出管线侧载荷（status/budget/retrieval/
+        verification/roles）；provider、prompt 模板标识、usage 用量与
+        ``automatic_repair`` 红线由装配层（本类）补充。仅触碰 ``cxx_agent``
+        字典，非 agent 任务逐字节等价。
+        """
+
+        if not isinstance(summary, dict) or "mode" not in summary:
+            return
+        summary.setdefault("provider", self.cxx_agent_provider)
+        summary.setdefault("prompt", {
+            "template": CXX_AGENT_PROMPT_TEMPLATE,
+            "roles": list(ROLE_ORDER),
+        })
+        summary.setdefault("automatic_repair", False)
+        budget = summary.get("budget")
+        if isinstance(budget, dict):
+            remaining = budget.get("remaining") or {}
+            # 诚实标注：v1 不拿 provider token 计数，用量是输出字节的代理。
+            summary["usage"] = {
+                "calls": max(
+                    0, int(budget.get("max_calls", 0)) - int(remaining.get("calls", 0))
+                ),
+                "context_files": max(
+                    0,
+                    int(budget.get("max_context_files", 0))
+                    - int(remaining.get("files", 0)),
+                ),
+                "context_lines": max(
+                    0,
+                    int(budget.get("max_context_lines", 0))
+                    - int(remaining.get("lines", 0)),
+                ),
+                "output_bytes": max(
+                    0,
+                    int(budget.get("max_output_bytes", 0))
+                    - int(remaining.get("bytes_remaining", 0)),
+                ),
+                "token_accounting": "bytes-proxy",
+            }
+        # 有界诊断（设计第 12/13 节）：diagnostics 数组只允许固定词表代码，
+        # 覆盖任何上游散落的 provider 原文错误串。context-truncated 如实
+        # 记录检索未覆盖的候选；llm-unavailable 承接顶层降级状态。
+        retrieval = summary.get("retrieval")
+        uncovered = (
+            int(retrieval.get("uncovered_candidates") or 0)
+            if isinstance(retrieval, dict) else 0
+        )
+        role_errors = [
+            str(role.get("error"))
+            for role in summary.get("roles") or []
+            if isinstance(role, dict)
+            and role.get("status") == "failed-replaced"
+            and role.get("error")
+        ]
+        summary["diagnostics"] = bounded_diagnostics(
+            role_errors,
+            context_truncated=uncovered > 0,
+            llm_unavailable=(
+                str(summary.get("status") or "") == DIAGNOSTIC_LLM_UNAVAILABLE
+            ),
+        )
+
     def repository_scan_capabilities(self) -> Dict[str, Any]:
         result = self.repository_import.capabilities()
+        health_status = "disabled"
+        health_schema_version = None
+        capabilities = None
+        source_layer_available = False
+        build_layer_available = False
+        sanitizer_layer_available = False
+        cxx_adapter = self.repository_scanner.cxx_memory_adapter
+        if self.settings.cxx_memory_mode != "off" and cxx_adapter is not None:
+            try:
+                health = cxx_adapter.health()
+            except CxxAnalyzerUnavailable:
+                health_status = "unavailable"
+            except CxxAnalyzerProtocolError:
+                health_status = "invalid-response"
+            else:
+                if isinstance(health, CxxAnalyzerHealth):
+                    health_status = "available"
+                    health_schema_version = health.schema_version
+                    capabilities = health.capabilities()
+                    source_layer_available = health.source_available
+                    build_layer_available = health.build_available
+                    sanitizer_layer_available = bool(
+                        health.build_available and health.test_configured
+                    )
+                else:
+                    health_status = "invalid-response"
         allowed = self.settings.repository_scan_sources
         result.update({
             "scan_sources": {
@@ -651,6 +956,25 @@ class ReviewService:
                 "repository-tests", "human-draft-pr-approval",
             ],
             "repair_tests_configured": bool(self.settings.repair_test_command),
+            "cxx_memory": {
+                "mode": self.settings.cxx_memory_mode,
+                # Kept for v1 clients; authoritative availability is health_status below.
+                "analyzer_configured": bool(self.settings.cxx_analyzer_url),
+                "health_status": health_status,
+                "health_schema_version": health_schema_version,
+                "capabilities": capabilities,
+                "source_layer_available": source_layer_available,
+                "build_layer_available": build_layer_available,
+                "sanitizer_layer_available": sanitizer_layer_available,
+                "supported_extensions": sorted(CXX_SOURCE_EXTENSIONS),
+                "build_metadata_extensions": sorted(CXX_BUILD_EXTENSIONS),
+                "build_metadata_filenames": sorted(DEFAULT_FILENAMES),
+                "supported_cwes": sorted(SUPPORTED_CWES),
+                "layers": list(REQUESTED_LAYERS),
+                "build_configuration_status": "sidecar-managed",
+                "test_configuration_status": "sidecar-managed",
+                "automatic_repair": False,
+            },
             "semantic_triage_mode": self.settings.repository_scan_llm_mode,
             "semantic_triage_enabled": self.repository_semantic_triage is not None,
             "semantic_triage_provider": (
@@ -669,7 +993,74 @@ class ReviewService:
             "max_file_bytes": self.settings.repository_scan_max_file_bytes,
             "max_total_bytes": self.settings.repository_scan_max_total_bytes,
         })
+        result["cxx_agent"] = self._cxx_agent_capabilities()
+        result["uaf_v2"] = self._uaf_v2_capabilities()
         return result
+
+    def _uaf_v2_capabilities(self) -> dict[str, Any]:
+        """Design §14: the additive ``uaf_v2`` capabilities object.
+
+        ``analyzer_configured`` 与 ``RepositoryScanner._run_uaf_v2_branch``
+        的判定同源——adapter 真的具备 ``analyze_uaf_facts`` 能力才算配置，
+        不看 URL 或 mode；``llm_configured`` 沿 ``resolved_llm()`` 判定，
+        只表示语义分支有可用 provider（不做可用性宣称）。全部走 getattr
+        兜底：测试 stub 缺字段时如实按未配置上报。
+        """
+
+        adapter = getattr(self.repository_scanner, "cxx_memory_adapter", None)
+        return {
+            "mode": str(
+                getattr(self.repository_scanner, "cxx_agent_mode", None)
+                or getattr(self.settings, "cxx_agent_mode", "off")
+                or "off"
+            ),
+            "analyzer_configured": callable(
+                getattr(adapter, "analyze_uaf_facts", None)
+            ),
+            "llm_configured": bool(self.llm_config),
+            "states": sorted(UAF_FINDING_STATES),
+        }
+
+    def _cxx_agent_capabilities(self) -> dict[str, Any]:
+        """Design §11: the ``cxx_agent`` capabilities object.
+
+        ``configured`` 与 ``healthy`` 分开：configured 只表示 mode 非 off 且
+        resolved_llm 非空；healthy 只有真实探测过 provider 才非 null——v1 在
+        capabilities 端点不做探测，恒为 None（不能仅凭 URL/key 非空宣称可用）。
+        ``automatic_repair`` 恒为 False（设计验收 10）。属性访问全部走
+        ``getattr`` 兜底：测试用的部分 settings stub 缺少 agent 字段时，
+        如实按未配置上报，而不是崩溃或宣称可用。
+        """
+
+        mode = str(getattr(self.settings, "cxx_agent_mode", "off") or "off")
+        configured = bool(mode != "off" and self.llm_config)
+        github_source_available = bool(
+            getattr(self.settings, "github_token", "")
+            or (
+                getattr(self.settings, "github_app_id", "")
+                and getattr(self.settings, "github_private_key_path", "")
+            )
+        )
+        model = ""
+        if configured:
+            effective_model = getattr(
+                self.settings, "effective_cxx_agent_model", None
+            )
+            model = str(effective_model()) if callable(effective_model) else ""
+        return {
+            "mode": mode,
+            "provider": str(getattr(self, "cxx_agent_provider", "") or "")
+            if configured
+            else "",
+            "model": model,
+            "repository_scan": mode != "off",
+            "pull_request_scan": mode != "off",
+            "external_source_context": github_source_available,
+            "automatic_repair": False,
+            "configured": configured,
+            # None = not probed; no availability claim without a real probe.
+            "healthy": None,
+        }
 
     def enqueue_repository_scan(
         self, repository_key: str, tenant_id: str = "default"
@@ -768,6 +1159,7 @@ class ReviewService:
             "scan_source": scan_source,
             "sast_mode": self.settings.repository_scan_sast_mode,
             "semantic_triage_mode": self.settings.repository_scan_llm_mode,
+            "cxx_memory_mode": self.settings.cxx_memory_mode,
         }
         message: dict[str, Any] = {
             "task_id": task_id,
@@ -918,9 +1310,14 @@ class ReviewService:
         ), metrics.timer("repository_scan_duration"):
             result = self.repository_scanner.scan(
                 workspace,
+                repository_key=repository_label,
                 progress_callback=(
                     progress.pipeline_event if progress is not None else None
                 ),
+                task_id=task_id,
+                # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
+                # 权威取消信号。
+                should_cancel=lambda: self.store.is_cancelled(task_id),
             )
         result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {
@@ -930,6 +1327,9 @@ class ReviewService:
             "snapshot_files": len(result.inventory.files),
             **import_policy_extra,
         }
+        self._enrich_cxx_agent_summary(
+            result.report.collaboration.get("cxx_agent") or {}
+        )
         if self.repository_semantic_triage is not None:
             if progress is not None:
                 progress.pipeline_event(SEMANTIC_TRIAGE, "正在语义复核候选发现")
@@ -1078,13 +1478,21 @@ class ReviewService:
             })
         if diff is None:
             raise PermanentTaskError("task payload no longer exists")
+        # PR 三级上下文链（设计第 6 节）在既有评审前运行：required 模式下
+        # 的管线失败在这里判死任务（任务尚未成功，失败语义与仓库扫描一致），
+        # auto 模式下任何降级都只如实记录，不改变既有 diff 评审的结论。
+        cxx_summary, cxx_findings = self._run_cxx_pull_request_review(
+            task_id, payload["repository"], diff, task.get("input") or {},
+            payload.get("installation_id"),
+        )
+        cxx_merge = None if cxx_summary is None else (cxx_summary, cxx_findings)
         try:
             with self.observability.span(
                 "review.async", task_id, task_id=task_id, tenant_id=tenant_id,
             ), metrics.timer("review_duration"):
                 report = self._run_review(
                     task_id, payload["repository"], payload.get("pull_request"), diff,
-                    tenant_id,
+                    tenant_id, cxx_merge=cxx_merge,
                 )
             self._run_shadow(task_id, tenant_id, diff, report)
             metrics.inc("reviews_total")
@@ -1102,6 +1510,215 @@ class ReviewService:
             self.releases.observe(tenant_id, "llm-review", True, lane)
             self.alerts.evaluate(tenant_id)
             raise
+
+    # ------------------------------------------------------ PR context chain
+
+    def _cxx_pr_local_commit_source(self) -> "tuple[Any, bool]":
+        """Resolve the tier-1 local commit source (exact repository@SHA).
+
+        生产默认接到 repository snapshot cache：同仓库已按完整 head SHA 物化
+        过的本地树即精确 commit 匹配（缓存键由 repository + resolved revision
+        折叠而成，与请求 ref 无关）。测试可经 ``cxx_pr_local_source`` 注入任意
+        LocalCommitSource。构建失败按未接线处理，不阻断 PR 评审。
+        """
+        if self.cxx_pr_local_source is not None:
+            return self.cxx_pr_local_source, True
+        try:
+            return _CacheCommitSource(self._ensure_repository_cache()), True
+        except (OSError, ValueError):
+            return None, False
+
+    def _run_cxx_pull_request_review(
+        self, task_id: str, repository: str, diff: str, task_input: dict[str, Any],
+        installation_id: int | None,
+    ) -> "tuple[dict[str, Any] | None, list[Finding]]":
+        """C/C++ PR 的三级上下文链（设计第 6 节）。
+
+        优先级：本地导入仓库且 commit 精确等于 head SHA（scope=repository）→
+        GitHub 凭据读取固定 head SHA（scope=pr-context）→ GitHub 不可用时
+        Diff-only。红线：
+
+        - 抓取只绑定完整 40 位 head SHA（来源为已验签 webhook payload），
+          绝不以分支名、短 SHA 或 PR 可变 ref 替代；
+        - Diff-only 不运行 C++ Agent 管线（无索引无读取能力，运行即编造），
+          PR 的 C++ 结论只来自既有 diff 评审路径，且永不升级；
+        - ``mode=off`` 或任务无 head_sha（API 提交的 PR 任务）时整条链不
+          进入，既有评审流程行为零变化；
+        - ``mode=required`` 的管线失败抛 PermanentTaskError；auto 降级保结果。
+        """
+        mode = self.settings.cxx_agent_mode
+        head_sha = str(task_input.get("head_sha") or "")
+        base_sha = str(task_input.get("base_sha") or "")
+        if mode == "off" or not head_sha:
+            return None, []
+        audit: dict[str, Any] = {
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "local-source": "not-wired",
+        }
+        if self.repository_scanner.cxx_agent_client_factory is None:
+            if mode == "required":
+                raise PermanentTaskError(
+                    "required C++ agent pipeline has no configured LLM provider"
+                )
+            return {"mode": mode, "status": "llm-not-configured", **audit}, []
+        # F4 接线：webhook diff 经 snapshot_from_diff 得到 tuple-of-pairs，
+        # 转 dict 后同源传给检索与 coordinator（代码上下文与 diff 绑定同一任务）。
+        changed = snapshot_from_diff(repository, head_sha, diff, SourceFetchBudget())
+        changed_lines = dict(changed.changed_lines)
+        cxx_paths = [
+            path for path in sorted(changed_lines)
+            if PurePosixPath(path).suffix.lower() in CXX_SOURCE_EXTENSIONS
+        ]
+        if not cxx_paths:
+            return {"mode": mode, "status": "no-cxx-sources", **audit}, []
+        local_source, local_wired = self._cxx_pr_local_commit_source()
+        audit["local-source"] = "wired" if local_wired else "not-wired"
+        client = (
+            self.github_client_for_installation(installation_id)
+            if installation_id is not None else self.github
+        )
+        provider = GitHubSourceProvider(client, local_source)
+        snapshot = provider.fetch(
+            repository, head_sha, cxx_paths,
+            SourceFetchBudget(
+                max_files=self.settings.repository_scan_max_files,
+                max_total_bytes=self.settings.repository_scan_max_total_bytes,
+            ),
+        )
+        if snapshot.mode == MODE_DIFF_ONLY:
+            # 无内容快照 = 无索引无读取能力：不运行管线、零 agent finding，
+            # 也不把未读取的旧代码当证据。coordinator 的 diff-only 封顶语义
+            # 由既有测试 test_diff_only_caps_every_state_at_llm_candidate
+            # 锁定，这里作为纵深防御保留。
+            return {
+                "mode": mode, "status": "diff-only", "scope": "diff-only",
+                "reason": snapshot.unavailable_reason,
+                "skipped_files": snapshot.skipped_files,
+                **audit,
+            }, []
+        scope = "repository" if snapshot.mode == MODE_LOCAL else "pr-context"
+        manifest = _snapshot_manifest_sha256(snapshot)
+        self.store.update_task_input(task_id, {"source_manifest_sha256": manifest})
+        audit.update({"scope": scope, "source_manifest_sha256": manifest})
+        try:
+            findings, summary = self._review_pull_request_snapshot(
+                task_id, changed_lines, snapshot, scope, mode, audit,
+            )
+        except (RuntimeError, ValueError) as exc:
+            if mode == "required":
+                raise PermanentTaskError(
+                    f"C++ agent pipeline failed in required mode: {exc}"
+                ) from exc
+            metrics.inc("pull_request_cxx_agent_unavailable_total")
+            # 有界诊断：只落固定词表代码，provider 原文不进入报告载荷。
+            return {
+                "mode": mode, "model": "",
+                "status": DIAGNOSTIC_LLM_UNAVAILABLE,
+                "diagnostics": [DIAGNOSTIC_LLM_UNAVAILABLE], **audit,
+            }, []
+        return summary, findings
+
+    def _review_pull_request_snapshot(
+        self, task_id: str, changed_lines: dict[str, tuple], snapshot: Any,
+        scope: str, mode: str, audit: dict[str, Any],
+    ) -> "tuple[list[Finding], dict[str, Any]]":
+        """在固定快照上运行 PR 检索与多 Agent 管线（F4 消费侧）。
+
+        快照文件物化为临时目录（写完即只读使用，扫描完清理）并按仓库扫描
+        同一语义建索引；status 判定、Finding 投影与 collaboration 载荷复用
+        repository_scanner 的实现，保证两条入口的审计口径一致。
+        """
+        scanner = self.repository_scanner
+        with tempfile.TemporaryDirectory(prefix="lima-pr-snapshot-") as tmp:
+            root = Path(tmp)
+            for item in snapshot.files:
+                target = root.joinpath(*Path(item.path).parts)
+                if not target.resolve().is_relative_to(root.resolve()):
+                    raise ValueError(
+                        f"snapshot path escapes the workspace: {item.path}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(item.content.encode("utf-8"))
+            workspace = RepositoryWorkspace(
+                root,
+                max_files=self.settings.repository_scan_max_files,
+                max_file_bytes=self.settings.repository_scan_max_file_bytes,
+                max_total_bytes=self.settings.repository_scan_max_total_bytes,
+            )
+            inventory = workspace.inventory()
+            index = CxxContextIndex.build(workspace, inventory)
+            if not index.coverage.indexed:
+                return [], {"mode": mode, "status": "no-cxx-sources", **audit}
+            budget = (
+                scanner.cxx_agent_budget_factory()
+                if scanner.cxx_agent_budget_factory is not None
+                else CxxAgentBudget()
+            )
+            retrieval = retrieve_pull_request(
+                index,
+                changed_lines,
+                RetrievalBudget(
+                    max_candidates=self.settings.cxx_agent_max_candidates,
+                    max_context_files=budget.max_context_files,
+                    max_context_lines=budget.max_context_lines,
+                ),
+            )
+            probe = _AgentClientProbe(scanner.cxx_agent_client_factory())
+            coordinator = CxxAgentCoordinator(
+                client=probe,
+                index=index,
+                # SnapshotReader 协议要求 .read_text(path)；workspace 即实现。
+                reader=workspace,
+                store=self.store,
+                task_id=task_id,
+                budget=budget,
+                source_mode=scope,
+                should_cancel=lambda: self.store.is_cancelled(task_id),
+            )
+            review = coordinator.review_pull_request(retrieval, changed_lines, budget)
+        cancelled = self.store.is_cancelled(task_id)
+        llm_failed = any(
+            outcome.role in LLM_ROLES and outcome.status == "failed-replaced"
+            for outcome in review.role_outcomes
+        )
+        if cancelled:
+            status = DIAGNOSTIC_CANCELLED
+        elif probe.succeeded_turns == 0 and llm_failed:
+            if mode == "required":
+                raise RuntimeError(
+                    "all agent roles failed: "
+                    + "; ".join(
+                        outcome.error[:120]
+                        for outcome in review.role_outcomes
+                        if outcome.error
+                    )[:500]
+                )
+            metrics.inc("pull_request_cxx_agent_unavailable_total")
+            status = DIAGNOSTIC_LLM_UNAVAILABLE
+        else:
+            status = "completed"
+        specialist_roles: dict[str, list] = {}
+        for outcome in review.role_outcomes:
+            if outcome.role in SPECIALIST_ROLES:
+                for candidate in outcome.candidates:
+                    specialist_roles.setdefault(candidate.candidate_id, []).append(
+                        outcome.role
+                    )
+        # 降级壳（cwe=unreviewed）永不转 Finding；legacy 投影域是
+        # LEGACY_AGENT_CWES（CWE-416 归 UAF v2 管线）；C++ Finding 绑定
+        # 触发行与 trigger_path（根因位置），gate 规则与仓库扫描完全一致。
+        findings = [
+            scanner._agent_finding(candidate, specialist_roles)
+            for candidate in review.candidates
+            if candidate.cwe in CXX_AGENT_LEGACY_CWES
+        ]
+        summary = scanner._cxx_agent_collaboration(
+            mode, status, probe, review, retrieval, budget,
+        )
+        summary.update(audit)
+        self._enrich_cxx_agent_summary(summary)
+        return findings, summary
 
     def _on_dead_letter(self, payload: Dict[str, Any], error: str) -> None:
         task_id = payload.get("task_id", "")
@@ -1152,10 +1769,14 @@ class ReviewService:
         diff_url = pull.get("diff_url")
         if not repository or not isinstance(number, int) or not diff_url:
             raise ValueError("invalid GitHub pull_request payload")
+        # 固定 head SHA（设计第 6 节）：从已验签 payload 提取完整 40 位
+        # head/base SHA 并绑定任务输入。任何分支名、短 SHA 或 PR 可变 ref
+        # 都不能作为抓取依据；下游源码抓取只允许使用这里的 head SHA。
+        head_sha, base_sha = pull_request_commit_shas(payload)
         self._authorize_repository(tenant_id, repository)
         task_id = self._create_deferred_task(
             repository, number, "github-webhook", tenant_id,
-            {"diff_url": diff_url},
+            {"diff_url": diff_url, "head_sha": head_sha, "base_sha": base_sha},
         )
         self.queue.submit({
             "task_id": task_id, "repository": repository, "pull_request": number,

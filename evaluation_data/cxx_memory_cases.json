@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "curl-curl-cve-2026-8925",
+      "project": "curl/curl",
+      "cwe": "CWE-415",
+      "vulnerable_commit": "eb9b253d660db179b1aadd77c425de5c71f18526",
+      "fixed_commit": "3da249e1f0716c06644ed3522a37a8bf81808012",
+      "archives": {
+        "vulnerable": {
+          "url": "https://codeload.github.com/curl/curl/tar.gz/eb9b253d660db179b1aadd77c425de5c71f18526",
+          "sha256": "1a053c1f5be8ac939506bb5432dc4d325fd213aa6b4880b7c58abe7f4f6cd256"
+        },
+        "fixed": {
+          "url": "https://codeload.github.com/curl/curl/tar.gz/3da249e1f0716c06644ed3522a37a8bf81808012",
+          "sha256": "337db17d9c8560c9553114c4fced71343e50cf2e895cc2a3ffce390deb12f41d"
+        }
+      },
+      "advisory_url": "https://nvd.nist.gov/vuln/detail/CVE-2026-8925",
+      "upstream_fix_url": "https://github.com/curl/curl/commit/3da249e1f0716c06644ed3522a37a8bf81808012",
+      "affected": {
+        "path": "lib/vauth/gsasl.c",
+        "symbol": "Curl_auth_gsasl_is_supported"
+      },
+      "build_steps": [
+        ["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug", "-DBUILD_CURL_EXE=ON", "-DBUILD_SHARED_LIBS=OFF", "-DCURL_USE_GSASL=ON", "-DCURL_USE_LIBPSL=OFF", "-DCURL_USE_OPENSSL=OFF", "-DCURL_ZLIB=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+        ["cmake", "--build", "build", "--parallel", "2"]
+      ],
+      "test_steps": [
+        ["build/src/curl", "--version"]
+      ],
+      "selection_rationale": "CVE-2026-8925 and the one-parent upstream fix identify a libgsasl cleanup double free in Curl_auth_gsasl_is_supported; the pinned build enables that feature and the fixed archive contains no links or special files.",
+      "license": {
+        "spdx": "curl",
+        "url": "https://raw.githubusercontent.com/curl/curl/3da249e1f0716c06644ed3522a37a8bf81808012/COPYING"
+      }
+    },
+    {
+      "id": "podofo-podofo-cve-2025-9394",
+      "project": "podofo/podofo",
+      "cwe": "CWE-416",
+      "vulnerable_commit": "e002106677a83b85dd8d4717b1be7fac88f9756e",
+      "fixed_commit": "22d16cb142f293bf956f66a4d399cdd65576d36c",
+      "archives": {
+        "vulnerable": {
+          "url": "https://codeload.github.com/podofo/podofo/tar.gz/e002106677a83b85dd8d4717b1be7fac88f9756e",
+          "sha256": "2f40ff086b3510f8818eaf503c880c0a68146559a2563ea81e1048d26cada6ba"
+        },
+        "fixed": {
+          "url": "https://codeload.github.com/podofo/podofo/tar.gz/22d16cb142f293bf956f66a4d399cdd65576d36c",
+          "sha256": "98839065de6c3bfb6fc331e39cf094d0cb407dc86bad17dfc3f050cc9dadee3f"
+        }
+      },
+      "advisory_url": "https://nvd.nist.gov/vuln/detail/CVE-2025-9394",
+      "upstream_fix_url": "https://github.com/podofo/podofo/commit/22d16cb142f293bf956f66a4d399cdd65576d36c",
+      "affected": {
+        "path": "src/podofo/main/PdfTokenizer.cpp",
+        "symbol": "PdfTokenizer::DetermineDataType"
+      },
+      "build_steps": [
+        ["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug", "-DPODOFO_BUILD_LIB_ONLY=ON", "-DPODOFO_BUILD_STATIC=ON", "-DPODOFO_WANT_LCMS2=OFF", "-DCMAKE_DISABLE_FIND_PACKAGE_JPEG=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_TIFF=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_PNG=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_Fontconfig=TRUE", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+        ["make", "-C", "build", "-f", "src/podofo/CMakeFiles/podofo_static.dir/build.make", "-B", "src/podofo/CMakeFiles/podofo_static.dir/main/PdfTokenizer.cpp.o"]
+      ],
+      "test_steps": [],
+      "selection_rationale": "CVE-2025-9394 and the one-parent upstream fix identify a use-after-free in PdfTokenizer::DetermineDataType; the pinned build-verification force-compiles that exact translation unit on both revisions. GitHub archives omit the test-resources submodule, and the bounded snapshot omits oversized generated utf8proc data, so no runtime sanitizer test is configured and this case does not claim a complete library link, a PoDoFo unit-test run, or a deterministic vulnerability trigger.",
+      "license": {
+        "spdx": "LGPL-2.0-or-later",
+        "url": "https://raw.githubusercontent.com/podofo/podofo/22d16cb142f293bf956f66a4d399cdd65576d36c/COPYING"
+      }
+    },
+    {
+      "id": "goaccess-cve-2026-55777",
+      "project": "allinurl/goaccess",
+      "cwe": "CWE-125",
+      "vulnerable_commit": "ea74b87254d0adc675c087ff49bddd2d60dc01d5",
+      "fixed_commit": "ba813ed97d998dbdcb8d87e178799a4bb2da9e81",
+      "archives": {
+        "vulnerable": {
+          "url": "https://codeload.github.com/allinurl/goaccess/tar.gz/ea74b87254d0adc675c087ff49bddd2d60dc01d5",
+          "sha256": "a629d40692bf5036e9f53dfcec86cb536da23bc69cc34f9732a162875774b7e6"
+        },
+        "fixed": {
+          "url": "https://codeload.github.com/allinurl/goaccess/tar.gz/ba813ed97d998dbdcb8d87e178799a4bb2da9e81",
+          "sha256": "4b36552ff80680cee07e788df26c4d20f6abbd7efd1950056550e1f554c9329a"
+        }
+      },
+      "advisory_url": "https://nvd.nist.gov/vuln/detail/CVE-2026-55777",
+      "upstream_fix_url": "https://github.com/allinurl/goaccess/commit/ba813ed97d998dbdcb8d87e178799a4bb2da9e81",
+      "affected": {
+        "path": "src/opesys.c",
+        "symbol": "parse_ios"
+      },
+      "build_steps": [
+        ["autoreconf", "-fiv"],
+        ["./configure", "--disable-bzip", "--disable-zlib", "--disable-geoip", "--enable-utf8"],
+        ["make", "-j2"]
+      ],
+      "test_steps": [
+        ["make", "check"]
+      ],
+      "selection_rationale": "CVE-2026-55777 describes an out-of-bounds read caused by parse_ios using an attacker-controlled offset as a memmove length; the one-parent fix changes that exact call.",
+      "license": {
+        "spdx": "MIT",
+        "url": "https://raw.githubusercontent.com/allinurl/goaccess/ba813ed97d998dbdcb8d87e178799a4bb2da9e81/COPYING"
+      }
+    },
+    {
+      "id": "goaccess-cve-2026-54715",
+      "project": "allinurl/goaccess",
+      "cwe": "CWE-787",
+      "vulnerable_commit": "561bcb683b00943ac9ca07102d992565bc860c07",
+      "fixed_commit": "81f90d9dafd6956c188dea9f944d24946d3d3351",
+      "archives": {
+        "vulnerable": {
+          "url": "https://codeload.github.com/allinurl/goaccess/tar.gz/561bcb683b00943ac9ca07102d992565bc860c07",
+          "sha256": "455edd828b4ffd6cdec477cdc661c231e834c6bf6d1be15960a037deaa14d96f"
+        },
+        "fixed": {
+          "url": "https://codeload.github.com/allinurl/goaccess/tar.gz/81f90d9dafd6956c188dea9f944d24946d3d3351",
+          "sha256": "35d157c681b5cfbfb217b1969287d324abfec55aaa41f0b5ee64e03a58147fc8"
+        }
+      },
+      "advisory_url": "https://nvd.nist.gov/vuln/detail/CVE-2026-54715",
+      "upstream_fix_url": "https://github.com/allinurl/goaccess/commit/81f90d9dafd6956c188dea9f944d24946d3d3351",
+      "affected": {
+        "path": "src/browsers.c",
+        "symbol": "parse_browser"
+      },
+      "build_steps": [
+        ["autoreconf", "-fiv"],
+        ["./configure", "--disable-bzip", "--disable-zlib", "--disable-geoip", "--enable-utf8"],
+        ["make", "-j2"]
+      ],
+      "test_steps": [
+        ["make", "check"]
+      ],
+      "selection_rationale": "CVE-2026-54715 and the one-parent upstream fix identify a heap out-of-bounds write in parse_browser; the patch anchors the Opera memmove destination to the actual token.",
+      "license": {
+        "spdx": "MIT",
+        "url": "https://raw.githubusercontent.com/allinurl/goaccess/81f90d9dafd6956c188dea9f944d24946d3d3351/COPYING"
+      }
+    }
+  ]
+}

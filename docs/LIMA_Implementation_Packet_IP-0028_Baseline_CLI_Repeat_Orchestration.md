@@ -213,7 +213,7 @@ N warm 重复执行（attempt 件经冻结 `run_baseline_attempt` 写出），�
 | `benchmarks/v4/baseline/orchestrate.py` | `add_baseline_arguments`、`BaselineOrchestrationError`、`BaselineOrchestrationErrorCode`、`BaselineRunSummary`、`run_baseline_from_args`、`run_repeats` |
 | 其余全部文件 | 公共符号面零变化（run.py 六符号、collect.py 十一符号、expert_timing.py 一符号均不动） |
 
-**导入方向冻结（无环）**：`orchestrate.py` → stdlib（恰 `argparse`/`dataclasses`/`json`/`pathlib`/`typing`）
+**导入方向冻结（无环）**：`orchestrate.py` → stdlib（恰 `argparse`/`dataclasses`/`enum`/`json`/`pathlib`/`typing`；`enum` 为 §7.0 冻结的 str-Enum 错误码类所必需——R5 委派 C1 Packet 冻结最终签名，纯 stdlib、离线、确定性，与 R10 目的（stdlib-only/无新依赖/无网络）一致，登记为对 R10 字面清单的在授权内解释）
 + 只读四方 `lima.baseline_run_spec`、`lima.baseline_run_result`、`benchmarks.v4.baseline.collect`、
 `benchmarks.v4.baseline.run`；三脚本 → 基线分支内惰性 import `orchestrate`（+ 分支内惰性 import 三个冻结
 error 类）；`orchestrate.py` **禁止** import `expert_timing`、`lima.contracts.codec`（digest 经 result 对象
@@ -235,6 +235,8 @@ P&V 产物为全新文件）；路径集合两两不重叠；Assignment 亲验�
   | `INVALID_REPEAT_COUNT` | `"The baseline repeat count must be a positive integer."` | repeat 非 int 或 < 1（argparse 已挡 CLI 面；本层防御直接 API 调用） |
   | `MANIFEST_UNREADABLE` | `"The baseline manifest file could not be read."` | manifest 文件缺失/不可读/UTF-8 或 JSON 解析失败 |
 
+- ruff 约定：错误码类定义行带 `# noqa: UP042 -- signature frozen by IP-0028`（镜像 IP-0027
+  `BaselineCollectionErrorCode` 先例；`(str, enum.Enum)` 形态是冻结签名的一部分）。
 - `BaselineOrchestrationError(ValueError)`：属性 `code: BaselineOrchestrationErrorCode`、`field_path: str`
   （结构化定位，如 `"$.baseline_output"`）；同一 code 渲染同一稳定消息（catalog；不内嵌原始 payload/路径/
   secret）；构造器 `__init__(code, field_path="")`。**不得继承或复用** `BaselineCollectionError`/
@@ -294,8 +296,9 @@ CLI 适配层。读取 `args` 恰三属性：`run_spec`、`baseline_output`、`r
 
 1. repeat 门：`type(repeat) is not int or repeat < 1` → `BaselineOrchestrationError(INVALID_REPEAT_COUNT,
    "$.repeat")`（零执行零文件）。
-2. 目录快照：`before = {p.name for p in pathlib.Path(output_dir).iterdir()}`（目录不存在时由首个 attempt 的
-   目录门以 `OUTPUT_DIRECTORY_UNAVAILABLE` fail closed，零执行）。
+2. 目录快照：`before = {p.name for p in pathlib.Path(output_dir).iterdir()} if
+   pathlib.Path(output_dir).is_dir() else set()`；目录不存在时本层不抛错——由首个 attempt 的目录门以
+   `OUTPUT_DIRECTORY_UNAVAILABLE` fail closed（零执行；快照空集不可达聚合路径）。
 3. N cold：`for i in range(repeat): run_baseline_attempt(spec_mapping, manifest, execute, output_dir,
    attempt_index=i, mode="cold", sources=sources)`。
 4. N warm：`for i in range(repeat): run_baseline_attempt(..., attempt_index=repeat + i, mode="warm",
@@ -343,17 +346,21 @@ class BaselineRunSummary:
 
 - 成功（编排完成即成功——**含 `insufficient_sample`**：样本充足性是数据状态，诚实记录于 status，不作为失败）：
   stdout 一行：`baseline: status={status} attempts={2N} aggregate={aggregate_path} sha256={aggregate_sha256}`
-  （Python 实现：`print("baseline: status=%s attempts=%d aggregate=%s sha256=%s" % (summary.status,
-  len(summary.attempts), summary.aggregate_path, summary.aggregate_sha256))`）。
+  （Python 实现（f-string，规避 ruff UP031；输出字节与 % 格式逐字相同）：
+  `print(f"baseline: status={summary.status} attempts={len(summary.attempts)}"
+  f" aggregate={summary.aggregate_path} sha256={summary.aggregate_sha256}")`）。
 - 门/参数/聚合 typed 错误：stderr 一行：`baseline error: {code} {field_path}`（实现：
-  `print("baseline error: %s %s" % (error.code.value, error.field_path), file=sys.stderr)`）+ 退出码 **2**。
+  `print(f"baseline error: {error.code.value} {error.field_path}", file=sys.stderr)`）+ 退出码 **2**。
 - `BaseException`（取消/中断/exit）：不捕获，原样传播（Python 默认退出语义）。
 - 编排完成退出码 **0**。
 
 ### 7.6 三脚本接线模板（R2/R5/R6；逐脚本冻结——允许的 diff 恰为这些形状）
 
-通用要素（三脚本一致）：`add_baseline_arguments(parser)` 一行插在既有 argparse 参数定义之后、
-`parse_args` 之前；早退分支插在 `parse_args` **之后、任何 legacy 工作之前**；分支内**惰性 import**
+通用要素（三脚本一致）：在 main 体内、既有 argparse 参数定义之后 `parse_args` 之前，先一行惰性 import
+`from benchmarks.v4.baseline.orchestrate import add_baseline_arguments` 再 `add_baseline_arguments(parser)`
+一行（调用先于 parse 存在，否则 `args.run_spec` 无从谈起；该 import 位于函数体内，模块级导入行为零变化，
+作为"经 add_baseline_arguments 添加三参数"这一 Allowed Modify 的机械组成部分）；早退分支插在 `parse_args`
+**之后、任何 legacy 工作之前**；分支内**惰性 import**
 （`from benchmarks.v4.baseline.orchestrate import BaselineOrchestrationError, run_baseline_from_args` +
 `from benchmarks.v4.baseline.collect import BaselineCollectionError` +
 `from lima.baseline_run_spec import BaselineRunSpecError` +
@@ -380,7 +387,7 @@ class BaselineRunSummary:
             write_jsonl(args.dataset, cases)
 
         def _baseline_execute():
-            baseline = EndToEndEvaluationHarness().run(
+            EndToEndEvaluationHarness().run(
                 baseline_reviewer(), cases, "single-agent-baseline"
             )
             return EndToEndEvaluationHarness(repairer=FixtureRepairer()).run(
@@ -402,18 +409,13 @@ class BaselineRunSummary:
             BaselineRunResultError,
         ) as error:
             print(
-                "baseline error: %s %s" % (error.code.value, error.field_path),
+                f"baseline error: {error.code.value} {error.field_path}",
                 file=sys.stderr,
             )
             sys.exit(2)
         print(
-            "baseline: status=%s attempts=%d aggregate=%s sha256=%s"
-            % (
-                summary.status,
-                len(summary.attempts),
-                summary.aggregate_path,
-                summary.aggregate_sha256,
-            )
+            f"baseline: status={summary.status} attempts={len(summary.attempts)}"
+            f" aggregate={summary.aggregate_path} sha256={summary.aggregate_sha256}"
         )
         return
 ```
@@ -473,18 +475,13 @@ run 后 candidate harness run——"现有 evaluator 计算调用"在 run_e2e �
             BaselineRunResultError,
         ) as error:
             print(
-                "baseline error: %s %s" % (error.code.value, error.field_path),
+                f"baseline error: {error.code.value} {error.field_path}",
                 file=sys.stderr,
             )
             return 2
         print(
-            "baseline: status=%s attempts=%d aggregate=%s sha256=%s"
-            % (
-                summary.status,
-                len(summary.attempts),
-                summary.aggregate_path,
-                summary.aggregate_sha256,
-            )
+            f"baseline: status={summary.status} attempts={len(summary.attempts)}"
+            f" aggregate={summary.aggregate_path} sha256={summary.aggregate_sha256}"
         )
         return 0
 ```
@@ -626,8 +623,8 @@ from_mapping；提交 run 产物。
 ## 10. 测试矩阵（`tests/test_v4_baseline_cli.py`，C2 冻结，27 方法 ≤ 35 上限）
 
 组织：unittest 风格、单文件；模块级 import = stdlib + 冻结 `lima.baseline_run_spec`/
-`lima.baseline_run_result` + `from benchmarks.v4.baseline import collect, orchestrate, run`（模块级产品
-import → RED 形态见下）；正例 fixture = 真实冻结 `evaluation_data/v4/baseline_manifest.json` + 名义 spec
+`lima.baseline_run_result` + `from benchmarks.v4.baseline import collect, expert_timing, run` 与
+`import benchmarks.v4.baseline.orchestrate as orchestrate`（模块级产品 import → RED 形态见下）；正例 fixture = 真实冻结 `evaluation_data/v4/baseline_manifest.json` + 名义 spec
 arrange（名义值同 IP-0027 先例：`analyzer_fingerprint="a"*64`、`config_digest="b"*64`、`seed=20260925`、
 声明式 machine profile）；负例全部深拷贝变异，不新建 fixture 数据文件；三脚本经 importlib 按路径加载
 （`scripts/` 无 `__init__.py`，DI-014 亲验）并按名缓存；测试临时输出一律 tempfile；CI 经
@@ -635,9 +632,10 @@ arrange（名义值同 IP-0027 先例：`analyzer_fingerprint="a"*64`、`config_
 
 **RED 形态（Assignment §8 第 8 项）**：C2 冻结时 `benchmarks.v4.baseline` 包存在而 `orchestrate` 子模块
 缺席，测试文件被 runner 正常发现（collection 成功），但模块 import 在
-`from benchmarks.v4.baseline import collect, orchestrate, run` 语句处以
-`ModuleNotFoundError: No module named 'benchmarks.v4.baseline.orchestrate'` 失败（逐条可归因；镜像 IP-0027
-冻结头先例）→ `python -m unittest tests.test_v4_baseline_cli` → `Ran 1 test / FAILED (errors=1)`、exit 1；
+`import benchmarks.v4.baseline.orchestrate` 语句处以
+`ModuleNotFoundError: No module named 'benchmarks.v4.baseline.orchestrate'` 失败（from-package
+按名导入在该形态下只会得到 ImportError "cannot import name"，故 RED 锚点语句必须是子模块目标导入；
+逐条可归因；镜像 IP-0027 冻结头先例的 ModuleNotFoundError 形态）→ `python -m unittest tests.test_v4_baseline_cli` → `Ran 1 test / FAILED (errors=1)`、exit 1；
 不得是测试语法/环境/依赖损坏（缺席态 `python -m py_compile` 通过 + Pre-Freeze Harness Gate 桩沙箱证明
 arrange 有效共同证明缺席是唯一失败源）。
 

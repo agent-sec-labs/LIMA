@@ -362,7 +362,7 @@ git merge-base --is-ancestor <Frozen-Test-Commit-SHA> HEAD && echo ANCESTRY-OK
 
 失败判据（任一命中即未达标）：任一 fail-closed 负例未以预期稳定码拒绝；任一 unavailable 位出现非 null 值或 measured 位出现虚构值；ratio 在分母缺席时为 0 而非 null；报告字节含路径分隔符/盘符/注入片段子串；canonical 字节不稳定或摘要不可复算；发现约定在真实产盘上识别错误或对外来文件报错/对损坏工件静默；冻结面 diff 非空；diff 超 3 路径或含 Modify；测试方法数 >35；出现网络/Secret/付费/新依赖/float 度量/manifest 消费；提交 run 产物。
 
-## 10. 测试矩阵（`tests/test_v4_baseline_report.py`，C2 冻结，28 方法 ≤ 35 上限）
+## 10. 测试矩阵（`tests/test_v4_baseline_report.py`，C2 冻结，29 方法 ≤ 35 上限）
 
 RED 锚点：模块级 `import benchmarks.v4.baseline.report as report` → `ModuleNotFoundError: No module named 'benchmarks.v4.baseline.report'`（包存在、子模块缺席；镜像 IP-0027/0028 冻结头先例）；不得是语法/环境/依赖损坏。
 

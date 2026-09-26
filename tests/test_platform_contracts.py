@@ -1166,6 +1166,92 @@ class SealPlatformReviewTests(unittest.TestCase):
         self.assertNotIn("hunter2-secret-canary", projected.explanation)
         self.assertTrue(projected.explanation)
 
+    def test_canaries_never_reach_the_full_report_serialization(self) -> None:
+        """Review round 4: the whole report dict, not just AEP/VEP/Finding.
+
+        Rejection reasons, review diagnostics and the seal-failure reason
+        are report exits too; a canary in any of them must be masked in
+        the complete ``ReviewReport.to_dict()`` serialization.
+        """
+
+        from unittest.mock import patch
+
+        from lima.models import ReviewReport
+        from lima.repository_scanner import RepositoryScanner
+
+        canary = "password = synthetic-secret-canary"
+        target = _plain_finding(
+            {
+                "target_id": "lead-0001",
+                "path": "src/example.c",
+                "line": 42,
+                "symbol": "parse_input",
+                "cwe": "CWE-787",
+                "state": "abstain",
+                "hypothesis_reason": "",
+                "poc_driver_code": "",
+                "experiment_log": (),
+                "identity": None,
+                "evidence_records": (),
+                "rejected_reason": canary,
+            }
+        )
+        outcome = PlatformReviewOutcome(
+            findings=(),
+            targets=(target,),
+            stats=PlatformReviewStats(1, 1, 0, 0, 0, 0, 1),
+            diagnostics=(canary,),
+            leads_considered=1,
+            translation_units=("src/example.c",),
+        )
+        scanner = RepositoryScanner.__new__(RepositoryScanner)
+        collab = scanner._platform_collaboration("auto", "completed", outcome)
+        with patch(
+            "lima.repository_scanner.seal_platform_review",
+            side_effect=ValueError("seal blew up on " + canary),
+        ):
+            failed = RepositoryScanner._seal_platform_v4(
+                outcome, "team/proj", _FakeInventory()
+            )
+        report = ReviewReport(
+            repository="team/proj",
+            pull_request=None,
+            summary="s",
+            risk="low",
+            collaboration={"platform": {**collab, "v4": failed}},
+        )
+
+        dump = json.dumps(report.to_dict(), sort_keys=True)
+
+        self.assertNotIn("synthetic-secret-canary", dump)
+        self.assertIn("[privacy-redacted]", dump)
+        self.assertEqual(failed["status"], "seal-failed")
+
+    def test_mask_carries_no_linkable_fingerprint(self) -> None:
+        """Review round 4: fixed mask, no fingerprint domain, no dedup.
+
+        #94's tenant fingerprint contract cannot hold on this path (no
+        tenant-key infrastructure), so sensitive text maps to one constant
+        opaque mask: different secrets are indistinguishable from each
+        other and from any other secret (no cross-tenant linkability, no
+        same-tenant dedup signal), and the mapping is deterministic.
+        """
+
+        from lima.platform_contracts import privacy_text
+
+        first = privacy_text("leak one: " + "A" * 32)
+        second = privacy_text("leak two: " + "B" * 32)
+
+        self.assertEqual("[privacy-redacted]", first)
+        self.assertEqual(first, second)
+        self.assertNotIn("REDACTED:", first)
+        self.assertEqual(first, privacy_text("leak one: " + "A" * 32))
+        # Clean internal text passes through unchanged.
+        self.assertEqual(
+            "Attacker-controlled length reaches memcpy unbounded.",
+            privacy_text("Attacker-controlled length reaches memcpy unbounded."),
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

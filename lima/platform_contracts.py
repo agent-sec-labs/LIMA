@@ -114,7 +114,11 @@ from lima.contracts.vep import (
     VerificationVerdict,
     VulnerabilityEvidencePackage,
 )
-from lima.evidence_privacy.models import EvidencePayload, SinkContext
+from lima.evidence_privacy.models import (
+    ArtifactClassification,
+    EvidencePayload,
+    SinkContext,
+)
 from lima.evidence_privacy.policy import DEFAULT_POLICY
 from lima.evidence_privacy.port import sanitize_for_sink
 
@@ -176,14 +180,20 @@ _PRIVACY_REDACTED: Final = "[privacy-redacted]"
 
 
 def privacy_text(value: str) -> str:
-    """Redact secret-looking material from one free-text string (#94 reuse).
+    """Mask secret-shaped material in free text (#94 detection reuse).
 
-    Reuses the frozen IP-0015 sanitizer (``sanitize_for_sink`` with the
-    default policy) and a per-run random tenant key, so sensitive or
-    restricted text is replaced by one-run fingerprints and raw secret
-    material never reaches the task report through the platform paths.
-    Any sanitizer failure fails closed to a bounded placeholder -- never
-    the original text. Plain internal text passes through unchanged.
+    Review round 4: the report-embedded preview has no tenant-key
+    infrastructure, so it deliberately emits **no fingerprints** -- any
+    string the #94 classifier flags (sensitive or restricted, or carrying
+    redactable spans) is replaced by one fixed opaque mask. The #94 tenant
+    fingerprint contract (cross-tenant non-linkability, same-tenant
+    cross-task dedup, NFR-N05-01/AC-N05-02) therefore does not apply to
+    this path: the mask is constant, carries no correlation signal, and
+    this preview path provides no dedup semantics. Classification itself
+    is key-independent, so the detection tenant key stays random and
+    never leaves this function; any sanitizer failure fails closed to the
+    same mask -- never the original text. Clean internal text passes
+    through unchanged.
     """
 
     try:
@@ -199,8 +209,13 @@ def privacy_text(value: str) -> str:
         )
     except Exception:  # noqa: BLE001 - fail closed, never persist raw text
         return _PRIVACY_REDACTED
-    redacted = sanitized.redacted_value
-    return redacted if isinstance(redacted, str) else _PRIVACY_REDACTED
+    manifest = sanitized.manifest
+    if (
+        manifest.classification is not ArtifactClassification.INTERNAL
+        or manifest.entries
+    ):
+        return _PRIVACY_REDACTED
+    return value
 
 
 def _sanitize_text(value: object, *, cap: int) -> str:

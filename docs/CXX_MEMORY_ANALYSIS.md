@@ -19,10 +19,11 @@ Web 修复按钮都排除这类结果；开发者必须人工复核并在上游�
 
 ## 管理员 argv JSON 与预算
 
-Compose 默认使用 `auto`：Sidecar 基础设施不可用时继续其他扫描并记录降级；`required`
-会让 Sidecar/协议错误导致任务失败。目标项目构建失败属于分析结果，仍保留纯源码候选。
-构建和测试只能由管理员在 Sidecar 启动时配置为 JSON argv 数组，分析请求不能提交命令、
-Shell 字符串或环境变量：
+默认为显式 opt-in（`LIMA_CXX_MEMORY_MODE=off`）：`docker compose up` 不启动常驻 Sidecar，需要时用
+`docker compose --profile cxx up` 按需启动。显式设为 `auto` 后，Sidecar 基础设施不可用时继续其他
+扫描并记录降级；`required` 会让 Sidecar/协议错误导致任务失败。目标项目构建失败属于分析结果，
+仍保留纯源码候选。构建和测试只能由管理员在 Sidecar 启动时配置为 JSON argv 数组，分析请求不能
+提交命令、Shell 字符串或环境变量：
 
 ```dotenv
 LIMA_CXX_MEMORY_MODE=auto

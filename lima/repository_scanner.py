@@ -594,7 +594,9 @@ class RepositoryScanner:
                 "cwe": item.cwe,
                 "proof": item.proof_verdict,
                 "experiments": len(item.experiment_log),
-                "rejected_reason": item.rejected_reason,
+                # Review round 4: every free-text report exit (including
+                # rejection reasons) passes the #94 privacy mask.
+                "rejected_reason": privacy_text(item.rejected_reason),
             })
         payload = {
             "mode": mode,
@@ -611,7 +613,8 @@ class RepositoryScanner:
             },
             "states": states,
             "broker": broker_counts,
-            "diagnostics": list(outcome.diagnostics),
+            # Review round 4: diagnostics are free text too -- mask them.
+            "diagnostics": [privacy_text(item) for item in outcome.diagnostics],
             "targets": audit,
         }
         if v4 is not None:
@@ -660,7 +663,7 @@ class RepositoryScanner:
             return {
                 "status": "seal-failed",
                 "availability": "report-embedded",
-                "diagnostics": [str(exc)[:300]],
+                "diagnostics": [privacy_text(str(exc)[:300])],
             }
         veps = []
         payloads: dict[str, dict] = {}
@@ -786,7 +789,7 @@ class RepositoryScanner:
             return {
                 "mode": mode,
                 "status": "analyzer-unavailable",
-                "diagnostics": [str(exc)[:500]],
+                "diagnostics": [privacy_text(str(exc)[:500])],
             }
         except (RuntimeError, ValueError) as exc:
             if mode == "required":
@@ -797,7 +800,7 @@ class RepositoryScanner:
             return {
                 "mode": mode,
                 "status": "review-failed",
-                "diagnostics": [str(exc)[:500]],
+                "diagnostics": [privacy_text(str(exc)[:500])],
             }
         # rejected/abstain 保留在 outcome 审计记录里，不投影为 Finding；
         # 正向状态按冻结状态机输出。合并键是不可变 finding 身份

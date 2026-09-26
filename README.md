@@ -68,7 +68,9 @@ powershell -ExecutionPolicy Bypass -File scripts/lima.ps1 down
 
 容器中的应用以固定非 root 用户运行，根文件系统只读，丢弃 Linux capabilities，并只把 Web 端口绑定到本机。
 
-C/C++ 内存分析默认以独立 Sidecar 的 `auto` 模式运行，只检测、不自动修复；部署、三层证据、
+C/C++ 内存分析为显式 opt-in（默认 `LIMA_CXX_MEMORY_MODE=off`，不调用 Sidecar），只检测、不自动修复；
+按需启动 Sidecar 用 `docker compose --profile cxx up`，显式开启将 `LIMA_CXX_MEMORY_MODE` 设为
+`auto` 或 `required`。部署、三层证据、
 管理员 argv JSON、预算、故障诊断和评测方法见
 [C/C++ 内存安全分析说明](docs/CXX_MEMORY_ANALYSIS.md)。
 

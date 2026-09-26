@@ -545,7 +545,11 @@ class TestRegistryContract(_FixtureContractTestCase):
 
     def test_synthetic_entries_carry_frozen_field_set_and_values(self):
         entries = self._registry_entries_by_key()
-        self.assertEqual(set(entries), set(_EXPECTED_FILE_COUNTS))
+        # the registry also carries the external-identity entry, so only the
+        # synthetic subset is asserted here (v3 fix C, DR-IP0030-IMPL-2; the
+        # helper stays unfiltered for its other callers and the 12-key closed
+        # set is asserted by test_registry_keys_form_closed_set_matching_fixture_keys)
+        self.assertTrue(set(_EXPECTED_FILE_COUNTS).issubset(entries))
         for key, expected_count in _EXPECTED_FILE_COUNTS.items():
             with self.subTest(key=key):
                 entry = entries[key]

@@ -1111,6 +1111,61 @@ class SealPlatformReviewTests(unittest.TestCase):
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["v4"]["status"], "seal-failed")
 
+    def test_free_text_canaries_never_reach_report_paths(self) -> None:
+        """Review round 3: synthetic secret canaries are redacted (#94).
+
+        A credential-style hypothesis must never appear verbatim in the
+        sealed V4 payloads nor in the projected Finding.explanation, while
+        the seal stays digest-consistent and detection results stand.
+        """
+
+        from lima.repository_scanner import RepositoryScanner
+
+        canary = 'uses password = "hunter2-secret-canary" in config'
+        finding = _plain_finding(
+            {
+                "target_id": "lead-0001",
+                "path": "src/example.c",
+                "line": 42,
+                "symbol": "parse_input",
+                "cwe": "CWE-787",
+                "state": "tool-corroborated",
+                "hypothesis_reason": canary + " and reaches memcpy",
+                "poc_driver_code": "int main(void) { return 0; }",
+                "experiment_log": (),
+                "identity": None,
+                "evidence_records": (_STATIC_RECORD,),
+            }
+        )
+        outcome = PlatformReviewOutcome(
+            findings=(finding,),
+            targets=(finding,),
+            stats=PlatformReviewStats(1, 1, 1, 0, 1, 0, 1),
+            diagnostics=(),
+            leads_considered=1,
+            translation_units=("src/example.c",),
+        )
+
+        sealed = RepositoryScanner._seal_platform_v4(
+            outcome, "team/proj", _FakeInventory()
+        )
+
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertNotIn(
+            "hunter2-secret-canary", json.dumps(sealed, sort_keys=True)
+        )
+        for entry in sealed["veps"]:
+            self.assertEqual(
+                entry["content_digest"],
+                compute_content_digest(
+                    sealed["payloads"][entry["artifact_id"]]
+                ),
+            )
+        scanner = RepositoryScanner.__new__(RepositoryScanner)
+        projected = scanner._platform_finding(finding)
+        self.assertNotIn("hunter2-secret-canary", projected.explanation)
+        self.assertTrue(projected.explanation)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

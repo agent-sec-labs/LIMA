@@ -66,7 +66,7 @@ services:
       LIMA_REPOSITORY_SCAN_MAX_FILES: ${LIMA_REPOSITORY_SCAN_MAX_FILES:-5000}
       LIMA_REPOSITORY_SCAN_MAX_FILE_BYTES: ${LIMA_REPOSITORY_SCAN_MAX_FILE_BYTES:-524288}
       LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES: ${LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES:-20971520}
-      LIMA_CXX_MEMORY_MODE: ${LIMA_CXX_MEMORY_MODE:-auto}
+      LIMA_CXX_MEMORY_MODE: ${LIMA_CXX_MEMORY_MODE:-off}
       LIMA_CXX_ANALYZER_URL: ${LIMA_CXX_ANALYZER_URL:-http://cxx-analyzer:8090}
       LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS: ${LIMA_CXX_ANALYSIS_TIMEOUT_SECONDS:-300}
       LIMA_CXX_MAX_RESPONSE_BYTES: ${LIMA_CXX_MAX_RESPONSE_BYTES:-2097152}
@@ -118,6 +118,11 @@ services:
       - cxx_analysis
 
   cxx-analyzer:
+    # On-demand service (review feedback round 3): plain `docker compose up`
+    # must not keep a persistent sidecar running; enable it explicitly with
+    # `docker compose --profile cxx up`.
+    profiles:
+      - cxx
     image: lima-cxx-analyzer:local
     build:
       context: .

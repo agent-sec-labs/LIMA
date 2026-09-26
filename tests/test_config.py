@@ -170,6 +170,13 @@ class DotenvTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "LIMA_CXX_MEMORY_MODE"):
                 Settings.from_env().validate_evolution()
 
+    def test_cxx_memory_mode_defaults_to_off(self):
+        # Review feedback round 3: existing repository scans must not call
+        # the C/C++ sidecar unless an operator explicitly enables it.
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual("off", settings.cxx_memory_mode)
+
     def test_cxx_analyzer_url_rejects_unsafe_or_invalid_components(self):
         invalid_urls = (
             "ftp://cxx-analyzer:8090",

@@ -184,7 +184,9 @@ class Settings:
     repository_scan_max_files: int = 5000
     repository_scan_max_file_bytes: int = 512 * 1024
     repository_scan_max_total_bytes: int = 20 * 1024 * 1024
-    cxx_memory_mode: str = "auto"
+    # Explicit opt-in (review feedback round 3): existing repository scans
+    # must not call the C/C++ sidecar unless an operator turns it on.
+    cxx_memory_mode: str = "off"
     cxx_analyzer_url: str = "http://cxx-analyzer:8090"
     cxx_analysis_timeout_seconds: int = 300
     cxx_max_response_bytes: int = 2 * 1024 * 1024
@@ -507,7 +509,7 @@ class Settings:
             repository_scan_max_total_bytes=_int(
                 "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES", 20 * 1024 * 1024
             ),
-            cxx_memory_mode=os.getenv("LIMA_CXX_MEMORY_MODE", "auto").strip().lower(),
+            cxx_memory_mode=os.getenv("LIMA_CXX_MEMORY_MODE", "off").strip().lower(),
             cxx_analyzer_url=os.getenv(
                 "LIMA_CXX_ANALYZER_URL", "http://cxx-analyzer:8090"
             ).rstrip("/"),

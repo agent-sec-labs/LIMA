@@ -37,7 +37,7 @@ from .cxx_retrieval import RetrievalBudget, retrieve_repository
 from .diff_parser import parse_unified_diff
 from .metrics import metrics
 from .models import Finding, ReviewReport, Severity
-from .platform_contracts import seal_platform_review
+from .platform_contracts import privacy_text, seal_platform_review
 from .python_analyzer import PythonAstSecurityAnalyzer
 from .python_dataflow import PythonDataflowAnalyzer
 from .reviewer import Reviewer, SecurityRuleReviewer
@@ -518,7 +518,9 @@ class RepositoryScanner:
         title = self._PLATFORM_TITLES.get(
             item.cwe, f"{item.cwe} suspected by agent analysis",
         )
-        explanation = item.hypothesis_reason
+        # Review feedback round 3: free LLM text is privacy-redacted (#94
+        # reuse) before it becomes report-bound Finding.explanation.
+        explanation = privacy_text(item.hypothesis_reason)
         if item.experiment_log:
             hits = sum(
                 1 for entry in item.experiment_log if entry.get("hit")

@@ -1319,6 +1319,32 @@ class ScannerSingleChainTests(unittest.TestCase):
 class ScannerPlatformBranchTests(unittest.TestCase):
     """Scanner-level platform branch wiring (facts-derived leads)."""
 
+    def test_default_scanner_makes_no_sidecar_calls(self):
+        """Review round 3: C/C++ memory analysis is explicit opt-in.
+
+        Scanning a C/C++ repository without an explicit ``cxx_memory_mode``
+        must complete with zero sidecar calls -- the adapter raises on any
+        use -- and report the chain as disabled (complete rollback).
+        """
+
+        root = tempfile.mkdtemp(suffix="-agent-scanner")
+        self.addCleanup(lambda: _rmtree(root))
+        _write_cxx_repo(root)
+
+        class ExplodingAdapter:
+            def analyze(self, *args, **kwargs):  # pragma: no cover - guard
+                raise AssertionError("sidecar adapter used with mode off")
+
+        scanner = RepositoryScanner(
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_memory_adapter=ExplodingAdapter(),
+        )
+        result = scanner.scan(RepositoryWorkspace(Path(root)))
+        cxx_summary = result.report.collaboration.get("cxx_memory", {})
+        self.assertEqual("off", cxx_summary.get("mode"))
+        self.assertEqual("disabled", cxx_summary.get("status"))
+
     def test_scanner_platform_branch_projects_findings(self):
         root = tempfile.mkdtemp(suffix="-agent-scanner")
         self.addCleanup(lambda: _rmtree(root))

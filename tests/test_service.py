@@ -68,8 +68,11 @@ class ServiceTests(unittest.TestCase):
     @patch("lima.service.CxxMemoryAnalyzerClient")
     def test_service_injects_configured_cxx_analyzer_client(self, client_class):
         client = client_class.return_value
+        # Review round 3: the analyzer client is built only on explicit
+        # opt-in, so the injection test enables the mode itself.
+        settings = replace(self.settings, cxx_memory_mode="auto")
 
-        service = ReviewService(self.settings)
+        service = ReviewService(settings)
         try:
             client_class.assert_called_once_with(
                 self.settings.cxx_analyzer_url,
@@ -78,6 +81,18 @@ class ServiceTests(unittest.TestCase):
             )
             self.assertIs(client, service.repository_scanner.cxx_memory_adapter)
             self.assertEqual("auto", service.repository_scanner.cxx_memory_mode)
+        finally:
+            service.queue.close()
+
+    @patch("lima.service.CxxMemoryAnalyzerClient")
+    def test_service_skips_cxx_client_by_default(self, client_class):
+        # Review round 3: default settings must not construct (or call) the
+        # sidecar client; existing scans stay on their previous baseline.
+        service = ReviewService(self.settings)
+        try:
+            client_class.assert_not_called()
+            self.assertIsNone(service.repository_scanner.cxx_memory_adapter)
+            self.assertEqual("off", service.repository_scanner.cxx_memory_mode)
         finally:
             service.queue.close()
 
@@ -93,7 +108,8 @@ class ServiceTests(unittest.TestCase):
             service.queue.close()
 
     def test_repository_scan_capabilities_describe_cxx_layers_without_url(self):
-        service = ReviewService(self.settings)
+        settings = replace(self.settings, cxx_memory_mode="auto")
+        service = ReviewService(settings)
         try:
             capabilities = service.repository_scan_capabilities()
             cxx = capabilities["cxx_memory"]

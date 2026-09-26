@@ -52,6 +52,7 @@ envelopes.
 import hashlib
 import json
 import re
+import secrets
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -113,6 +114,9 @@ from lima.contracts.vep import (
     VerificationVerdict,
     VulnerabilityEvidencePackage,
 )
+from lima.evidence_privacy.models import EvidencePayload, SinkContext
+from lima.evidence_privacy.policy import DEFAULT_POLICY
+from lima.evidence_privacy.port import sanitize_for_sink
 
 __all__ = [
     "PlatformSealBundle",
@@ -120,6 +124,7 @@ __all__ = [
     "patch_outcome_to_rvr",
     "platform_review_to_aep",
     "platform_review_to_workflow_summary",
+    "privacy_text",
     "seal_platform_review",
 ]
 
@@ -161,11 +166,51 @@ def _short_digest(material: str) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
+# --- review round 3: #94 privacy redaction for report-bound free text -------
+
+# One random tenant key per process run, mirroring the one-run pattern of
+# scripts/audit_sensitive_artifacts.py (#94): fingerprints are comparable
+# within the run and meaningless outside it.
+_PRIVACY_TENANT_KEY: Final = secrets.token_bytes(32)
+_PRIVACY_REDACTED: Final = "[privacy-redacted]"
+
+
+def privacy_text(value: str) -> str:
+    """Redact secret-looking material from one free-text string (#94 reuse).
+
+    Reuses the frozen IP-0015 sanitizer (``sanitize_for_sink`` with the
+    default policy) and a per-run random tenant key, so sensitive or
+    restricted text is replaced by one-run fingerprints and raw secret
+    material never reaches the task report through the platform paths.
+    Any sanitizer failure fails closed to a bounded placeholder -- never
+    the original text. Plain internal text passes through unchanged.
+    """
+
+    try:
+        sanitized = sanitize_for_sink(
+            EvidencePayload(payload_kind="text", value=value),
+            SinkContext(
+                sink_kind="storage",
+                purpose="platform-report-preview",
+                tenant_id="platform-preview",
+                tenant_key=_PRIVACY_TENANT_KEY,
+            ),
+            DEFAULT_POLICY,
+        )
+    except Exception:  # noqa: BLE001 - fail closed, never persist raw text
+        return _PRIVACY_REDACTED
+    redacted = sanitized.redacted_value
+    return redacted if isinstance(redacted, str) else _PRIVACY_REDACTED
+
+
 def _sanitize_text(value: object, *, cap: int) -> str:
     """Bound one piece of platform free text for a bounded-text field.
 
     Control characters (ASan logs carry newlines) collapse to spaces so the
     contract's bounded-text validation passes; output is deterministic.
+    Free text additionally passes the #94 privacy redaction
+    (:func:`privacy_text`) so credential-shaped material never enters the
+    report-bound payloads.
     """
 
     if not isinstance(value, str):
@@ -174,6 +219,7 @@ def _sanitize_text(value: object, *, cap: int) -> str:
         " " if unicodedata.category(char) == "Cc" else char for char in value
     )
     cleaned = " ".join(cleaned.split())
+    cleaned = privacy_text(cleaned)
     if len(cleaned.encode("utf-8")) > cap:
         cleaned = cleaned[:cap]
     return cleaned.strip()

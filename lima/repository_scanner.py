@@ -370,12 +370,16 @@ class RepositoryScanner:
                     {
                         "role": outcome.role,
                         "status": outcome.status,
-                        **({"error": outcome.error[:300]}
+                        # Review round 6: role errors are model/provider
+                        # free text -- mask first, then bound.
+                        **({"error": privacy_text(outcome.error)[:300]}
                            if outcome.error else {}),
                     }
                     for outcome in review.role_outcomes
                 ],
-                "arbiter_rejections": list(review.arbiter_rejections),
+                "arbiter_rejections": [
+                    privacy_text(item) for item in review.arbiter_rejections
+                ],
                 "message_count": review.message_count,
                 "tool_evidence_bound": any(
                     candidate.verification_state in {
@@ -448,15 +452,15 @@ class RepositoryScanner:
             review = coordinator.review_repository(retrieval)
         except (RuntimeError, ValueError) as exc:
             if mode == "required":
-                raise RuntimeError(
-                    f"C++ agent pipeline failed in required mode: {exc}"
+                raise self._platform_required_error(
+                    "C++ agent pipeline failed in required mode", exc
                 ) from exc
             metrics.inc("repository_scan_cxx_agent_unavailable_total")
             return {
                 "mode": mode,
                 "model": "",
                 "status": "llm-unavailable",
-                "diagnostics": [str(exc)[:500]],
+                "diagnostics": [privacy_text(str(exc))[:500]],
             }
         cancelled = bool(cancel_probe is not None and cancel_probe())
         llm_failed = any(
@@ -469,14 +473,14 @@ class RepositoryScanner:
             # 零成功模型轮次且存在角色降级：设计规定的 auto 降级/required
             # 失败判据（LLM 不可用导致验证无法完成）。
             if mode == "required":
-                raise RuntimeError(
-                    "C++ agent pipeline failed in required mode: all agent "
-                    "roles failed: "
-                    + "; ".join(
+                raise self._platform_required_error(
+                    "C++ agent pipeline failed in required mode: "
+                    "all agent roles failed",
+                    RuntimeError("; ".join(
                         outcome.error[:120]
                         for outcome in review.role_outcomes
                         if outcome.error
-                    )[:500]
+                    )),
                 )
             metrics.inc("repository_scan_cxx_agent_unavailable_total")
             status = "llm-unavailable"
@@ -634,11 +638,12 @@ class RepositoryScanner:
 
         The raised error reaches the task failure payload, dead-letter
         queue and alerts verbatim, so the exception text passes the #94
-        mask before the raise; the cause chain keeps the original for
-        local debugging without persisting it.
+        mask before the raise (mask first, then bound -- truncating first
+        would cut secrets below the detection threshold); the cause chain
+        keeps the original for local debugging without persisting it.
         """
 
-        return RuntimeError(f"{prefix}: {privacy_text(str(exc)[:300])}")
+        return RuntimeError(f"{prefix}: {privacy_text(str(exc))[:300]}")
 
     @staticmethod
     def _seal_platform_v4(outcome, repository_key: str, inventory) -> dict:
@@ -680,7 +685,7 @@ class RepositoryScanner:
             return {
                 "status": "seal-failed",
                 "availability": "report-embedded",
-                "diagnostics": [privacy_text(str(exc)[:300])],
+                "diagnostics": [privacy_text(str(exc))[:300]],
             }
         veps = []
         payloads: dict[str, dict] = {}
@@ -806,7 +811,7 @@ class RepositoryScanner:
             return {
                 "mode": mode,
                 "status": "analyzer-unavailable",
-                "diagnostics": [privacy_text(str(exc)[:500])],
+                "diagnostics": [privacy_text(str(exc))[:500]],
             }
         except (RuntimeError, ValueError) as exc:
             if mode == "required":
@@ -817,7 +822,7 @@ class RepositoryScanner:
             return {
                 "mode": mode,
                 "status": "review-failed",
-                "diagnostics": [privacy_text(str(exc)[:500])],
+                "diagnostics": [privacy_text(str(exc))[:500]],
             }
         # rejected/abstain 保留在 outcome 审计记录里，不投影为 Finding；
         # 正向状态按冻结状态机输出。合并键是不可变 finding 身份
@@ -995,7 +1000,8 @@ class RepositoryScanner:
                     "status": cxx_result.status,
                     "tool_runs": cxx_result.tool_runs,
                     "coverage": cxx_result.coverage,
-                    "diagnostics": cxx_result.diagnostics,
+                    # Review round 6: sidecar diagnostics are free text too.
+                "diagnostics": [privacy_text(item) for item in cxx_result.diagnostics],
                 })
                 for finding in cxx_result.findings:
                     self._merge_cxx_finding(findings, cxx_finding_index, finding)

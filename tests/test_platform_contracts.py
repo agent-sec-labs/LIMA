@@ -1351,5 +1351,203 @@ class SealPlatformReviewTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret-canary", str(failure))
 
 
+@unittest.skipIf(
+    seal_platform_review is None, "seal_platform_review not implemented (RED)"
+)
+class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
+    """Round-6 matrix: public ids and text never track raw secrets."""
+
+    SNAPSHOT = "1" * 64
+
+    @staticmethod
+    def _finding(snippet: str):
+        return _plain_finding(
+            {
+                "target_id": "lead-0001",
+                "path": "src/example.c",
+                "line": 42,
+                "symbol": "parse_input",
+                "cwe": "CWE-787",
+                "state": "runtime-confirmed",
+                "hypothesis_reason": (
+                    "Attacker-controlled length reaches memcpy unbounded."
+                ),
+                "poc_driver_code": "int main(void) { return 0; }",
+                "experiment_log": (_HIT_ENTRY,),
+                "identity": None,
+                "evidence_records": (
+                    EvidenceRecord(
+                        source="asan",
+                        kind="runtime",
+                        path="src/example.c",
+                        line=42,
+                        snippet=snippet,
+                        rule_id="asan.repro",
+                        cwe="CWE-787",
+                        symbol="parse_input",
+                        tool_run_id="repro-" + "0" * 24,
+                    ),
+                ),
+            }
+        )
+
+    def test_public_ids_do_not_track_raw_secrets(self) -> None:
+        """Different secrets, identical projections (round-6 item 1/3)."""
+
+        def _sealed(snippet: str):
+            finding = self._finding(snippet)
+            outcome = PlatformReviewOutcome(
+                findings=(finding,),
+                targets=(finding,),
+                stats=PlatformReviewStats(1, 1, 1, 1, 1, 0, 1),
+                diagnostics=(),
+                leads_considered=1,
+                translation_units=("src/example.c",),
+            )
+            return seal_platform_review(
+                outcome,
+                snapshot_sha256=self.SNAPSHOT,
+                repository="team/proj",
+            )
+
+        first = _sealed(
+            "ERROR: AddressSanitizer: password = synthetic-secret-one"
+        )
+        second = _sealed(
+            "ERROR: AddressSanitizer: password = synthetic-secret-two"
+        )
+
+        self.assertEqual(
+            compute_content_digest(first.veps[0].to_dict()),
+            compute_content_digest(second.veps[0].to_dict()),
+            "VEP digests must not distinguish two secrets",
+        )
+        self.assertEqual(
+            compute_content_digest(first.aep.to_dict()),
+            compute_content_digest(second.aep.to_dict()),
+            "AEP digests must not distinguish two secrets",
+        )
+
+        from lima.platform_contracts import (
+            platform_review_to_workflow_summary,
+        )
+
+        def _summary(diagnostic: str):
+            finding = self._finding("ERROR: AddressSanitizer: heap overflow")
+            outcome = PlatformReviewOutcome(
+                findings=(finding,),
+                targets=(finding,),
+                stats=PlatformReviewStats(1, 1, 1, 1, 1, 0, 1),
+                diagnostics=(diagnostic,),
+                leads_considered=1,
+                translation_units=("src/example.c",),
+            )
+            return platform_review_to_workflow_summary(
+                outcome,
+                snapshot_sha256=self.SNAPSHOT,
+                repository="team/proj",
+                source_aep=first.veps[0].source_aep,
+            )
+
+        wf_first = _summary("scout noted password = synthetic-secret-one")
+        wf_second = _summary("scout noted password = synthetic-secret-two")
+        self.assertEqual(
+            wf_first.workflow.artifact_id, wf_second.workflow.artifact_id
+        )
+        self.assertEqual(
+            wf_first.security_outcome.artifact_id,
+            wf_second.security_outcome.artifact_id,
+        )
+
+    def test_truncation_happens_after_masking(self) -> None:
+        """Round-6 item 2: mask the full text, then bound the output."""
+
+        from lima.platform_contracts import privacy_text
+        from lima.repository_scanner import RepositoryScanner
+
+        edge = "." * 290 + "A" * 32
+        # The untruncated form is detected and masked ...
+        self.assertEqual("[privacy-redacted]", privacy_text(edge))
+        # ... and the required-failure helper no longer leaks the tail that
+        # a truncate-first order would cut below the detection threshold.
+        failure = RepositoryScanner._platform_required_error(
+            "required platform review failed", ValueError(edge)
+        )
+        self.assertNotIn("A" * 10, str(failure))
+
+    def test_three_path_report_matrix_masks_every_projection(self) -> None:
+        """Round-6 items 3/4: platform, legacy agent and sidecar findings."""
+
+        from lima.cxx_agent_models import CxxAgentCandidate, to_agent_finding_payload
+        from lima.cxx_memory import CxxMemoryAnalyzerClient
+        from lima.models import Finding as ModelsFinding
+        from lima.models import ReviewReport
+        from lima.repository_scanner import RepositoryScanner
+
+        canary = "password = synthetic-secret-canary"
+        scanner = RepositoryScanner.__new__(RepositoryScanner)
+        platform = scanner._platform_finding(
+            self._finding("ERROR: AddressSanitizer: " + canary)
+        )
+        candidate = CxxAgentCandidate(
+            candidate_id="sha256-" + "0" * 64,
+            cwe="CWE-787",
+            path="src/example.c",
+            line=42,
+            symbol="parse_input",
+            title="Agent title " + canary,
+            mechanism="mechanism " + canary,
+            trigger_path=("step one", "step " + canary),
+            confidence=0.9,
+            verification_state="agent-corroborated",
+        )
+        legacy = ModelsFinding(**to_agent_finding_payload(candidate))
+        sidecar_item = {
+            "rule_id": "cxx.source.oob-write",
+            "severity": "high",
+            "title": "title " + canary,
+            "explanation": "explanation " + canary,
+            "path": "src/example.c",
+            "line": 42,
+            "evidence": "evidence " + canary,
+            "fix": "",
+            "test": "Exercise under AddressSanitizer.",
+            "confidence": 0.5,
+            "cwe": "CWE-787",
+            "tool": "semgrep",
+            "evidence_kind": "line",
+            "verification_state": "candidate",
+            "language": "c++",
+            "symbol": "parse_input",
+            "analysis_mode": "source-only",
+            "producer_run_ids": ["run-1"],
+        }
+        sidecar = CxxMemoryAnalyzerClient._convert_finding(sidecar_item)
+        twin = CxxMemoryAnalyzerClient._convert_finding({
+            **sidecar_item,
+            "evidence": "evidence password = synthetic-secret-two",
+        })
+
+        report = ReviewReport(
+            repository="team/proj",
+            pull_request=None,
+            summary="s",
+            risk="low",
+            findings=[platform, legacy, sidecar],
+            collaboration={"platform": {}},
+        )
+        dump = json.dumps(report.to_dict(), sort_keys=True)
+        self.assertNotIn("synthetic-secret-canary", dump)
+        self.assertNotIn("synthetic-secret-one", dump)
+        # Finding.fingerprint digests the evidence field: with masking
+        # applied before construction, two different secrets share one
+        # fingerprint instead of leaking distinct hashes.
+        self.assertEqual(sidecar.fingerprint, twin.fingerprint)
+        # Detection semantics stand: states are untouched projections.
+        self.assertEqual("runtime-confirmed", platform.verification_state)
+        self.assertEqual("agent-corroborated", legacy.verification_state)
+        self.assertEqual("candidate", sidecar.verification_state)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

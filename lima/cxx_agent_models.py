@@ -551,16 +551,23 @@ def verified_only_gate(
 
 
 def to_agent_finding_payload(candidate: CxxAgentCandidate) -> dict[str, Any]:
-    """Project one candidate onto the Finding JSON shape the report expects."""
+    """Project one candidate onto the Finding JSON shape the report expects.
+
+    Review round 6: model free text (title/mechanism/trigger path) is
+    masked at this report projection boundary; the orchestrator keeps the
+    raw candidate for its internal judgments.
+    """
+
+    from .platform_contracts import privacy_text  # lazy: avoids an import cycle
 
     return {
         "rule_id": f"cxx.llm.{candidate.cwe.lower()}",
         "severity": Severity.HIGH,
-        "title": candidate.title,
-        "explanation": candidate.mechanism,
+        "title": privacy_text(candidate.title),
+        "explanation": privacy_text(candidate.mechanism),
         "path": candidate.path,
         "line": candidate.line,
-        "evidence": " → ".join(candidate.trigger_path),
+        "evidence": privacy_text(" → ".join(candidate.trigger_path)),
         "fix": "",
         "test": "Exercise the trigger path under AddressSanitizer.",
         "confidence": candidate.confidence,

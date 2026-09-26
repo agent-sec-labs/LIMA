@@ -1318,16 +1318,24 @@ class CxxMemoryAnalyzerClient:
         # (validated by _validate_producer_binding) so downstream consumers can
         # bind a finding to the exact tool run that produced it.  The record
         # mirrors Finding's implicit fallback record plus that identity.
+        # Review round 6: sidecar free text is masked BEFORE the Finding is
+        # constructed -- Finding.fingerprint digests the evidence field, so
+        # building from raw text would leak it through the id.
+        from .platform_contracts import privacy_text  # lazy: import cycle
+
+        title = privacy_text(item["title"])
+        explanation = privacy_text(item["explanation"])
+        evidence = privacy_text(item["evidence"])
         return Finding(
             rule_id=item["rule_id"],
             severity=Severity(item["severity"]),
-            title=item["title"],
-            explanation=item["explanation"],
+            title=title,
+            explanation=explanation,
             path=item["path"],
             line=item["line"],
-            evidence=item["evidence"],
-            fix=item["fix"],
-            test=item["test"],
+            evidence=evidence,
+            fix=privacy_text(item["fix"]),
+            test=privacy_text(item["test"]),
             confidence=item["confidence"],
             cwe=item["cwe"],
             source=item["tool"],
@@ -1342,7 +1350,7 @@ class CxxMemoryAnalyzerClient:
                 kind=item["evidence_kind"],
                 path=item["path"],
                 line=item["line"],
-                snippet=item["evidence"],
+                snippet=evidence,
                 rule_id=item["rule_id"],
                 cwe=item["cwe"],
                 confidence=item["confidence"],

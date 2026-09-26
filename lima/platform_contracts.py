@@ -330,30 +330,36 @@ def _reproduction_runs(
     return tuple(sorted(runs.values(), key=lambda run: run.run_artifact_id))
 
 
-def _lift_evidence_record(record: Any, subject_id: str) -> EvidenceRecord | None:
+def _lift_evidence_record(
+    record: Any, subject_id: str, ordinal: int = 0,
+) -> EvidenceRecord | None:
     """Lift one ``models.EvidenceRecord`` to the contract domain, or None.
 
     Only runtime (ASan) records are VEP-admissible (D3); static tool
-    records are D2 and stay platform-side.
+    records are D2 and stay platform-side.  Review round 6: the evidence
+    id digests the *masked* snippet plus a raw-text-free ordinal, so two
+    different secrets at the same location project to the same id instead
+    of carrying a computable fingerprint of the original text.
     """
 
     if record.source != "asan":
         return None
-    material = _canonical_json(
-        {
-            "line": record.line,
-            "path": record.path,
-            "snippet": record.snippet,
-            "source": record.source,
-            "subject_id": subject_id,
-            "tool_run_id": record.tool_run_id,
-        }
-    )
     summary = _sanitize_text(record.snippet, cap=_MAX_TEXT_BYTES)
     if not summary:
         summary = _sanitize_text(
             f"{record.source} evidence at {record.path}:{record.line}", cap=512
         )
+    material = _canonical_json(
+        {
+            "line": record.line,
+            "ordinal": ordinal,
+            "path": record.path,
+            "snippet": summary,
+            "source": record.source,
+            "subject_id": subject_id,
+            "tool_run_id": record.tool_run_id,
+        }
+    )
     return EvidenceRecord(
         evidence_id="ev" + _short_digest(material),
         subject_kind=EvidenceSubjectKind.VULNERABILITY_HYPOTHESIS,
@@ -455,9 +461,10 @@ def finding_to_vep(
 
     lifted = [
         lifted_record
-        for candidate in finding.evidence_records
-        if (lifted_record := _lift_evidence_record(candidate, hypothesis_id))
-        is not None
+        for ordinal, candidate in enumerate(finding.evidence_records)
+        if (lifted_record := _lift_evidence_record(
+            candidate, hypothesis_id, ordinal
+        )) is not None
     ]
     asan_run_ids = [
         candidate.tool_run_id
@@ -684,20 +691,12 @@ def _aep_finding_objects(
 
     records: list[EvidenceRecord] = []
     d2_supported = False
-    for candidate in finding.evidence_records:
+    for ordinal, candidate in enumerate(finding.evidence_records):
         if candidate.source == "asan":
             continue  # D3 runtime evidence is VEP-domain, not audit-bundle.
-        material = _canonical_json(
-            {
-                "layer": "aep-static",
-                "line": candidate.line,
-                "path": candidate.path,
-                "snippet": candidate.snippet,
-                "source": candidate.source,
-                "subject_id": hypothesis_id,
-                "tool_run_id": candidate.tool_run_id,
-            }
-        )
+        # Review round 6: same masking-first rule as the VEP lift -- the
+        # artifact id digests the masked snippet plus a raw-text-free
+        # ordinal, never the original text.
         summary = _sanitize_text(candidate.snippet, cap=_MAX_TEXT_BYTES)
         if not summary:
             summary = _sanitize_text(
@@ -705,6 +704,18 @@ def _aep_finding_objects(
                 f"{candidate.path}:{candidate.line}",
                 cap=512,
             )
+        material = _canonical_json(
+            {
+                "layer": "aep-static",
+                "line": candidate.line,
+                "ordinal": ordinal,
+                "path": candidate.path,
+                "snippet": summary,
+                "source": candidate.source,
+                "subject_id": hypothesis_id,
+                "tool_run_id": candidate.tool_run_id,
+            }
+        )
         artifact_id = (
             candidate.tool_run_id
             if candidate.tool_run_id
@@ -993,10 +1004,14 @@ def _review_material(
     kind: str,
     extra: Mapping[str, Any] | None = None,
 ) -> str:
-    """Canonical digest material for one deterministic stand-in reference."""
+    """Canonical digest material for one deterministic stand-in reference.
+
+    Review round 6: diagnostics enter the material masked, so different
+    sensitive texts cannot be told apart through the derived ids.
+    """
 
     material: dict[str, Any] = {
-        "diagnostics": list(outcome.diagnostics),
+        "diagnostics": [privacy_text(item) for item in outcome.diagnostics],
         "kind": kind,
         "repository": repository,
         "snapshot_sha256": snapshot_sha256,

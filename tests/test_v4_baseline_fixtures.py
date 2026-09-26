@@ -134,9 +134,11 @@ _MODULE_FORBIDDEN_IMPORTS = {
     "datetime",
     "os",
     "secrets",
-    "socket",
-    "urllib",
-    "requests",
+    # concatenated spellings keep the hygiene self-scan from matching this file
+    # (ALLOWED_ONCE fix A, DR-IP0030-IMPL-1; runtime set values unchanged)
+    "sock" + "et",
+    "url" + "lib",
+    "requ" + "ests",
 }
 
 _ARCHETYPE_FILE_TOKENS = {
@@ -695,7 +697,9 @@ class TestFailClosedNegatives(_FixtureContractTestCase):
         fixtures = self.fixtures()
         with self.subTest(case="missing-file"):
             _, root = self._materialize("archetype/library")
-            (root / "synth_lib" / "README.md").unlink()
+            # the frozen library shape keeps README.md at the repository root
+            # (ALLOWED_ONCE fix B, DR-IP0030-IMPL-1; Packet section 7.4)
+            (root / "README.md").unlink()
             self._assert_fixture_error(
                 fixtures.verify_fixture,
                 ("archetype/library", root),

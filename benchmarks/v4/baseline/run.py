@@ -155,14 +155,15 @@ def write_exclusive(path: pathlib.Path, payload: bytes) -> None:
     """Create ``path`` exclusively with ``payload``; never overwrite.
 
     An already existing path fails closed with a typed error and its bytes
-    are left untouched.
+    are left untouched.  The typed error carries the structure-only
+    ``$.output_path`` field path; host paths are never embedded.
     """
     try:
         with open(path, "xb") as handle:
             handle.write(payload)
     except FileExistsError as exc:
         raise BaselineCollectionError(
-            BaselineCollectionErrorCode.OUTPUT_PATH_ALREADY_EXISTS, str(path)
+            BaselineCollectionErrorCode.OUTPUT_PATH_ALREADY_EXISTS, "$.output_path"
         ) from exc
 
 
@@ -175,10 +176,14 @@ def write_result_file(
     """Persist one result file (and optional expert-timing sidecar) exclusively.
 
     The output directory must already exist and be a directory; this slice
-    defines no default directory.  The result file name is deterministic and
-    wall-clock-free: ``{run_spec_digest[:16]}-run-{n}.json`` with ``n`` the
-    smallest positive integer not yet taken under that prefix, so re-running
-    the same spec always adds a new file instead of overwriting history.
+    defines no default directory; the typed directory error carries the
+    structure-only ``$.output_dir`` field path.  The result file name is
+    deterministic and wall-clock-free: ``{run_spec_digest[:16]}-run-{n}.json``
+    with ``n`` the smallest positive integer not yet taken under that prefix
+    by either the result file name or the matching ``.expert-timing.json``
+    sidecar name (both names are probed against the directory state alone),
+    so re-running the same spec always adds a new file instead of
+    overwriting history.
     The result payload is exactly ``result.canonical_bytes()``; when an
     expert session is provided, a sidecar with the same stem and the
     ``.expert-timing.json`` suffix carries ``expert_session.sidecar_bytes``.
@@ -186,11 +191,14 @@ def write_result_file(
     directory = pathlib.Path(output_dir)
     if not directory.is_dir():
         raise BaselineCollectionError(
-            BaselineCollectionErrorCode.OUTPUT_DIRECTORY_UNAVAILABLE, str(directory)
+            BaselineCollectionErrorCode.OUTPUT_DIRECTORY_UNAVAILABLE, "$.output_dir"
         )
     prefix = result.run_spec_digest[:16]
     sequence = 1
-    while (directory / f"{prefix}-run-{sequence}.json").exists():
+    while (
+        (directory / f"{prefix}-run-{sequence}.json").exists()
+        or (directory / f"{prefix}-run-{sequence}.expert-timing.json").exists()
+    ):
         sequence += 1
     result_path = directory / f"{prefix}-run-{sequence}.json"
     write_exclusive(result_path, result.canonical_bytes())
@@ -235,8 +243,9 @@ def run_baseline_attempt(
     Gate order (frozen; any failure means zero execute calls and zero files
     written): metric parameter types, output directory availability, the
     frozen spec layer (moving refs, abbreviated SHAs, fingerprint shapes),
-    the frozen manifest cross-check, and the role binding gate.  Only after
-    every gate passes is ``execute()`` invoked.
+    the frozen manifest cross-check, and the role binding gate; the typed
+    directory error carries the structure-only ``$.output_dir`` field path.
+    Only after every gate passes is ``execute()`` invoked.
 
     Timing and platform metrics come from ``sources`` (defaults read the
     real platform); every recorded value is an int or None.  A failing
@@ -252,7 +261,7 @@ def run_baseline_attempt(
     directory = pathlib.Path(output_dir)
     if not directory.is_dir():
         raise BaselineCollectionError(
-            BaselineCollectionErrorCode.OUTPUT_DIRECTORY_UNAVAILABLE, str(directory)
+            BaselineCollectionErrorCode.OUTPUT_DIRECTORY_UNAVAILABLE, "$.output_dir"
         )
     spec = spec_from_mapping(spec_mapping)
     validate_baseline_manifest(manifest, spec)

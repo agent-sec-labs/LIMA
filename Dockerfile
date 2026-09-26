@@ -37,6 +37,7 @@ COPY --chown=lima:lima skills ./skills
 COPY --chown=lima:lima scripts/scan_repository.py ./scripts/scan_repository.py
 COPY --chown=lima:lima scripts/run_repair_evaluation.py ./scripts/run_repair_evaluation.py
 COPY --chown=lima:lima scripts/run_real_world_evaluation.py ./scripts/run_real_world_evaluation.py
+COPY --chown=lima:lima scripts/run_e2e_evaluation.py ./scripts/run_e2e_evaluation.py
 COPY --chown=lima:lima scripts/run_real_project_oracle.py ./scripts/run_real_project_oracle.py
 COPY --chown=lima:lima scripts/probe_llm_triage.py ./scripts/probe_llm_triage.py
 COPY --chown=lima:lima evaluation_data ./evaluation_data

@@ -137,7 +137,67 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--dataflow", choices=("on", "off"), default="on")
     parser.add_argument("--run-oracles", action="store_true")
+    from benchmarks.v4.baseline.orchestrate import add_baseline_arguments
+
+    add_baseline_arguments(parser)
     args = parser.parse_args(argv)
+
+    if args.run_spec is not None:
+        from benchmarks.v4.baseline.collect import BaselineCollectionError
+        from benchmarks.v4.baseline.orchestrate import (
+            BaselineOrchestrationError,
+            run_baseline_from_args,
+        )
+        from lima.baseline_run_result import BaselineRunResultError
+        from lima.baseline_run_spec import BaselineRunSpecError
+
+        dataset = load_real_world_dataset(
+            args.dataset, allow_unpinned_archives=args.mode == "fetch"
+        )
+        evaluator = RealWorldSecurityEvaluator(
+            SnapshotStore(args.cache),
+            scanner=RepositoryScanner(
+                sast_mode="off", dataflow_enabled=args.dataflow == "on"
+            ),
+            oracle_runner=RealProjectOracleRunner(
+                ROOT / "scripts" / "run_real_project_oracle.py"
+            ),
+            llm_client=_llm_client() if args.mode in {"llm", "llm-retrieval"} else None,
+        )
+
+        def _baseline_execute():
+            if args.mode == "fetch":
+                return evaluator.fetch(dataset)
+            if args.mode == "oracle":
+                return evaluator.run_oracle_matrix(dataset)
+            return evaluator.run(
+                dataset, mode=args.mode, run_oracles=args.run_oracles
+            )
+
+        try:
+            summary = run_baseline_from_args(
+                args,
+                execute=_baseline_execute,
+                manifest_path=str(
+                    ROOT / "evaluation_data" / "v4" / "baseline_manifest.json"
+                ),
+            )
+        except (
+            BaselineOrchestrationError,
+            BaselineCollectionError,
+            BaselineRunSpecError,
+            BaselineRunResultError,
+        ) as error:
+            print(
+                f"baseline error: {error.code.value} {error.field_path}",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"baseline: status={summary.status} attempts={len(summary.attempts)}"
+            f" aggregate={summary.aggregate_path} sha256={summary.aggregate_sha256}"
+        )
+        return 0
 
     dataset = load_real_world_dataset(
         args.dataset, allow_unpinned_archives=args.mode == "fetch"

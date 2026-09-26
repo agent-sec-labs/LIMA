@@ -144,7 +144,58 @@ def main():
         "--reuse-dataset", action="store_true",
         help="Load the existing JSONL instead of regenerating the controlled corpus.",
     )
+    from benchmarks.v4.baseline.orchestrate import add_baseline_arguments
+
+    add_baseline_arguments(parser)
     args = parser.parse_args()
+
+    if args.run_spec is not None:
+        from benchmarks.v4.baseline.collect import BaselineCollectionError
+        from benchmarks.v4.baseline.orchestrate import (
+            BaselineOrchestrationError,
+            run_baseline_from_args,
+        )
+        from lima.baseline_run_result import BaselineRunResultError
+        from lima.baseline_run_spec import BaselineRunSpecError
+
+        if args.reuse_dataset:
+            cases = load_jsonl(args.dataset)
+        else:
+            cases = generate_controlled_pr_cases()
+            write_jsonl(args.dataset, cases)
+
+        def _baseline_execute():
+            EndToEndEvaluationHarness().run(
+                baseline_reviewer(), cases, "single-agent-baseline"
+            )
+            return EndToEndEvaluationHarness(repairer=FixtureRepairer()).run(
+                candidate_reviewer(), cases, "multi-agent-candidate"
+            )
+
+        try:
+            summary = run_baseline_from_args(
+                args,
+                execute=_baseline_execute,
+                manifest_path=os.path.join(
+                    ROOT, "evaluation_data", "v4", "baseline_manifest.json"
+                ),
+            )
+        except (
+            BaselineOrchestrationError,
+            BaselineCollectionError,
+            BaselineRunSpecError,
+            BaselineRunResultError,
+        ) as error:
+            print(
+                f"baseline error: {error.code.value} {error.field_path}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            f"baseline: status={summary.status} attempts={len(summary.attempts)}"
+            f" aggregate={summary.aggregate_path} sha256={summary.aggregate_sha256}"
+        )
+        return
 
     if args.reuse_dataset:
         cases = load_jsonl(args.dataset)

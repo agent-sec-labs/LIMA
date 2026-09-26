@@ -66,7 +66,51 @@ def main(argv=None) -> int:
     parser.add_argument("--output", default="")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument("--min-constraint-accuracy", type=float, default=1.0)
+    from benchmarks.v4.baseline.orchestrate import add_baseline_arguments
+
+    add_baseline_arguments(parser)
     args = parser.parse_args(argv)
+
+    if args.run_spec is not None:
+        from benchmarks.v4.baseline.collect import BaselineCollectionError
+        from benchmarks.v4.baseline.orchestrate import (
+            BaselineOrchestrationError,
+            run_baseline_from_args,
+        )
+        from lima.baseline_run_result import BaselineRunResultError
+        from lima.baseline_run_spec import BaselineRunSpecError
+
+        dataset = load_repair_dataset(args.dataset)
+        evaluator = RepairConstraintEvaluator()
+
+        def _baseline_execute():
+            return evaluator.run(dataset)
+
+        try:
+            summary = run_baseline_from_args(
+                args,
+                execute=_baseline_execute,
+                manifest_path=os.path.join(
+                    ROOT, "evaluation_data", "v4", "baseline_manifest.json"
+                ),
+            )
+        except (
+            BaselineOrchestrationError,
+            BaselineCollectionError,
+            BaselineRunSpecError,
+            BaselineRunResultError,
+        ) as error:
+            print(
+                f"baseline error: {error.code.value} {error.field_path}",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"baseline: status={summary.status} attempts={len(summary.attempts)}"
+            f" aggregate={summary.aggregate_path} sha256={summary.aggregate_sha256}"
+        )
+        return 0
+
     result = RepairConstraintEvaluator().run(load_repair_dataset(args.dataset))
     rendered = (
         json.dumps(result, ensure_ascii=False, indent=2) + "\n"

@@ -617,23 +617,36 @@ class RepositoryScanner:
         return payload
 
     _V4_PAYLOAD_BUDGET_BYTES: Final = 512 * 1024
-    _V4_MAX_PAYLOAD_ARTIFACTS: Final = 64
 
     @staticmethod
     def _seal_platform_v4(outcome, repository_key: str, inventory) -> dict:
-        """Seal the platform review into V4 artifacts (review feedback #183).
+        """Seal the platform review into a report-embedded V4 preview.
 
-        The production path mints and validates the AEP, per-finding VEPs
-        (each pinned to the real AEP reference and a driver-digest oracle
-        reference) and the workflow summary; content-addressed ids and
-        digests ride the collaboration payload, and full artifact payloads
-        travel along under a byte budget so independent stages can consume
-        the sealed chain from one report.  Sealing failures degrade to an
-        honest diagnostic and never alter detection results.
+        Review-feedback semantics (PR #183 round 2):
+
+        - **Report-embedded preview, not an artifact store.** The whole
+          projection lives inside the task report
+          (``collaboration.platform.v4``): there is no independent
+          artifact persistence, the repair-verification converter
+          (``patch_outcome_to_rvr``) has no runtime caller yet, the
+          oracle reference is a payload-level digest pin over the PoC
+          driver bytes, and the workflow/security-outcome/profile links
+          remain stand-ins.  Downstream stages must not treat this as
+          the independently consumable V4 artifact chain.
+        - **No unretrievable references under a full seal.** ``status``
+          is ``sealed`` only when every referenced id (the AEP plus
+          every listed VEP) carries a retrievable, digest-verifiable
+          payload.  Byte-budget omissions downgrade the status to
+          ``partial`` and every id without a payload is listed
+          explicitly in ``omitted_payload_ids``.
+        - **Optional projection.** Sealing never blocks task completion
+          and never alters detection results; ``seal-failed`` records
+          the bounded reason instead.  Consumers may only consume
+          payloads from ``sealed``/``partial`` states and must verify
+          each payload against its recorded digest.
         """
 
         budget = RepositoryScanner._V4_PAYLOAD_BUDGET_BYTES
-        max_artifacts = RepositoryScanner._V4_MAX_PAYLOAD_ARTIFACTS
         try:
             bundle = seal_platform_review(
                 outcome,
@@ -644,16 +657,17 @@ class RepositoryScanner:
             metrics.inc("repository_scan_platform_v4_seal_failed_total")
             return {
                 "status": "seal-failed",
+                "availability": "report-embedded",
                 "diagnostics": [str(exc)[:300]],
             }
         veps = []
         payloads: dict[str, dict] = {}
+        omitted: list[str] = []
         payload_bytes = 0
-        truncated = False
         aep_payload = bundle.aep.to_dict()
         aep_bytes = len(json.dumps(aep_payload, sort_keys=True))
         if aep_bytes > budget:
-            truncated = True
+            omitted.append(bundle.aep_artifact_id)
         else:
             payloads[bundle.aep_artifact_id] = aep_payload
             payload_bytes += aep_bytes
@@ -665,17 +679,14 @@ class RepositoryScanner:
                 "verification_verdict": vep.verification_verdict.value,
             })
             encoded = len(json.dumps(payload_dict, sort_keys=True))
-            if (
-                truncated
-                or len(payloads) >= max_artifacts
-                or payload_bytes + encoded > budget
-            ):
-                truncated = True
+            if payload_bytes + encoded > budget:
+                omitted.append(vep.hypothesis_id)
                 continue
             payloads[vep.hypothesis_id] = payload_dict
             payload_bytes += encoded
-        return {
-            "status": "sealed",
+        result = {
+            "status": "sealed" if not omitted else "partial",
+            "availability": "report-embedded",
             "aep": {
                 "artifact_id": bundle.aep_artifact_id,
                 "content_digest": bundle.aep_content_digest,
@@ -691,8 +702,10 @@ class RepositoryScanner:
             },
             "veps": veps,
             "payloads": payloads,
-            "payloads_truncated": truncated,
         }
+        if omitted:
+            result["omitted_payload_ids"] = omitted
+        return result
 
     def _run_platform_branch(
         self,

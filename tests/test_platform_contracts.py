@@ -973,7 +973,8 @@ class SealPlatformReviewTests(unittest.TestCase):
         )
 
         self.assertEqual(sealed["status"], "sealed")
-        self.assertFalse(sealed["payloads_truncated"])
+        self.assertEqual(sealed["availability"], "report-embedded")
+        self.assertNotIn("omitted_payload_ids", sealed)
         self.assertIn(sealed["aep"]["artifact_id"], sealed["payloads"])
         self.assertIn("execution_status", sealed["workflow_summary"])
         self.assertIn("content_digest", sealed["workflow_summary"])
@@ -994,6 +995,121 @@ class SealPlatformReviewTests(unittest.TestCase):
             "v4",
             scanner._platform_collaboration("auto", "completed", outcome),
         )
+
+    @staticmethod
+    def _many_findings_outcome(count: int) -> PlatformReviewOutcome:
+        items = tuple(
+            _plain_finding(
+                {
+                    "target_id": f"lead-{index:04d}",
+                    "path": "src/example.c",
+                    "line": 42 + index,
+                    "symbol": "parse_input",
+                    "cwe": "CWE-787",
+                    "state": "tool-corroborated",
+                    "hypothesis_reason": (
+                        "Attacker-controlled length reaches memcpy unbounded."
+                    ),
+                    "poc_driver_code": "int main(void) { return 0; }",
+                    "experiment_log": (),
+                    "identity": None,
+                    "evidence_records": (_STATIC_RECORD,),
+                }
+            )
+            for index in range(count)
+        )
+        return PlatformReviewOutcome(
+            findings=items,
+            targets=items,
+            stats=PlatformReviewStats(count, count, count, 0, count, 0, 1),
+            diagnostics=(),
+            leads_considered=count,
+            translation_units=("src/example.c",),
+        )
+
+    def test_scanner_seal_covers_the_64_finding_boundary(self) -> None:
+        """64 findings (the frozen summary cap) still seal completely.
+
+        The first review round found a payload-cap off-by-one at this
+        boundary (AEP + 64 VEPs > 64); every referenced id must carry a
+        retrievable payload under a full seal.
+        """
+
+        from lima.repository_scanner import RepositoryScanner
+
+        outcome = self._many_findings_outcome(64)
+        sealed = RepositoryScanner._seal_platform_v4(
+            outcome, "team/proj", _FakeInventory()
+        )
+
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertNotIn("omitted_payload_ids", sealed)
+        self.assertEqual(len(sealed["veps"]), 64)
+        self.assertEqual(
+            len(sealed["payloads"]), 65,
+            "AEP + every VEP must carry a payload",
+        )
+        referenced = {entry["artifact_id"] for entry in sealed["veps"]}
+        referenced.add(sealed["aep"]["artifact_id"])
+        self.assertEqual(referenced, set(sealed["payloads"]))
+
+    def test_scanner_seal_low_budget_is_explicitly_partial(self) -> None:
+        """A tiny byte budget must degrade to partial, never lie sealed."""
+
+        from unittest.mock import patch
+
+        from lima.repository_scanner import RepositoryScanner
+
+        outcome = self._many_findings_outcome(4)
+        with patch.object(
+            RepositoryScanner, "_V4_PAYLOAD_BUDGET_BYTES", 1024
+        ):
+            sealed = RepositoryScanner._seal_platform_v4(
+                outcome, "team/proj", _FakeInventory()
+            )
+
+        self.assertEqual(sealed["status"], "partial")
+        omitted = set(sealed["omitted_payload_ids"])
+        referenced = {entry["artifact_id"] for entry in sealed["veps"]}
+        referenced.add(sealed["aep"]["artifact_id"])
+        # Every referenced id resolves either to a payload or to an
+        # explicit omission -- never to silence.
+        self.assertEqual(referenced, set(sealed["payloads"]) | omitted)
+        self.assertFalse(set(sealed["payloads"]) & omitted)
+        for entry in sealed["veps"]:
+            if entry["artifact_id"] in sealed["payloads"]:
+                self.assertEqual(
+                    entry["content_digest"],
+                    compute_content_digest(
+                        sealed["payloads"][entry["artifact_id"]]
+                    ),
+                )
+
+    def test_scanner_seal_failure_is_an_optional_projection(self) -> None:
+        """Sealing failure never blocks completion nor alters findings."""
+
+        from unittest.mock import patch
+
+        from lima.repository_scanner import RepositoryScanner
+
+        outcome = _outcome()
+        with patch(
+            "lima.repository_scanner.seal_platform_review",
+            side_effect=ValueError("boom"),
+        ):
+            sealed = RepositoryScanner._seal_platform_v4(
+                outcome, "team/proj", _FakeInventory()
+            )
+
+        self.assertEqual(sealed["status"], "seal-failed")
+        self.assertEqual(sealed["availability"], "report-embedded")
+        self.assertTrue(sealed["diagnostics"])
+        scanner = RepositoryScanner.__new__(RepositoryScanner)
+        payload = scanner._platform_collaboration(
+            "auto", "completed", outcome, v4=sealed
+        )
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["v4"]["status"], "seal-failed")
 
 
 if __name__ == "__main__":  # pragma: no cover

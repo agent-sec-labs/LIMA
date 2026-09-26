@@ -1162,6 +1162,11 @@ def seal_platform_review(
     finding the frozen VEP vocabulary cannot carry (or more than 64
     findings) propagates the ``ValueError`` to the caller instead of
     being silently dropped.
+
+    Consumption caveat: the scanner embeds these payloads inside the
+    task report as a preview projection -- no independent artifact store
+    backs these references yet, and the workflow/security-outcome and
+    repository-profile links remain stand-ins.
     """
 
     aep = platform_review_to_aep(

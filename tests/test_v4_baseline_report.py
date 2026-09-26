@@ -816,9 +816,10 @@ class TestExpertAndAutomationFace(_IP0029ReportTestCase):
             _sidecar(reviewer_digest=bob, active_ms=9),
         )
         document = self._build(_scan_payload(states=("candidate",)), sidecars=sidecars)
+        # Ascending is hex digest order, not reviewer-name order: bob (944d..) < alice (e159..).
         self.assertEqual(
             document.to_canonical_value()["expert"],
-            {"active_time_ms_total": 21, "sessions": 3, "reviewer_digests": [alice, bob]},
+            {"active_time_ms_total": 21, "sessions": 3, "reviewer_digests": [bob, alice]},
         )
         data = document.canonical_bytes()
         self.assertNotIn(b"alice", data)

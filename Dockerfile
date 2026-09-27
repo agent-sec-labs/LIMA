@@ -56,6 +56,7 @@ COPY --chown=lima:lima docs/DEVELOPER_HANDOFF.md docs/GITHUB_COLLABORATION.md ./
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0031_Offline_Budget_Gate.md ./docs/
 COPY --chown=lima:lima docs/LIMA_PR3d_Real_Run_Budget_Decision_Pack.md ./docs/
 COPY --chown=lima:lima docs/LIMA_PR3d_Real_Run_Approval_2026-09-27.md ./docs/
+COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0032_Real_Run.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0020_Vault_Audit.md ./docs/
 COPY --chown=lima:lima docs/adr ./docs/adr
 COPY --chown=lima:lima schemas ./schemas

@@ -1,5 +1,4 @@
 """Minimal JSON protocol used by the isolated skill subprocess."""
-import builtins
 import json
 import os
 import sys

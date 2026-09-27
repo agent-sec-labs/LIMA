@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .diff_parser import parse_unified_diff
-from .models import Finding, Severity
+from .models import Finding
 from .reviewer import Reviewer
 from .verifier import RepairVerifier
 

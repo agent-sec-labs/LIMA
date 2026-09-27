@@ -1,4 +1,6 @@
 import copy
+import dataclasses
+import hashlib
 import io
 import itertools
 import json
@@ -7,7 +9,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lima.cxx_agent_models import CxxAgentCandidate
 from lima.cxx_memory import (
     REQUESTED_LAYERS,
     CxxAnalysisResult,
@@ -26,6 +27,23 @@ from lima.workspace import (
     WorkspaceFile,
     WorkspaceInventory,
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class _BindingCandidate:
+    """Local structural stand-in for the retired legacy candidate contract.
+
+    ``bind_tool_evidence`` is structurally typed over these five fields, so
+    a frozen local dataclass keeps the binding tests honest without keeping
+    the retired ``CxxAgentCandidate`` class alive.
+    """
+
+    candidate_id: str
+    cwe: str
+    path: str
+    line: int
+    symbol: str
+
 
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
 CLIENT_INVENTORY = WorkspaceInventory(
@@ -1133,16 +1151,18 @@ def binding_candidate(
     cwe="CWE-415",
     mechanism="free called twice",
 ):
-    return CxxAgentCandidate.from_untrusted_json({
-        "cwe": cwe,
-        "path": path,
-        "line": line,
-        "symbol": symbol,
-        "title": "double free claim",
-        "mechanism": mechanism,
-        "trigger_path": ["entry", "release"],
-        "confidence": 0.8,
-    })
+    digest = hashlib.sha256(
+        json.dumps(
+            [cwe, path, line, symbol, mechanism], sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return _BindingCandidate(
+        candidate_id="sha256-" + digest,
+        cwe=cwe,
+        path=path,
+        line=line,
+        symbol=symbol,
+    )
 
 
 def binding_finding(
@@ -1254,16 +1274,12 @@ class BindToolEvidenceTests(unittest.TestCase):
 
         # The strict constructor requires a non-empty symbol, so the
         # symbol-less candidate shape is built directly here.
-        bare = CxxAgentCandidate(
+        bare = _BindingCandidate(
             candidate_id="direct-bare-candidate",
             cwe="CWE-415",
             path="src/free.c",
             line=12,
             symbol="",
-            title="double free claim",
-            mechanism="free called twice",
-            trigger_path=("entry", "release"),
-            confidence=0.8,
         )
         near = bind_tool_evidence(
             [bare],

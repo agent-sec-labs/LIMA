@@ -358,6 +358,15 @@ class Settings:
                 "LIMA_CXX_AGENT_MODEL (or LIMA_LLM_MODEL) is required when "
                 "LIMA_CXX_AGENT_MODE is required"
             )
+        if (
+            self.cxx_agent_mode == "required"
+            and self.cxx_memory_mode == "off"
+        ):
+            raise ValueError(
+                "LIMA_CXX_MEMORY_MODE must not be off when "
+                "LIMA_CXX_AGENT_MODE is required: the platform chain "
+                "consults the sidecar analyzer for facts"
+            )
         if min(
             self.cxx_agent_max_calls,
             self.cxx_agent_max_context_files,

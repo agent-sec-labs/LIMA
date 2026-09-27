@@ -161,6 +161,48 @@ class DotenvTests(unittest.TestCase):
         self.assertEqual(41, settings.cxx_analysis_timeout_seconds)
         self.assertEqual(4096, settings.cxx_max_response_bytes)
 
+    def test_cxx_agent_required_rejects_memory_off(self):
+        # Review #225: the platform chain consults the sidecar analyzer;
+        # required + memory=off would silently skip agent detection.
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "required",
+                "LIMA_CXX_AGENT_MODEL": "gpt-test",
+                "LIMA_CXX_MEMORY_MODE": "off",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "LIMA_CXX_MEMORY_MODE must not be off"
+            ):
+                Settings.from_env().validate_evolution()
+
+    def test_cxx_agent_required_accepts_memory_auto(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "required",
+                "LIMA_CXX_AGENT_MODEL": "gpt-test",
+                "LIMA_CXX_MEMORY_MODE": "auto",
+            },
+            clear=True,
+        ):
+            Settings.from_env().validate_evolution()
+
+    def test_cxx_agent_auto_with_memory_off_is_valid_config(self):
+        # auto + memory=off is a legal degraded configuration (no
+        # sidecar, no agent chain), it just must not claim capability.
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "auto",
+                "LIMA_CXX_MEMORY_MODE": "off",
+            },
+            clear=True,
+        ):
+            Settings.from_env().validate_evolution()
+
     def test_cxx_memory_mode_rejects_unknown_value(self):
         with patch.dict(os.environ, {"LIMA_CXX_MEMORY_MODE": "maybe"}, clear=True):
             with self.assertRaisesRegex(ValueError, "LIMA_CXX_MEMORY_MODE"):

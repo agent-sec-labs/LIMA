@@ -846,7 +846,9 @@ class ReviewService:
             if configured
             else "",
             "model": model,
-            "repository_scan": mode != "off",
+            "repository_scan": (
+                mode != "off" and self.repository_scanner.cxx_memory_adapter is not None
+            ),
             # Retirement Task 1: the legacy C++ PR injection is retired;
             # platform diff-only PR review is follow-up work and stays off
             # until its end-to-end tests land.

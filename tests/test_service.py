@@ -123,6 +123,18 @@ class ServiceTests(unittest.TestCase):
         finally:
             service.queue.close()
 
+    def test_cxx_agent_capabilities_false_when_memory_off(self):
+        # Review #225: with no sidecar adapter, the platform chain cannot
+        # run and must not claim repository_scan capability.
+        settings = replace(self.settings, cxx_agent_mode="auto")
+        service = ReviewService(settings)
+        try:
+            capabilities = service.repository_scan_capabilities()
+            cxx = capabilities["cxx_agent"]
+            self.assertFalse(cxx["repository_scan"])
+        finally:
+            service.queue.close()
+
     def test_service_has_no_cxx_pr_injection(self):
         # The legacy PR snapshot flow and its merge reviewer are gone while
         # generic Python PR review keeps its single-result persistence.

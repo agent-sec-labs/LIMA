@@ -517,6 +517,12 @@ class RepositoryScanner:
             return {"mode": "off", "status": "disabled"}
         adapter = self.cxx_memory_adapter
         if not callable(getattr(adapter, "analyze_uaf_facts", None)):
+            if mode == "required":
+                raise RuntimeError(
+                    "required platform review needs the C/C++ analyzer; "
+                    "enable LIMA_CXX_MEMORY_MODE (auto or required) so the "
+                    "sidecar adapter is constructed"
+                )
             return {"mode": mode, "status": "analyzer-not-configured"}
         translation_units = tuple(sorted({
             PurePosixPath(item.path).as_posix()

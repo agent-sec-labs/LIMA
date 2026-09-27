@@ -1330,6 +1330,41 @@ class ScannerSingleChainTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(scanner, residue), residue)
 
+    def test_required_platform_never_succeeds_without_analyzer(self):
+        """Review #225: required mode must fail loudly when no sidecar.
+
+        The platform chain consults the sidecar analyzer for facts; with
+        the adapter missing (memory=off), a required-mode scan must raise
+        instead of returning a successful task with zero agent findings.
+        """
+        scanner = RepositoryScanner(
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_agent_mode="required",
+            cxx_uaf_llm_factory=lambda: {"provider": "openai", "model": "fake"},
+        )
+        root = tempfile.mkdtemp(suffix="-agent-scanner")
+        self.addCleanup(lambda: _rmtree(root))
+        _write_cxx_repo(root)
+        with self.assertRaisesRegex(RuntimeError, "sidecar adapter"):
+            scanner.scan(RepositoryWorkspace(Path(root)))
+
+    def test_auto_platform_without_analyzer_is_honest_skip(self):
+        """auto + memory=off: the platform chain records its unavailability."""
+        scanner = RepositoryScanner(
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_agent_mode="auto",
+            cxx_uaf_llm_factory=lambda: {"provider": "openai", "model": "fake"},
+        )
+        root = tempfile.mkdtemp(suffix="-agent-scanner")
+        self.addCleanup(lambda: _rmtree(root))
+        _write_cxx_repo(root)
+        result = scanner.scan(RepositoryWorkspace(Path(root)))
+        platform = result.report.collaboration.get("platform", {})
+        self.assertEqual("auto", platform.get("mode"))
+        self.assertEqual("analyzer-not-configured", platform.get("status"))
+
     def test_platform_collaboration_has_no_cxx_agent_key(self):
         """The scan report drops the legacy collaboration key entirely."""
         from lima.agent_orchestrator import (
@@ -1510,5 +1545,3 @@ class ScannerPlatformBranchTests(unittest.TestCase):
             [], [item for item in result.report.to_dict()["findings"]
                  if item["cwe"] == "CWE-416"],
         )
-
-

@@ -74,12 +74,12 @@ C/C++ 内存分析为显式 opt-in（默认 `LIMA_CXX_MEMORY_MODE=off`，不调�
 管理员 argv JSON、预算、故障诊断和评测方法见
 [C/C++ 内存安全分析说明](docs/CXX_MEMORY_ANALYSIS.md)。
 
-在 Sidecar 之上，LIMA 还提供 C/C++ LLM 多 Agent 检测（`LIMA_CXX_AGENT_MODE=off/auto/required`）：
-Planner → 三个独立 Specialist → Critic → Evidence → Verifier → Arbiter 的协作管线，
+在 Sidecar 之上，LIMA 还提供 C/C++ 智能体检测链（`LIMA_CXX_AGENT_MODE=off/auto/required`）：
+Scout 分诊 → Specialist 假设与 PoC → 沙箱 ASan 实验 → Critic 修正 → 冻结仲裁的单链管线，
 候选全部重新绑定可信快照并按严格 Schema 校验，`automatic_repair` 恒为 `False`。
 启用前必须知晓外部模型会读取代码；模式语义、预算与费用（字节代理）、验证状态与
-verified-only 门禁、降级链、无标签评测和 CI 触发矩阵见
-[C/C++ LLM Agent 检测说明](docs/CXX_LLM_AGENT_ANALYSIS.md)。
+verified-only 门禁、降级链和无标签评测见
+[C/C++ 智能体检测说明](docs/AGENT_VULN_PLATFORM.md)。
 
 项目镜像默认从 AWS Public ECR 的 Docker Official Images 镜像拉取，并锁定 manifest digest，以规避部分网络环境中 `auth.docker.io` 的 DNS/IPv6 连接异常，同时避免使用来源不明的公共镜像站。
 

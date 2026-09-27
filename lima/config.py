@@ -192,7 +192,6 @@ class Settings:
     cxx_max_response_bytes: int = 2 * 1024 * 1024
     cxx_agent_mode: str = "off"
     cxx_agent_model: str = ""
-    cxx_agent_max_candidates: int = 100
     cxx_agent_max_calls: int = 40
     cxx_agent_max_context_files: int = 12
     cxx_agent_max_context_lines: int = 1200
@@ -359,8 +358,16 @@ class Settings:
                 "LIMA_CXX_AGENT_MODEL (or LIMA_LLM_MODEL) is required when "
                 "LIMA_CXX_AGENT_MODE is required"
             )
+        if (
+            self.cxx_agent_mode == "required"
+            and self.cxx_memory_mode == "off"
+        ):
+            raise ValueError(
+                "LIMA_CXX_MEMORY_MODE must not be off when "
+                "LIMA_CXX_AGENT_MODE is required: the platform chain "
+                "consults the sidecar analyzer for facts"
+            )
         if min(
-            self.cxx_agent_max_candidates,
             self.cxx_agent_max_calls,
             self.cxx_agent_max_context_files,
             self.cxx_agent_max_context_lines,
@@ -519,7 +526,6 @@ class Settings:
             cxx_max_response_bytes=_int("LIMA_CXX_MAX_RESPONSE_BYTES", 2 * 1024 * 1024),
             cxx_agent_mode=os.getenv("LIMA_CXX_AGENT_MODE", "off").strip().lower(),
             cxx_agent_model=os.getenv("LIMA_CXX_AGENT_MODEL", "").strip(),
-            cxx_agent_max_candidates=_int("LIMA_CXX_AGENT_MAX_CANDIDATES", 100),
             cxx_agent_max_calls=_int("LIMA_CXX_AGENT_MAX_CALLS", 40),
             cxx_agent_max_context_files=_int("LIMA_CXX_AGENT_MAX_CONTEXT_FILES", 12),
             cxx_agent_max_context_lines=_int("LIMA_CXX_AGENT_MAX_CONTEXT_LINES", 1200),

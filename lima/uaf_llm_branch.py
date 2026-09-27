@@ -21,7 +21,7 @@ Security stance (design sections 10.2/13, unchanged):
   (``UAF_SEMANTIC_STEP_FIELDS``) -- this is deliberately *not* the
   ``tool``/``final`` union of :class:`lima.cxx_llm.AgentStep`, so the branch
   uses its own strict parser plus the shared fence-unwrapping and
-  untrusted-JSON primitives instead of ``CxxLLMClient.step``.
+  untrusted-JSON primitives instead of a step-union client contract.
 * Authority limits: the reply may only reference the reviewed
   ``candidate_id`` and fact ids that were provided. A forged id rejects the
   whole round (no repair, no partial acceptance). The reply can never
@@ -36,7 +36,7 @@ Security stance (design sections 10.2/13, unchanged):
   fails the task instead of silently skipping the required analysis.
 * Budget honesty: one call is charged through ``CxxAgentBudget.consume``
   before each wire round trip and the UTF-8 byte size of each completion is
-  charged on arrival -- identical timing to ``CxxLLMClient.step``. Exactly
+  charged on arrival -- identical timing to the retired step client. Exactly
   one format repair is attempted for reply-shape failures (never for
   authorization failures, transport failures or budget failures).
 """
@@ -422,7 +422,7 @@ def send_semantic_request(
     """Send one canonical semantic request and return the raw reply text.
 
     The independent wire path for the semantic branch: identical budget
-    timing to ``CxxLLMClient.step`` (one call charged before the round trip,
+    timing to the retired step client (one call charged before the round trip,
     response bytes charged on arrival) but no tool/final union contract --
     the reply is parsed afterwards by :func:`parse_uaf_semantic_reply`.
     Transport errors (``LLMTransportError``/``LLMResponseTooLarge``) and

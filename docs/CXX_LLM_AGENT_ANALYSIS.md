@@ -1,4 +1,9 @@
-# C/C++ LLM Agent 检测
+# C/C++ LLM Agent 检测（已退役）
+
+> **退役说明（2026-09-27）**：本文描述的七角色多 Agent 管线（Planner → 三个
+> Specialist → Critic → Evidence → Verifier → Arbiter）已随智能体检测平台落地而
+> 退役；现役检测链见 `docs/AGENT_VULN_PLATFORM.md`。以下内容保留为历史参考，其中
+> 的命令、评测结果与 CI 接线说明不再适用。
 
 LIMA 的 C/C++ 检测在传统三层（Semgrep / Clang / ASan，见
 `docs/CXX_MEMORY_ANALYSIS.md`）之外，提供一条真实大模型多 Agent 检测管线：模型是

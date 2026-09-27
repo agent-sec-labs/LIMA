@@ -82,7 +82,6 @@ class DotenvTests(unittest.TestCase):
             {
                 "LIMA_CXX_AGENT_MODE": "required",
                 "LIMA_CXX_AGENT_MODEL": "gpt-test",
-                "LIMA_CXX_AGENT_MAX_CANDIDATES": "50",
                 "LIMA_CXX_AGENT_MAX_CALLS": "20",
                 "LIMA_CXX_AGENT_MAX_CONTEXT_FILES": "6",
                 "LIMA_CXX_AGENT_MAX_CONTEXT_LINES": "600",
@@ -96,7 +95,6 @@ class DotenvTests(unittest.TestCase):
             settings = Settings.from_env()
         self.assertEqual("required", settings.cxx_agent_mode)
         self.assertEqual("gpt-test", settings.cxx_agent_model)
-        self.assertEqual(50, settings.cxx_agent_max_candidates)
         self.assertEqual(20, settings.cxx_agent_max_calls)
         self.assertEqual(6, settings.cxx_agent_max_context_files)
         self.assertEqual(600, settings.cxx_agent_max_context_lines)
@@ -110,7 +108,6 @@ class DotenvTests(unittest.TestCase):
             settings = Settings.from_env()
         self.assertEqual("off", settings.cxx_agent_mode)
         self.assertEqual("", settings.cxx_agent_model)
-        self.assertEqual(100, settings.cxx_agent_max_candidates)
         self.assertEqual(40, settings.cxx_agent_max_calls)
         self.assertEqual(12, settings.cxx_agent_max_context_files)
         self.assertEqual(1200, settings.cxx_agent_max_context_lines)
@@ -134,7 +131,6 @@ class DotenvTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "LIMA_CXX_AGENT_MODEL"):
                 Settings.from_env().validate_evolution()
         for name in (
-            "LIMA_CXX_AGENT_MAX_CANDIDATES",
             "LIMA_CXX_AGENT_MAX_CALLS",
             "LIMA_CXX_AGENT_MAX_CONTEXT_FILES",
             "LIMA_CXX_AGENT_MAX_CONTEXT_LINES",
@@ -164,6 +160,48 @@ class DotenvTests(unittest.TestCase):
         self.assertEqual("http://cxx-analyzer:8090", settings.cxx_analyzer_url)
         self.assertEqual(41, settings.cxx_analysis_timeout_seconds)
         self.assertEqual(4096, settings.cxx_max_response_bytes)
+
+    def test_cxx_agent_required_rejects_memory_off(self):
+        # Review #225: the platform chain consults the sidecar analyzer;
+        # required + memory=off would silently skip agent detection.
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "required",
+                "LIMA_CXX_AGENT_MODEL": "gpt-test",
+                "LIMA_CXX_MEMORY_MODE": "off",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "LIMA_CXX_MEMORY_MODE must not be off"
+            ):
+                Settings.from_env().validate_evolution()
+
+    def test_cxx_agent_required_accepts_memory_auto(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "required",
+                "LIMA_CXX_AGENT_MODEL": "gpt-test",
+                "LIMA_CXX_MEMORY_MODE": "auto",
+            },
+            clear=True,
+        ):
+            Settings.from_env().validate_evolution()
+
+    def test_cxx_agent_auto_with_memory_off_is_valid_config(self):
+        # auto + memory=off is a legal degraded configuration (no
+        # sidecar, no agent chain), it just must not claim capability.
+        with patch.dict(
+            os.environ,
+            {
+                "LIMA_CXX_AGENT_MODE": "auto",
+                "LIMA_CXX_MEMORY_MODE": "off",
+            },
+            clear=True,
+        ):
+            Settings.from_env().validate_evolution()
 
     def test_cxx_memory_mode_rejects_unknown_value(self):
         with patch.dict(os.environ, {"LIMA_CXX_MEMORY_MODE": "maybe"}, clear=True):

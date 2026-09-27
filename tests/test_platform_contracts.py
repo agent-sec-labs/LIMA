@@ -30,7 +30,6 @@ import json
 import unittest
 
 from lima.agent_orchestrator import PlatformReviewOutcome, PlatformReviewStats
-from lima.agent_patch import PatchFlowOutcome, PatchProposal, PatchVerification
 from lima.contracts.aep import (
     AuditBudget,
     AuditCoverageGap,
@@ -43,13 +42,6 @@ from lima.contracts.aep import (
 from lima.contracts.codec import compute_content_digest
 from lima.contracts.common import SchemaVersion
 from lima.contracts.evidence import EvidenceLevel, EvidencePolarity, HypothesisStatus
-from lima.contracts.rvr import (
-    CandidateVerdict,
-    GateKind,
-    GateOutcome,
-    decode_rvr_payload,
-    encode_rvr_payload,
-)
 from lima.contracts.summary import (
     ExecutionStatus,
     SummaryReferenceKind,
@@ -580,230 +572,16 @@ class PlatformReviewContractsTests(unittest.TestCase):
         )
 
 
-# --- task T3: PatchFlowOutcome -> RVR + golden path chain -------------------
-
-_PATCHED_CONTENT = (
-    "void parse_input(const char *data, unsigned n) {\n"
-    "    if (n <= 256u) {\n"
-    "        memcpy(buffer, data, n);\n"
-    "    }\n"
-    "}\n"
-)
-_PATCH_RATIONALE = (
-    "Bounds-check the attacker-controlled length against the buffer size "
-    "before the memcpy; everything else is preserved verbatim."
-)
-
-
-def _patch_outcome(**overrides):
-    """One verified patch flow outcome for the T1 runtime-confirmed finding."""
-
-    proposal = PatchProposal(
-        target_path="src/example.c",
-        patched_content=_PATCHED_CONTENT,
-        rationale=_PATCH_RATIONALE,
-    )
-    verification = PatchVerification(
-        compiles=True,
-        poc_still_triggers=False,
-        asan_type_after=None,
-        verified=True,
-        diagnostics=(),
-    )
-    base = {
-        "proposal": proposal,
-        "verification": verification,
-        "rounds_used": 1,
-        "verified": True,
-        "diagnostics": (),
-    }
-    base.update(overrides)
-    return PatchFlowOutcome(**base)
-
-
-@unittest.skipIf(
-    patch_outcome_to_rvr is None, "patch_outcome_to_rvr not implemented (RED)"
-)
-class PatchOutcomeToRvrTests(unittest.TestCase):
-    """PatchFlowOutcome -> RepairVerificationReport converter (T3)."""
-
-    def test_patch_outcome_to_rvr_verified(self):
-        finding = _finding()
-        rvr = patch_outcome_to_rvr(
-            _patch_outcome(),
-            finding=finding,
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
-        )
-        vep = finding_to_vep(finding, snapshot_sha256=SNAPSHOT, repository=REPOSITORY)
-        self.assertEqual(rvr.schema_version, SchemaVersion(4, 0))
-        self.assertEqual(rvr.source_vep.artifact_id, vep.hypothesis_id)
-        self.assertEqual(
-            rvr.source_vep.content_digest, compute_content_digest(vep.to_dict())
-        )
-        self.assertEqual(len(rvr.candidates), 1)
-        candidate = rvr.candidates[0]
-        self.assertIs(candidate.verdict, CandidateVerdict.VERIFIED_PATCH)
-        self.assertTrue(candidate.candidate_id.startswith("cand-"))
-        self.assertEqual(candidate.changed_files, ("src/example.c",))
-        self.assertEqual(
-            candidate.patch.content_digest,
-            hashlib.sha256(_PATCHED_CONTENT.encode("utf-8")).hexdigest(),
-        )
-        self.assertTrue(candidate.patch.patch_artifact_id.startswith("patch-"))
-        self.assertEqual(candidate.strategy, _PATCH_RATIONALE)
-        self.assertEqual(
-            [gate.gate for gate in candidate.gates],
-            [GateKind.FUNCTIONAL_PRESERVATION, GateKind.SECURITY_PRESERVATION],
-        )
-        self.assertIs(candidate.gates[0].outcome, GateOutcome.PASS)
-        self.assertIs(candidate.gates[1].outcome, GateOutcome.PASS)
-        # The generator (patch engineer model) never verifies its own patch.
-        for gate in candidate.gates:
-            self.assertNotEqual(gate.producer, candidate.generator)
-        # Deterministic: same inputs -> identical report.
-        again = patch_outcome_to_rvr(
-            _patch_outcome(),
-            finding=finding,
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
-        )
-        self.assertEqual(rvr, again)
-
-    def test_patch_outcome_to_rvr_rejected(self):
-        poc_still = patch_outcome_to_rvr(
-            _patch_outcome(
-                rounds_used=2,
-                verified=False,
-                verification=PatchVerification(
-                    compiles=True,
-                    poc_still_triggers=True,
-                    asan_type_after="heap-buffer-overflow",
-                    verified=False,
-                    diagnostics=("poc-still-triggers",),
-                ),
-            ),
-            finding=_finding(),
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
-        )
-        candidate = poc_still.candidates[0]
-        self.assertIs(candidate.verdict, CandidateVerdict.REJECTED)
-        self.assertIs(candidate.gates[0].outcome, GateOutcome.PASS)
-        self.assertIs(candidate.gates[1].outcome, GateOutcome.FAILED)
-        self.assertIn("poc-still-triggers", candidate.gates[1].detail)
-        self.assertIn("heap-buffer-overflow", candidate.gates[1].detail)
-        # Compile failure is the other honest rejection path.
-        no_compile = patch_outcome_to_rvr(
-            _patch_outcome(
-                rounds_used=2,
-                verified=False,
-                verification=PatchVerification(
-                    compiles=False,
-                    poc_still_triggers=None,
-                    asan_type_after=None,
-                    verified=False,
-                    diagnostics=("patch-does-not-compile",),
-                ),
-            ),
-            finding=_finding(),
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
-        )
-        candidate = no_compile.candidates[0]
-        self.assertIs(candidate.verdict, CandidateVerdict.REJECTED)
-        self.assertIs(candidate.gates[0].outcome, GateOutcome.FAILED)
-        self.assertIs(candidate.gates[1].outcome, GateOutcome.INCONCLUSIVE)
-        self.assertIn("patch-does-not-compile", candidate.gates[0].detail)
-
-    def test_patch_outcome_to_rvr_noop_diagnostic_preserved(self):
-        rvr = patch_outcome_to_rvr(
-            _patch_outcome(
-                verified=False,
-                verification=PatchVerification(
-                    compiles=None,
-                    poc_still_triggers=None,
-                    asan_type_after=None,
-                    verified=False,
-                    diagnostics=("patch-is-noop",),
-                ),
-            ),
-            finding=_finding(),
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
-        )
-        candidate = rvr.candidates[0]
-        # The noop shortcut never compiled and never ran the PoC: nothing was
-        # judged, so both gates stay inconclusive and the verdict follows.
-        self.assertIs(candidate.verdict, CandidateVerdict.INCONCLUSIVE)
-        for gate in candidate.gates:
-            self.assertIs(gate.outcome, GateOutcome.INCONCLUSIVE)
-            self.assertIn("patch-is-noop", gate.detail)
-
-    def test_patch_outcome_to_rvr_rejects_unrepresentable_outcomes(self):
-        generation_failed = PatchFlowOutcome(
-            proposal=None,
-            verification=None,
-            rounds_used=1,
-            verified=False,
-            diagnostics=("patch-generation-failed",),
-        )
-        with self.assertRaises(ValueError):
-            patch_outcome_to_rvr(
-                generation_failed,
-                finding=_finding(),
-                snapshot_sha256=SNAPSHOT,
-                repository=REPOSITORY,
-            )
-        # An unverified outcome whose gates would both pass is contradictory
-        # and must never surface as verified_patch (fail-closed).
-        with self.assertRaises(ValueError):
-            patch_outcome_to_rvr(
-                _patch_outcome(verified=False, diagnostics=("critic-overruled",)),
-                finding=_finding(),
-                snapshot_sha256=SNAPSHOT,
-                repository=REPOSITORY,
-            )
-
-    def test_rvr_roundtrip_via_codec(self):
-        rvr = patch_outcome_to_rvr(
-            _patch_outcome(),
-            finding=_finding(),
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
-        )
-        payload = rvr.to_dict()
-        decoded = decode_rvr_payload(payload, schema_version=SchemaVersion(4, 0))
-        self.assertEqual(decoded, rvr)
-        self.assertEqual(encode_rvr_payload(decoded), payload)
-        self.assertEqual(
-            compute_content_digest(payload),
-            compute_content_digest(encode_rvr_payload(decoded)),
-        )
-        # Canonical JSON round trip stays stable for downstream digesting.
-        self.assertEqual(json.loads(json.dumps(payload)), payload)
-
-
-@unittest.skipIf(
-    patch_outcome_to_rvr is None, "patch_outcome_to_rvr not implemented (RED)"
-)
 class PlatformGoldenPathTests(unittest.TestCase):
-    """End-to-end platform run -> AEP -> VEP -> RVR -> WorkflowSummary (T3)."""
+    """End-to-end platform run -> AEP -> VEP -> WorkflowSummary (T3 retired)."""
 
     def test_golden_path_chain_digest_consistency(self):
         finding = _finding()
         outcome = _outcome(findings=(finding,), targets=(finding,))
-        patch_outcome = _patch_outcome()
 
         vep = finding_to_vep(finding, snapshot_sha256=SNAPSHOT, repository=REPOSITORY)
         aep = platform_review_to_aep(
             outcome, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
-        )
-        rvr = patch_outcome_to_rvr(
-            patch_outcome,
-            finding=finding,
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
         )
         summary = platform_review_to_workflow_summary(
             outcome, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
@@ -811,16 +589,9 @@ class PlatformGoldenPathTests(unittest.TestCase):
         digests = {
             "vulnerability_evidence_package": compute_content_digest(vep.to_dict()),
             "audit_evidence_package": compute_content_digest(aep.to_dict()),
-            "repair_verification_report": compute_content_digest(rvr.to_dict()),
             "workflow_summary": compute_content_digest(summary.to_dict()),
         }
 
-        # Hop RVR -> VEP: the identity triple pins the real VEP payload digest.
-        self.assertEqual(rvr.source_vep.artifact_id, vep.hypothesis_id)
-        self.assertEqual(
-            rvr.source_vep.content_digest,
-            digests["vulnerability_evidence_package"],
-        )
         # Hop WorkflowSummary -> VEP: one evidence link at the VEP digest.
         links = {link.artifact_id: link for link in summary.evidence}
         self.assertEqual(sorted(links), [vep.hypothesis_id])
@@ -846,12 +617,6 @@ class PlatformGoldenPathTests(unittest.TestCase):
                 encode_vep_payload,
             ),
             (
-                "repair_verification_report",
-                rvr.to_dict(),
-                decode_rvr_payload,
-                encode_rvr_payload,
-            ),
-            (
                 "workflow_summary",
                 summary.to_dict(),
                 decode_workflow_summary_payload,
@@ -864,27 +629,12 @@ class PlatformGoldenPathTests(unittest.TestCase):
                 self.assertEqual(
                     compute_content_digest(encode(decoded)), digests[name]
                 )
-        # The RVR gates carry the real patch verification facts.
-        candidate = rvr.candidates[0]
-        self.assertIs(candidate.verdict, CandidateVerdict.VERIFIED_PATCH)
-        self.assertIs(candidate.gates[0].outcome, GateOutcome.PASS)
-        self.assertIs(candidate.gates[1].outcome, GateOutcome.PASS)
-        self.assertEqual(
-            candidate.patch.content_digest,
-            hashlib.sha256(_PATCHED_CONTENT.encode("utf-8")).hexdigest(),
-        )
         # Deterministic end to end: rerunning the whole chain is stable.
         again_vep = finding_to_vep(
             finding, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
         )
         again_aep = platform_review_to_aep(
             outcome, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
-        )
-        again_rvr = patch_outcome_to_rvr(
-            _patch_outcome(),
-            finding=finding,
-            snapshot_sha256=SNAPSHOT,
-            repository=REPOSITORY,
         )
         again_summary = platform_review_to_workflow_summary(
             outcome, snapshot_sha256=SNAPSHOT, repository=REPOSITORY
@@ -896,10 +646,6 @@ class PlatformGoldenPathTests(unittest.TestCase):
         self.assertEqual(
             compute_content_digest(again_aep.to_dict()),
             digests["audit_evidence_package"],
-        )
-        self.assertEqual(
-            compute_content_digest(again_rvr.to_dict()),
-            digests["repair_verification_report"],
         )
         self.assertEqual(
             compute_content_digest(again_summary.to_dict()),
@@ -1476,11 +1222,9 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
         self.assertNotIn("A" * 10, str(failure))
 
     def test_three_path_report_matrix_masks_every_projection(self) -> None:
-        """Round-6 items 3/4: platform, legacy agent and sidecar findings."""
+        """Round-6 items 3/4 (legacy chain retired): platform and sidecar."""
 
-        from lima.cxx_agent_models import CxxAgentCandidate, to_agent_finding_payload
         from lima.cxx_memory import CxxMemoryAnalyzerClient
-        from lima.models import Finding as ModelsFinding
         from lima.models import ReviewReport
         from lima.repository_scanner import RepositoryScanner
 
@@ -1489,19 +1233,6 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
         platform = scanner._platform_finding(
             self._finding("ERROR: AddressSanitizer: " + canary)
         )
-        candidate = CxxAgentCandidate(
-            candidate_id="sha256-" + "0" * 64,
-            cwe="CWE-787",
-            path="src/example.c",
-            line=42,
-            symbol="parse_input",
-            title="Agent title " + canary,
-            mechanism="mechanism " + canary,
-            trigger_path=("step one", "step " + canary),
-            confidence=0.9,
-            verification_state="agent-corroborated",
-        )
-        legacy = ModelsFinding(**to_agent_finding_payload(candidate))
         sidecar_item = {
             "rule_id": "cxx.source.oob-write",
             "severity": "high",
@@ -1533,7 +1264,7 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
             pull_request=None,
             summary="s",
             risk="low",
-            findings=[platform, legacy, sidecar],
+            findings=[platform, sidecar],
             collaboration={"platform": {}},
         )
         dump = json.dumps(report.to_dict(), sort_keys=True)
@@ -1545,78 +1276,8 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
         self.assertEqual(sidecar.fingerprint, twin.fingerprint)
         # Detection semantics stand: states are untouched projections.
         self.assertEqual("runtime-confirmed", platform.verification_state)
-        self.assertEqual("agent-corroborated", legacy.verification_state)
         self.assertEqual("candidate", sidecar.verification_state)
 
-    def test_agent_finding_public_boundary_is_raw_free(self) -> None:
-        """Round 7: the production wrapper, not just the payload helper.
-
-        ``_agent_finding()`` must mask trigger steps and derive the public
-        candidate_id from masked material; different secrets project to
-        identical public ids and clean full reports.
-        """
-
-        from lima.cxx_agent_models import CxxAgentCandidate
-        from lima.models import ReviewReport
-        from lima.repository_scanner import RepositoryScanner
-
-        def _candidate(secret: str) -> CxxAgentCandidate:
-            return CxxAgentCandidate(
-                candidate_id="sha256-" + "0" * 64,
-                cwe="CWE-787",
-                path="src/example.c",
-                line=42,
-                symbol="parse_input",
-                title="Agent title",
-                mechanism="mechanism " + secret,
-                trigger_path=("step one", "step " + secret),
-                confidence=0.9,
-                verification_state="agent-corroborated",
-            )
-
-        scanner = RepositoryScanner.__new__(RepositoryScanner)
-        roles = {"sha256-" + "0" * 64: ["memory-lifetime"]}
-        one = scanner._agent_finding(
-            _candidate("password = synthetic-secret-one"), roles
-        )
-        two = scanner._agent_finding(
-            _candidate("password = synthetic-secret-two"), roles
-        )
-        report_one = ReviewReport(
-            repository="team/proj", pull_request=None,
-            summary="s", risk="low", findings=[one],
-        )
-        report_two = ReviewReport(
-            repository="team/proj", pull_request=None,
-            summary="s", risk="low", findings=[two],
-        )
-
-        self.assertNotIn(
-            "synthetic-secret-one",
-            json.dumps(report_one.to_dict(), sort_keys=True),
-        )
-        self.assertNotIn(
-            "synthetic-secret-two",
-            json.dumps(report_two.to_dict(), sort_keys=True),
-        )
-        self.assertEqual(one.candidate_id, two.candidate_id)
-        self.assertEqual(one.trigger_path, two.trigger_path)
-        self.assertTrue(one.candidate_id.startswith("report-sha256-"))
-
-    def test_legacy_all_roles_failed_masks_before_truncation(self) -> None:
-        """Round 7: the real required branch masks full errors first."""
-
-        from types import SimpleNamespace
-
-        from lima.repository_scanner import RepositoryScanner
-
-        review = SimpleNamespace(role_outcomes=[
-            SimpleNamespace(role="planner", error="." * 110 + "A" * 32),
-            SimpleNamespace(role="memory-lifetime", error=""),
-        ])
-        failure = RepositoryScanner._legacy_all_roles_failed_error(review)
-        self.assertNotIn("A" * 10, str(failure))
-        self.assertIn("all agent roles failed", str(failure))
 
 
 if __name__ == "__main__":  # pragma: no cover

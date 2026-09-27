@@ -36,7 +36,6 @@ from unittest.mock import MagicMock, patch
 
 from lima.agent_repro_tools import ExperimentObservation, _observation_from_response
 from lima.agent_scout import ScoutLead
-from lima.cxx_agent_models import CxxAgentCandidate
 from lima.cxx_agent_tools import CxxAgentBudget
 from lima.cxx_memory import (
     CxxAnalysisResult,
@@ -1169,6 +1168,15 @@ class FpDisciplineTests(unittest.TestCase):
         self.assertEqual((), outcome.findings)
 
 
+def target_experiments(outcome):
+    """All experiment log entries across the audited targets."""
+
+    entries = []
+    for target in outcome.targets:
+        entries.extend(target.experiment_log)
+    return entries
+
+
 class ModeMatrixTests(unittest.TestCase):
     """off/auto/required semantics for the platform review."""
 
@@ -1294,6 +1302,113 @@ class ScannerSingleChainTests(unittest.TestCase):
         scanner = RepositoryScanner(sast_mode="off", dataflow_enabled=False)
         self.assertFalse(hasattr(scanner, "_run_uaf_v2_branch"))
         self.assertTrue(hasattr(scanner, "_run_platform_branch"))
+
+    def test_scanner_has_no_legacy_branch_residue(self):
+        """Retirement Task 1: the seven-role chain is gone from the scanner.
+
+        The legacy repository branch, its collaboration payload and its
+        finding projection must not exist anywhere on the scanner.
+        """
+        import lima.repository_scanner as scanner_module
+
+        source = inspect.getsource(scanner_module)
+        for residue in (
+            "_run_cxx_agent_branch",
+            "_cxx_agent_collaboration",
+            "_agent_finding",
+            "_legacy_all_roles_failed_error",
+            "retrieve_repository",
+            "LEGACY_AGENT_CWES",
+        ):
+            self.assertNotIn(residue, source, residue)
+        scanner = RepositoryScanner(sast_mode="off", dataflow_enabled=False)
+        for residue in (
+            "_run_cxx_agent_branch",
+            "_cxx_agent_collaboration",
+            "_agent_finding",
+            "_legacy_all_roles_failed_error",
+        ):
+            self.assertFalse(hasattr(scanner, residue), residue)
+
+    def test_required_platform_never_succeeds_without_analyzer(self):
+        """Review #225: required mode must fail loudly when no sidecar.
+
+        The platform chain consults the sidecar analyzer for facts; with
+        the adapter missing (memory=off), a required-mode scan must raise
+        instead of returning a successful task with zero agent findings.
+        """
+        scanner = RepositoryScanner(
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_agent_mode="required",
+            cxx_uaf_llm_factory=lambda: {"provider": "openai", "model": "fake"},
+        )
+        root = tempfile.mkdtemp(suffix="-agent-scanner")
+        self.addCleanup(lambda: _rmtree(root))
+        _write_cxx_repo(root)
+        with self.assertRaisesRegex(RuntimeError, "sidecar adapter"):
+            scanner.scan(RepositoryWorkspace(Path(root)))
+
+    def test_auto_platform_without_analyzer_is_honest_skip(self):
+        """auto + memory=off: the platform chain records its unavailability."""
+        scanner = RepositoryScanner(
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_agent_mode="auto",
+            cxx_uaf_llm_factory=lambda: {"provider": "openai", "model": "fake"},
+        )
+        root = tempfile.mkdtemp(suffix="-agent-scanner")
+        self.addCleanup(lambda: _rmtree(root))
+        _write_cxx_repo(root)
+        result = scanner.scan(RepositoryWorkspace(Path(root)))
+        platform = result.report.collaboration.get("platform", {})
+        self.assertEqual("auto", platform.get("mode"))
+        self.assertEqual("analyzer-not-configured", platform.get("status"))
+
+    def test_platform_collaboration_has_no_cxx_agent_key(self):
+        """The scan report drops the legacy collaboration key entirely."""
+        from lima.agent_orchestrator import (
+            PlatformFinding,
+            PlatformReviewOutcome,
+            PlatformReviewStats,
+        )
+
+        finding = PlatformFinding(
+            target_id="lead-0001",
+            path="src/example.c",
+            line=42,
+            symbol="parse_input",
+            cwe="CWE-787",
+            state="abstain",
+            hypothesis_reason="",
+            poc_driver_code="",
+            experiment_log=(),
+            identity=None,
+            evidence_records=(),
+        )
+        outcome = PlatformReviewOutcome(
+            findings=(),
+            targets=(finding,),
+            stats=PlatformReviewStats(1, 1, 0, 0, 0, 0, 1),
+            diagnostics=("deadline-exceeded before the platform review started",),
+            leads_considered=1,
+            translation_units=("src/example.c",),
+        )
+        scanner = RepositoryScanner(sast_mode="off", dataflow_enabled=False)
+        payload = scanner._platform_collaboration(
+            "auto", "completed", outcome
+        )
+        self.assertNotIn("cxx_agent", payload)
+        # The legacy collaboration key disappears even on the disabled path.
+        disabled = scanner._platform_collaboration(
+            "off", "disabled",
+            PlatformReviewOutcome(
+                findings=(), targets=(), diagnostics=(),
+                stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 0),
+                leads_considered=0, translation_units=(),
+            ),
+        )
+        self.assertNotIn("cxx_agent", disabled)
 
     def test_uaf_proof_first_entrypoint_retired(self):
         # The semantic branch is directly usable: proof is optional and the
@@ -1430,141 +1545,3 @@ class ScannerPlatformBranchTests(unittest.TestCase):
             [], [item for item in result.report.to_dict()["findings"]
                  if item["cwe"] == "CWE-416"],
         )
-
-
-class LegacyCwe416IsolationTests(unittest.TestCase):
-    """After the v2 retirement the legacy isolation still holds."""
-
-    def test_legacy_cwe416_isolation_unchanged(self):
-        # Layer 1 (contract): the legacy candidate contract physically
-        # rejects CWE-416; no legacy role can construct one from wire.
-        with self.assertRaises(ValueError):
-            CxxAgentCandidate.from_untrusted_json({
-                "cwe": "CWE-416",
-                "path": "vuln.c",
-                "line": 8,
-                "symbol": "leak",
-                "title": "buf is used after free",
-                "mechanism": "free before write",
-                "trigger_path": ["leak", "free", "buf[0]"],
-                "confidence": 0.9,
-            })
-        from lima.cxx_agent_models import LEGACY_AGENT_CWES, SUPPORTED_CWES
-
-        self.assertEqual(
-            frozenset({"CWE-787", "CWE-125", "CWE-415"}), LEGACY_AGENT_CWES
-        )
-        self.assertIn("CWE-416", SUPPORTED_CWES)
-
-        # Layer 2 (projection): a legacy run whose scripted specialist
-        # returns a CWE-416 candidate built past the contract still emits
-        # no CWE-416 Finding, while the legacy pipeline itself completes.
-        from lima.cxx_agents import ROLE_MEMORY_LIFETIME, ROLE_PLANNER
-        from lima.cxx_llm import AgentStep
-
-        vuln_c = """#include <stdlib.h>
-
-static char *g_buf = 0;
-
-void leak(void) {
-    char *buf = malloc(64);
-    free(buf);
-    buf[0] = 'a';
-}
-"""
-
-        def agent_final(candidate):
-            return AgentStep(action="final", candidates=(candidate,))
-
-        def from_json_candidate(cwe, path, line, symbol, title):
-            return CxxAgentCandidate.from_untrusted_json({
-                "cwe": cwe,
-                "path": path,
-                "line": line,
-                "symbol": symbol,
-                "title": title,
-                "mechanism": "model-described mechanism",
-                "trigger_path": ["leak"],
-                "confidence": 0.6,
-            })
-
-        def direct_cwe_416_candidate():
-            return CxxAgentCandidate(
-                candidate_id="sha256-" + "4" * 64,
-                cwe="CWE-416",
-                path="vuln.c",
-                line=8,
-                symbol="leak",
-                title="buf is used after free",
-                mechanism="free(buf) releases the buffer before buf[0]",
-                trigger_path=("leak", "free", "buf[0]"),
-                confidence=0.9,
-            )
-
-        root = tempfile.mkdtemp(suffix="-agent-legacy-isolation")
-        self.addCleanup(lambda: _rmtree(root))
-        workspace = _write_cxx_repo(root, name="vuln.c", content=vuln_c)
-
-        class ScriptedClient:
-            model = "fake-cxx-model"
-
-            def step(self, role, managed_context, tools, budget,
-                     read_paths=None):
-                if role == ROLE_PLANNER:
-                    return agent_final(from_json_candidate(
-                        "CWE-415", "vuln.c", 5, "leak", "anchor",
-                    ))
-                if role == ROLE_MEMORY_LIFETIME:
-                    return agent_final(direct_cwe_416_candidate())
-                return agent_final(from_json_candidate(
-                    "CWE-415", "vuln.c", 8, "leak", "peer view",
-                ))
-
-        unavailable = {
-            "translation_unit": "vuln.c",
-            "extraction": "unavailable",
-            "build_context": {
-                "status": "unavailable", "source_kind": "",
-                "context_hash": "", "diagnostics": [],
-            },
-            "coverage": {
-                "ast_complete": False, "cfg_complete": False,
-                "semantic_gaps": ["context-not-resolved"],
-            },
-            "facts": [],
-        }
-        scanner = RepositoryScanner(
-            sast_mode="off",
-            dataflow_enabled=False,
-            cxx_memory_mode="auto",
-            cxx_memory_adapter=FakeUafAnalyzer(
-                payload=_payload(unavailable),
-            ),
-            cxx_agent_mode="auto",
-            cxx_agent_client_factory=ScriptedClient,
-        )
-        result = scanner.scan(workspace)
-        findings = result.report.to_dict()["findings"]
-        cwe_416 = [item for item in findings if item["cwe"] == "CWE-416"]
-        self.assertEqual([], cwe_416)
-        # The legacy branch really ran and its non-416 candidates project.
-        self.assertEqual(
-            "completed", result.report.collaboration["cxx_agent"]["status"]
-        )
-        self.assertTrue(
-            any(item["cwe"] == "CWE-415" for item in findings),
-            "legacy CWE-415 candidates must keep flowing",
-        )
-
-
-def target_experiments(outcome):
-    """All experiment log entries across the audited targets."""
-
-    entries = []
-    for target in outcome.targets:
-        entries.extend(target.experiment_log)
-    return entries
-
-
-if __name__ == "__main__":
-    unittest.main()

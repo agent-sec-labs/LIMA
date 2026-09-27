@@ -16,7 +16,7 @@ Security stance (mirrors ``lima.uaf_llm_branch``):
   into the assembled context.
 * Output contract: a closed-shape JSON array reply -- one object per judged
   lead with exactly ``lead_id``/``verdict``/``reason``/``confidence``. This
-  is deliberately not the ``tool``/``final`` union of ``CxxLLMClient.step``;
+  is deliberately not a ``tool``/``final`` step union;
   the branch uses its own strict parser plus the shared fence-unwrapping and
   untrusted-JSON primitives. The reply can never change a lead's identity,
   path or line: verdicts are re-bound to the in-context lead records.

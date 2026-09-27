@@ -2,7 +2,6 @@
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Optional
 
 
 trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")

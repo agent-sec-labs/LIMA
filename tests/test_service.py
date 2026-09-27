@@ -107,6 +107,33 @@ class ServiceTests(unittest.TestCase):
         finally:
             service.queue.close()
 
+    def test_cxx_agent_capabilities_report_platform_only_topology(self):
+        # Retirement Task 1: C++ PR scanning is offline; the repository
+        # platform chain is the only advertised agent surface.
+        settings = replace(
+            self.settings, cxx_memory_mode="auto", cxx_agent_mode="auto"
+        )
+        service = ReviewService(settings)
+        try:
+            capabilities = service.repository_scan_capabilities()
+            cxx = capabilities["cxx_agent"]
+            self.assertFalse(cxx["pull_request_scan"])
+            self.assertTrue(cxx["repository_scan"])
+            self.assertFalse(cxx["automatic_repair"])
+        finally:
+            service.queue.close()
+
+    def test_service_has_no_cxx_pr_injection(self):
+        # The legacy PR snapshot flow and its merge reviewer are gone while
+        # generic Python PR review keeps its single-result persistence.
+        import inspect
+
+        import lima.service as service_module
+
+        source = inspect.getsource(service_module)
+        self.assertNotIn("_CxxAgentMergeReviewer", source)
+        self.assertNotIn("_review_pull_request_snapshot", source)
+
     def test_repository_scan_capabilities_describe_cxx_layers_without_url(self):
         settings = replace(self.settings, cxx_memory_mode="auto")
         service = ReviewService(settings)
@@ -119,6 +146,7 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(sorted(CXX_SOURCE_EXTENSIONS), cxx["supported_extensions"])
             self.assertEqual(
                 sorted(CXX_BUILD_EXTENSIONS), cxx["build_metadata_extensions"]
+
             )
             self.assertEqual(sorted(DEFAULT_FILENAMES), cxx["build_metadata_filenames"])
             self.assertEqual(sorted(SUPPORTED_CWES), cxx["supported_cwes"])

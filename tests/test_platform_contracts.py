@@ -1476,11 +1476,9 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
         self.assertNotIn("A" * 10, str(failure))
 
     def test_three_path_report_matrix_masks_every_projection(self) -> None:
-        """Round-6 items 3/4: platform, legacy agent and sidecar findings."""
+        """Round-6 items 3/4 (legacy chain retired): platform and sidecar."""
 
-        from lima.cxx_agent_models import CxxAgentCandidate, to_agent_finding_payload
         from lima.cxx_memory import CxxMemoryAnalyzerClient
-        from lima.models import Finding as ModelsFinding
         from lima.models import ReviewReport
         from lima.repository_scanner import RepositoryScanner
 
@@ -1489,19 +1487,6 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
         platform = scanner._platform_finding(
             self._finding("ERROR: AddressSanitizer: " + canary)
         )
-        candidate = CxxAgentCandidate(
-            candidate_id="sha256-" + "0" * 64,
-            cwe="CWE-787",
-            path="src/example.c",
-            line=42,
-            symbol="parse_input",
-            title="Agent title " + canary,
-            mechanism="mechanism " + canary,
-            trigger_path=("step one", "step " + canary),
-            confidence=0.9,
-            verification_state="agent-corroborated",
-        )
-        legacy = ModelsFinding(**to_agent_finding_payload(candidate))
         sidecar_item = {
             "rule_id": "cxx.source.oob-write",
             "severity": "high",
@@ -1533,7 +1518,7 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
             pull_request=None,
             summary="s",
             risk="low",
-            findings=[platform, legacy, sidecar],
+            findings=[platform, sidecar],
             collaboration={"platform": {}},
         )
         dump = json.dumps(report.to_dict(), sort_keys=True)
@@ -1545,78 +1530,8 @@ class ReviewRound6PrivacyMatrixTests(unittest.TestCase):
         self.assertEqual(sidecar.fingerprint, twin.fingerprint)
         # Detection semantics stand: states are untouched projections.
         self.assertEqual("runtime-confirmed", platform.verification_state)
-        self.assertEqual("agent-corroborated", legacy.verification_state)
         self.assertEqual("candidate", sidecar.verification_state)
 
-    def test_agent_finding_public_boundary_is_raw_free(self) -> None:
-        """Round 7: the production wrapper, not just the payload helper.
-
-        ``_agent_finding()`` must mask trigger steps and derive the public
-        candidate_id from masked material; different secrets project to
-        identical public ids and clean full reports.
-        """
-
-        from lima.cxx_agent_models import CxxAgentCandidate
-        from lima.models import ReviewReport
-        from lima.repository_scanner import RepositoryScanner
-
-        def _candidate(secret: str) -> CxxAgentCandidate:
-            return CxxAgentCandidate(
-                candidate_id="sha256-" + "0" * 64,
-                cwe="CWE-787",
-                path="src/example.c",
-                line=42,
-                symbol="parse_input",
-                title="Agent title",
-                mechanism="mechanism " + secret,
-                trigger_path=("step one", "step " + secret),
-                confidence=0.9,
-                verification_state="agent-corroborated",
-            )
-
-        scanner = RepositoryScanner.__new__(RepositoryScanner)
-        roles = {"sha256-" + "0" * 64: ["memory-lifetime"]}
-        one = scanner._agent_finding(
-            _candidate("password = synthetic-secret-one"), roles
-        )
-        two = scanner._agent_finding(
-            _candidate("password = synthetic-secret-two"), roles
-        )
-        report_one = ReviewReport(
-            repository="team/proj", pull_request=None,
-            summary="s", risk="low", findings=[one],
-        )
-        report_two = ReviewReport(
-            repository="team/proj", pull_request=None,
-            summary="s", risk="low", findings=[two],
-        )
-
-        self.assertNotIn(
-            "synthetic-secret-one",
-            json.dumps(report_one.to_dict(), sort_keys=True),
-        )
-        self.assertNotIn(
-            "synthetic-secret-two",
-            json.dumps(report_two.to_dict(), sort_keys=True),
-        )
-        self.assertEqual(one.candidate_id, two.candidate_id)
-        self.assertEqual(one.trigger_path, two.trigger_path)
-        self.assertTrue(one.candidate_id.startswith("report-sha256-"))
-
-    def test_legacy_all_roles_failed_masks_before_truncation(self) -> None:
-        """Round 7: the real required branch masks full errors first."""
-
-        from types import SimpleNamespace
-
-        from lima.repository_scanner import RepositoryScanner
-
-        review = SimpleNamespace(role_outcomes=[
-            SimpleNamespace(role="planner", error="." * 110 + "A" * 32),
-            SimpleNamespace(role="memory-lifetime", error=""),
-        ])
-        failure = RepositoryScanner._legacy_all_roles_failed_error(review)
-        self.assertNotIn("A" * 10, str(failure))
-        self.assertIn("all agent roles failed", str(failure))
 
 
 if __name__ == "__main__":  # pragma: no cover

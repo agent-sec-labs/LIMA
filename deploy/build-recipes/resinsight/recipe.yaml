@@ -29,7 +29,7 @@ generated_globs:
   - "build/*.h"
   - "build/**/*.h"
 include_roots:
-  - {container: "/usr/include/x86_64-linux-gnu/qt5", package: "headers/qt5"}
+  - {container: "/usr/include/x86_64-linux-gnu/qt6", package: "headers/qt6"}
   - {container: "/usr/include/hdf5", package: "headers/hdf5"}
   - {container: "/usr/include/boost", package: "headers/boost"}
   - {container: "/usr/include/eigen3", package: "headers/eigen3"}

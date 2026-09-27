@@ -461,7 +461,11 @@ class TestFailClosedNegatives(_BudgetTestCase):
     def test_batch_cost_accumulation_refused(self):
         first = self.oracle_cost(100, 50)
         second = self.oracle_cost(80, 40)
-        spec = self.spec(batch=self.limits(cost_micro_usd=first + second - 1))
+        # Re-freeze v2 (ALLOWED_ONCE): legal spec; run-b lands exactly at cap, run-c refused.
+        spec = self.spec(
+            per_run=self.limits(cost_micro_usd=first),
+            batch=self.limits(cost_micro_usd=first + second),
+        )
         ledger = self.ledger(spec=spec)
         ledger.reserve("run-a", self.estimate())
         ledger.reserve("run-b", self.estimate(prompt_tokens=80, completion_tokens=40))

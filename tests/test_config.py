@@ -82,7 +82,6 @@ class DotenvTests(unittest.TestCase):
             {
                 "LIMA_CXX_AGENT_MODE": "required",
                 "LIMA_CXX_AGENT_MODEL": "gpt-test",
-                "LIMA_CXX_AGENT_MAX_CANDIDATES": "50",
                 "LIMA_CXX_AGENT_MAX_CALLS": "20",
                 "LIMA_CXX_AGENT_MAX_CONTEXT_FILES": "6",
                 "LIMA_CXX_AGENT_MAX_CONTEXT_LINES": "600",

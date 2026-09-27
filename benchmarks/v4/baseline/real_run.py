@@ -20,6 +20,14 @@ byte guards.  Usage and served-identity reporting fail closed, the canary
 checklist (five mechanical items) runs at the first follow-on attempt, and
 any failure latches the batch closed with zero further real calls.
 
+IP-0033 adds the diagnostics face: every received response body records a
+sanitized checkpoint diagnostic (the closed eleven-value checkpoint map with
+structure-only field paths, plus nine response-metadata keys that never
+carry a content value), failure attempts keep their observed resource bytes,
+and usage settlement is decoupled from the verdict (the compliant usage of a
+failed response is accounted while the sample stays a failure; missing usage
+remains a violation, never zero).
+
 The locked IP-0031 gate face is untouched: ``budget.REAL_RUN_GATE_UNLOCKED``
 stays ``False``, ``require_real_run_unlock`` is neither called nor modified,
 and this authorized path is independent of both.  The module reads no
@@ -311,6 +319,61 @@ class RealRunError(ValueError):
         super().__init__(_STABLE_MESSAGES[code])
 
 
+class RealRunResponseCheckpoint(str, enum.Enum):  # noqa: UP042 -- frozen, IP-0033 7.2
+    """The closed eleven-checkpoint map of response-contract failures.
+
+    One first-class marker per failure point of the ``_parse_response``
+    chain (IP-0033 Packet 7.2); the ten-code error family stays unchanged
+    -- a checkpoint never splits ``REAL_RUN_RESPONSE_INVALID``.  The member
+    is not exported in ``__all__``: consumers read it through the module
+    attribute and compare against the wire string value (``member ==
+    member.value`` holds through the ``str`` mixin).
+    """
+
+    response_json = "response_json"
+    response_dict = "response_dict"
+    response_model = "response_model"
+    response_identity = "response_identity"
+    choices_list = "choices_list"
+    choice0_dict = "choice0_dict"
+    message_dict = "message_dict"
+    content_str = "content_str"
+    content_json = "content_json"
+    verdict_shape = "verdict_shape"
+    verdict_types = "verdict_types"
+
+
+#: The frozen structure-only field path of every checkpoint (IP-0033 7.3):
+#: the machine-readable anchor is ``record.diagnostic.checkpoint`` and this
+#: path is the human-readable structural anchor; neither ever embeds values.
+_CHECKPOINT_FIELD_PATHS: typing.Final[dict[RealRunResponseCheckpoint, str]] = {
+    RealRunResponseCheckpoint.response_json: "$.response",
+    RealRunResponseCheckpoint.response_dict: "$.response",
+    RealRunResponseCheckpoint.response_model: "$.response.model",
+    RealRunResponseCheckpoint.response_identity: "$.response.model",
+    RealRunResponseCheckpoint.choices_list: "$.response.choices",
+    RealRunResponseCheckpoint.choice0_dict: "$.response.choices[0]",
+    RealRunResponseCheckpoint.message_dict: "$.response.choices[0].message",
+    RealRunResponseCheckpoint.content_str: "$.response.choices[0].message.content",
+    RealRunResponseCheckpoint.content_json: "$.response.choices[0].message.content",
+    RealRunResponseCheckpoint.verdict_shape: "$.response.verdict",
+    RealRunResponseCheckpoint.verdict_types: "$.response.verdict",
+}
+
+#: The closed nine-key sanitized response-metadata face (IP-0033 7.4).
+_RESPONSE_META_KEYS: typing.Final[tuple[str, ...]] = (
+    "top_level_keys",
+    "choices_count",
+    "message_keys",
+    "content_len",
+    "content_sha256",
+    "finish_reason",
+    "usage_present",
+    "model",
+    "system_fingerprint",
+)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class RealSuiteResult:
     """Paths, digests, ledger state, and identity baseline of one real suite run.
@@ -360,7 +423,13 @@ class _ApprovalContract:
 
 @dataclasses.dataclass(slots=True)
 class _AttemptRecord:
-    """One guarded attempt's evidence summary (no raw content anywhere)."""
+    """One guarded attempt's evidence summary (no raw content anywhere).
+
+    ``diagnostic`` is the IP-0033 sanitized response face (``None`` when no
+    response body was received), ``resources`` the attempt-0 observed
+    materialization bytes (``None`` otherwise), and ``settle_usage_tokens``
+    an internal-only carrier for the decoupled settlement -- never emitted.
+    """
 
     attempt_index: int
     mode: str
@@ -378,9 +447,12 @@ class _AttemptRecord:
     failure_code: str | None = None
     error_code: str | None = None
     error_field_path: str | None = None
+    diagnostic: dict[str, object] | None = None
+    resources: dict[str, int] | None = None
+    settle_usage_tokens: tuple[int, int] | None = None
 
     def to_document(self) -> dict[str, object]:
-        """The closed-key per-attempt evidence mapping (Packet 7.9)."""
+        """The closed-key per-attempt evidence mapping (Packets 7.9 and 7.4)."""
         return {
             "attempt_index": self.attempt_index,
             "mode": self.mode,
@@ -402,6 +474,8 @@ class _AttemptRecord:
             "failure_code": self.failure_code,
             "error_code": self.error_code,
             "error_field_path": self.error_field_path,
+            "diagnostic": None if self.diagnostic is None else dict(self.diagnostic),
+            "resources": None if self.resources is None else dict(self.resources),
         }
 
 
@@ -643,6 +717,86 @@ def _worst_case_cost(prompt_tokens: int, completion_tokens: int) -> int:
     )
 
 
+def _response_meta(document: object) -> dict[str, object]:
+    """The sanitized post-mortem metadata of one received response document.
+
+    Every value is structural (sorted key names, integer counts, a length,
+    a one-way digest) or an identity string already covered by the frozen
+    recording face; content values, credentials, and full bodies are never
+    recorded (IP-0033 Packet 7.4 leak rules).  A field whose precondition
+    was not reached stays ``None`` -- never ``""``, ``0``, or ``[]`` -- so
+    "not read" stays distinguishable from "served empty".
+    """
+    meta: dict[str, object] = dict.fromkeys(_RESPONSE_META_KEYS)
+    if not isinstance(document, dict):
+        return meta
+    meta["top_level_keys"] = sorted(document)
+    meta["usage_present"] = isinstance(document.get("usage"), dict)
+    model = document.get("model")
+    if isinstance(model, str):
+        meta["model"] = model
+    fingerprint = document.get("system_fingerprint")
+    if isinstance(fingerprint, str):
+        meta["system_fingerprint"] = fingerprint
+    choices = document.get("choices")
+    if isinstance(choices, list):
+        meta["choices_count"] = len(choices)
+    first = choices[0] if isinstance(choices, list) and choices else None
+    if isinstance(first, dict):
+        reason = first.get("finish_reason")
+        if isinstance(reason, str):
+            meta["finish_reason"] = reason
+        message = first.get("message")
+    else:
+        message = None
+    if isinstance(message, dict):
+        meta["message_keys"] = sorted(message)
+        content = message.get("content")
+        if isinstance(content, str):
+            meta["content_len"] = len(content)
+            meta["content_sha256"] = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+    return meta
+
+
+def _compliant_usage_tokens(document: object) -> tuple[int, int] | None:
+    """The compliant (prompt, completion) token pair of a response, or ``None``.
+
+    Compliance is the frozen success-path rule (IP-0033 Packet 7.5): the
+    usage block is a dict whose prompt/completion token values are exact
+    ints >= 1.  ``None`` means no compliant usage -- the decoupled
+    settlement treats it as a violation, never as zero.
+    """
+    if not isinstance(document, dict):
+        return None
+    usage_block = document.get("usage")
+    if not isinstance(usage_block, dict):
+        return None
+    prompt_tokens = usage_block.get("prompt_tokens")
+    completion_tokens = usage_block.get("completion_tokens")
+    if (
+        type(prompt_tokens) is not int
+        or prompt_tokens < 1
+        or type(completion_tokens) is not int
+        or completion_tokens < 1
+    ):
+        return None
+    return prompt_tokens, completion_tokens
+
+
+def _usage_document(usage: CallUsage) -> dict[str, int]:
+    """The closed six-field usage view of one settled call (Packet 7.5)."""
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "cost_micro_usd": usage.cost_micro_usd,
+        "wall_ms": usage.wall_ms,
+        "download_bytes": usage.download_bytes,
+        "storage_bytes": usage.storage_bytes,
+    }
+
+
 def _urllib_transport(
     url: str,
     payload: bytes | None,
@@ -730,9 +884,11 @@ class _GuardedRealEvaluator:
     a taxonomy sample with zero transport calls); the body then runs exactly
     once -- attempt-0 materializes the snapshot, every attempt performs
     exactly one bounded chat completion -- and settlement follows the frozen
-    per-code rules (reservation released on failure, usage recorded on
-    success, missing usage a violation with the reservation then released,
-    identity change latches the batch).
+    per-code rules with the IP-0033 decoupled accounting (compliant usage is
+    recorded even when the response contract fails or the identity changes,
+    missing usage is a violation with the reservation then released, every
+    other failure releases the reservation, identity change latches the
+    batch).
     """
 
     def __init__(
@@ -913,20 +1069,85 @@ class _GuardedRealEvaluator:
                 record.candidate_files = self._candidate_files
             self._chat(index, run_id, record)
         except RealRunError as exc:
-            self._settle(run_id, exc)
+            self._settle(run_id, record, exc)
             raise
 
-    def _settle(self, run_id: str, exc: RealRunError) -> None:
-        """Settle one typed failure exactly once (Packet 7.7 item 5)."""
+    def _settle(self, run_id: str, record: _AttemptRecord, exc: RealRunError) -> None:
+        """Settle one typed failure exactly once (IP-0032 7.7; IP-0033 7.5).
+
+        The decoupled difference table D1-D6: a response-contract failure
+        with compliant usage books the usage and keeps the failure sample
+        (D1); without compliant usage it is a violation and only the local
+        observation is retained (D2); an identity change books its compliant
+        usage before latching (D4).  The missing-usage path (D3), transport
+        failures (D5), and every other code keep the frozen release-only
+        settlement.  Only the frozen budget primitives are called.
+        """
         if exc.code is RealRunErrorCode.REAL_RUN_USAGE_MISSING:
             try:
                 self._ledger.record_usage(run_id, None)
             except BudgetGateError:
                 self._ledger.record_failure(run_id)
             return
-        self._ledger.record_failure(run_id)
+        if exc.code is RealRunErrorCode.REAL_RUN_RESPONSE_INVALID:
+            tokens = record.settle_usage_tokens
+            if tokens is not None:
+                usage = self._usage_carrier(record, tokens)
+                self._ledger.record_usage(run_id, usage)
+                if record.attempt_index == 0:
+                    self._attempt0_usage = _usage_document(usage)
+                return
+            try:
+                self._ledger.record_usage(run_id, None)
+            except BudgetGateError:
+                pass
+            self._ledger.record_failure(run_id, self._partial_usage(record))
+            return
         if exc.code is RealRunErrorCode.REAL_RUN_IDENTITY_CHANGED:
+            tokens = record.settle_usage_tokens
+            if tokens is not None:
+                self._ledger.record_usage(run_id, self._usage_carrier(record, tokens))
+            else:
+                self._ledger.record_failure(run_id)
             self._latched = True
+            return
+        self._ledger.record_failure(run_id)
+
+    def _usage_carrier(
+        self, record: _AttemptRecord, tokens: tuple[int, int]
+    ) -> CallUsage:
+        """The frozen compliant-usage carrier of one settled call (D1/D4/D6).
+
+        Cost is the frozen worst-case formula, wall is the measured latency,
+        and the download/storage bytes belong to attempt-0 only (follow-on
+        attempts report zero on those dimensions, as frozen in Packet 7.5).
+        """
+        prompt_tokens, completion_tokens = tokens
+        return CallUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_micro_usd=_worst_case_cost(prompt_tokens, completion_tokens),
+            wall_ms=record.latency_ms,
+            download_bytes=self._download_bytes if record.attempt_index == 0 else 0,
+            storage_bytes=self._storage_bytes if record.attempt_index == 0 else 0,
+        )
+
+    def _partial_usage(self, record: _AttemptRecord) -> CallUsage | None:
+        """The local-observation-only carrier of one violation (D2).
+
+        Attempt-0 keeps its measured download/storage bytes and wall clock;
+        follow-on attempts carry no local observation at all (``None`` books
+        zero under the frozen ``CallUsage`` absence rule).  The token and
+        cost dimensions are always absent: a violation never books pseudo
+        zero usage.
+        """
+        if record.attempt_index != 0:
+            return None
+        return CallUsage(
+            wall_ms=record.latency_ms,
+            download_bytes=self._download_bytes,
+            storage_bytes=self._storage_bytes,
+        )
 
     # -- attempt-0 materialization ------------------------------------------
 
@@ -976,6 +1197,10 @@ class _GuardedRealEvaluator:
         self._tarball_sha256 = digest.hexdigest()
         self._download_bytes = total
         self._extract_tarball(record)
+        record.resources = {
+            "download_bytes": self._download_bytes,
+            "storage_bytes": self._storage_bytes,
+        }
 
     def _extract_tarball(self, record: _AttemptRecord) -> None:
         """Two-phase safe extraction: validate every member, then materialize."""
@@ -1113,69 +1338,92 @@ class _GuardedRealEvaluator:
         record: _AttemptRecord,
         response_bytes: bytes,
     ) -> None:
-        invalid = RealRunErrorCode.REAL_RUN_RESPONSE_INVALID
+        document: object = None
         try:
             document = json.loads(response_bytes.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
-            raise self._typed(record, invalid, "$.response") from exc
+            self._fail_response(
+                record,
+                _response_meta(document),
+                _compliant_usage_tokens(document),
+                RealRunResponseCheckpoint.response_json,
+                exc,
+            )
+        meta = _response_meta(document)
+        tokens = _compliant_usage_tokens(document)
         if not isinstance(document, dict):
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.response_dict
+            )
         model = document.get("model")
         if not isinstance(model, str):
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.response_model
+            )
         if _normalize_identity(model) not in self._allowed_model_forms:
             record.response_model = model
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.response_identity
+            )
         record.response_model = model
         fingerprint = document.get("system_fingerprint")
         if isinstance(fingerprint, str):
             record.response_fingerprint = fingerprint
         choices = document.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.choices_list
+            )
         first = choices[0]
         if not isinstance(first, dict):
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.choice0_dict
+            )
         message = first.get("message")
         if not isinstance(message, dict):
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.message_dict
+            )
         content = message.get("content")
         if not isinstance(content, str):
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.content_str
+            )
         finish_reason = first.get("finish_reason")
         if isinstance(finish_reason, str):
             record.finish_reason = finish_reason
         try:
             verdict = json.loads(content)
         except ValueError as exc:
-            raise self._typed(record, invalid, "$.response") from exc
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.content_json, exc
+            )
         if not isinstance(verdict, dict) or set(verdict) != _VERDICT_FIELDS:
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.verdict_shape
+            )
         if type(verdict["is_vulnerable"]) is not bool:
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.verdict_types
+            )
         for key in ("cwe", "path"):
             if verdict[key] is not None and not isinstance(verdict[key], str):
-                raise self._typed(record, invalid, "$.response")
+                self._fail_response(
+                    record, meta, tokens, RealRunResponseCheckpoint.verdict_types
+                )
         if not isinstance(verdict["reason"], str):
-            raise self._typed(record, invalid, "$.response")
+            self._fail_response(
+                record, meta, tokens, RealRunResponseCheckpoint.verdict_types
+            )
         record.content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
         record.is_vulnerable = verdict["is_vulnerable"]
+        record.diagnostic = {"checkpoint": None, "response_meta": meta}
 
-        usage_block = document.get("usage")
-        prompt_tokens = None
-        completion_tokens = None
-        if isinstance(usage_block, dict):
-            prompt_tokens = usage_block.get("prompt_tokens")
-            completion_tokens = usage_block.get("completion_tokens")
-        if (
-            type(prompt_tokens) is not int
-            or prompt_tokens < 1
-            or type(completion_tokens) is not int
-            or completion_tokens < 1
-        ):
+        if tokens is None:
             raise self._typed(
                 record, RealRunErrorCode.REAL_RUN_USAGE_MISSING, "$.usage"
             )
+        record.settle_usage_tokens = tokens
 
         if index == 0:
             if isinstance(fingerprint, str) and fingerprint:
@@ -1191,27 +1439,40 @@ class _GuardedRealEvaluator:
                 record, RealRunErrorCode.REAL_RUN_IDENTITY_CHANGED, "$.identity"
             )
 
-        usage = CallUsage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cost_micro_usd=_worst_case_cost(prompt_tokens, completion_tokens),
-            wall_ms=record.latency_ms,
-            download_bytes=self._download_bytes if index == 0 else 0,
-            storage_bytes=self._storage_bytes if index == 0 else 0,
-        )
+        usage = self._usage_carrier(record, tokens)
         self._ledger.record_usage(run_id, usage)
-        record.usage = {
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "cost_micro_usd": usage.cost_micro_usd,
-            "wall_ms": usage.wall_ms,
-            "download_bytes": usage.download_bytes,
-            "storage_bytes": usage.storage_bytes,
-        }
+        record.usage = _usage_document(usage)
         record.outcome = "success"
         if index == 0:
             self._attempt0_success = True
             self._attempt0_usage = dict(record.usage)
+
+    def _fail_response(
+        self,
+        record: _AttemptRecord,
+        meta: dict[str, object],
+        tokens: tuple[int, int] | None,
+        checkpoint: RealRunResponseCheckpoint,
+        cause: BaseException | None = None,
+    ) -> typing.NoReturn:
+        """Fail the response contract at one closed checkpoint; always raises.
+
+        Attaches the sanitized diagnostic face (the checkpoint plus the
+        post-mortem response metadata), stashes any compliant usage for the
+        decoupled settlement (difference-table rows D1/D2), and raises
+        ``REAL_RUN_RESPONSE_INVALID`` under the checkpoint's frozen
+        structure-only field path (IP-0033 Packets 7.2/7.3/7.4).
+        """
+        record.diagnostic = {"checkpoint": checkpoint.value, "response_meta": meta}
+        record.settle_usage_tokens = tokens
+        error = self._typed(
+            record,
+            RealRunErrorCode.REAL_RUN_RESPONSE_INVALID,
+            _CHECKPOINT_FIELD_PATHS[checkpoint],
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
 
     # -- the canary checklist --------------------------------------------------
 

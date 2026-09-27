@@ -1018,7 +1018,13 @@ class TestUsageAndIdentity(_RealRunTestCase):
     """FR-02 / AC-2: usage reconciliation and served-identity fail-closed."""
 
     def test_missing_usage_is_violation_with_reservation_released(self):
-        responses = [_chat_response(), _chat_response(with_usage=False)]
+        # DR-1 fixture correction (re-freeze v2): only the second call may lack
+        # usage; the remaining eight responses stay healthy (Packet 9 u1 row),
+        # because the fake repeats its last scheduled entry once the list is
+        # exhausted.
+        responses = [_chat_response()]
+        responses.append(_chat_response(with_usage=False))
+        responses.extend(_chat_response() for _ in range(8))
         with tempfile.TemporaryDirectory() as directory:
             transport = self.happy_transport(responses=responses)
             result = self.run_entry(directory, transport=transport)
@@ -1457,8 +1463,12 @@ class TestRealSuiteResultAndEvidence(_RealRunTestCase):
             happy_candidates = len(
                 [name for name in _happy_files() if name.endswith(".py")]
             )
+            # DR-2 assertion-container correction (re-freeze v2): the frozen
+            # report schema exposes raw_candidates only under
+            # compression_chain (report.py), so the assertion must not read it
+            # from counts.
             self.assertEqual(
-                report_counts["raw_candidates"]["value"], happy_candidates
+                report_doc["compression_chain"]["raw_candidates"], happy_candidates
             )
             self.assertEqual(
                 report_counts["scanned_files"]["value"],

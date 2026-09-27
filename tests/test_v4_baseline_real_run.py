@@ -39,6 +39,21 @@ checks (a1-a4, C1 document), the locked-gate guard (h2, IP-0031 module), the
 default-path import scan (h3, frozen sources), and the two budget-ledger probes
 (g3 at-cap self-consistency, g4 injected-clock wall gate; the frozen IP-0031
 ledger is the validator being probed, mirroring the IP-0031 n5 precedent).
+
+IP-0033 evolution to frozen version v3 (CA-IP-0033-v1.0 of 2026-09-28; the
+formal one-time frozen-surface evolution authorization is recorded in
+docs/LIMA_Implementation_Packet_IP-0033_Real_Run_Diagnostics.md section 10):
+all 35 v2 methods are retained without weakening -- three gain additive
+assertions only (a1 the IP-0033 packet document and its container copy line,
+u3 the response_identity checkpoint, e2 the diagnostic-face leak audit) --
+and twelve new methods in three new classes pin the checkpoint diagnostics
+matrix (FR-01), the usage-decoupled settlement (FR-03), and the failure
+resource observation (FR-04).  The product module already exists at the v3
+freeze, so the RED anchor is capability absence: the new and evolved
+assertions fail on the unmodified real_run.py of the 45a7ec7 baseline
+(missing diagnostic/resources evidence keys, the v2 all-usage-discarded
+settlement), never through import or arrange errors; the pre-freeze baseline
+run of the v2 file (35/35 green) is archived alongside the RED log.
 """
 
 import ast
@@ -201,6 +216,79 @@ _APPROVAL_FIELDS = frozenset(
 
 _HEX64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _RUN_NAME_PATTERN = re.compile(r"^[0-9a-f]{16}-run-[0-9]+\.json$")
+
+# IP-0033 v3 frozen surfaces (Packet 7.2/7.3/7.4/7.6 and section 8).
+_PACKET_IP0033_RELATIVE_PATH = (
+    "docs/LIMA_Implementation_Packet_IP-0033_Real_Run_Diagnostics.md"
+)
+_IP0033_COPY_LINE = (
+    "COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0033_Real_Run_"
+    "Diagnostics.md ./docs/"
+)
+# The served form the last real canary actually returned (2026-09-27 attempt-0
+# evidence, ERR-D issuecomment-5856555608): its normalization is outside the
+# pinned allowed forms, so the failure checkpoint is derivable as
+# response_identity and must reproduce offline (AC-1).
+_LAST_ROUND_SERVED_FORM = "deepseek-flash"
+_RESPONSE_CHECKPOINTS = (
+    "response_json",
+    "response_dict",
+    "response_model",
+    "response_identity",
+    "choices_list",
+    "choice0_dict",
+    "message_dict",
+    "content_str",
+    "content_json",
+    "verdict_shape",
+    "verdict_types",
+)
+_CHECKPOINT_FIELD_PATHS = {
+    "response_json": "$.response",
+    "response_dict": "$.response",
+    "response_model": "$.response.model",
+    "response_identity": "$.response.model",
+    "choices_list": "$.response.choices",
+    "choice0_dict": "$.response.choices[0]",
+    "message_dict": "$.response.choices[0].message",
+    "content_str": "$.response.choices[0].message.content",
+    "content_json": "$.response.choices[0].message.content",
+    "verdict_shape": "$.response.verdict",
+    "verdict_types": "$.response.verdict",
+}
+_RESPONSE_META_KEYS = frozenset(
+    {
+        "top_level_keys",
+        "choices_count",
+        "message_keys",
+        "content_len",
+        "content_sha256",
+        "finish_reason",
+        "usage_present",
+        "model",
+        "system_fingerprint",
+    }
+)
+_ATTEMPT_DOC_KEYS = frozenset(
+    {
+        "attempt_index",
+        "mode",
+        "outcome",
+        "request",
+        "response",
+        "usage",
+        "latency_ms",
+        "failure_code",
+        "error_code",
+        "error_field_path",
+        "diagnostic",
+        "resources",
+    }
+)
+_RESOURCES_KEYS = frozenset({"download_bytes", "storage_bytes"})
+_EMPTY_CONTENT_SHA256 = (
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
 
 _NOMINAL_MACHINE_PROFILE = {
     "profile_id": "lima-baseline-profile-001",
@@ -404,6 +492,59 @@ class _FakeTransport:
         return json.dumps(scheduled).encode("utf-8")
 
 
+class _RawBodyTransport(_FakeTransport):
+    """Chat double that can return scripted raw bytes (IP-0033 matrix).
+
+    The GET (download) side is inherited unchanged; the POST side returns the
+    scheduled entry verbatim when it is ``bytes`` -- invalid UTF-8 or non-JSON
+    bodies cannot be produced through ``json.dumps`` -- so the eleven
+    checkpoint forms can all be driven offline (Packet 9.1 rd1).
+    """
+
+    def __call__(self, url, payload, headers, timeout):
+        if payload is None:
+            return super().__call__(url, payload, headers, timeout)
+        self.chat_calls += 1
+        scheduled = self._responses[min(self.chat_calls - 1, len(self._responses) - 1)]
+        if isinstance(scheduled, BaseException):
+            raise scheduled
+        if isinstance(scheduled, bytes):
+            return scheduled
+        return json.dumps(scheduled).encode("utf-8")
+
+
+def _verdict_shape_failure_body(
+    *, prompt_tokens=1_000, completion_tokens=500, with_usage=True,
+    content_payload=None,
+):
+    """One response body whose content is JSON with the wrong verdict key set.
+
+    Shared arrange for the decoupled-settlement and resource-observation
+    faces (Packet 9.1): the response contract fails at verdict_shape while
+    the usage block stays scriptable.
+    """
+    body = _chat_response(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        with_usage=with_usage,
+    )
+    body["choices"][0]["message"]["content"] = json.dumps(
+        content_payload if content_payload is not None else {"unexpected": True}
+    )
+    return body
+
+
+def _string_values(value):
+    """Every string leaf of a nested json-shaped value (diagnostic audit)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [leaf for item in value.values() for leaf in _string_values(item)]
+    if isinstance(value, list):
+        return [leaf for item in value for leaf in _string_values(item)]
+    return []
+
+
 def _fixed_sources(durations_ms):
     """Injectable platform sources with fixed per-attempt wall/cpu durations."""
     durations = [value * 1_000_000 for value in durations_ms]
@@ -603,6 +744,15 @@ class TestApprovalArtifact(_RealRunTestCase):
             " ./docs/"
         )
         self.assertIn(copy_line, dockerfile)
+        # IP-0033 v3 (Packet section 8): the diagnostics packet document and
+        # its container copy line are static C1 deliverables.
+        packet_ip0033 = _REPO_ROOT / _PACKET_IP0033_RELATIVE_PATH
+        if not packet_ip0033.is_file():
+            self.fail(
+                f"required deliverable document is missing:"
+                f" {_PACKET_IP0033_RELATIVE_PATH}"
+            )
+        self.assertIn(_IP0033_COPY_LINE, dockerfile)
 
     def test_authorized_numbers_match_maintainer_constants(self):
         document = self.load_repo_approval()
@@ -1070,6 +1220,13 @@ class TestUsageAndIdentity(_RealRunTestCase):
             self.assertEqual(
                 set(self.error_code_sequence(directory)[1:]), {"REAL_RUN_CANARY_FAILED"}
             )
+            # IP-0033 v3 (FR-01/AC-1): the served-form rejection carries the
+            # first-class identity checkpoint and the sanitized model meta.
+            diagnostic = self.read_attempt(directory, 0)["diagnostic"]
+            self.assertEqual(diagnostic["checkpoint"], "response_identity")
+            self.assertEqual(
+                diagnostic["response_meta"]["model"], "deepseek-v9-ultra"
+            )
 
     def test_usage_consumed_matches_fake_response_values(self):
         prompts = [1_000 + 7 * index for index in range(_ATTEMPT_TOTAL)]
@@ -1391,6 +1548,29 @@ class TestRealSuiteResultAndEvidence(_RealRunTestCase):
                 if _RAW_CONTENT_MARKER.encode("utf-8") in data:
                     offenders.append((path.name, "raw-content"))
             self.assertEqual(offenders, [])
+            # IP-0033 v3 (FR-02/AC-2): the leak probe extends to the diagnostic
+            # face -- sanitized metadata must never carry content values or any
+            # string outside the scripted response structure.
+            happy_body = _chat_response()
+            allowlist = (
+                set(happy_body)
+                | set(happy_body["choices"][0]["message"])
+                | set(_RESPONSE_CHECKPOINTS)
+                | {
+                    _REQUEST_MODEL,
+                    happy_body["system_fingerprint"],
+                    happy_body["choices"][0]["finish_reason"],
+                }
+            )
+            for index in range(_ATTEMPT_TOTAL):
+                document = self.read_attempt(directory, index)
+                self.assertIn("diagnostic", document)
+                for value in _string_values(document["diagnostic"]):
+                    if _HEX64_PATTERN.match(value):
+                        continue
+                    self.assertIn(
+                        value, allowlist, f"attempt {index} leaked {value!r}"
+                    )
 
     def test_ledger_evidence_matches_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1535,6 +1715,445 @@ class TestRealRunHygiene(_RealRunTestCase):
         )
         own_roots = _import_roots(pathlib.Path(__file__).read_text(encoding="utf-8"))
         self.assertFalse(own_roots & forbidden)
+
+
+class TestResponseDiagnostics(_RealRunTestCase):
+    """FR-01 / FR-02 / AC-1 / AC-2: checkpoint diagnostics and sanitized meta."""
+
+    def test_eleven_checkpoints_produce_distinct_diagnostics(self):
+        module = self.real_run()
+        checkpoint_enum = getattr(module, "RealRunResponseCheckpoint", None)
+        self.assertIsNotNone(
+            checkpoint_enum, "RealRunResponseCheckpoint enum is missing"
+        )
+        self.assertTrue(issubclass(checkpoint_enum, str))
+        members = list(checkpoint_enum)
+        self.assertEqual(len(members), len(_RESPONSE_CHECKPOINTS))
+        self.assertEqual(
+            {member.value for member in members}, set(_RESPONSE_CHECKPOINTS)
+        )
+        for member in members:
+            self.assertEqual(member, member.value)
+        self.assertNotIn("RealRunResponseCheckpoint", module.__all__)
+        shape_bad = _chat_response()
+        shape_bad["choices"][0]["message"]["content"] = json.dumps({"unexpected": True})
+        types_bad = _chat_response()
+        types_bad["choices"][0]["message"]["content"] = json.dumps(
+            {"is_vulnerable": "yes", "cwe": None, "path": None, "reason": "ok"}
+        )
+        model_not_str = _chat_response()
+        model_not_str["model"] = 1234
+        # ERR-D anchor (issuecomment-5856555608): the last real canary failed
+        # at the identity checkpoint because the served form normalizes
+        # outside the pinned allowed forms -- reproduced offline (AC-1).
+        identity_drift = _chat_response(model=_LAST_ROUND_SERVED_FORM)
+        choices_missing = _chat_response()
+        del choices_missing["choices"]
+        choice0_not_dict = _chat_response()
+        choice0_not_dict["choices"] = [42]
+        message_missing = _chat_response()
+        message_missing["choices"] = [{"index": 0, "finish_reason": "stop"}]
+        content_null = _chat_response()
+        content_null["choices"][0]["message"] = {"role": "assistant", "content": None}
+        content_empty = _chat_response()
+        content_empty["choices"][0]["message"]["content"] = ""
+        matrix = (
+            ("response_json", b"\xff\xfe\x00\xfa not-utf8"),
+            ("response_dict", b"[1, 2, 3]"),
+            ("response_model", model_not_str),
+            ("response_identity", identity_drift),
+            ("choices_list", choices_missing),
+            ("choice0_dict", choice0_not_dict),
+            ("message_dict", message_missing),
+            ("content_str", content_null),
+            ("content_json", content_empty),
+            ("verdict_shape", shape_bad),
+            ("verdict_types", types_bad),
+        )
+        observed = {}
+        for checkpoint, body in matrix:
+            with self.subTest(checkpoint=checkpoint):
+                with tempfile.TemporaryDirectory() as directory:
+                    transport = _RawBodyTransport(
+                        tarball=_happy_tarball(), responses=[body]
+                    )
+                    self.run_entry(directory, transport=transport)
+                    attempt = self.read_attempt(directory, 0)
+                    self.assertEqual(set(attempt), _ATTEMPT_DOC_KEYS)
+                    self.assertEqual(attempt["error_code"], "REAL_RUN_RESPONSE_INVALID")
+                    self.assertEqual(
+                        attempt["error_field_path"],
+                        _CHECKPOINT_FIELD_PATHS[checkpoint],
+                    )
+                    self.assertEqual(attempt["diagnostic"]["checkpoint"], checkpoint)
+                observed[checkpoint] = _CHECKPOINT_FIELD_PATHS[checkpoint]
+        self.assertEqual(len(observed), len(_RESPONSE_CHECKPOINTS))
+        self.assertEqual(
+            sorted(observed.items()), sorted(_CHECKPOINT_FIELD_PATHS.items())
+        )
+
+    def test_response_meta_nine_keys_sorting_and_none_discipline(self):
+        identity_form = _chat_response(model=_LAST_ROUND_SERVED_FORM)
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[identity_form])
+            self.run_entry(directory, transport=transport)
+            diagnostic = self.read_attempt(directory, 0)["diagnostic"]
+            self.assertEqual(diagnostic["checkpoint"], "response_identity")
+            meta = diagnostic["response_meta"]
+            self.assertEqual(set(meta), _RESPONSE_META_KEYS)
+            self.assertEqual(meta["top_level_keys"], sorted(identity_form))
+            self.assertEqual(meta["choices_count"], 1)
+            self.assertEqual(meta["message_keys"], ["content", "role"])
+            content = identity_form["choices"][0]["message"]["content"]
+            self.assertEqual(meta["content_len"], len(content))
+            self.assertEqual(
+                meta["content_sha256"],
+                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual(meta["finish_reason"], "stop")
+            self.assertIs(meta["usage_present"], True)
+            self.assertEqual(meta["model"], _LAST_ROUND_SERVED_FORM)
+            self.assertEqual(meta["system_fingerprint"], "fp-stable-001")
+        # None discipline (ERR-C): an unparseable body read nothing, so every
+        # meta field is null -- never an empty collection or zero.
+        with tempfile.TemporaryDirectory() as directory:
+            transport = _RawBodyTransport(
+                tarball=_happy_tarball(), responses=[b"\xff\xfe unparseable"]
+            )
+            self.run_entry(directory, transport=transport)
+            meta = self.read_attempt(directory, 0)["diagnostic"]["response_meta"]
+            self.assertEqual(set(meta), _RESPONSE_META_KEYS)
+            for key in sorted(_RESPONSE_META_KEYS):
+                self.assertIsNone(meta[key], key)
+        # Early checkpoint: structure fields are read, everything downstream
+        # of the failure stays null.
+        with tempfile.TemporaryDirectory() as directory:
+            missing = _chat_response()
+            del missing["choices"]
+            transport = self.happy_transport(responses=[missing])
+            self.run_entry(directory, transport=transport)
+            meta = self.read_attempt(directory, 0)["diagnostic"]["response_meta"]
+            self.assertEqual(meta["top_level_keys"], sorted(missing))
+            self.assertIsNone(meta["choices_count"])
+            self.assertIsNone(meta["message_keys"])
+            self.assertIsNone(meta["content_len"])
+            self.assertIsNone(meta["content_sha256"])
+            self.assertIsNone(meta["finish_reason"])
+
+    def test_success_attempts_carry_null_checkpoint_full_meta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport()
+            self.run_entry(directory, transport=transport)
+            content = _chat_response()["choices"][0]["message"]["content"]
+            for index in range(_ATTEMPT_TOTAL):
+                with self.subTest(index=index):
+                    document = self.read_attempt(directory, index)
+                    diagnostic = document["diagnostic"]
+                    self.assertEqual(
+                        set(diagnostic), {"checkpoint", "response_meta"}
+                    )
+                    self.assertIsNone(diagnostic["checkpoint"])
+                    meta = diagnostic["response_meta"]
+                    self.assertEqual(set(meta), _RESPONSE_META_KEYS)
+                    self.assertEqual(meta["model"], _REQUEST_MODEL)
+                    self.assertIs(meta["usage_present"], True)
+                    self.assertEqual(meta["choices_count"], 1)
+                    self.assertEqual(meta["content_len"], len(content))
+                    self.assertEqual(
+                        meta["content_sha256"],
+                        hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    )
+
+    def test_content_digest_recorded_even_when_verdict_fails(self):
+        empty = _chat_response()
+        empty["choices"][0]["message"]["content"] = ""
+        unparseable = _chat_response()
+        unparseable["choices"][0]["message"]["content"] = "not-json"
+        for body in (empty, unparseable):
+            text = body["choices"][0]["message"]["content"]
+            with self.subTest(content_len=len(text)):
+                with tempfile.TemporaryDirectory() as directory:
+                    transport = self.happy_transport(responses=[body])
+                    self.run_entry(directory, transport=transport)
+                    attempt = self.read_attempt(directory, 0)
+                    self.assertEqual(attempt["error_code"], "REAL_RUN_RESPONSE_INVALID")
+                    self.assertEqual(
+                        attempt["diagnostic"]["checkpoint"], "content_json"
+                    )
+                    meta = attempt["diagnostic"]["response_meta"]
+                    self.assertEqual(meta["content_len"], len(text))
+                    self.assertEqual(
+                        meta["content_sha256"],
+                        hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    )
+        # H2 decidable offline: the empty-string digest is the known constant.
+        self.assertEqual(hashlib.sha256(b"").hexdigest(), _EMPTY_CONTENT_SHA256)
+        self.assertEqual(
+            hashlib.sha256(b"").hexdigest(),
+            hashlib.sha256(empty["choices"][0]["message"]["content"].encode()).hexdigest(),
+        )
+
+    def test_diagnostics_face_leak_free_and_value_domain_audit(self):
+        bait = _verdict_shape_failure_body(content_payload={"bait": _RAW_CONTENT_MARKER})
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[bait])
+            self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            offenders = []
+            for path in sorted(pathlib.Path(directory).rglob("*")):
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+                if _FAKE_KEY.encode("utf-8") in data:
+                    offenders.append((path.name, "api-key"))
+                if _RAW_CONTENT_MARKER.encode("utf-8") in data:
+                    offenders.append((path.name, "raw-content"))
+            self.assertEqual(offenders, [])
+            allowlist = (
+                set(bait)
+                | set(bait["choices"][0]["message"])
+                | set(_RESPONSE_CHECKPOINTS)
+                | {
+                    _REQUEST_MODEL,
+                    bait["system_fingerprint"],
+                    bait["choices"][0]["finish_reason"],
+                }
+            )
+            for index in range(_ATTEMPT_TOTAL):
+                document = self.read_attempt(directory, index)
+                self.assertIn("diagnostic", document)
+                for value in _string_values(document["diagnostic"]):
+                    if _HEX64_PATTERN.match(value):
+                        continue
+                    self.assertIn(value, allowlist, f"attempt {index} leak {value!r}")
+
+    def test_transport_failure_keeps_null_diagnostic_and_latency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(
+                responses=[TimeoutError("synthetic-diagnostics-timeout")]
+            )
+            self.run_entry(directory, transport=transport)
+            attempt = self.read_attempt(directory, 0)
+            self.assertEqual(attempt["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+            self.assertIn("diagnostic", attempt)
+            self.assertIsNone(attempt["diagnostic"])
+            self.assertIsInstance(attempt["latency_ms"], int)
+            self.assertIsNotNone(attempt["latency_ms"])
+
+
+class TestUsageDecoupling(_RealRunTestCase):
+    """FR-03 / AC-3: verdict failure never discards compliant usage (D1-D4)."""
+
+    def test_verdict_failure_with_usage_settles_and_retains_failure(self):
+        body = _verdict_shape_failure_body()
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.status, "insufficient_sample")
+            attempt = self.read_attempt(directory, 0)
+            self.assertEqual(attempt["outcome"], "failure")
+            self.assertEqual(attempt["failure_code"], "EXECUTION_ERROR")
+            self.assertEqual(attempt["error_code"], "REAL_RUN_RESPONSE_INVALID")
+            self.assertEqual(attempt["error_field_path"], "$.response.verdict")
+            self.assertEqual(attempt["diagnostic"]["checkpoint"], "verdict_shape")
+            self.assertEqual(result.ledger_snapshot.violations, 0)
+            book = result.ledger_snapshot.batch
+            self.assertEqual(set(book["reserved"].values()), {0})
+            consumed = book["consumed"]
+            self.assertEqual(consumed["prompt_tokens"], 1_000)
+            self.assertEqual(consumed["completion_tokens"], 500)
+            expected_cost = (
+                math.ceil(_AUTH_PRICES[0] * 1_000 / 1_000_000)
+                + math.ceil(_AUTH_PRICES[1] * 500 / 1_000_000)
+            )
+            self.assertEqual(consumed["cost_micro_usd"], expected_cost)
+            self.assertEqual(consumed["download_bytes"], len(_happy_tarball()))
+            expected_storage = sum(
+                len(text.encode("utf-8")) for text in _happy_files().values()
+            )
+            self.assertEqual(consumed["storage_bytes"], expected_storage)
+            released = book["released"]
+            self.assertEqual(released["prompt_tokens"], _REQUEST_BYTE_CAP - 1_000)
+            self.assertEqual(
+                released["completion_tokens"],
+                _AUTH_PER_RUN["completion_tokens"] - 500,
+            )
+
+    def test_verdict_failure_without_usage_counts_violation_and_keeps_observation(
+        self,
+    ):
+        body = _verdict_shape_failure_body(with_usage=False)
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.ledger_snapshot.violations, 1)
+            book = result.ledger_snapshot.batch
+            self.assertEqual(set(book["reserved"].values()), {0})
+            consumed = book["consumed"]
+            self.assertEqual(consumed["prompt_tokens"], 0)
+            self.assertEqual(consumed["completion_tokens"], 0)
+            self.assertEqual(consumed["cost_micro_usd"], 0)
+            self.assertEqual(consumed["download_bytes"], len(_happy_tarball()))
+            expected_storage = sum(
+                len(text.encode("utf-8")) for text in _happy_files().values()
+            )
+            self.assertEqual(consumed["storage_bytes"], expected_storage)
+            self.assertEqual(
+                consumed["wall_ms"], self.read_attempt(directory, 0)["latency_ms"]
+            )
+
+    def test_identity_change_records_usage_then_latches(self):
+        first = _chat_response(fingerprint="fp-alpha")
+        second = _chat_response(
+            fingerprint="fp-beta", prompt_tokens=1_234, completion_tokens=567
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[first, second])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 2)
+            self.assertEqual(result.canary_status, "passed")
+            codes = self.error_code_sequence(directory)
+            self.assertEqual(codes[1], "REAL_RUN_IDENTITY_CHANGED")
+            self.assertEqual(set(codes[2:]), {"REAL_RUN_CANARY_FAILED"})
+            self.assertEqual(result.ledger_snapshot.violations, 0)
+            book = result.ledger_snapshot.batch
+            self.assertEqual(set(book["reserved"].values()), {0})
+            consumed = book["consumed"]
+            self.assertEqual(consumed["prompt_tokens"], 1_000 + 1_234)
+            self.assertEqual(consumed["completion_tokens"], 500 + 567)
+            expected_cost = sum(
+                math.ceil(_AUTH_PRICES[0] * p / 1_000_000)
+                + math.ceil(_AUTH_PRICES[1] * c / 1_000_000)
+                for p, c in ((1_000, 500), (1_234, 567))
+            )
+            self.assertEqual(consumed["cost_micro_usd"], expected_cost)
+
+    def test_canary_first_item_true_when_usage_settled_but_canary_still_latches(
+        self,
+    ):
+        body = _verdict_shape_failure_body(prompt_tokens=900, completion_tokens=450)
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.canary_status, "failed")
+            self.assertEqual(result.ledger_snapshot.violations, 0)
+            manifest = self.read_manifest(directory)
+            checks = manifest["canary"]["checks"]
+            self.assertIs(checks["usage_within_reservation"], True)
+            self.assertIs(checks["identity_matches"], False)
+            self.assertIs(checks["canary_sample_success"], False)
+            self.assertEqual(
+                self.error_code_sequence(directory)[1:],
+                ["REAL_RUN_CANARY_FAILED"] * 9,
+            )
+
+
+class TestResourceObservation(_RealRunTestCase):
+    """FR-04: failure attempts keep observed bytes/wall without ledger drift."""
+
+    def test_attempt0_failure_keeps_resources_and_request_observation(self):
+        body = _verdict_shape_failure_body()
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            self.run_entry(directory, transport=transport)
+            attempt = self.read_attempt(directory, 0)
+            self.assertIn("resources", attempt)
+            self.assertEqual(set(attempt["resources"]), _RESOURCES_KEYS)
+            self.assertEqual(
+                attempt["resources"]["download_bytes"], len(_happy_tarball())
+            )
+            expected_storage = sum(
+                len(text.encode("utf-8")) for text in _happy_files().values()
+            )
+            self.assertEqual(attempt["resources"]["storage_bytes"], expected_storage)
+            request = attempt["request"]
+            self.assertIsInstance(request["body_bytes"], int)
+            self.assertGreater(request["body_bytes"], 0)
+            self.assertIsInstance(attempt["latency_ms"], int)
+            self.assertGreaterEqual(attempt["latency_ms"], 0)
+
+    def test_follow_on_failure_observation_and_release_reconciliation(self):
+        responses = [
+            _chat_response(),
+            TimeoutError("synthetic-observation-timeout"),
+            _chat_response(),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=responses)
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            self.assertEqual(result.status, "sufficient_sample")
+            documents = [
+                self.read_attempt(directory, index) for index in range(_ATTEMPT_TOTAL)
+            ]
+            failed = documents[1]
+            self.assertEqual(failed["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+            self.assertIn("resources", failed)
+            self.assertIsNone(failed["resources"])
+            self.assertEqual(
+                failed["request"]["body_bytes"], documents[0]["request"]["body_bytes"]
+            )
+            self.assertIsInstance(failed["latency_ms"], int)
+            latencies = [document["latency_ms"] for document in documents]
+            body_bytes = documents[0]["request"]["body_bytes"]
+            expected_storage = sum(
+                len(text.encode("utf-8")) for text in _happy_files().values()
+            )
+            wall_entry = _AUTH_PER_RUN["wall_ms"]
+            completion_entry = _AUTH_PER_RUN["completion_tokens"]
+            entry0_cost = (
+                math.ceil(_AUTH_PRICES[0] * _REQUEST_BYTE_CAP / 1_000_000)
+                + math.ceil(_AUTH_PRICES[1] * completion_entry / 1_000_000)
+            )
+            follow_on_entry_cost = (
+                math.ceil(_AUTH_PRICES[0] * body_bytes / 1_000_000)
+                + math.ceil(_AUTH_PRICES[1] * completion_entry / 1_000_000)
+            )
+            settled_cost = (
+                math.ceil(_AUTH_PRICES[0] * 1_000 / 1_000_000)
+                + math.ceil(_AUTH_PRICES[1] * 500 / 1_000_000)
+            )
+            # Reconciliation (Packet 9.1 ro2): released == sum(entry - actual)
+            # per dimension, with the attempt-0 worst-case entry, the body-
+            # derived follow-on entries, and actuals read from the evidence.
+            expected_released = {
+                "prompt_tokens": (
+                    (_REQUEST_BYTE_CAP - 1_000)
+                    + body_bytes
+                    + 8 * max(0, body_bytes - 1_000)
+                ),
+                "completion_tokens": (
+                    (completion_entry - 500) + completion_entry
+                    + 8 * (completion_entry - 500)
+                ),
+                "wall_ms": (
+                    (wall_entry - latencies[0])
+                    + wall_entry
+                    + sum(wall_entry - value for value in latencies[2:])
+                ),
+                "download_bytes": (
+                    _AUTH_PER_RUN["download_bytes"] - len(_happy_tarball())
+                ),
+                "storage_bytes": _AUTH_PER_RUN["storage_bytes"] - expected_storage,
+                "cost_micro_usd": (
+                    (entry0_cost - settled_cost)
+                    + follow_on_entry_cost
+                    + 8 * (follow_on_entry_cost - settled_cost)
+                ),
+            }
+            released = result.ledger_snapshot.batch["released"]
+            for dimension, expected in expected_released.items():
+                self.assertEqual(released[dimension], expected, dimension)
+            # D5 unchanged: the transport-failure attempt books no usage wall.
+            self.assertEqual(
+                result.ledger_snapshot.batch["consumed"]["wall_ms"],
+                latencies[0] + sum(latencies[2:]),
+            )
+            self.assertEqual(result.ledger_snapshot.batch["calls"], _ATTEMPT_TOTAL)
+            self.assertEqual(result.ledger_snapshot.violations, 0)
 
 
 if __name__ == "__main__":  # pragma: no cover

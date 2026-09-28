@@ -3,11 +3,12 @@
 IP-0030 implementation (Source Issue #219; Coordinator Assignment
 CA-IP-0030-v1.0; Packet: docs/LIMA_Implementation_Packet_IP-0030_Baseline_Fixture_Family.md).
 
-This module is the single source of truth for eleven synthetic repository
-shapes -- an empty repository, a minimal Python project, and nine V5
-archetypes -- plus the closed registry of their data identities.  The registry
-also carries one external-identity entry that registers upstream provenance
-metadata only; it has no synthetic tree and is never materializable here.
+This module is the single source of truth for twelve synthetic repository
+shapes -- an empty repository, a minimal Python project, nine V5 archetypes,
+and the signal-storm pattern storm (IP-0036) -- plus the closed registry of
+their data identities.  The registry also carries one external-identity entry
+that registers upstream provenance metadata only; it has no synthetic tree
+and is never materializable here.
 
 Every shape maps POSIX-relative paths to all-ASCII LF-only text.
 ``materialize_fixture`` writes those bytes explicitly, so materialized trees
@@ -109,6 +110,8 @@ SYNTHETIC_FIXTURE_KEYS: Final[tuple[str, ...]] = (
     "archetype/large-repo",
     "archetype/malicious-layout",
     "archetype/dependency-blocked",
+    # IP-0036 (R3.1): signal-storm is the appended twelfth synthetic key.
+    "archetype/signal-storm",
 )
 EXTERNAL_IDENTITY_KEYS: Final[tuple[str, ...]] = ("external/llamafactory-replay",)
 FIXTURE_KEYS: Final[tuple[str, ...]] = SYNTHETIC_FIXTURE_KEYS + EXTERNAL_IDENTITY_KEYS
@@ -117,6 +120,20 @@ registry_relative_path: Final[str] = "evaluation_data/v4/fixture_registry.json"
 _FIXTURE_KEY_SET: Final[frozenset[str]] = frozenset(FIXTURE_KEYS)
 _SYNTHETIC_KEY_SET: Final[frozenset[str]] = frozenset(SYNTHETIC_FIXTURE_KEYS)
 _EXTERNAL_KEY_SET: Final[frozenset[str]] = frozenset(EXTERNAL_IDENTITY_KEYS)
+
+#: The twelfth synthetic archetype (IP-0036 R3.1): a deterministic storm of
+#: low-value inert command-injection pattern modules.
+_SIGNAL_STORM_KEY: Final[str] = "archetype/signal-storm"
+
+#: IP-0036 (R3.1/R3.6): the registry entry order.  The twelve pre-existing
+#: entries (eleven synthetic shapes, then the single external-identity entry)
+#: keep their frozen order and bytes; the thirteenth entry -- signal-storm --
+#: is appended at the document end.
+_REGISTRY_ENTRY_ORDER: Final[tuple[str, ...]] = (
+    *(key for key in SYNTHETIC_FIXTURE_KEYS if key != _SIGNAL_STORM_KEY),
+    *EXTERNAL_IDENTITY_KEYS,
+    _SIGNAL_STORM_KEY,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +167,10 @@ _RELATIONSHIP_TO_SUPPORT_MATRIX: Final[str] = (
     " Upgrading those rows is deferred to #57 PR3-e, where it will land"
     " together with a new matrix version and a re-freeze of the matrix"
     " tests; nothing in this registry claims support levels for the matrix."
+    " The PR3-e requirement-level matrix now lives in"
+    " docs/LIMA_PR3e_Requirement_Matrix_v2.md (IP-0036 additive note), while"
+    " the two IP-0026 artifact matrices above remain byte-frozen, so their"
+    " unsupported rows stay honestly unsupported."
 )
 
 _OFFLINE_NOTE: Final[str] = (
@@ -210,6 +231,14 @@ _SYNTHETIC_NOTES: Final[dict[str, str]] = {
     "archetype/dependency-blocked": (
         "unresolvable-dependency shape: one unresolvable version pin and one"
         " RFC 2606 .invalid git source; no reachable host is referenced"
+    ),
+    "archetype/signal-storm": (
+        "signal-storm shape: 24 SYNTHETIC INERT pattern modules, each"
+        " carrying exactly one constant-argument shell-command site"
+        " (CWE-78 decidable) and generated purely from the module index;"
+        " the storm is hidden-cap probe raw material (more than twelve"
+        " findings must all survive scanning) and its total bytes stay"
+        " within the large-repo bound"
     ),
 }
 
@@ -627,6 +656,39 @@ def _dependency_blocked_shape() -> dict[str, str]:
     }
 
 
+#: IP-0036 (DR-IP-0036-PV-7): the frozen signal-storm module count.  Twenty-
+#: four exceeds twelve (the hidden-cap probe needs more findings than any
+#: suspected fixed cap), and one inert pattern module per index keeps the
+#: whole storm far inside the large-repo byte bound.
+_SIGNAL_STORM_MODULE_COUNT: Final[int] = 24
+
+
+def _signal_storm_module_text(index: int) -> str:
+    """One inert command-injection pattern module, purely index-derived.
+
+    Every module carries the SYNTHETIC INERT header (malicious-layout
+    precedent) and exactly one constant-argument ``os.system`` site with a
+    benign literal, so the production scanner face yields exactly one
+    decidable CWE-78 finding per module and no data-flow secondaries.
+    """
+    return (
+        _MALICIOUS_INERT_HEADER
+        + "# Inert command-injection pattern shape; never executed.\n"
+        "\n"
+        "import os\n"
+        "\n\n"
+        f"def trigger_{index:03d}() -> int:\n"
+        f'    return os.system("synthetic-inert-{index:03d}")\n'
+    )
+
+
+def _signal_storm_shape() -> dict[str, str]:
+    return {
+        f"synth_storm/signal_{index:03d}.py": _signal_storm_module_text(index)
+        for index in range(_SIGNAL_STORM_MODULE_COUNT)
+    }
+
+
 def _build_shapes() -> dict[str, dict[str, str]]:
     return {
         "archetype/empty-repository": {},
@@ -640,6 +702,7 @@ def _build_shapes() -> dict[str, dict[str, str]]:
         "archetype/large-repo": _large_repo_shape(),
         "archetype/malicious-layout": _malicious_layout_shape(),
         "archetype/dependency-blocked": _dependency_blocked_shape(),
+        "archetype/signal-storm": _signal_storm_shape(),
     }
 
 
@@ -799,16 +862,20 @@ def _synthetic_registry_entry(key: str) -> dict[str, object]:
     }
 
 
+def _registry_entry(key: str) -> dict[str, object]:
+    """One registry entry by key: the external identity or a synthetic shape."""
+    if key in _EXTERNAL_KEY_SET:
+        return dict(_EXTERNAL_REGISTRY_ENTRY)
+    return _synthetic_registry_entry(key)
+
+
 def _build_registry_document() -> dict[str, object]:
     return {
         "schema_version": _REGISTRY_SCHEMA_VERSION,
         "registry_id": _REGISTRY_ID,
         "relationship_to_support_matrix": _RELATIONSHIP_TO_SUPPORT_MATRIX,
         "offline_note": _OFFLINE_NOTE,
-        "fixtures": [
-            *(_synthetic_registry_entry(key) for key in SYNTHETIC_FIXTURE_KEYS),
-            dict(_EXTERNAL_REGISTRY_ENTRY),
-        ],
+        "fixtures": [_registry_entry(key) for key in _REGISTRY_ENTRY_ORDER],
     }
 
 

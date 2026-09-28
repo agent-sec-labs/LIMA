@@ -87,11 +87,48 @@ from .memory import MEMORY_PACK  # noqa: E402 -- data module needs VulnPack abov
 register_pack(MEMORY_PACK)
 
 
+def registry_cwe_ids() -> frozenset[str]:
+    """The union of every registered pack's CWE coverage."""
+
+    merged: set[str] = set()
+    for name in list_packs():
+        merged.update(get_pack(name).cwe_ids)
+    return frozenset(merged)
+
+
+def registry_runtime_markers() -> dict[str, tuple[str, ...]]:
+    """The merged error-type matching table across all registered packs.
+
+    Preserves per-CWE insertion order: earlier packs' markers come first,
+    later packs append unseen markers.
+    """
+
+    merged: dict[str, tuple[str, ...]] = {}
+    for name in list_packs():
+        for cwe, markers in runtime_markers(get_pack(name)).items():
+            existing = merged.get(cwe, ())
+            merged[cwe] = existing + tuple(
+                marker for marker in markers if marker not in existing
+            )
+    return merged
+
+
+def registry_prompt_addenda() -> str:
+    """Every registered pack's specialist prompt addendum, joined."""
+
+    return "\n".join(
+        get_pack(name).specialist_prompt_addendum for name in list_packs()
+    )
+
+
 __all__ = [
     "MEMORY_PACK",
     "VulnPack",
     "get_pack",
     "list_packs",
     "register_pack",
+    "registry_cwe_ids",
+    "registry_prompt_addenda",
+    "registry_runtime_markers",
     "runtime_markers",
 ]

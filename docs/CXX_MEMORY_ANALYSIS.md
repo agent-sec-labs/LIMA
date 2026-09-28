@@ -156,7 +156,8 @@ python scripts/run_cxx_memory_evaluation.py `
 ```
 
 缓存的 `repositories` 必须与 Sidecar `/repositories` 使用同一共享挂载，并保留完全相同的
-相对 repository key。定时/手动 CI 先校验完整 manifest，再用固定 case ID 选择一项，将其
+相对 repository key。评测通过本地脚本执行（原定时/手动 CI 评测 job 已于 2026-09-28 移除）：
+先校验完整 manifest，再用固定 case ID 选择一项，将其
 build/test argv 作为管理员进程环境启动一个专用 Sidecar，并在同一 Sidecar 上依次评测该项
 的 vulnerable/fixed revision。argv JSON 通过环境变量原样转发给 `docker --env NAME`，不会
 拼接或求值为 Shell 文本。评测请求仍严格只有 `request_id`、`repository_key`、
@@ -177,12 +178,12 @@ diagnostic，绝不伪造 100%。
 排序后的 Debian/Python 包清单以及实际 image ID 共同提供可审计身份。不过 apt 仓库没有按
 Debian snapshot 精确固定，因此这些证据支持审计，不构成逐字节可复现性声明。
 
-定时/手动 CI 在每次公开评测后把完整工具链身份与 JSON 报告一起归档为四个 artifact：
+原 CI 评测 job 上传的四类工具链身份 artifact 已随 job 移除而不再自动生成。本地复跑评测时
+建议手动导出相同清单以保持证据一致：
 `evaluation-report`（评测 JSON，内含实际与基础镜像 ID）、`debian-packages`
 （`/usr/local/share/lima/analyzer-toolchain-packages.txt` 导出）、`python-packages`
 （`analyzer-python-packages.txt` 导出）和 `image-inspect`（宿主机 `docker image inspect`
-的完整 JSON，含 Id、Parent 与 RepoDigests）。本地复跑评测时建议导出相同清单以保持证据
-一致。
+的完整 JSON，含 Id、Parent 与 RepoDigests）。
 
 CWE-415 使用 curl/curl 的 CVE-2026-8925：固定构建显式启用 `CURL_USE_GSASL`，使
 `lib/vauth/gsasl.c::Curl_auth_gsasl_is_supported` 进入构建身份，测试以固定构建产物的

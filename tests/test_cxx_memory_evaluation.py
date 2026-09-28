@@ -795,19 +795,29 @@ class CliAndCiContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_evaluation_module()
 
-    def test_public_evaluation_artifact_retains_toolchain_manifests(self):
-        workflow = yaml.safe_load(
-            Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        )
-        upload_steps = [
-            step
-            for job in workflow.get("jobs", {}).values()
-            for step in job.get("steps") or []
-            if "upload-artifact" in str(step.get("uses") or "")
-        ]
-        # Scheduled evaluation jobs are retired; the engineering gates
-        # still upload their evidence artifacts.
-        self.assertGreaterEqual(len(upload_steps), 5)
+    def test_manual_evaluation_script_and_case_data_are_intact(self):
+        """Retired CI jobs leave the manual evaluation path functional.
+
+        The evaluation script and case manifest must remain importable and
+        structurally valid so manual local runs still work.
+        """
+        module = self.module
+        # The script exposes the mandatory identity parameters.
+        parser = module.build_parser()
+        options = {
+            option
+            for action in parser._actions
+            for option in action.option_strings
+        }
+        self.assertIn("--analyzer-image-digest", options)
+        self.assertIn("--analyzer-base-image-digest", options)
+        # The frozen case manifest is still complete enough to score.
+        manifest = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(manifest["cases"]), 4)
+        for case in manifest["cases"]:
+            self.assertIn("id", case)
+            self.assertIn("vulnerable_commit", case)
+            self.assertIn("fixed_commit", case)
 
     def test_report_metadata_records_validated_base_image_identity(self):
         base = "sha256:" + "b" * 64
@@ -924,11 +934,6 @@ class CliAndCiContractTests(unittest.TestCase):
         self.assertIn("--cap-drop ALL", commands)
         self.assertNotIn("/var/run/docker.sock", commands)
         self.assertNotRegex(commands, r"(?:^|\s)-p\s|--publish")
-
-        # Scheduled evaluation jobs are retired; the case manifest stays
-        # valid for manual runs of scripts/run_cxx_memory_evaluation.py.
-        manifest = json.loads(CASES_PATH.read_text(encoding="utf-8"))
-        self.assertGreaterEqual(len(manifest["cases"]), 4)
 
 
 if __name__ == "__main__":

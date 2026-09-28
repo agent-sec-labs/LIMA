@@ -73,6 +73,32 @@ $.run_name by the current loader pins, so every entry-driven arrange fails
 there and the token expectations fail against verbatim recording; the
 pre-freeze baseline run of the v3 file (47/47 green, nine frozen files
 298/298, discover 2631 OK with 24 skips) is archived alongside the RED log.
+
+IP-0035 evolution to frozen version v5 (CA-IP-0035-v1.0 of 2026-09-28; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0035_Time_Governance.md
+section 10): all 54 v4' methods are retained without weakening -- the
+attempt-document key set grows by the three additive observation sub-blocks
+(state_reuse/provider_cache/timings, R5/R6), the static artifact guard admits
+the IP-0035 packet document and its single container copy line, and three
+settlement/observation methods gain additive coexistence assertions only --
+while twelve new methods in two new classes pin the executable wall deadline
+per phase (FR-01: slow-stream download, slow extraction, slow-response
+recheck, transport-timeout clamping, batch-margin clamping), the
+cancellation evidence path (FR-02: partial five-file evidence set,
+EXECUTION_CANCELLED taxonomy, D7/D8 release-and-partial-observation
+reconciliation), and the honest cold/warm and separated-timing observation
+faces (FR-03/FR-04: state_reuse flags, provider_cache null discipline,
+timings separation, manifest batch_wall_ms plus the deadline observation
+block, and the frozen ten-code/eleven-checkpoint/canary static anchors).
+Every negative is injection-driven through the module monotonic seam
+``_monotonic`` (patched with a deterministic clock, never a real sleep), so
+the RED anchor is capability absence: on the unmodified real_run.py of the
+d59c135 baseline the seam is never read, the deadlines never trip, the
+cancelled path writes no evidence, and the observation sub-blocks are
+absent; the pre-freeze baseline run of the v4' file (54/54 green, nine
+frozen files 298/298, discover 2638 OK with 24 skips) is archived alongside
+the RED log.
 """
 
 import ast
@@ -268,6 +294,16 @@ _IP0034_APPROVAL_COPY_LINE = (
 _APPROVAL_2026_09_27_RELATIVE_PATH = (
     "docs/LIMA_PR3d_Real_Run_Approval_2026-09-27.md"
 )
+# IP-0035 v5 static deliverable (Packet section 5.1): the time-governance
+# packet document and its single container copy line (exactly one added
+# Dockerfile line after the IP-0034 packet line).
+_PACKET_IP0035_RELATIVE_PATH = (
+    "docs/LIMA_Implementation_Packet_IP-0035_Time_Governance.md"
+)
+_IP0035_PACKET_COPY_LINE = (
+    "COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0035_Time_"
+    "Governance.md ./docs/"
+)
 # The served form the last real canary actually returned (2026-09-27 attempt-0
 # evidence, ERR-D issuecomment-5856555608).  IP-0034 v4 (R2) flips its
 # meaning: deepseek-flash is now an APPROVED form -- pinned in the
@@ -329,6 +365,10 @@ _ATTEMPT_DOC_KEYS = frozenset(
         "error_field_path",
         "diagnostic",
         "resources",
+        # IP-0035 v5 (R5/R6): the three additive observation sub-blocks.
+        "state_reuse",
+        "provider_cache",
+        "timings",
     }
 )
 _RESOURCES_KEYS = frozenset({"download_bytes", "storage_bytes"})
@@ -368,6 +408,34 @@ _EXPECTED_FINISH_REASONS = frozenset(
 )
 _FINGERPRINT_PATTERN = re.compile(r"^fp_[A-Za-z0-9]{1,63}$")
 _SF01_TOKEN_PATTERN = re.compile(r"^~d:[0-9]+:[0-9a-f]{64}$")
+# IP-0035 v5 frozen observation faces (Packet 7.5/7.6): the three attempt
+# sub-block key sets, the manifest deadline observation block, and the
+# frozen ten-code error family that the time-governance evolution must not
+# touch (static anchors, ho5).
+_STATE_REUSE_KEYS = frozenset(
+    {"materialized", "snapshot_reused", "request_body_rebuilt", "process_identity"}
+)
+_PROVIDER_CACHE_KEYS = frozenset(
+    {"prompt_cache_hit_tokens", "prompt_cache_miss_tokens"}
+)
+_TIMINGS_KEYS = frozenset(
+    {"api_latency_ms", "attempt_wall_ms", "download_ms", "extract_ms"}
+)
+_LEDGER_BOOK_DIMENSIONS = frozenset(_AUTH_PER_RUN) - {"calls"}
+_FROZEN_ERROR_CODES = frozenset(
+    {
+        "APPROVAL_ARTIFACT_INVALID",
+        "REAL_RUN_OUTPUT_NOT_EMPTY",
+        "REAL_RUN_DOWNLOAD_EXCEEDED",
+        "REAL_RUN_ARCHIVE_UNSAFE",
+        "REAL_RUN_REQUEST_TOO_LARGE",
+        "REAL_RUN_TRANSPORT_FAILED",
+        "REAL_RUN_USAGE_MISSING",
+        "REAL_RUN_RESPONSE_INVALID",
+        "REAL_RUN_IDENTITY_CHANGED",
+        "REAL_RUN_CANARY_FAILED",
+    }
+)
 
 _NOMINAL_MACHINE_PROFILE = {
     "profile_id": "lima-baseline-profile-001",
@@ -531,6 +599,78 @@ class _UnboundedDownload:
         return b"\x00" * size
 
 
+class _JumpClock:
+    """Monotonic-seam double: constant between explicit test-side jumps.
+
+    Every read returns the current value, so the elapsed window between two
+    product reads is exactly the total of the jumps applied in between (a
+    fake stream or chat double applies them at deterministic points).  The
+    product reads time only through the patched ``_monotonic`` seam (Packet
+    7.3.4); no real sleep ever happens.
+    """
+
+    def __init__(self, base=1_000.0):
+        self._value = base
+
+    def __call__(self):
+        return self._value
+
+    def jump_ms(self, milliseconds):
+        self._value += milliseconds / 1_000.0
+
+
+class _SteppedClock:
+    """Monotonic-seam double advancing a fixed step on every single read."""
+
+    def __init__(self, step_ms):
+        self._value = 0.0
+        self._step_seconds = step_ms / 1_000.0
+
+    def __call__(self):
+        self._value += self._step_seconds
+        return self._value
+
+
+class _SlowStream:
+    """Endless 1 MiB-chunk GET stream that jumps the clock on read ``n``."""
+
+    def __init__(self, clock, jump_on_read, jump_ms):
+        self._clock = clock
+        self._jump_on_read = jump_on_read
+        self._jump_ms = jump_ms
+        self._chunk = b"\x00" * _DOWNLOAD_CHUNK_BYTES
+        self.reads = 0
+        self.served = 0
+
+    def read(self, size):
+        self.reads += 1
+        if self.reads == self._jump_on_read:
+            self._clock.jump_ms(self._jump_ms)
+        data = self._chunk[:size]
+        self.served += len(data)
+        return data
+
+
+class _JumpingTarballStream:
+    """Finite GET stream over a tarball that jumps the clock on read ``n``."""
+
+    def __init__(self, payload, clock, jump_on_read, jump_ms):
+        self._payload = payload
+        self._clock = clock
+        self._jump_on_read = jump_on_read
+        self._jump_ms = jump_ms
+
+    def read(self, size):
+        if not self._payload:
+            return b""
+        if self._jump_on_read is not None:
+            self._jump_on_read -= 1
+            if self._jump_on_read == 0:
+                self._clock.jump_ms(self._jump_ms)
+        data, self._payload = self._payload[:size], self._payload[size:]
+        return data
+
+
 class _FakeTransport:
     """Injected transport double: streaming GET plus scripted chat POSTs."""
 
@@ -590,6 +730,26 @@ class _RawBodyTransport(_FakeTransport):
         if isinstance(scheduled, bytes):
             return scheduled
         return json.dumps(scheduled).encode("utf-8")
+
+
+class _ClockJumpChatTransport(_FakeTransport):
+    """Chat double that jumps the injected clock before every reply (IP-0035).
+
+    The GET (download) side is inherited unchanged; every POST advances the
+    monotonic-seam clock by ``chat_jump_ms`` before returning the scripted
+    response, so the product's post-call latency measurement and deadline
+    recheck observe exactly that elapsed window (Packet 9.1 tg3/tg6/tg7).
+    """
+
+    def __init__(self, *, clock, chat_jump_ms, **kwargs):
+        super().__init__(**kwargs)
+        self._clock = clock
+        self._chat_jump_ms = chat_jump_ms
+
+    def __call__(self, url, payload, headers, timeout):
+        if payload is not None:
+            self._clock.jump_ms(self._chat_jump_ms)
+        return super().__call__(url, payload, headers, timeout)
 
 
 def _verdict_shape_failure_body(
@@ -716,6 +876,32 @@ class _RealRunTestCase(unittest.TestCase):
         import benchmarks.v4.baseline.real_run as real_run_module
 
         return real_run_module
+
+    def patch_monotonic(self, clock):
+        """Bind the module monotonic seam to a deterministic clock (IP-0035).
+
+        The frozen seam is the module attribute ``_monotonic`` (Packet
+        7.3.4).  Setting it is safe in the RED state too: when the product
+        does not read the seam yet, the attribute simply sits unused and the
+        failure stays a behavior assertion failure, never an arrange error.
+        The sentinel-based cleanup restores or removes the attribute.
+        """
+        module = self.real_run()
+        sentinel = object()
+        original = getattr(module, "_monotonic", sentinel)
+        module._monotonic = clock
+
+        def restore():
+            if original is sentinel:
+                try:
+                    del module._monotonic
+                except AttributeError:  # pragma: no cover - defensive
+                    pass
+            else:
+                module._monotonic = original
+
+        self.addCleanup(restore)
+        return module
 
     def product_source(self, relative):
         path = _REPO_ROOT / relative
@@ -856,6 +1042,16 @@ class TestApprovalArtifact(_RealRunTestCase):
             )
         self.assertIn(_IP0034_PACKET_COPY_LINE, dockerfile)
         self.assertIn(_IP0034_APPROVAL_COPY_LINE, dockerfile)
+        # IP-0035 v5 (Packet section 5.1): the time-governance packet
+        # document and its single container copy line are static C1
+        # deliverables (the Dockerfile grows by exactly one line).
+        packet_ip0035 = _REPO_ROOT / _PACKET_IP0035_RELATIVE_PATH
+        if not packet_ip0035.is_file():
+            self.fail(
+                f"required deliverable document is missing:"
+                f" {_PACKET_IP0035_RELATIVE_PATH}"
+            )
+        self.assertIn(_IP0035_PACKET_COPY_LINE, dockerfile)
 
     def test_authorized_numbers_match_maintainer_constants(self):
         document = self.load_repo_approval()
@@ -1622,6 +1818,12 @@ class TestRealSuiteResultAndEvidence(_RealRunTestCase):
     """FR-04 / AC-3 / AC-4: evidence timing, secretlessness, and digests."""
 
     def test_evidence_written_after_run_repeats_window(self):
+        # IP-0035 v5 (R4.4 evolution registration): the evidence-write
+        # timing face now has two honest states -- the full set pinned here
+        # after a normal ``run_repeats`` return (assertions unchanged) and
+        # the partial five-file set on a control-flow BaseException re-raise
+        # (pinned by the cancellation test of TestTimeGovernance, tg4).
+        # No assertion on this normal path changed.
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             transport = self.happy_transport(output_root=root)
@@ -2142,6 +2344,11 @@ class TestUsageDecoupling(_RealRunTestCase):
                 released["completion_tokens"],
                 _AUTH_PER_RUN["completion_tokens"] - 500,
             )
+            # IP-0035 v5 (FR-02/FR-04): the additive observation sub-blocks
+            # coexist with the D1 settlement face (D8 must not disturb
+            # D1-D6).
+            self.assertIn("timings", attempt)
+            self.assertIn("state_reuse", attempt)
 
     def test_verdict_failure_without_usage_counts_violation_and_keeps_observation(
         self,
@@ -2237,6 +2444,10 @@ class TestResourceObservation(_RealRunTestCase):
             self.assertGreater(request["body_bytes"], 0)
             self.assertIsInstance(attempt["latency_ms"], int)
             self.assertGreaterEqual(attempt["latency_ms"], 0)
+            # IP-0035 v5 (FR-04): the timings/state_reuse sub-blocks coexist
+            # with the attempt-0 resources face.
+            self.assertIn("timings", attempt)
+            self.assertIn("state_reuse", attempt)
 
     def test_follow_on_failure_observation_and_release_reconciliation(self):
         responses = [
@@ -2256,6 +2467,9 @@ class TestResourceObservation(_RealRunTestCase):
             self.assertEqual(failed["error_code"], "REAL_RUN_TRANSPORT_FAILED")
             self.assertIn("resources", failed)
             self.assertIsNone(failed["resources"])
+            # IP-0035 v5 (FR-02/FR-04): the follow-on failure keeps the D5
+            # release-only face alongside the new observation sub-block.
+            self.assertIn("timings", failed)
             self.assertEqual(
                 failed["request"]["body_bytes"], documents[0]["request"]["body_bytes"]
             )
@@ -2652,6 +2866,566 @@ class TestSF01Sanitization(_RealRunTestCase):
             ):
                 hits.append(path.name)
         return hits
+
+
+class TestTimeGovernance(_RealRunTestCase):
+    """FR-01 / FR-02 / AC-1 / AC-2: executable deadlines and cancellation.
+
+    Every negative below is injection-driven through the frozen module
+    monotonic seam ``_monotonic`` (Packet 7.3.4): a constant-until-jumped
+    clock or a fixed-step clock replaces real time, a fake stream or chat
+    double applies deterministic jumps, and no test ever sleeps or touches a
+    socket.  The typed deadline failures follow the frozen taxonomy of
+    Packet 7.2 (EXECUTION_TIMEOUT + REAL_RUN_TRANSPORT_FAILED + the
+    phase-specific structure path) and settle through D7/D8.
+    """
+
+    def test_slow_stream_download_deadline_aborts_cleans_and_types(self):
+        # tg1 (Packet 9.1): the per-chunk deadline check aborts the
+        # download mid-stream (the second 1 MiB chunk read jumps the clock
+        # 1,500,000 ms past the 1,200,000 ms attempt deadline).
+        clock = _JumpClock()
+        stream = _SlowStream(clock, jump_on_read=2, jump_ms=1_500_000)
+        with tempfile.TemporaryDirectory() as directory:
+            transport = _FakeTransport(
+                download_factory=lambda: stream, responses=[_chat_response()]
+            )
+            self.patch_monotonic(clock)
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.download_calls, 1)
+            self.assertEqual(transport.chat_calls, 0)
+            attempt = self.read_attempt(directory, 0)
+            self.assertEqual(attempt["failure_code"], "EXECUTION_TIMEOUT")
+            self.assertEqual(attempt["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+            self.assertEqual(attempt["error_field_path"], "$.download")
+            self.assertEqual(attempt["outcome"], "timeout")
+            # Partial-file cleanup: the aborted tarball leaves no residue.
+            leftovers = list((pathlib.Path(directory) / "_materialized").rglob("*.gz"))
+            self.assertEqual(leftovers, [])
+            # None discipline: the chat never ran, so the api-latency
+            # channel is unread on both faces while the attempt wall keeps
+            # its honest partial value.
+            self.assertIsNone(attempt["latency_ms"])
+            self.assertIn("timings", attempt)
+            self.assertIsNone(attempt["timings"]["api_latency_ms"])
+            self.assertIsInstance(attempt["timings"]["attempt_wall_ms"], int)
+            self.assertGreaterEqual(attempt["timings"]["attempt_wall_ms"], 0)
+            self.assertEqual(result.status, "insufficient_sample")
+            codes = self.error_code_sequence(directory)
+            self.assertEqual(codes[0], "REAL_RUN_TRANSPORT_FAILED")
+            self.assertEqual(set(codes[1:]), {"REAL_RUN_CANARY_FAILED"})
+            # D7 reconciliation: release-only settlement -- the reservation
+            # left the in-flight balance, the granted call was not
+            # recycled, and any partial download observation stays bounded
+            # by what the slow stream actually served.
+            book = result.ledger_snapshot.batch
+            self.assertEqual(set(book["reserved"].values()), {0})
+            self.assertEqual(book["calls"], 1)
+            consumed_download = book["consumed"]["download_bytes"]
+            self.assertIsInstance(consumed_download, int)
+            self.assertLessEqual(0, consumed_download)
+            self.assertLessEqual(consumed_download, stream.served)
+
+    def test_slow_extraction_deadline_types_archive_phase(self):
+        # tg2: the stepped clock (200,000 ms per seam read) leaves the
+        # one-chunk gz download under the deadline but crosses it inside
+        # the 16 MiB member's extraction loop, typing the failure at the
+        # archive phase.
+        members = {
+            f"{_HAPPY_TOP}/README.md": "# readme\n",
+            f"{_HAPPY_TOP}/big.bin": "\x00" * (16 * _DOWNLOAD_CHUNK_BYTES),
+        }
+        clock = _SteppedClock(step_ms=200_000)
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(tarball=_build_tarball(members))
+            self.patch_monotonic(clock)
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.download_calls, 1)
+            self.assertEqual(transport.chat_calls, 0)
+            attempt = self.read_attempt(directory, 0)
+            self.assertEqual(attempt["failure_code"], "EXECUTION_TIMEOUT")
+            self.assertEqual(attempt["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+            self.assertEqual(attempt["error_field_path"], "$.archive")
+            self.assertEqual(attempt["outcome"], "timeout")
+            self.assertEqual(result.status, "insufficient_sample")
+            book = result.ledger_snapshot.batch
+            self.assertEqual(set(book["reserved"].values()), {0})
+            self.assertEqual(book["calls"], 1)
+            self.assertEqual(
+                set(self.error_code_sequence(directory)[1:]), {"REAL_RUN_CANARY_FAILED"}
+            )
+
+    def test_slow_response_deadline_recheck_never_success_settles_d7(self):
+        # tg3: the chat reply arrives 2,000,000 ms after the attempt anchor
+        # (deadline 1,200,000 ms); the post-chat deadline recheck fails the
+        # attempt typed, never records usage, and settles D7 with the
+        # attempt-0 partial observation.
+        clock = _JumpClock()
+        with tempfile.TemporaryDirectory() as directory:
+            transport = _ClockJumpChatTransport(
+                clock=clock,
+                chat_jump_ms=2_000_000,
+                tarball=_happy_tarball(),
+                responses=[_chat_response()],
+            )
+            self.patch_monotonic(clock)
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            attempt = self.read_attempt(directory, 0)
+            self.assertEqual(attempt["outcome"], "timeout")
+            self.assertEqual(attempt["failure_code"], "EXECUTION_TIMEOUT")
+            self.assertEqual(attempt["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+            self.assertEqual(attempt["error_field_path"], "$.transport")
+            self.assertIsNone(attempt["usage"])
+            self.assertIn("timings", attempt)
+            self.assertEqual(attempt["timings"]["api_latency_ms"], attempt["latency_ms"])
+            self.assertEqual(attempt["latency_ms"], 2_000_000)
+            self.assertGreaterEqual(
+                attempt["timings"]["attempt_wall_ms"],
+                attempt["timings"]["api_latency_ms"],
+            )
+            # D7 numeric reconciliation (PC3): release-only with the
+            # attempt-0 partial observation retained in consumed.
+            book = result.ledger_snapshot.batch
+            self.assertEqual(set(book["reserved"].values()), {0})
+            consumed = book["consumed"]
+            self.assertEqual(consumed["wall_ms"], 2_000_000)
+            self.assertEqual(consumed["prompt_tokens"], 0)
+            self.assertEqual(consumed["completion_tokens"], 0)
+            self.assertEqual(consumed["cost_micro_usd"], 0)
+            self.assertEqual(consumed["download_bytes"], len(_happy_tarball()))
+            expected_storage = sum(
+                len(text.encode("utf-8")) for text in _happy_files().values()
+            )
+            self.assertEqual(consumed["storage_bytes"], expected_storage)
+            entry0_cost = (
+                math.ceil(_AUTH_PRICES[0] * _REQUEST_BYTE_CAP / 1_000_000)
+                + math.ceil(
+                    _AUTH_PRICES[1] * _AUTH_PER_RUN["completion_tokens"] / 1_000_000
+                )
+            )
+            released = book["released"]
+            self.assertEqual(released["prompt_tokens"], _REQUEST_BYTE_CAP)
+            self.assertEqual(
+                released["completion_tokens"], _AUTH_PER_RUN["completion_tokens"]
+            )
+            self.assertEqual(released["cost_micro_usd"], entry0_cost)
+            self.assertEqual(
+                released["download_bytes"],
+                _AUTH_PER_RUN["download_bytes"] - len(_happy_tarball()),
+            )
+            self.assertEqual(
+                released["storage_bytes"], _AUTH_PER_RUN["storage_bytes"] - expected_storage
+            )
+            # The measured wall overshot its reservation, so nothing was
+            # releasable on the wall dimension.
+            self.assertEqual(released["wall_ms"], 0)
+            self.assertEqual(book["calls"], 1)
+            self.assertEqual(result.status, "insufficient_sample")
+            self.assertEqual(
+                set(self.error_code_sequence(directory)[1:]), {"REAL_RUN_CANARY_FAILED"}
+            )
+
+    def test_cancellation_writes_partial_evidence_set_and_releases(self):
+        # tg4: a control-flow BaseException injected at the chat transport
+        # re-raises out of the entry after the partial five-file evidence
+        # set is written and the trailing unsettled attempt is released.
+        interrupt = KeyboardInterrupt("synthetic-operator-cancel")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport(
+                responses=[_chat_response(), _chat_response(), interrupt]
+            )
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 3)
+            expected_files = [
+                "approval.json",
+                "ledger.json",
+                "machine_profile.json",
+                "manifest.json",
+            ]
+            for name in expected_files:
+                self.assertTrue((root / name).is_file(), name)
+            attempt_files = sorted(path.name for path in (root / "attempts").glob("*"))
+            self.assertEqual(
+                attempt_files,
+                ["attempt-00.json", "attempt-01.json", "attempt-02.json"],
+            )
+            cancelled = self.read_attempt(directory, 2)
+            self.assertEqual(cancelled["outcome"], "cancelled")
+            self.assertEqual(cancelled["failure_code"], "EXECUTION_CANCELLED")
+            self.assertIsNone(cancelled["error_code"])
+            self.assertIsNone(cancelled["error_field_path"])
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["attempt_count"], 3)
+            self.assertEqual(manifest["cold_count"], _COLD_COUNT)
+            self.assertEqual(manifest["warm_count"], _WARM_COUNT)
+            self.assertEqual(
+                manifest["failures"],
+                [
+                    {
+                        "attempt_index": 2,
+                        "failure_code": "EXECUTION_CANCELLED",
+                        "error_code": None,
+                        "error_field_path": None,
+                    }
+                ],
+            )
+            self.assertIn("batch_wall_ms", manifest)
+            self.assertIsInstance(manifest["batch_wall_ms"], int)
+            self.assertGreaterEqual(manifest["batch_wall_ms"], 0)
+            self.assertIn("deadline", manifest)
+            # D8 reconciliation: the trailing pending reservation is
+            # released (reserved zero), the two settled successes keep
+            # their usage, and the granted calls are not recycled.
+            book = json.loads((root / "ledger.json").read_bytes().decode("utf-8"))
+            batch = book["batch"]
+            self.assertEqual(set(batch["reserved"].values()), {0})
+            self.assertEqual(batch["calls"], 3)
+            self.assertEqual(batch["consumed"]["prompt_tokens"], 2_000)
+            # The aggregate and report are honestly absent on the
+            # cancelled path; the orchestration persisted exactly the
+            # three per-attempt run files and nothing after them.
+            self.assertEqual(list(root.glob("*-report-*")), [])
+            run_sequences = sorted(
+                int(path.stem.rsplit("-", 1)[1])
+                for path in root.iterdir()
+                if _RUN_NAME_PATTERN.match(path.name)
+            )
+            self.assertEqual(run_sequences, [1, 2, 3])
+        # Cancellation on attempt-0 keeps the D8 attempt-0 partial
+        # observation (measured download/storage of the completed
+        # materialization) while releasing the reservation.
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport(responses=[interrupt])
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["attempt_count"], 1)
+            self.assertEqual(
+                manifest["failures"],
+                [
+                    {
+                        "attempt_index": 0,
+                        "failure_code": "EXECUTION_CANCELLED",
+                        "error_code": None,
+                        "error_field_path": None,
+                    }
+                ],
+            )
+            cancelled0 = self.read_attempt(directory, 0)
+            self.assertEqual(cancelled0["outcome"], "cancelled")
+            book = json.loads((root / "ledger.json").read_bytes().decode("utf-8"))
+            batch = book["batch"]
+            self.assertEqual(set(batch["reserved"].values()), {0})
+            self.assertEqual(batch["calls"], 1)
+            self.assertEqual(batch["consumed"]["download_bytes"], len(_happy_tarball()))
+            expected_storage = sum(
+                len(text.encode("utf-8")) for text in _happy_files().values()
+            )
+            self.assertEqual(batch["consumed"]["storage_bytes"], expected_storage)
+            self.assertEqual(
+                sorted(path.name for path in (root / "attempts").glob("*")),
+                ["attempt-00.json"],
+            )
+            run_sequences = sorted(
+                int(path.stem.rsplit("-", 1)[1])
+                for path in root.iterdir()
+                if _RUN_NAME_PATTERN.match(path.name)
+            )
+            self.assertEqual(run_sequences, [1])
+
+    def test_transport_timeout_clamped_to_remaining_deadline(self):
+        # tg5: the four-argument transport contract is unchanged; the
+        # timeout argument passed to the transport is clamped to the
+        # remaining attempt deadline, max(1, min(timeout_seconds,
+        # ceil(remaining_seconds))) -- the min branch, the >=1 floor, and
+        # the untouched timeout_seconds branch.
+        def widen_wall(document):
+            document["budget"]["per_run"]["wall_ms"] = 1_500_000
+
+        cases = (
+            ("min-branch", 1_400_000, 100),
+            ("floor-branch", 1_499_990, 1),
+            ("timeout-seconds-branch", 0, 1_500),
+        )
+        for label, jump_ms, expected_timeout in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    clock = _JumpClock()
+                    stream = _JumpingTarballStream(
+                        _happy_tarball(), clock, jump_on_read=1, jump_ms=jump_ms
+                    )
+                    transport = _FakeTransport(
+                        download_factory=lambda stream=stream: stream,
+                        responses=[_chat_response()],
+                    )
+                    self.patch_monotonic(clock)
+                    approval = self.write_artifact(directory, widen_wall)
+                    self.run_entry(
+                        directory,
+                        transport=transport,
+                        artifact_path=approval,
+                        timeout_seconds=1_500,
+                    )
+                    self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+                    self.assertEqual(transport.chat_timeouts[0], expected_timeout)
+                    self.assertEqual(transport.chat_timeouts[1:], [1_500] * 9)
+
+    def test_batch_wall_margin_clamps_attempt_deadline(self):
+        # tg6: with per_run.wall_ms 2,400,000 and batch.wall_ms 7,200,000,
+        # each 1,500,000 ms chat keeps attempts 0-3 under the per-run
+        # deadline; from attempt 4 on, the consumed batch wall (6,000,000)
+        # leaves a 1,200,000 ms batch margin that clamps the attempt
+        # deadline below per-run -- observable in the clamped transport
+        # timeout and in the post-chat recheck failures.
+        def widen_walls(document):
+            document["budget"]["per_run"]["wall_ms"] = 2_400_000
+            document["budget"]["batch"]["wall_ms"] = 7_200_000
+
+        clock = _JumpClock()
+        with tempfile.TemporaryDirectory() as directory:
+            transport = _ClockJumpChatTransport(
+                clock=clock,
+                chat_jump_ms=1_500_000,
+                tarball=_happy_tarball(),
+                responses=[_chat_response()],
+            )
+            self.patch_monotonic(clock)
+            approval = self.write_artifact(directory, widen_walls)
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                timeout_seconds=2_000,
+            )
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            self.assertEqual(transport.chat_timeouts, [2_000] * 4 + [1_200] * 6)
+            outcomes = [
+                self.read_attempt(directory, index)["outcome"]
+                for index in range(_ATTEMPT_TOTAL)
+            ]
+            self.assertEqual(outcomes.count("success"), 4)
+            self.assertEqual(outcomes.count("timeout"), 6)
+            for index in range(4, _ATTEMPT_TOTAL):
+                attempt = self.read_attempt(directory, index)
+                self.assertEqual(attempt["failure_code"], "EXECUTION_TIMEOUT")
+                self.assertEqual(attempt["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+                self.assertEqual(attempt["error_field_path"], "$.transport")
+            book = result.ledger_snapshot.batch
+            self.assertEqual(book["consumed"]["wall_ms"], 6_000_000)
+            self.assertEqual(book["calls"], _ATTEMPT_TOTAL)
+
+    def test_manifest_batch_wall_ms_and_deadline_observation(self):
+        # tg7: the manifest carries the additive batch wall (int >= 0) and
+        # the evidence-phase deadline observation block -- false on a
+        # healthy margin, true once a D7 partial observation pushes the
+        # consumed batch wall past the batch cap (the run still completes
+        # and writes every remaining evidence file).
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport()
+            self.run_entry(directory, transport=transport)
+            manifest = self.read_manifest(directory)
+            self.assertIn("batch_wall_ms", manifest)
+            self.assertIsInstance(manifest["batch_wall_ms"], int)
+            self.assertGreaterEqual(manifest["batch_wall_ms"], 0)
+            self.assertIn("deadline", manifest)
+            self.assertEqual(manifest["deadline"], {"batch_wall_exceeded": False})
+        clock = _JumpClock()
+        with tempfile.TemporaryDirectory() as directory:
+            transport = _ClockJumpChatTransport(
+                clock=clock,
+                chat_jump_ms=12_500_000,
+                tarball=_happy_tarball(),
+                responses=[_chat_response()],
+            )
+            self.patch_monotonic(clock)
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(
+                result.ledger_snapshot.batch["consumed"]["wall_ms"], 12_500_000
+            )
+            manifest = self.read_manifest(directory)
+            self.assertIn("deadline", manifest)
+            self.assertIs(manifest["deadline"]["batch_wall_exceeded"], True)
+            self.assertIn("batch_wall_ms", manifest)
+            self.assertIsInstance(manifest["batch_wall_ms"], int)
+            self.assertEqual(
+                set(self.error_code_sequence(directory)[1:]), {"REAL_RUN_CANARY_FAILED"}
+            )
+
+
+class TestHonestObservation(_RealRunTestCase):
+    """FR-03 / FR-04 / AC-3 / AC-4: honest cold-warm and separated metrics."""
+
+    def test_state_reuse_annotation_and_process_identity(self):
+        # ho1: the state_reuse sub-block annotates the actual execution
+        # face of every attempt (attempt-0 materializes and rebuilds the
+        # request body; the follow-ons reuse the snapshot and the cached
+        # body), and the process identity is one digest token shared by
+        # the whole suite (the frozen _digest_token form; a restart
+        # changes it).  The mode labels stay exactly 0-4 cold / 5-9 warm.
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport()
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(result.status, "sufficient_sample")
+            identities = set()
+            modes = []
+            for index in range(_ATTEMPT_TOTAL):
+                document = self.read_attempt(directory, index)
+                self.assertIn("state_reuse", document)
+                reuse = document["state_reuse"]
+                self.assertEqual(set(reuse), _STATE_REUSE_KEYS)
+                expected_flags = (
+                    (True, False, True) if index == 0 else (False, True, False)
+                )
+                self.assertEqual(
+                    (
+                        reuse["materialized"],
+                        reuse["snapshot_reused"],
+                        reuse["request_body_rebuilt"],
+                    ),
+                    expected_flags,
+                )
+                identities.add(reuse["process_identity"])
+                modes.append(document["mode"])
+            self.assertEqual(len(identities), 1)
+            identity = identities.pop()
+            self.assertIsInstance(identity, str)
+            self.assertTrue(identity)
+            self.assertIsNotNone(_SF01_TOKEN_PATTERN.match(identity))
+            self.assertEqual(modes, ["cold"] * _COLD_COUNT + ["warm"] * _WARM_COUNT)
+
+    def test_provider_cache_observation_keys_and_null_discipline(self):
+        # ho2: compliant cache counters land in the observation face;
+        # missing or non-compliant values stay null (never a fabricated
+        # zero); the counters never reach any ledger face and the frozen
+        # six-field usage view is unchanged.
+        def cached_response(hit, miss):
+            body = _chat_response()
+            body["usage"]["prompt_cache_hit_tokens"] = hit
+            body["usage"]["prompt_cache_miss_tokens"] = miss
+            return body
+
+        usage_view_keys = _LEDGER_BOOK_DIMENSIONS
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[cached_response(64, 936)])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            self.assertEqual(result.status, "sufficient_sample")
+            for index in range(_ATTEMPT_TOTAL):
+                document = self.read_attempt(directory, index)
+                self.assertIn("provider_cache", document)
+                cache = document["provider_cache"]
+                self.assertEqual(set(cache), _PROVIDER_CACHE_KEYS)
+                self.assertEqual(cache["prompt_cache_hit_tokens"], 64)
+                self.assertEqual(cache["prompt_cache_miss_tokens"], 936)
+                self.assertEqual(set(document["usage"]), usage_view_keys)
+            book = result.ledger_snapshot.batch
+            for face in ("consumed", "reserved", "released"):
+                self.assertNotIn("prompt_cache_hit_tokens", book[face])
+                self.assertNotIn("prompt_cache_miss_tokens", book[face])
+            self.assertEqual(set(book["consumed"]), usage_view_keys)
+        for label, hit in (("missing", None), ("non-int", "64"), ("negative", -1)):
+            with self.subTest(case=label):
+                body = _chat_response()
+                if hit is not None:
+                    body["usage"]["prompt_cache_hit_tokens"] = hit
+                with tempfile.TemporaryDirectory() as directory:
+                    transport = self.happy_transport(responses=[body])
+                    result = self.run_entry(directory, transport=transport)
+                    self.assertEqual(result.status, "sufficient_sample")
+                    self.assertIn("provider_cache", self.read_attempt(directory, 0))
+                    cache = self.read_attempt(directory, 0)["provider_cache"]
+                    self.assertIsNone(cache["prompt_cache_hit_tokens"])
+                    self.assertIsNone(cache["prompt_cache_miss_tokens"])
+
+    def test_timings_separation_and_none_discipline(self):
+        # ho3: api_latency_ms is the same measurement as latency_ms, the
+        # attempt wall dominates it, and the download/extract phase
+        # channels are attempt-0 only.  On a request-side refusal (after
+        # materialization, before the chat) the api-latency channel is
+        # unread (null on both faces) while the attempt wall and the
+        # attempt-0 phase channels keep honest values.
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport()
+            self.run_entry(directory, transport=transport)
+            for index in range(_ATTEMPT_TOTAL):
+                with self.subTest(index=index):
+                    document = self.read_attempt(directory, index)
+                    self.assertIn("timings", document)
+                    timings = document["timings"]
+                    self.assertEqual(set(timings), _TIMINGS_KEYS)
+                    self.assertEqual(timings["api_latency_ms"], document["latency_ms"])
+                    self.assertIsInstance(timings["api_latency_ms"], int)
+                    self.assertGreaterEqual(
+                        timings["attempt_wall_ms"], timings["api_latency_ms"]
+                    )
+                    if index == 0:
+                        self.assertIsInstance(timings["download_ms"], int)
+                        self.assertGreaterEqual(timings["download_ms"], 0)
+                        self.assertIsInstance(timings["extract_ms"], int)
+                        self.assertGreaterEqual(timings["extract_ms"], 0)
+                    else:
+                        self.assertIsNone(timings["download_ms"])
+                        self.assertIsNone(timings["extract_ms"])
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(tarball=_cjk_tarball())
+            self.run_entry(directory, transport=transport)
+            document = self.read_attempt(directory, 0)
+            self.assertIn("timings", document)
+            timings = document["timings"]
+            self.assertIsNone(document["latency_ms"])
+            self.assertIsNone(timings["api_latency_ms"])
+            self.assertIsInstance(timings["attempt_wall_ms"], int)
+            self.assertGreaterEqual(timings["attempt_wall_ms"], 0)
+            self.assertIsInstance(timings["download_ms"], int)
+            self.assertIsInstance(timings["extract_ms"], int)
+
+    def test_cold_label_with_cache_hit_decidable_and_mode_unchanged(self):
+        # ho4: the decidable falsification pair -- a cold mode label and a
+        # non-zero provider cache hit coexist on the evidence face, so a
+        # cold-start claim made from the mode label alone is falsifiable
+        # by the observation keys (Packet 7.5.4 conclusion-limitation
+        # rules); the mode sequence itself is untouched.
+        body = _chat_response()
+        body["usage"]["prompt_cache_hit_tokens"] = 64
+        body["usage"]["prompt_cache_miss_tokens"] = 936
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(result.status, "sufficient_sample")
+            modes = []
+            for index in range(_ATTEMPT_TOTAL):
+                document = self.read_attempt(directory, index)
+                modes.append(document["mode"])
+                self.assertIn("state_reuse", document)
+                self.assertIn("provider_cache", document)
+            self.assertEqual(modes, ["cold"] * _COLD_COUNT + ["warm"] * _WARM_COUNT)
+            first = self.read_attempt(directory, 0)
+            self.assertEqual(first["mode"], "cold")
+            self.assertEqual(first["provider_cache"]["prompt_cache_hit_tokens"], 64)
+
+    def test_frozen_taxonomy_checkpoints_and_canary_static_anchors(self):
+        # ho5: the time-governance evolution must not touch the frozen
+        # wire faces -- exactly ten error codes, the closed
+        # eleven-checkpoint map, and the five canary keys stay verbatim.
+        module = self.real_run()
+        self.assertEqual(
+            {member.value for member in module.RealRunErrorCode}, _FROZEN_ERROR_CODES
+        )
+        checkpoint_paths = module._CHECKPOINT_FIELD_PATHS
+        self.assertEqual(
+            {
+                member.value: checkpoint_paths[member]
+                for member in module.RealRunResponseCheckpoint
+            },
+            dict(_CHECKPOINT_FIELD_PATHS),
+        )
+        self.assertEqual(set(module._CANARY_CHECK_KEYS), _CANARY_CHECK_KEYS)
 
 
 if __name__ == "__main__":  # pragma: no cover

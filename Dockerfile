@@ -60,6 +60,7 @@ COPY --chown=lima:lima docs/LIMA_PR3d_Real_Run_Approval_2026-09-28.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0032_Real_Run.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0033_Real_Run_Diagnostics.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0034_Identity_SF01.md ./docs/
+COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0035_Time_Governance.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0020_Vault_Audit.md ./docs/
 COPY --chown=lima:lima docs/adr ./docs/adr
 COPY --chown=lima:lima schemas ./schemas

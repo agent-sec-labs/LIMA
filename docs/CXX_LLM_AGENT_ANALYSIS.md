@@ -275,7 +275,11 @@ Agent Finding（含验证状态与 `automatic_repair`）、状态计数、usage�
 
 真实网络只发生在评测脚本运行时；普通 PR 的 CI 只跑 Fake-LLM 合同测试。
 
-## CI 触发矩阵
+## CI 触发矩阵（已失效）
+
+> **2026-09-28 更新**：下表中的评测 job 已从 CI 移除；所有评测现为仅本地手动运行
+> （脚本保留在 `scripts/run_uaf_v2_evaluation.py`，读取 `LIMA_LLM_*` 环境变量，
+> `--provider-url / --provider-key / --model` 可显式覆盖）。以下保留为历史参考。
 
 | 事件 | 执行内容 |
 |---|---|

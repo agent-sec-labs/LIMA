@@ -1227,10 +1227,6 @@ class FinalRenderingDownloadAndIdentityTests(unittest.TestCase):
                 {"precision": None}, b'{}', analyzer_image_digest=None
             )
 
-        workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("docker image inspect", workflow)
-        self.assertIn("--analyzer-image-digest", workflow)
-
         dockerfile = Path("cxx_analyzer/Dockerfile").read_text(encoding="utf-8")
         self.assertIn("dpkg-query", dockerfile)
         self.assertIn("analyzer-toolchain-packages", dockerfile)

@@ -795,25 +795,29 @@ class CliAndCiContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_evaluation_module()
 
-    def test_public_evaluation_artifact_retains_toolchain_manifests(self):
-        workflow = yaml.safe_load(
-            Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        )
-        names = set()
-        for job in workflow.get("jobs", {}).values():
-            for step in job.get("steps") or []:
-                if "upload-artifact" not in str(step.get("uses") or ""):
-                    continue
-                name = str(step.get("with", {}).get("name") or "")
-                names.add(name.replace("${{ matrix.case-id }}", "").rstrip("-"))
-        self.assertGreaterEqual(
-            names,
-            {"evaluation-report", "debian-packages", "python-packages", "image-inspect"},
-        )
-        ci_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("analyzer-toolchain-packages.txt", ci_text)
-        self.assertIn("analyzer-python-packages.txt", ci_text)
-        self.assertIn("docker image inspect", ci_text)
+    def test_manual_evaluation_script_and_case_data_are_intact(self):
+        """Retired CI jobs leave the manual evaluation path functional.
+
+        The evaluation script and case manifest must remain importable and
+        structurally valid so manual local runs still work.
+        """
+        module = self.module
+        # The script exposes the mandatory identity parameters.
+        parser = module.build_parser()
+        options = {
+            option
+            for action in parser._actions
+            for option in action.option_strings
+        }
+        self.assertIn("--analyzer-image-digest", options)
+        self.assertIn("--analyzer-base-image-digest", options)
+        # The frozen case manifest is still complete enough to score.
+        manifest = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(manifest["cases"]), 4)
+        for case in manifest["cases"]:
+            self.assertIn("id", case)
+            self.assertIn("vulnerable_commit", case)
+            self.assertIn("fixed_commit", case)
 
     def test_report_metadata_records_validated_base_image_identity(self):
         base = "sha256:" + "b" * 64
@@ -913,7 +917,6 @@ class CliAndCiContractTests(unittest.TestCase):
         events = workflow[True]
         self.assertIn("pull_request", events)
         self.assertIn("workflow_dispatch", events)
-        self.assertIn("schedule", events)
         matrix = workflow["jobs"]["unit-tests"]["strategy"]["matrix"]
         self.assertEqual({"ubuntu-latest", "windows-latest"}, set(matrix["os"]))
         self.assertEqual({"3.11", "3.12"}, set(matrix["python-version"]))
@@ -931,21 +934,6 @@ class CliAndCiContractTests(unittest.TestCase):
         self.assertIn("--cap-drop ALL", commands)
         self.assertNotIn("/var/run/docker.sock", commands)
         self.assertNotRegex(commands, r"(?:^|\s)-p\s|--publish")
-
-        public = workflow["jobs"]["public-cxx-memory-evaluation"]
-        manifest = json.loads(CASES_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(
-            {case["id"] for case in manifest["cases"]},
-            set(public["strategy"]["matrix"]["case-id"]),
-        )
-        public_commands = "\n".join(
-            step.get("run", "") for step in public["steps"] if isinstance(step, dict)
-        )
-        self.assertIn("prepare_cxx_memory_evaluation_case.py", public_commands)
-        self.assertIn("--env LIMA_CXX_BUILD_STEPS_JSON", public_commands)
-        self.assertIn("--env LIMA_CXX_TEST_STEPS_JSON", public_commands)
-        self.assertIn("--env LIMA_CXX_EVALUATION_CASE_ID", public_commands)
-        self.assertNotIn("steps.case.outputs.build_steps_json", public_commands)
 
 
 if __name__ == "__main__":

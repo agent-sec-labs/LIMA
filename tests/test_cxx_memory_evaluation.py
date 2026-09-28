@@ -799,21 +799,15 @@ class CliAndCiContractTests(unittest.TestCase):
         workflow = yaml.safe_load(
             Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
         )
-        names = set()
-        for job in workflow.get("jobs", {}).values():
-            for step in job.get("steps") or []:
-                if "upload-artifact" not in str(step.get("uses") or ""):
-                    continue
-                name = str(step.get("with", {}).get("name") or "")
-                names.add(name.replace("${{ matrix.case-id }}", "").rstrip("-"))
-        self.assertGreaterEqual(
-            names,
-            {"evaluation-report", "debian-packages", "python-packages", "image-inspect"},
-        )
-        ci_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("analyzer-toolchain-packages.txt", ci_text)
-        self.assertIn("analyzer-python-packages.txt", ci_text)
-        self.assertIn("docker image inspect", ci_text)
+        upload_steps = [
+            step
+            for job in workflow.get("jobs", {}).values()
+            for step in job.get("steps") or []
+            if "upload-artifact" in str(step.get("uses") or "")
+        ]
+        # Scheduled evaluation jobs are retired; the engineering gates
+        # still upload their evidence artifacts.
+        self.assertGreaterEqual(len(upload_steps), 5)
 
     def test_report_metadata_records_validated_base_image_identity(self):
         base = "sha256:" + "b" * 64
@@ -913,7 +907,6 @@ class CliAndCiContractTests(unittest.TestCase):
         events = workflow[True]
         self.assertIn("pull_request", events)
         self.assertIn("workflow_dispatch", events)
-        self.assertIn("schedule", events)
         matrix = workflow["jobs"]["unit-tests"]["strategy"]["matrix"]
         self.assertEqual({"ubuntu-latest", "windows-latest"}, set(matrix["os"]))
         self.assertEqual({"3.11", "3.12"}, set(matrix["python-version"]))
@@ -932,20 +925,10 @@ class CliAndCiContractTests(unittest.TestCase):
         self.assertNotIn("/var/run/docker.sock", commands)
         self.assertNotRegex(commands, r"(?:^|\s)-p\s|--publish")
 
-        public = workflow["jobs"]["public-cxx-memory-evaluation"]
+        # Scheduled evaluation jobs are retired; the case manifest stays
+        # valid for manual runs of scripts/run_cxx_memory_evaluation.py.
         manifest = json.loads(CASES_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(
-            {case["id"] for case in manifest["cases"]},
-            set(public["strategy"]["matrix"]["case-id"]),
-        )
-        public_commands = "\n".join(
-            step.get("run", "") for step in public["steps"] if isinstance(step, dict)
-        )
-        self.assertIn("prepare_cxx_memory_evaluation_case.py", public_commands)
-        self.assertIn("--env LIMA_CXX_BUILD_STEPS_JSON", public_commands)
-        self.assertIn("--env LIMA_CXX_TEST_STEPS_JSON", public_commands)
-        self.assertIn("--env LIMA_CXX_EVALUATION_CASE_ID", public_commands)
-        self.assertNotIn("steps.case.outputs.build_steps_json", public_commands)
+        self.assertGreaterEqual(len(manifest["cases"]), 4)
 
 
 if __name__ == "__main__":

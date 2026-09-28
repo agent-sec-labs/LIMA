@@ -39,6 +39,20 @@ digest token ``~d:<len>:<sha256>``.  The bounded transform is an evidence
 face, never a failure mode, and the in-memory identity, drift, and canary
 logic keeps comparing full strings.
 
+IP-0035 adds the time-governance face: every wall, deadline, latency, and
+attempt-wall measurement reads the single module monotonic seam
+``_monotonic``, each attempt runs under the executable deadline
+``min(per_run.wall_ms, batch wall margin)`` with in-execution checks in
+the download, extraction, and chat phases plus a post-chat recheck (a
+deadline miss is the typed EXECUTION_TIMEOUT family under the frozen
+transport code, settled release-only with the attempt-0 partial
+observation), a control-flow ``BaseException`` out of ``run_repeats``
+releases the trailing unsettled attempt as EXECUTION_CANCELLED and writes
+the partial five-file evidence set before the original exception is
+re-raised unchanged, and the attempt documents gain the additive
+state_reuse/provider_cache/timings observation sub-blocks while the
+manifest gains ``batch_wall_ms`` and the pure-observation deadline block.
+
 The locked IP-0031 gate face is untouched: ``budget.REAL_RUN_GATE_UNLOCKED``
 stays ``False``, ``require_real_run_unlock`` is neither called nor modified,
 and this authorized path is independent of both.  The module reads no
@@ -58,6 +72,7 @@ import enum
 import hashlib
 import json
 import math
+import os
 import pathlib
 import re
 import tarfile
@@ -92,6 +107,14 @@ __all__ = [
     "RealSuiteResult",
     "run_real_baseline_suite",
 ]
+
+#: The single module monotonic seam (IP-0035 Packet 7.3.4): every wall,
+#: deadline, latency, and attempt-wall measurement in this module reads
+#: this callable instead of ``time.monotonic`` directly, so the frozen
+#: tests can inject a deterministic clock (never a real sleep).  The
+#: budget ledger keeps its own injectable ``now_ns`` clock and is never
+#: read through this seam.
+_monotonic: typing.Callable[[], float] = time.monotonic
 
 #: The frozen price pin (micro-USD per million tokens, 2026-09-28 peak
 #: cache-miss basis): the sole definition source for the two-source price
@@ -144,6 +167,14 @@ _CANARY_CHECK_KEYS: typing.Final[tuple[str, ...]] = (
 )
 _EXECUTION_COMMIT_PLACEHOLDER: typing.Final[str] = "pending-operator-record"
 _TOKENS_PER_MILLION: typing.Final[int] = 1_000_000
+
+#: The closed two-key provider-cache observation face (IP-0035 Packet
+#: 7.5.2): read-only counters from the response usage block, never part of
+#: the six-field usage view, any ledger face, or any budget gate.
+_PROVIDER_CACHE_KEYS: typing.Final[tuple[str, ...]] = (
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
+)
 
 _SYSTEM_TEXT: typing.Final[str] = (
     "You are a defensive security triage assistant. You never execute code,"
@@ -492,6 +523,11 @@ class _AttemptRecord:
     persistence fields and carry only SF-01 bounded values (verbatim under
     the frozen predicates, digest tokens otherwise); the in-memory identity,
     drift, and canary logic reads full strings and never these fields.
+    IP-0035 adds the additive observation carriers: ``state_reuse`` and
+    ``provider_cache`` (both evidence sub-blocks), the timing scalars
+    ``attempt_wall_ms``/``download_ms``/``extract_ms`` (with
+    ``api_latency_ms`` composed from ``latency_ms`` at emission), and the
+    internal-only monotonic attempt anchor ``wall_anchor`` -- never emitted.
     """
 
     attempt_index: int
@@ -513,6 +549,14 @@ class _AttemptRecord:
     diagnostic: dict[str, object] | None = None
     resources: dict[str, int] | None = None
     settle_usage_tokens: tuple[int, int] | None = None
+    state_reuse: dict[str, object] | None = None
+    provider_cache: dict[str, int | None] = dataclasses.field(
+        default_factory=lambda: dict.fromkeys(_PROVIDER_CACHE_KEYS)
+    )
+    attempt_wall_ms: int | None = None
+    download_ms: int | None = None
+    extract_ms: int | None = None
+    wall_anchor: float | None = None
 
     def to_document(self) -> dict[str, object]:
         """The closed-key per-attempt evidence mapping (Packets 7.9 and 7.4)."""
@@ -539,6 +583,14 @@ class _AttemptRecord:
             "error_field_path": self.error_field_path,
             "diagnostic": None if self.diagnostic is None else dict(self.diagnostic),
             "resources": None if self.resources is None else dict(self.resources),
+            "state_reuse": dict(self.state_reuse) if self.state_reuse else {},
+            "provider_cache": dict(self.provider_cache),
+            "timings": {
+                "api_latency_ms": self.latency_ms,
+                "attempt_wall_ms": self.attempt_wall_ms,
+                "download_ms": self.download_ms,
+                "extract_ms": self.extract_ms,
+            },
         }
 
 
@@ -894,6 +946,28 @@ def _compliant_usage_tokens(document: object) -> tuple[int, int] | None:
     return prompt_tokens, completion_tokens
 
 
+def _provider_cache_observation(document: object) -> dict[str, int | None]:
+    """The compliant provider-cache observation of one response document.
+
+    Each counter is read independently and only an exact non-negative int
+    is admitted; a missing or non-compliant value stays ``None`` (never a
+    fabricated zero).  The observation is a pure evidence face: it never
+    feeds ``CallUsage``, any ledger dimension, or any budget gate
+    (IP-0035 Packet 7.5.2).
+    """
+    observation: dict[str, int | None] = dict.fromkeys(_PROVIDER_CACHE_KEYS)
+    if not isinstance(document, dict):
+        return observation
+    usage_block = document.get("usage")
+    if not isinstance(usage_block, dict):
+        return observation
+    for key in _PROVIDER_CACHE_KEYS:
+        value = usage_block.get(key)
+        if type(value) is int and value >= 0:
+            observation[key] = value
+    return observation
+
+
 def _usage_document(usage: CallUsage) -> dict[str, int]:
     """The closed six-field usage view of one settled call (Packet 7.5)."""
     return {
@@ -906,6 +980,33 @@ def _usage_document(usage: CallUsage) -> dict[str, int]:
     }
 
 
+def _bounded_read_all(source: object, budget_seconds: float) -> bytes:
+    """Deadline-aware bounded accumulation of one file-like body (IP-0035).
+
+    The product-default transport reads its POST response body through
+    this helper instead of one unbounded ``read()``: chunks accumulate
+    while the module monotonic seam stays under the per-call budget (the
+    guarded caller already clamped that budget to the remaining attempt
+    deadline), and a crossing raises ``TimeoutError`` so the guarded
+    caller maps it onto the frozen timeout taxonomy.  The helper works on
+    any file-like object, which is what keeps this form offline-testable
+    (Packet 7.3.2-3).
+    """
+    read = getattr(source, "read", None)
+    if not callable(read):  # pragma: no cover - defensive
+        raise TypeError("transport body is not readable")
+    parts: list[bytes] = []
+    start = _monotonic()
+    while True:
+        chunk = read(DOWNLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        parts.append(chunk)
+        if _monotonic() - start >= budget_seconds:
+            raise TimeoutError("bounded read exceeded its per-call deadline")
+    return b"".join(parts)
+
+
 def _urllib_transport(
     url: str,
     payload: bytes | None,
@@ -915,8 +1016,9 @@ def _urllib_transport(
     """The default transport, used only for the authorized real execution.
 
     ``payload is None`` is the GET semantics (streaming file object); bytes
-    mean one POST whose full response body is returned.  HTTP and URL errors
-    are ``OSError`` family members and propagate to the guarded caller's
+    mean one POST whose response body is accumulated through the bounded
+    deadline-aware reader above.  HTTP and URL errors are ``OSError``
+    family members and propagate to the guarded caller's
     ``REAL_RUN_TRANSPORT_FAILED`` mapping.  Both URLs are identity-pinned
     https values from the validated approval artifact.
     """
@@ -933,7 +1035,7 @@ def _urllib_transport(
     with urllib.request.urlopen(  # noqa: S310 - pinned https  # nosec B310
         request, timeout=timeout
     ) as response:
-        return response.read()
+        return _bounded_read_all(response, timeout)
 
 
 def _walk_python_files(snapshot_root: pathlib.Path) -> list[pathlib.Path]:
@@ -1030,6 +1132,11 @@ class _GuardedRealEvaluator:
         )
         self._invocations = 0
         self._latched = False
+        # One digest-token process identity per suite (IP-0035 Packet 7.5.1):
+        # captured once here, identical across every attempt of the batch,
+        # and changed by a process restart.  The raw pid digit string never
+        # reaches any evidence face.
+        self._process_identity = _digest_token(str(os.getpid()))
         self.records: list[_AttemptRecord] = []
         self._canary_checks: dict[str, bool] | None = None
         self._canary_status = "failed"
@@ -1109,35 +1216,55 @@ class _GuardedRealEvaluator:
         index = self._invocations
         self._invocations += 1
         record = _AttemptRecord(
-            attempt_index=index, mode="cold" if index < _REPEAT_COUNT else "warm"
+            attempt_index=index,
+            mode="cold" if index < _REPEAT_COUNT else "warm",
+            state_reuse={
+                "materialized": False,
+                "snapshot_reused": False,
+                "request_body_rebuilt": False,
+                "process_identity": self._process_identity,
+            },
         )
+        record.wall_anchor = _monotonic()
         self.records.append(record)
-        if self._latched:
-            raise self._typed(record, RealRunErrorCode.REAL_RUN_CANARY_FAILED)
-        if index == 1:
-            self._run_canary_checklist()
-            if self._canary_status != "passed":
-                self._latched = True
-                raise self._typed(record, RealRunErrorCode.REAL_RUN_CANARY_FAILED)
-        run_id = f"attempt-{index}"
         try:
-            self._ledger.reserve(run_id, self._estimate_for(index))
-        except BudgetGateError as exc:
-            record.outcome = "failure"
-            record.failure_code = "EXECUTION_ERROR"
-            record.error_code = exc.code.value
-            record.error_field_path = exc.field_path
-            raise
-        if index == 0:
-            estimate = self._estimate_for(0)
-            self._attempt0_estimate = {
-                name: getattr(estimate, name) for name in _ESTIMATE_FIELD_NAMES
-            }
-            self._attempt0_estimate["cost_micro_usd"] = _worst_case_cost(
-                estimate.prompt_tokens, estimate.completion_tokens
-            )
-        self._run_attempt(index, run_id, record)
-        return None
+            if self._latched:
+                raise self._typed(record, RealRunErrorCode.REAL_RUN_CANARY_FAILED)
+            if index == 1:
+                self._run_canary_checklist()
+                if self._canary_status != "passed":
+                    self._latched = True
+                    raise self._typed(
+                        record, RealRunErrorCode.REAL_RUN_CANARY_FAILED
+                    )
+            run_id = f"attempt-{index}"
+            try:
+                self._ledger.reserve(run_id, self._estimate_for(index))
+            except BudgetGateError as exc:
+                record.outcome = "failure"
+                record.failure_code = "EXECUTION_ERROR"
+                record.error_code = exc.code.value
+                record.error_field_path = exc.field_path
+                raise
+            if index == 0:
+                estimate = self._estimate_for(0)
+                self._attempt0_estimate = {
+                    name: getattr(estimate, name) for name in _ESTIMATE_FIELD_NAMES
+                }
+                self._attempt0_estimate["cost_micro_usd"] = _worst_case_cost(
+                    estimate.prompt_tokens, estimate.completion_tokens
+                )
+            self._run_attempt(index, run_id, record)
+            return None
+        finally:
+            # The attempt wall closes on every exit (IP-0035 Packet 7.6.1):
+            # success, typed failure, budget refusal, and the instant a
+            # control-flow cancellation unwinds through this frame (the
+            # cancellation path re-measures it later at its catch point).
+            if record.wall_anchor is not None:
+                record.attempt_wall_ms = max(
+                    0, int((_monotonic() - record.wall_anchor) * 1000)
+                )
 
     def _typed(
         self,
@@ -1152,12 +1279,52 @@ class _GuardedRealEvaluator:
         record.error_field_path = field_path
         return RealRunError(code, field_path)
 
+    def _past_deadline(self, anchor: float, deadline_ms: int) -> bool:
+        """True when the monotonic window from ``anchor`` reached the deadline."""
+        return (_monotonic() - anchor) * 1000.0 >= deadline_ms
+
+    def _timeout_failure(
+        self, record: _AttemptRecord, field_path: str
+    ) -> RealRunError:
+        """Book one typed deadline failure onto the record and build the error.
+
+        The EXECUTION_TIMEOUT family (IP-0035 Packet 7.2): the wire error
+        code stays the frozen transport failure while the free-string
+        ``failure_code`` channel and the phase structure path carry the
+        taxonomy; the settlement is release-only (D7).
+        """
+        record.outcome = "timeout"
+        record.failure_code = "EXECUTION_TIMEOUT"
+        record.error_code = RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED.value
+        record.error_field_path = field_path
+        return RealRunError(RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED, field_path)
+
+    def _attempt_deadline_ms(self) -> int:
+        """The executable attempt deadline (IP-0035 Packet 7.3.1).
+
+        ``min(per_run.wall_ms, batch wall margin)`` where the margin reads
+        the ledger at the attempt boundary -- every earlier attempt is
+        settled there and holds no pending reservation, so the consumed
+        wall alone carries the spent batch time.  The anchor of the
+        measurement is the attempt-start monotonic anchor.
+        """
+        book = self._ledger.snapshot().batch
+        margin = (
+            self._approval.budget_spec.batch.wall_ms
+            - book["consumed"]["wall_ms"]
+        )
+        return min(self._approval.budget_spec.per_run.wall_ms, margin)
+
     def _estimate_for(self, index: int) -> CallEstimate:
         if index == 0:
+            # The attempt-0 worst case admits the artifact's own per-run wall
+            # (identical to the frozen ``_WALL_ESTIMATE_MS`` on the pinned
+            # artifact, where per_run.wall_ms equals the constant; a widened
+            # test artifact scales its own worst case, IP-0035 Packet 7.1).
             return CallEstimate(
                 prompt_tokens=REQUEST_BODY_BYTE_CAP,
                 completion_tokens=MAX_TOKENS,
-                wall_ms=_WALL_ESTIMATE_MS,
+                wall_ms=self._approval.budget_spec.per_run.wall_ms,
                 download_bytes=_DOWNLOAD_ESTIMATE_BYTES,
                 storage_bytes=_STORAGE_ESTIMATE_BYTES,
             )
@@ -1170,15 +1337,24 @@ class _GuardedRealEvaluator:
     def _run_attempt(
         self, index: int, run_id: str, record: _AttemptRecord
     ) -> None:
+        deadline_ms = self._attempt_deadline_ms()
+        if deadline_ms <= 0:
+            # Defensive refusal (IP-0035 Packet 7.3.1): a passed reservation
+            # implies a positive batch margin under the frozen estimates, so
+            # this typed branch is unreachable offline (DR-IP-0035-PV-5).
+            raise self._timeout_failure(record, "$.transport")
         try:
             if index == 0:
-                self._materialize(record)
+                record.state_reuse["materialized"] = True
+                self._materialize(record, deadline_ms)
+                record.state_reuse["request_body_rebuilt"] = True
                 self._prepare_request(record)
             else:
+                record.state_reuse["snapshot_reused"] = True
                 record.body_bytes = len(self._body_bytes or b"")
                 record.context_chars = self._context_chars
                 record.candidate_files = self._candidate_files
-            self._chat(index, run_id, record)
+            self._chat(index, run_id, record, deadline_ms)
         except RealRunError as exc:
             self._settle(run_id, record, exc)
             raise
@@ -1192,8 +1368,16 @@ class _GuardedRealEvaluator:
         observation is retained (D2); an identity change books its compliant
         usage before latching (D4).  The missing-usage path (D3), transport
         failures (D5), and every other code keep the frozen release-only
-        settlement.  Only the frozen budget primitives are called.
+        settlement.  IP-0035 adds D7: every EXECUTION_TIMEOUT failure
+        settles release-only with the attempt-0 partial observation and
+        never books usage.  Only the frozen budget primitives are called.
         """
+        if record.failure_code == "EXECUTION_TIMEOUT":
+            # D7 (IP-0035 Packet 7.3.3): release-only settlement carrying
+            # the attempt-0 local observation; a deadline miss has no
+            # compliant usage, so record_usage is never reached.
+            self._ledger.record_failure(run_id, self._partial_usage(record))
+            return
         if exc.code is RealRunErrorCode.REAL_RUN_USAGE_MISSING:
             try:
                 self._ledger.record_usage(run_id, None)
@@ -1260,15 +1444,46 @@ class _GuardedRealEvaluator:
             storage_bytes=self._storage_bytes,
         )
 
+    def settle_cancelled(self) -> None:
+        """Release the trailing unsettled attempt as cancelled (D8, 7.4).
+
+        Exactly the last record with no outcome -- the attempt a
+        control-flow ``BaseException`` interrupted, including a form
+        interrupted before its reservation -- is settled: the reservation
+        is released through the frozen ``record_failure`` primitive (whose
+        docstring explicitly covers cancellation) carrying the attempt-0
+        partial observation when applicable, the record adopts the additive
+        ``cancelled`` outcome with ``EXECUTION_CANCELLED`` on the
+        free-string channel and no wire error code, and every
+        already-settled attempt is left untouched.  Usage is never booked.
+        """
+        for record in reversed(self.records):
+            if record.outcome is not None:
+                continue
+            if record.wall_anchor is not None:
+                record.attempt_wall_ms = max(
+                    0, int((_monotonic() - record.wall_anchor) * 1000)
+                )
+            record.outcome = "cancelled"
+            record.failure_code = "EXECUTION_CANCELLED"
+            record.error_code = None
+            record.error_field_path = None
+            self._ledger.record_failure(
+                f"attempt-{record.attempt_index}", self._partial_usage(record)
+            )
+            return
+
     # -- attempt-0 materialization ------------------------------------------
 
-    def _materialize(self, record: _AttemptRecord) -> None:
+    def _materialize(self, record: _AttemptRecord, deadline_ms: int) -> None:
         destination = self._tarball_dir / f"llamafactory-{self._approval.commit_sha}.tar.gz"
         cap = self._approval.budget_spec.per_run.download_bytes
         digest = hashlib.sha256()
         total = 0
         stream = None
         exceeded = False
+        timed_out = False
+        download_start = _monotonic()
         try:
             stream = self._transport(
                 self._approval.tarball_url, None, {}, self._timeout
@@ -1281,8 +1496,14 @@ class _GuardedRealEvaluator:
                     total += len(chunk)
                     digest.update(chunk)
                     handle.write(chunk)
+                    # The running total keeps the honest partial byte count
+                    # available to the D7/D8 carriers on any abort.
+                    self._download_bytes = total
                     if total > cap:
                         exceeded = True
+                        break
+                    if self._past_deadline(record.wall_anchor, deadline_ms):
+                        timed_out = True
                         break
         except OSError as exc:
             if isinstance(exc, TimeoutError):
@@ -1290,7 +1511,9 @@ class _GuardedRealEvaluator:
                 record.failure_code = "EXECUTION_TIMEOUT"
                 record.error_code = RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED.value
                 record.error_field_path = "$.transport"
-                self._ledger.record_failure(f"attempt-{record.attempt_index}")
+                self._ledger.record_failure(
+                    f"attempt-{record.attempt_index}", self._partial_usage(record)
+                )
                 raise
             raise self._typed(
                 record, RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED, "$.transport"
@@ -1299,80 +1522,107 @@ class _GuardedRealEvaluator:
             closer = getattr(stream, "close", None)
             if callable(closer):
                 closer()
+            # The measured partial download window survives every exit
+            # (IP-0035 Packet 7.6.1 None discipline: an executed phase is
+            # never reported as unread).
+            record.download_ms = max(
+                0, int((_monotonic() - download_start) * 1000)
+            )
         if exceeded:
             if destination.is_file():
                 destination.unlink()
             raise self._typed(
                 record, RealRunErrorCode.REAL_RUN_DOWNLOAD_EXCEEDED, "$.download"
             )
+        if timed_out:
+            # Per-chunk deadline abort (IP-0035 Packet 7.3.2-1): the partial
+            # tarball file is deleted, exactly like the byte-cap abort.
+            if destination.is_file():
+                destination.unlink()
+            raise self._timeout_failure(record, "$.download")
         self._tarball_sha256 = digest.hexdigest()
         self._download_bytes = total
-        self._extract_tarball(record)
+        self._extract_tarball(record, deadline_ms)
         record.resources = {
             "download_bytes": self._download_bytes,
             "storage_bytes": self._storage_bytes,
         }
 
-    def _extract_tarball(self, record: _AttemptRecord) -> None:
+    def _extract_tarball(self, record: _AttemptRecord, deadline_ms: int) -> None:
         """Two-phase safe extraction: validate every member, then materialize."""
         storage_cap = self._approval.budget_spec.per_run.storage_bytes
         snapshot_root = self._snapshot_dir.resolve()
         unsafe = RealRunErrorCode.REAL_RUN_ARCHIVE_UNSAFE
-        with tarfile.open(
-            self._tarball_dir / f"llamafactory-{self._approval.commit_sha}.tar.gz",
-            "r:gz",
-        ) as archive:
-            members = archive.getmembers()
-            if len(members) > MEMBER_COUNT_CAP:
-                raise self._typed(record, unsafe, "$.archive")
-            regular: list[tarfile.TarInfo] = []
-            top_directories: set[str] = set()
-            declared_total = 0
-            for member in members:
-                parts = pathlib.PurePosixPath(member.name).parts
-                if member.name.startswith("/") or ".." in parts:
+        extract_start = _monotonic()
+        try:
+            with tarfile.open(
+                self._tarball_dir / f"llamafactory-{self._approval.commit_sha}.tar.gz",
+                "r:gz",
+            ) as archive:
+                members = archive.getmembers()
+                if len(members) > MEMBER_COUNT_CAP:
                     raise self._typed(record, unsafe, "$.archive")
-                top_directories.add(parts[0] if parts else member.name)
-                if member.isdir():
-                    continue
-                if member.issym() or member.islnk():
-                    continue
-                if member.size > MEMBER_BYTE_CAP:
+                regular: list[tarfile.TarInfo] = []
+                top_directories: set[str] = set()
+                declared_total = 0
+                for member in members:
+                    parts = pathlib.PurePosixPath(member.name).parts
+                    if member.name.startswith("/") or ".." in parts:
+                        raise self._typed(record, unsafe, "$.archive")
+                    top_directories.add(parts[0] if parts else member.name)
+                    if member.isdir():
+                        continue
+                    if member.issym() or member.islnk():
+                        continue
+                    if member.size > MEMBER_BYTE_CAP:
+                        raise self._typed(record, unsafe, "$.archive")
+                    declared_total += member.size
+                    regular.append(member)
+                if declared_total > storage_cap:
                     raise self._typed(record, unsafe, "$.archive")
-                declared_total += member.size
-                regular.append(member)
-            if declared_total > storage_cap:
-                raise self._typed(record, unsafe, "$.archive")
-            if len(top_directories) != 1:
-                raise self._typed(record, unsafe, "$.archive")
-            for member in regular:
-                target = self._snapshot_member_path(member.name)
-                try:
-                    target.resolve().relative_to(snapshot_root)
-                except ValueError as exc:
-                    raise self._typed(record, unsafe, "$.archive") from exc
-            written_total = 0
-            file_count = 0
-            for member in members:
-                if member.isdir():
-                    directory = self._snapshot_member_path(member.name)
-                    directory.mkdir(parents=True, exist_ok=True)
-            for member in regular:
-                target = self._snapshot_member_path(member.name)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                source = archive.extractfile(member)
-                if source is None:  # pragma: no cover - defensive
+                if len(top_directories) != 1:
                     raise self._typed(record, unsafe, "$.archive")
-                with open(target, "wb") as handle:
-                    while True:
-                        chunk = source.read(DOWNLOAD_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        written_total += len(chunk)
-                        handle.write(chunk)
-                        if written_total > storage_cap:
-                            raise self._typed(record, unsafe, "$.archive")
-                file_count += 1
+                for member in regular:
+                    target = self._snapshot_member_path(member.name)
+                    try:
+                        target.resolve().relative_to(snapshot_root)
+                    except ValueError as exc:
+                        raise self._typed(record, unsafe, "$.archive") from exc
+                written_total = 0
+                file_count = 0
+                for member in members:
+                    if member.isdir():
+                        directory = self._snapshot_member_path(member.name)
+                        directory.mkdir(parents=True, exist_ok=True)
+                for member in regular:
+                    # Per-member and per-chunk deadline checks (IP-0035
+                    # Packet 7.3.2-2): the extraction aborts at the archive
+                    # phase the moment the attempt window crosses.
+                    if self._past_deadline(record.wall_anchor, deadline_ms):
+                        raise self._timeout_failure(record, "$.archive")
+                    target = self._snapshot_member_path(member.name)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+                    if source is None:  # pragma: no cover - defensive
+                        raise self._typed(record, unsafe, "$.archive")
+                    with open(target, "wb") as handle:
+                        while True:
+                            chunk = source.read(DOWNLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            written_total += len(chunk)
+                            handle.write(chunk)
+                            if written_total > storage_cap:
+                                raise self._typed(record, unsafe, "$.archive")
+                            if self._past_deadline(
+                                record.wall_anchor, deadline_ms
+                            ):
+                                raise self._timeout_failure(record, "$.archive")
+                    file_count += 1
+        finally:
+            record.extract_ms = max(
+                0, int((_monotonic() - extract_start) * 1000)
+            )
         self._storage_bytes = written_total
         self._snapshot_files = file_count
 
@@ -1421,25 +1671,42 @@ class _GuardedRealEvaluator:
 
     # -- the single chat completion -------------------------------------------
 
-    def _chat(self, index: int, run_id: str, record: _AttemptRecord) -> None:
-        start = time.monotonic()
+    def _chat(
+        self,
+        index: int,
+        run_id: str,
+        record: _AttemptRecord,
+        deadline_ms: int,
+    ) -> None:
+        start = _monotonic()
+        # The four-argument transport contract is frozen; the timeout
+        # argument alone carries the deadline into the call, clamped to the
+        # remaining attempt window (IP-0035 Packet 7.3.2-3), floored at one
+        # second so the post-call recheck below stays the final authority.
+        remaining_ms = deadline_ms - (start - record.wall_anchor) * 1000.0
+        timeout = max(1, min(self._timeout, math.ceil(remaining_ms / 1000.0)))
         try:
             response_bytes = self._transport(
-                self._chat_url, self._body_bytes, self._headers, self._timeout
+                self._chat_url, self._body_bytes, self._headers, timeout
             )
         except OSError as exc:
-            record.latency_ms = max(0, int((time.monotonic() - start) * 1000))
+            record.latency_ms = max(0, int((_monotonic() - start) * 1000))
             if isinstance(exc, TimeoutError):
                 record.outcome = "timeout"
                 record.failure_code = "EXECUTION_TIMEOUT"
                 record.error_code = RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED.value
                 record.error_field_path = "$.transport"
-                self._ledger.record_failure(run_id)
+                self._ledger.record_failure(run_id, self._partial_usage(record))
                 raise
             raise self._typed(
                 record, RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED, "$.transport"
             ) from exc
-        record.latency_ms = max(0, int((time.monotonic() - start) * 1000))
+        record.latency_ms = max(0, int((_monotonic() - start) * 1000))
+        if self._past_deadline(record.wall_anchor, deadline_ms):
+            # Post-chat deadline recheck (IP-0035 Packet 7.3.2-4): a reply
+            # that crossed the attempt window is never a success and never
+            # books usage, whatever its content.
+            raise self._timeout_failure(record, "$.transport")
         self._parse_response(index, run_id, record, response_bytes)
 
     def _parse_response(
@@ -1460,6 +1727,10 @@ class _GuardedRealEvaluator:
                 RealRunResponseCheckpoint.response_json,
                 exc,
             )
+        # The provider-cache observation is read off every received document
+        # (IP-0035 Packet 7.5.2): a pure evidence face with independent
+        # per-key compliance, absent from every ledger dimension.
+        record.provider_cache = _provider_cache_observation(document)
         meta = _response_meta(document, self._allowed_forms_verbatim)
         tokens = _compliant_usage_tokens(document)
         if not isinstance(document, dict):
@@ -1648,6 +1919,7 @@ def _build_manifest_document(
     attempt_count: int,
     snapshot: LedgerSnapshot,
     approval_digest: str,
+    batch_wall_ms: int,
 ) -> dict[str, object]:
     """The closed-key run manifest (Packet 7.9).
 
@@ -1655,6 +1927,11 @@ def _build_manifest_document(
     baseline pair is written under the SF-01 predicates (an approved model
     form stays verbatim, a fingerprint outside the frozen format becomes
     the digest token), keeping the ``None`` discipline of an unlatched batch.
+    IP-0035 adds the additive ``batch_wall_ms`` observation and the pure
+    ``deadline`` observation block, evaluated here at manifest construction
+    -- the single authoritative evidence-phase judgment point (Packet
+    7.3.2-5): the block records whether the batch wall margin is exhausted
+    and never feeds back into any failure.
     """
     failures = [
         {
@@ -1674,6 +1951,11 @@ def _build_manifest_document(
         for name in _BOOK_DIMENSIONS
     }
     batch_remaining["calls"] = batch_limits.calls - book["calls"]
+    batch_wall_exceeded = (
+        batch_limits.wall_ms
+        - book["reserved"]["wall_ms"]
+        - book["consumed"]["wall_ms"]
+    ) <= 0
     approved_forms = frozenset(
         {approval.model_request_name, *approval.model_served_forms}
     )
@@ -1694,6 +1976,8 @@ def _build_manifest_document(
             "checks": guarded.canary_checks,
         },
         "batch_remaining": batch_remaining,
+        "batch_wall_ms": batch_wall_ms,
+        "deadline": {"batch_wall_exceeded": batch_wall_exceeded},
         "tarball_sha256": guarded.tarball_sha256,
         "model": (
             None
@@ -1707,6 +1991,66 @@ def _build_manifest_document(
         ),
         "execution_commit_sha": _EXECUTION_COMMIT_PLACEHOLDER,
     }
+
+
+def _write_core_evidence(
+    approval: _ApprovalContract,
+    guarded: _GuardedRealEvaluator,
+    ledger: BudgetLedger,
+    root: pathlib.Path,
+    attempt_count: int,
+    batch_wall_ms: int,
+) -> tuple[LedgerSnapshot, str]:
+    """Write the five core evidence files, the same source for both states.
+
+    The normal path writes them after ``run_repeats`` returns (its full set
+    then continues into the report) and the cancellation path writes the
+    identical five files in the identical exclusive order before re-raising
+    (IP-0035 Packet 7.4.2); the manifest is constructed last so its
+    ``deadline`` observation is the single authoritative judgment point.
+    """
+    snapshot = ledger.snapshot()
+    approval_digest = hashlib.sha256(approval.raw).hexdigest()
+    attempts_dir = root / "attempts"
+    attempts_dir.mkdir(parents=True, exist_ok=True)
+    _write_exclusive(root / "approval.json", approval.raw)
+    ledger_triple = {
+        "per_run": snapshot.per_run,
+        "batch": snapshot.batch,
+        "violations": snapshot.violations,
+    }
+    _write_exclusive(
+        root / "ledger.json",
+        canonical_encode(
+            {
+                "schema_version": 1,
+                "budget_ledger_digest": compute_content_digest(ledger_triple),
+                **ledger_triple,
+            }
+        ),
+    )
+    _write_exclusive(
+        root / "machine_profile.json", canonical_encode(approval.machine_profile)
+    )
+    for record in guarded.records:
+        _write_exclusive(
+            attempts_dir / f"attempt-{record.attempt_index:02d}.json",
+            canonical_encode(record.to_document()),
+        )
+    _write_exclusive(
+        root / "manifest.json",
+        canonical_encode(
+            _build_manifest_document(
+                approval,
+                guarded,
+                attempt_count,
+                snapshot,
+                approval_digest,
+                batch_wall_ms,
+            )
+        ),
+    )
+    return snapshot, approval_digest
 
 
 def run_real_baseline_suite(
@@ -1730,10 +2074,16 @@ def run_real_baseline_suite(
     whose first reserve already fails closed); the manifest loads; the
     ``_materialized`` directories are pre-created before the
     ``run_repeats`` difference window opens; the ledger and guarded
-    evaluator are built; ``run_repeats`` drives 5 cold + 5 warm attempts;
-    the evidence set is written strictly after it returns; the real-world
-    v2 payload feeds the frozen report; the :class:`RealSuiteResult` is
-    returned with ``real_run`` constant ``True``.
+    evaluator are built; ``run_repeats`` drives 5 cold + 5 warm attempts
+    under the measured batch wall; the evidence set is written after the
+    window closes -- the full set on a normal return, or the identical
+    partial five-file set (approval/ledger/machine_profile/attempts/
+    manifest, with ``EXECUTION_CANCELLED`` in the manifest failures) when a
+    control-flow ``BaseException`` unwinds, after which the original
+    exception is re-raised unchanged and no :class:`RealSuiteResult` is
+    built (IP-0035 Packet 7.4); the real-world v2 payload feeds the frozen
+    report; the :class:`RealSuiteResult` is returned with ``real_run``
+    constant ``True``.
 
     Budget-gate refusals propagate unchanged (``BudgetGateError`` passthrough,
     never wrapped); every typed real-run failure carries its closed code and
@@ -1784,45 +2134,36 @@ def run_real_baseline_suite(
         approval=approval,
         output_root=root,
     )
-    summary = run_repeats(  # (7)
-        spec_mapping, manifest, guarded, root, repeat=_REPEAT_COUNT, sources=sources
-    )
-
-    snapshot = ledger.snapshot()  # (8)
-    approval_digest = hashlib.sha256(approval.raw).hexdigest()
-    attempts_dir = root / "attempts"
-    attempts_dir.mkdir(parents=True, exist_ok=True)
-    _write_exclusive(root / "approval.json", approval.raw)
-    ledger_triple = {
-        "per_run": snapshot.per_run,
-        "batch": snapshot.batch,
-        "violations": snapshot.violations,
-    }
-    _write_exclusive(
-        root / "ledger.json",
-        canonical_encode(
-            {
-                "schema_version": 1,
-                "budget_ledger_digest": compute_content_digest(ledger_triple),
-                **ledger_triple,
-            }
-        ),
-    )
-    _write_exclusive(
-        root / "machine_profile.json", canonical_encode(approval.machine_profile)
-    )
-    for record in guarded.records:
-        _write_exclusive(
-            attempts_dir / f"attempt-{record.attempt_index:02d}.json",
-            canonical_encode(record.to_document()),
+    batch_start = _monotonic()
+    try:
+        summary = run_repeats(  # (7)
+            spec_mapping, manifest, guarded, root, repeat=_REPEAT_COUNT, sources=sources
         )
-    _write_exclusive(
-        root / "manifest.json",
-        canonical_encode(
-            _build_manifest_document(
-                approval, guarded, len(summary.attempts), snapshot, approval_digest
+    except BaseException as exc:
+        # Cancellation path (IP-0035 Packet 7.4): settle the trailing
+        # unsettled attempt (D8), write the partial five-file evidence set
+        # under the same exclusive discipline, and re-raise the original
+        # control-flow exception unchanged -- never swallow, convert, or
+        # delay it.  Frozen typed failures never reach this handler: the
+        # orchestration already turned those ``Exception`` bodies into
+        # retained samples and continued.  A secondary failure of the
+        # evidence writeout is chained behind the original, which stays
+        # primary.
+        batch_wall_ms = max(0, int((_monotonic() - batch_start) * 1000))
+        secondary: BaseException | None = None
+        try:
+            guarded.settle_cancelled()
+            _write_core_evidence(
+                approval, guarded, ledger, root, len(guarded.records), batch_wall_ms
             )
-        ),
+        except BaseException as chain:
+            secondary = chain
+        if secondary is not None:
+            raise exc from secondary
+        raise
+    batch_wall_ms = max(0, int((_monotonic() - batch_start) * 1000))
+    snapshot, approval_digest = _write_core_evidence(  # (8)
+        approval, guarded, ledger, root, len(summary.attempts), batch_wall_ms
     )
     report = build_baseline_report(summary, guarded.build_payload())
     artifacts = write_report_file(report, root)
@@ -1847,7 +2188,7 @@ def run_real_baseline_suite(
             "ledger": root / "ledger.json",
             "manifest": root / "manifest.json",
             "machine_profile": root / "machine_profile.json",
-            "attempts": attempts_dir,
+            "attempts": root / "attempts",
         },
         real_run=True,
     )

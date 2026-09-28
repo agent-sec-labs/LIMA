@@ -1,9 +1,9 @@
 """Gated real-run entry for LIMA v4 baselines (IP-0032).
 
 This module is the reviewed, artifact-driven real-execution face of the
-2026-09-27 Maintainer one-time authorization (Source Issue #223, parent #57
+2026-09-28 Maintainer one-time authorization (Source Issue #232, parent #57
 PR3-d real-run limited sub-leaf).  It consumes exactly one approval artifact
-(``docs/LIMA_PR3d_Real_Run_Approval_2026-09-27.md``, machine-readable json
+(``docs/LIMA_PR3d_Real_Run_Approval_2026-09-28.md``, machine-readable json
 block) whose identity fields are cross-checked against this module's frozen
 constants (two-source agreement) and whose seven-dimension numeric budget
 drives an IP-0031 :class:`~benchmarks.v4.baseline.budget.BudgetLedger` with
@@ -27,6 +27,17 @@ carry a content value), failure attempts keep their observed resource bytes,
 and usage settlement is decoupled from the verdict (the compliant usage of a
 failed response is accounted while the sample stays a failure; missing usage
 remains a violation, never zero).
+
+IP-0034 widens the served-identity allowance to the approved three-form set
+(the request name plus the closed ``served_model_forms`` list of the dated
+approval artifact, compared on the normalized identity in memory) and bounds
+the SF-01 evidence channels: a server-controlled string is persisted
+verbatim only under its frozen predicate -- the controlled key and
+finish-reason enumerations, the approved identity forms, the
+system-fingerprint format pattern -- and otherwise only as the irreversible
+digest token ``~d:<len>:<sha256>``.  The bounded transform is an evidence
+face, never a failure mode, and the in-memory identity, drift, and canary
+logic keeps comparing full strings.
 
 The locked IP-0031 gate face is untouched: ``budget.REAL_RUN_GATE_UNLOCKED``
 stays ``False``, ``require_real_run_unlock`` is neither called nor modified,
@@ -82,7 +93,7 @@ __all__ = [
     "run_real_baseline_suite",
 ]
 
-#: The frozen price pin (micro-USD per million tokens, 2026-09-27 peak
+#: The frozen price pin (micro-USD per million tokens, 2026-09-28 peak
 #: cache-miss basis): the sole definition source for the two-source price
 #: agreement with the approval artifact (Packet 7.3).
 APPROVAL_PROMPT_PRICE_MICRO_USD_PER_MILLION: typing.Final[int] = 300_000
@@ -191,7 +202,7 @@ _UPSTREAM_FIELDS: typing.Final[tuple[str, ...]] = (
 _MODEL_FIELDS: typing.Final[tuple[str, ...]] = (
     "provider",
     "request_name",
-    "served_as",
+    "served_model_forms",
     "base_url",
     "system_fingerprint_policy",
 )
@@ -235,11 +246,19 @@ _UPSTREAM_TARBALL_PIN: typing.Final[str] = (
 )
 _MODEL_PROVIDER_PIN: typing.Final[str] = "deepseek"
 _MODEL_REQUEST_NAME_PIN: typing.Final[str] = "deepseek-v4-flash"
-_MODEL_SERVED_AS_PIN: typing.Final[str] = "DeepSeek-V4.1-Flash"
+#: The closed, order-sensitive served-form pin list (IP-0034 Packet 7.2):
+#: the artifact's ``served_model_forms`` must equal this tuple element by
+#: element and position; the verbatim elements are also the approved-identity
+#: source for the evidence predicates, and their normalizations join the
+#: request name in the in-memory identity allowance.
+_MODEL_SERVED_FORMS_PIN: typing.Final[tuple[str, ...]] = (
+    "DeepSeek-V4.1-Flash",
+    "deepseek-flash",
+)
 _MODEL_BASE_URL_PIN: typing.Final[str] = "https://api.deepseek.com"
 _MODEL_FINGERPRINT_POLICY_PIN: typing.Final[str] = "record-and-latch-on-change"
 _PRICING_SOURCE_PIN: typing.Final[str] = "api-docs.deepseek.com"
-_PRICING_RETRIEVAL_DATE_PIN: typing.Final[str] = "2026-09-27"
+_PRICING_RETRIEVAL_DATE_PIN: typing.Final[str] = "2026-09-28"
 _PRICING_BASIS_PIN: typing.Final[str] = "peak cache-miss per million tokens"
 
 
@@ -373,6 +392,46 @@ _RESPONSE_META_KEYS: typing.Final[tuple[str, ...]] = (
     "system_fingerprint",
 )
 
+#: The controlled response-key enumeration (IP-0034 Packet 7.5): a response
+#: or message key outside this closed set is never persisted verbatim -- it
+#: reaches the evidence face only as the digest token.
+_EXPECTED_RESPONSE_KEYS: typing.Final[frozenset[str]] = frozenset(
+    {
+        "id",
+        "object",
+        "created",
+        "model",
+        "choices",
+        "usage",
+        "system_fingerprint",
+        "service_tier",
+        "role",
+        "content",
+        "reasoning_content",
+        "tool_calls",
+        "refusal",
+    }
+)
+
+#: The controlled finish-reason enumeration (IP-0034 Packet 7.5): a value
+#: outside this closed set is persisted only as the digest token.
+_EXPECTED_FINISH_REASONS: typing.Final[frozenset[str]] = frozenset(
+    {
+        "stop",
+        "length",
+        "content_filter",
+        "tool_calls",
+        "function_call",
+        "insufficient_system_resource",
+    }
+)
+
+#: The frozen system-fingerprint format predicate (IP-0034 Packet 7.5): a
+#: matching value is format-controlled and may be persisted verbatim.
+_FINGERPRINT_PATTERN: typing.Final[re.Pattern[str]] = re.compile(
+    r"^fp_[A-Za-z0-9]{1,63}$"
+)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RealSuiteResult:
@@ -415,7 +474,7 @@ class _ApprovalContract:
     tarball_url: str
     base_url: str
     model_request_name: str
-    model_served_as: str
+    model_served_forms: tuple[str, ...]
     budget_spec: BudgetSpec
     pricing: Pricing
     machine_profile: dict[str, object]
@@ -429,6 +488,10 @@ class _AttemptRecord:
     response body was received), ``resources`` the attempt-0 observed
     materialization bytes (``None`` otherwise), and ``settle_usage_tokens``
     an internal-only carrier for the decoupled settlement -- never emitted.
+    ``response_model``, ``response_fingerprint``, and ``finish_reason`` are
+    persistence fields and carry only SF-01 bounded values (verbatim under
+    the frozen predicates, digest tokens otherwise); the in-memory identity,
+    drift, and canary logic reads full strings and never these fields.
     """
 
     attempt_index: int
@@ -552,8 +615,8 @@ def _load_and_validate_approval(
     _require_str_pin(
         document["approval_type"], "PR3D-REAL-RUN-LIMITED", "$.approval_type"
     )
-    _require_str_pin(document["run_name"], "pr3d-real-2026-09-27", "$.run_name")
-    _require_str_pin(document["date"], "2026-09-27", "$.date")
+    _require_str_pin(document["run_name"], "pr3d-real-2026-09-28", "$.run_name")
+    _require_str_pin(document["date"], "2026-09-28", "$.date")
     _require_str_pin(document["authorized_by"], "Maintainer", "$.authorized_by")
     _require_str_pin(document["baseline_sha"], _BASELINE_SHA_PIN, "$.baseline_sha")
 
@@ -582,7 +645,14 @@ def _load_and_validate_approval(
     _require_str_pin(
         model["request_name"], _MODEL_REQUEST_NAME_PIN, "$.model.request_name"
     )
-    _require_str_pin(model["served_as"], _MODEL_SERVED_AS_PIN, "$.model.served_as")
+    served_forms = model["served_model_forms"]
+    if not isinstance(served_forms, list) or len(served_forms) != len(
+        _MODEL_SERVED_FORMS_PIN
+    ):
+        raise _invalid("$.model.served_model_forms")
+    for form, pinned in zip(served_forms, _MODEL_SERVED_FORMS_PIN, strict=True):
+        if not isinstance(form, str) or form != pinned:
+            raise _invalid("$.model.served_model_forms")
     _require_str_pin(model["base_url"], _MODEL_BASE_URL_PIN, "$.model.base_url")
     _require_str_pin(
         model["system_fingerprint_policy"],
@@ -666,7 +736,7 @@ def _load_and_validate_approval(
         tarball_url=upstream["tarball_url"],
         base_url=model["base_url"],
         model_request_name=model["request_name"],
-        model_served_as=model["served_as"],
+        model_served_forms=tuple(model["served_model_forms"]),
         budget_spec=budget_spec,
         pricing=Pricing(
             prompt_token_price_micro_usd_per_million=pricing[
@@ -717,27 +787,66 @@ def _worst_case_cost(prompt_tokens: int, completion_tokens: int) -> int:
     )
 
 
-def _response_meta(document: object) -> dict[str, object]:
+def _digest_token(value: str) -> str:
+    """The frozen SF-01 irreversible digest token of one controlled string.
+
+    ``~d:<len>:<sha256-hex64>`` with the Python character count and the full
+    UTF-8 digest (never a prefix, never a truncation): self-describing,
+    bounded to 88 characters, and unable to collide with any verbatim
+    predicate hit because ``~`` and ``:`` never occur in those value faces.
+    """
+    return f"~d:{len(value)}:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _bounded_key_name(key: str) -> str:
+    """Verbatim inside the controlled key enumeration, else the digest token."""
+    return key if key in _EXPECTED_RESPONSE_KEYS else _digest_token(key)
+
+
+def _bounded_model_string(value: str, approved_forms: frozenset[str]) -> str:
+    """Verbatim as an approved canonical identity (case-sensitive), else token."""
+    return value if value in approved_forms else _digest_token(value)
+
+
+def _bounded_fingerprint(value: str) -> str:
+    """Verbatim when the frozen fingerprint format holds, else the digest token."""
+    return value if _FINGERPRINT_PATTERN.match(value) else _digest_token(value)
+
+
+def _bounded_finish_reason(value: str) -> str:
+    """Verbatim inside the controlled finish enumeration, else the token."""
+    return value if value in _EXPECTED_FINISH_REASONS else _digest_token(value)
+
+
+def _response_meta(
+    document: object, approved_forms: frozenset[str]
+) -> dict[str, object]:
     """The sanitized post-mortem metadata of one received response document.
 
-    Every value is structural (sorted key names, integer counts, a length,
-    a one-way digest) or an identity string already covered by the frozen
-    recording face; content values, credentials, and full bodies are never
-    recorded (IP-0033 Packet 7.4 leak rules).  A field whose precondition
-    was not reached stays ``None`` -- never ``""``, ``0``, or ``[]`` -- so
-    "not read" stays distinguishable from "served empty".
+    Every value is structural (sorted key names, integer counts, a length, a
+    one-way digest) or a server-controlled string admitted only under its
+    frozen SF-01 predicate: enumerated key names, the model value exactly
+    equal to an approved identity form (``approved_forms``), a
+    format-controlled system fingerprint, and an enumerated finish reason
+    stay verbatim; any other form of those strings is replaced by the
+    irreversible digest token.  Content values, credentials, and full bodies
+    are never recorded (IP-0033 Packet 7.4 leak rules).  A field whose
+    precondition was not reached stays ``None`` -- never ``""``, ``0``, or
+    ``[]`` -- so "not read" stays distinguishable from "served empty".
+    Key-name lists are sorted by the original key names, then transformed
+    item by item, so a fully enumerated response keeps the exact v3 shape.
     """
     meta: dict[str, object] = dict.fromkeys(_RESPONSE_META_KEYS)
     if not isinstance(document, dict):
         return meta
-    meta["top_level_keys"] = sorted(document)
+    meta["top_level_keys"] = [_bounded_key_name(key) for key in sorted(document)]
     meta["usage_present"] = isinstance(document.get("usage"), dict)
     model = document.get("model")
     if isinstance(model, str):
-        meta["model"] = model
+        meta["model"] = _bounded_model_string(model, approved_forms)
     fingerprint = document.get("system_fingerprint")
     if isinstance(fingerprint, str):
-        meta["system_fingerprint"] = fingerprint
+        meta["system_fingerprint"] = _bounded_fingerprint(fingerprint)
     choices = document.get("choices")
     if isinstance(choices, list):
         meta["choices_count"] = len(choices)
@@ -745,12 +854,12 @@ def _response_meta(document: object) -> dict[str, object]:
     if isinstance(first, dict):
         reason = first.get("finish_reason")
         if isinstance(reason, str):
-            meta["finish_reason"] = reason
+            meta["finish_reason"] = _bounded_finish_reason(reason)
         message = first.get("message")
     else:
         message = None
     if isinstance(message, dict):
-        meta["message_keys"] = sorted(message)
+        meta["message_keys"] = [_bounded_key_name(key) for key in sorted(message)]
         content = message.get("content")
         if isinstance(content, str):
             meta["content_len"] = len(content)
@@ -914,9 +1023,11 @@ class _GuardedRealEvaluator:
         self._tarball_dir = output_root / "_materialized" / "tarball"
         self._snapshot_dir = output_root / "_materialized" / "snapshot"
         self._allowed_model_forms = {
-            _normalize_identity(approval.model_request_name),
-            _normalize_identity(approval.model_served_as),
-        }
+            _normalize_identity(approval.model_request_name)
+        } | {_normalize_identity(form) for form in approval.model_served_forms}
+        self._allowed_forms_verbatim = frozenset(
+            {approval.model_request_name, *approval.model_served_forms}
+        )
         self._invocations = 0
         self._latched = False
         self.records: list[_AttemptRecord] = []
@@ -1344,12 +1455,12 @@ class _GuardedRealEvaluator:
         except (UnicodeDecodeError, ValueError) as exc:
             self._fail_response(
                 record,
-                _response_meta(document),
+                _response_meta(document, self._allowed_forms_verbatim),
                 _compliant_usage_tokens(document),
                 RealRunResponseCheckpoint.response_json,
                 exc,
             )
-        meta = _response_meta(document)
+        meta = _response_meta(document, self._allowed_forms_verbatim)
         tokens = _compliant_usage_tokens(document)
         if not isinstance(document, dict):
             self._fail_response(
@@ -1361,14 +1472,18 @@ class _GuardedRealEvaluator:
                 record, meta, tokens, RealRunResponseCheckpoint.response_model
             )
         if _normalize_identity(model) not in self._allowed_model_forms:
-            record.response_model = model
+            record.response_model = _bounded_model_string(
+                model, self._allowed_forms_verbatim
+            )
             self._fail_response(
                 record, meta, tokens, RealRunResponseCheckpoint.response_identity
             )
-        record.response_model = model
+        record.response_model = _bounded_model_string(
+            model, self._allowed_forms_verbatim
+        )
         fingerprint = document.get("system_fingerprint")
         if isinstance(fingerprint, str):
-            record.response_fingerprint = fingerprint
+            record.response_fingerprint = _bounded_fingerprint(fingerprint)
         choices = document.get("choices")
         if not isinstance(choices, list) or not choices:
             self._fail_response(
@@ -1391,7 +1506,7 @@ class _GuardedRealEvaluator:
             )
         finish_reason = first.get("finish_reason")
         if isinstance(finish_reason, str):
-            record.finish_reason = finish_reason
+            record.finish_reason = _bounded_finish_reason(finish_reason)
         try:
             verdict = json.loads(content)
         except ValueError as exc:
@@ -1534,7 +1649,13 @@ def _build_manifest_document(
     snapshot: LedgerSnapshot,
     approval_digest: str,
 ) -> dict[str, object]:
-    """The closed-key run manifest (Packet 7.9)."""
+    """The closed-key run manifest (Packet 7.9).
+
+    The identity faces are persistence boundaries: the latched in-memory
+    baseline pair is written under the SF-01 predicates (an approved model
+    form stays verbatim, a fingerprint outside the frozen format becomes
+    the digest token), keeping the ``None`` discipline of an unlatched batch.
+    """
     failures = [
         {
             "attempt_index": record.attempt_index,
@@ -1553,6 +1674,11 @@ def _build_manifest_document(
         for name in _BOOK_DIMENSIONS
     }
     batch_remaining["calls"] = batch_limits.calls - book["calls"]
+    approved_forms = frozenset(
+        {approval.model_request_name, *approval.model_served_forms}
+    )
+    baseline_model = guarded.baseline_model
+    baseline_fingerprint = guarded.baseline_fingerprint
     return {
         "schema_version": 1,
         "run_name": approval.run_name,
@@ -1569,8 +1695,16 @@ def _build_manifest_document(
         },
         "batch_remaining": batch_remaining,
         "tarball_sha256": guarded.tarball_sha256,
-        "model": guarded.baseline_model,
-        "system_fingerprint_baseline": guarded.baseline_fingerprint,
+        "model": (
+            None
+            if baseline_model is None
+            else _bounded_model_string(baseline_model, approved_forms)
+        ),
+        "system_fingerprint_baseline": (
+            None
+            if baseline_fingerprint is None
+            else _bounded_fingerprint(baseline_fingerprint)
+        ),
         "execution_commit_sha": _EXECUTION_COMMIT_PLACEHOLDER,
     }
 

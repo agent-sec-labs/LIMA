@@ -2490,7 +2490,7 @@ class TestSF01Sanitization(_RealRunTestCase):
 
     def test_identity_string_channels_tokenized_across_three_faces(self):
         long_model = "m" * 200 + _RAW_CONTENT_MARKER + "x" * 7
-        self.assertEqual(len(long_model), 220)
+        self.assertEqual(len(long_model), 230)
         hostile_fingerprint = "fingerprint-" + _RAW_CONTENT_MARKER + "-nope"
         hostile_finish = "finish-" + _RAW_CONTENT_MARKER
         compliant_fingerprint = "fp_" + "a" * 32

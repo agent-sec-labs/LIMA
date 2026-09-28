@@ -3725,6 +3725,18 @@ class TestArtifactFamilyAndColdReset(_RealRunTestCase):
                     self.assertEqual(book["calls"], 0)
                     for dimension in _LEDGER_BOOK_DIMENSIONS:
                         self.assertEqual(book["consumed"][dimension], 0, dimension)
+                    # ALLOWED_ONCE defect 2 (2026-09-28): the frozen
+                    # orchestration (run_baseline_attempt per attempt plus the
+                    # run_repeats aggregate via write_result_file, then
+                    # write_report_file) necessarily persists the
+                    # ``{digest16}-run-{1.._ATTEMPT_TOTAL+1}.json`` family and
+                    # one ``{digest16}-report-1.json`` next to the frozen
+                    # five-file evidence set -- the same root state the v5
+                    # test_evidence_written_after_run_repeats_window pins.
+                    # The expected set is enumerated from the run digest; the
+                    # five-file evidence presence and every substantive
+                    # assertion are unchanged.
+                    digest16 = result.run_spec_digest[:16]
                     self.assertEqual(
                         {path.name for path in root.iterdir() if path.is_file()},
                         {
@@ -3733,7 +3745,12 @@ class TestArtifactFamilyAndColdReset(_RealRunTestCase):
                             "ledger.json",
                             "manifest.json",
                             "machine_profile.json",
-                        },
+                        }
+                        | {
+                            f"{digest16}-run-{sequence}.json"
+                            for sequence in range(1, _ATTEMPT_TOTAL + 2)
+                        }
+                        | {f"{digest16}-report-1.json"},
                     )
                     self.assertEqual(
                         sorted(path.name for path in (root / "attempts").iterdir()),

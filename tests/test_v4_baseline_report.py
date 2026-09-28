@@ -1346,12 +1346,17 @@ class TestV5SchemaFaces(_IP0029ReportTestCase):
     def test_vep_rvr_stage_outcome_null_discipline(self):
         # R2.1: absent source -> null + "unavailable" on every new face,
         # null-not-zero, and from_mapping rejects every malformed shape.
-        for payload in (
-            _scan_payload(states=("confirmed",)),
-            _e2e_payload(),
-            _rw_payload([_rw_case()]),
+        for payload_kind, payload in (
+            ("scanner", _scan_payload(states=("confirmed",))),
+            ("e2e", _e2e_payload()),
+            ("real-world", _rw_payload([_rw_case()])),
         ):
-            with self.subTest(payload=payload["schema_version"]):
+            # ALLOWED_ONCE defect 1 (2026-09-28): the label must be a literal
+            # kind string -- _scan_payload() returns a RepositoryScanResult,
+            # which is not subscriptable, so the previous
+            # payload["schema_version"] label always raised TypeError before
+            # any behaviour assertion ran.  Mechanical label fix only.
+            with self.subTest(payload=payload_kind):
                 value = self._doc(payload)
                 self.assertEqual(value["vep"], _count(None, "unavailable"))
                 self.assertEqual(value["rvr"], _count(None, "unavailable"))

@@ -40,6 +40,8 @@ class VulnPack:
     driver_templates: tuple[str, ...]
     asan_markers: Mapping[str, tuple[str, ...]]
     integer_overflow_markers: Mapping[str, str]
+    #: Display order for the CWE enum in prompts (empty = sorted).
+    cwe_display_order: tuple[str, ...] = ()
 
 
 def runtime_markers(pack: VulnPack) -> dict[str, tuple[str, ...]]:
@@ -94,6 +96,21 @@ def registry_cwe_ids() -> frozenset[str]:
     for name in list_packs():
         merged.update(get_pack(name).cwe_ids)
     return frozenset(merged)
+
+
+def registry_cwe_display_order() -> tuple[str, ...]:
+    """CWE coverage in display order (pack order, then pack display order)."""
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in list_packs():
+        pack = get_pack(name)
+        display = pack.cwe_display_order or tuple(sorted(pack.cwe_ids))
+        for cwe in display:
+            if cwe in pack.cwe_ids and cwe not in seen:
+                ordered.append(cwe)
+                seen.add(cwe)
+    return tuple(ordered)
 
 
 def registry_runtime_markers() -> dict[str, tuple[str, ...]]:

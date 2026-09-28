@@ -32,7 +32,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lima.agent_orchestrator import (
-    _SYSTEM_PLATFORM_SPECIALIST,
     PLATFORM_HYPOTHESIS_FIELDS,
     PlatformFormatError,
     _experiment_hit,
@@ -209,11 +208,11 @@ class OrchestratorPackWiringTests(unittest.TestCase):
         import lima.agent_orchestrator as orchestrator
 
         # C0.1: the matching table is derived from the registry (which for
-        # now equals the single memory pack), not re-hard-coded.
+        # now equals the single memory pack), read at call time.
         from lima.vuln_packs import registry_runtime_markers
         self.assertEqual(
             registry_runtime_markers(),
-            orchestrator._ASAN_CWE_MARKERS,
+            orchestrator._asan_cwe_markers(),
         )
         source = inspect.getsource(orchestrator)
         self.assertIn("registry_cwe_ids", source)
@@ -252,15 +251,31 @@ class OrchestratorPackWiringTests(unittest.TestCase):
         with self.assertRaises(PlatformFormatError):
             parse_hypothesis_reply(forged, known)
         # The Specialist prompt carries the pack knowledge and the extended
-        # closed CWE enumeration; the legacy enumeration stays verbatim.
-        from lima.vuln_packs import registry_cwe_ids as _rci
-        for cwe in _rci():
-            self.assertIn(cwe, _SYSTEM_PLATFORM_SPECIALIST)
-        # The enum is registry-driven (sorted), no longer a fixed hand-written order.
-        cwe_enum = "|".join(sorted(_rci()))
-        self.assertIn(f'"cwe":"{cwe_enum}"', _SYSTEM_PLATFORM_SPECIALIST)
-        self.assertIn(MEMORY_PACK.specialist_prompt_addendum,
-                      _SYSTEM_PLATFORM_SPECIALIST)
+        # closed CWE enumeration; the original order is preserved via
+        # cwe_display_order.
+        from lima.vuln_packs import registry_cwe_display_order as _rcdo
+        prompt = orchestrator._system_platform_specialist()
+        for cwe in _rcdo():
+            self.assertIn(cwe, prompt)
+        cwe_enum = "|".join(_rcdo())
+        self.assertIn(f'"cwe":"{cwe_enum}"', prompt)
+        self.assertIn(MEMORY_PACK.specialist_prompt_addendum, prompt)
+
+    def test_default_prompt_is_byte_identical_to_pre_registry(self):
+        """C0.1 golden baseline: the default prompt matches pre-registry."""
+        import lima.agent_orchestrator as orchestrator
+
+        prompt = orchestrator._system_platform_specialist()
+        # The original hand-written CWE enum order is preserved.
+        self.assertIn(
+            '"cwe":"CWE-416|CWE-415|CWE-787|CWE-125|CWE-476|CWE-190"',
+            prompt,
+        )
+        # The addendum is directly concatenated (no extra separator).
+        self.assertIn(
+            "never invent ids." + MEMORY_PACK.specialist_prompt_addendum,
+            prompt,
+        )
 
 
 class SeedPatternTests(unittest.TestCase):
@@ -589,7 +604,7 @@ class RegistryVocabularyTests(unittest.TestCase):
         import lima.agent_orchestrator as orchestrator
 
         # With the default registry, the known CWEs are all present.
-        schema = orchestrator._PLATFORM_SCHEMA
+        schema = orchestrator._platform_schema()
         for cwe in ("CWE-416", "CWE-787", "CWE-476", "CWE-190"):
             self.assertIn(cwe, schema)
         self.assertNotIn("CWE-121", schema)
@@ -598,10 +613,34 @@ class RegistryVocabularyTests(unittest.TestCase):
         """The platform's error-type marker table merges all packs."""
         import lima.agent_orchestrator as orchestrator
 
-        markers = orchestrator._ASAN_CWE_MARKERS
+        markers = orchestrator._asan_cwe_markers()
         self.assertIn("CWE-416", markers)
         self.assertIn("use-after-free", markers["CWE-416"])
         self.assertIn("CWE-190", markers)
+
+    def test_late_registration_updates_all_consumers(self):
+        """Review #235: registering after import updates everything live.
+
+        The Specialist prompt, the CWE parsing vocabulary and the error-type
+        marker table must all pick up a pack registered after the module
+        was imported -- no frozen module-level state.
+        """
+        import lima.agent_orchestrator as orchestrator
+
+        self._register_test_pack()
+
+        # The parser accepts the new CWE.
+        from lima.vuln_packs import registry_cwe_ids
+        self.assertIn("CWE-121", registry_cwe_ids())
+
+        # The Specialist prompt carries the new CWE in its enum.
+        prompt = orchestrator._system_platform_specialist()
+        self.assertIn("CWE-121", prompt)
+
+        # The error-type marker table includes the new pack's markers.
+        markers = orchestrator._asan_cwe_markers()
+        self.assertIn("CWE-121", markers)
+        self.assertIn("stack-buffer-overflow", markers["CWE-121"])
 
 
 if __name__ == "__main__":

@@ -99,6 +99,26 @@ cancelled path writes no evidence, and the observation sub-blocks are
 absent; the pre-freeze baseline run of the v4' file (54/54 green, nine
 frozen files 298/298, discover 2638 OK with 24 skips) is archived alongside
 the RED log.
+
+IP-0036 evolution to frozen version v6 (CA-IP-0036-v1.0 of 2026-09-28; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0036_PR3e_Offline_Integration.md
+section 10): all 66 v5 methods are retained without weakening -- the entry
+signature pin gains exactly one trailing keyword-only parameter
+(``artifact_key``, default ``external/llamafactory-replay``, R9.2) -- while
+ten new methods in one new class pin the frozen artifact family (ten keys:
+nine synthetic archetypes plus the verbatim llamafactory descriptor), the
+per-descriptor loader pinning with the derived 40-hex commit shas and the
+structure-only unknown-key rejection, the zero-budget refusal face for all
+nine synthetic keys (calls=0/cost=0, zero transport), the offline full
+chain under a synthetic key with the gates unrelaxed, and the cold-reset
+program (``reset_cold_state``: re-extract from the cached tarball into a
+per-cold snapshot directory, rebuild the request body, zero GET,
+state_reuse (T,F,T), download_ms=None discipline, repeat determinism, the
+full attempt-sequence assertion, and the unchanged default batch).  The RED
+anchor is capability absence: on the unmodified real_run.py of the 1046501d
+baseline the parameter, the catalog and the reset entry are absent; the
+default-batch compatibility method passes by design.
 """
 
 import ast
@@ -212,6 +232,8 @@ _ENTRY_PARAM_ORDER = (
     "timeout_seconds",
     "manifest_path",
     "sources",
+    # IP-0036 v6 (R9.2): the single trailing keyword-only artifact key.
+    "artifact_key",
 )
 _ENTRY_KEYWORD_ONLY = {
     "output_root",
@@ -220,6 +242,7 @@ _ENTRY_KEYWORD_ONLY = {
     "timeout_seconds",
     "manifest_path",
     "sources",
+    "artifact_key",
 }
 _RESULT_FIELDS = (
     "run_name",
@@ -436,6 +459,61 @@ _FROZEN_ERROR_CODES = frozenset(
         "REAL_RUN_CANARY_FAILED",
     }
 )
+
+# IP-0036 v6 frozen artifact-family faces (Packet 7.4/7.5): the closed
+# ten-key catalog, the nine synthetic keys, the family discriminator, the
+# descriptor field set, the synthetic derivation rule, and the cold-reset
+# observation document keys and per-cold directory naming.
+_ARTIFACT_FAMILY_KEYS = (
+    "archetype/application",
+    "archetype/library",
+    "archetype/cli",
+    "archetype/docs-content",
+    "archetype/test-heavy",
+    "archetype/monorepo",
+    "archetype/large-repo",
+    "archetype/malicious-layout",
+    "archetype/dependency-blocked",
+    "external/llamafactory-replay",
+)
+_SYNTHETIC_ARTIFACT_KEYS = tuple(
+    key for key in _ARTIFACT_FAMILY_KEYS if key != "external/llamafactory-replay"
+)
+_DEFAULT_ARTIFACT_KEY = "external/llamafactory-replay"
+_ZERO_BUDGET_FAMILY_VALUE = "PR3E-OFFLINE-PROOF-ZERO-BUDGET"
+_DESCRIPTOR_FIELDS = frozenset(
+    {
+        "repository",
+        "requested_name",
+        "commit_sha",
+        "tarball_url",
+        "tarball_filename",
+        "approval_type",
+        "run_name",
+    }
+)
+_COLD_RESET_KEYS = frozenset(
+    {
+        "state_reuse",
+        "timings",
+        "snapshot_tree_sha256",
+        "request_body_sha256",
+        "materialization_count",
+    }
+)
+_PER_COLD_DIR_PATTERN = re.compile(r"^snapshot-cold-[0-9]+$")
+
+
+def _synthetic_commit_sha(key, fingerprint):
+    """The frozen synthetic-descriptor commit-sha derivation (Packet 7.4.1).
+
+    ``sha256("lima-synth-artifact:<key>:<registry-fingerprint>")[:40]`` --
+    a deterministic 40-hex identity derived from the fixture tree
+    fingerprint, never a git commit.
+    """
+    return hashlib.sha256(
+        ("lima-synth-artifact:" + key + ":" + fingerprint).encode("utf-8")
+    ).hexdigest()[:40]
 
 _NOMINAL_MACHINE_PROFILE = {
     "profile_id": "lima-baseline-profile-001",
@@ -982,8 +1060,14 @@ class _RealRunTestCase(unittest.TestCase):
         )
 
     def run_entry(self, output_root, *, transport, artifact_path=None,
-                  timeout_seconds=120):
+                  timeout_seconds=120, artifact_key=None):
         module = self.real_run()
+        kwargs = {}
+        if artifact_key is not None:
+            # IP-0036 v6 (R9.2): the keyword is forwarded only when the
+            # caller selects an artifact, so every pre-existing call site
+            # keeps exercising the byte-identical default path.
+            kwargs["artifact_key"] = artifact_key
         return module.run_real_baseline_suite(
             artifact_path or (_REPO_ROOT / _APPROVAL_RELATIVE_PATH),
             _FAKE_KEY,
@@ -992,7 +1076,33 @@ class _RealRunTestCase(unittest.TestCase):
             transport=transport,
             timeout_seconds=timeout_seconds,
             sources=self.fixed_sources(),
+            **kwargs,
         )
+
+    def artifact_catalog(self):
+        """The frozen artifact family catalog (C5 deliverable), fail-closed."""
+        module = self.real_run()
+        catalog = getattr(module, "REAL_RUN_ARTIFACT_FAMILY", None)
+        self.assertIsNotNone(
+            catalog, "REAL_RUN_ARTIFACT_FAMILY is missing (C5 deliverable)"
+        )
+        return catalog
+
+    def write_synthetic_artifact(self, directory, key, mutate=None):
+        """One approval-shaped document carrying the descriptor pins."""
+        descriptor = self.artifact_catalog()[key]
+
+        def apply_descriptor(document):
+            document["approval_type"] = descriptor["approval_type"]
+            document["run_name"] = descriptor["run_name"]
+            document["upstream"]["repository"] = descriptor["repository"]
+            document["upstream"]["requested_name"] = descriptor["requested_name"]
+            document["upstream"]["commit_sha"] = descriptor["commit_sha"]
+            document["upstream"]["tarball_url"] = descriptor["tarball_url"]
+            if mutate is not None:
+                mutate(document)
+
+        return self.write_artifact(directory, apply_descriptor)
 
     def read_attempt(self, root, index):
         path = pathlib.Path(root) / "attempts" / f"attempt-{index:02d}.json"
@@ -3426,6 +3536,466 @@ class TestHonestObservation(_RealRunTestCase):
             dict(_CHECKPOINT_FIELD_PATHS),
         )
         self.assertEqual(set(module._CANARY_CHECK_KEYS), _CANARY_CHECK_KEYS)
+
+
+class TestArtifactFamilyAndColdReset(_RealRunTestCase):
+    """IP-0036 FR-07/FR-08/AC-4 (Packet 7.4/7.5): artifact family, entry
+    generalization, zero-budget proof, and the cold-reset program."""
+
+    def test_entry_signature_gains_artifact_key_with_frozen_default(self):
+        # R9.2: exactly one trailing keyword-only parameter whose default
+        # keeps the llamafactory path byte-identical.
+        module = self.real_run()
+        parameters = inspect.signature(module.run_real_baseline_suite).parameters
+        self.assertIn("artifact_key", parameters)
+        self.assertIs(parameters["artifact_key"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(parameters["artifact_key"].default, _DEFAULT_ARTIFACT_KEY)
+        self.assertEqual(_ENTRY_PARAM_ORDER[-1], "artifact_key")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport()
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(result.attempt_count, _ATTEMPT_TOTAL)
+            self.assertEqual(transport.download_urls, [self.canonical_tarball_url()])
+            commit = self.canonical_tarball_url().rsplit("/", 1)[1]
+            self.assertTrue(
+                (root / "_materialized" / "tarball" / f"llamafactory-{commit}.tar.gz").is_file()
+            )
+
+    def test_artifact_family_catalog_frozen_ten_keys(self):
+        # R9.1: the closed ten-key catalog with the verbatim llamafactory
+        # descriptor (four pins, identity pins, byte-identical filename
+        # template).
+        catalog = self.artifact_catalog()
+        self.assertEqual(set(catalog), set(_ARTIFACT_FAMILY_KEYS))
+        self.assertEqual(len(catalog), 10)
+        for key in _ARTIFACT_FAMILY_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(set(catalog[key]), _DESCRIPTOR_FIELDS)
+        descriptor = catalog["external/llamafactory-replay"]
+        commit = self.canonical_tarball_url().rsplit("/", 1)[1]
+        self.assertEqual(descriptor["repository"], _CANONICAL_REPOSITORY)
+        self.assertEqual(descriptor["requested_name"], "hiyouga/LLaMA-Factory")
+        self.assertEqual(descriptor["commit_sha"], commit)
+        self.assertEqual(descriptor["tarball_url"], self.canonical_tarball_url())
+        self.assertEqual(descriptor["tarball_filename"], "llamafactory-{commit_sha}.tar.gz")
+        self.assertEqual(descriptor["approval_type"], "PR3D-REAL-RUN-LIMITED")
+        self.assertEqual(descriptor["run_name"], _RUN_NAME)
+
+    def test_synthetic_descriptors_derived_deterministically(self):
+        # R9.1/DR-IP-0036-PV-4: the nine synthetic descriptors are derived
+        # once -- slug form, registry-fingerprint commit sha, .invalid URL,
+        # filename template, and the offline-proof identity pins.
+        catalog = self.artifact_catalog()
+        registry = fixtures_module.load_registry()
+        entries = {entry["key"]: entry for entry in registry["fixtures"]}
+        for key in _SYNTHETIC_ARTIFACT_KEYS:
+            with self.subTest(key=key):
+                descriptor = catalog[key]
+                archetype = key.removeprefix("archetype/")
+                slug = f"lima-synth/{archetype}"
+                expected_sha = _synthetic_commit_sha(key, entries[key]["fingerprint"])
+                self.assertEqual(descriptor["repository"], slug)
+                self.assertEqual(descriptor["requested_name"], slug)
+                self.assertEqual(descriptor["commit_sha"], expected_sha)
+                self.assertRegex(descriptor["commit_sha"], r"^[0-9a-f]{40}$")
+                self.assertEqual(
+                    descriptor["tarball_url"],
+                    f"https://lima-synth.invalid/{archetype}/tar.gz/{expected_sha}",
+                )
+                self.assertEqual(
+                    descriptor["tarball_filename"],
+                    f"lima-synth-{archetype}-{{commit_sha}}.tar.gz",
+                )
+                self.assertEqual(descriptor["approval_type"], _ZERO_BUDGET_FAMILY_VALUE)
+                self.assertEqual(descriptor["run_name"], f"pr3e-offline-proof-{archetype}")
+
+    def test_unknown_artifact_key_rejected_structure_only(self):
+        # R9.1: an unknown artifact key is the frozen structure-only
+        # rejection under the existing code family (zero new error codes).
+        module = self.real_run()
+        self.assertIn(
+            "artifact_key",
+            inspect.signature(module.run_real_baseline_suite).parameters,
+        )
+        for key in ("external/ghost", "archetype/ghost", "lima-synth/application"):
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(module.RealRunError) as caught:
+                        self.run_entry(
+                            pathlib.Path(directory) / "out",
+                            transport=self.happy_transport(),
+                            artifact_key=key,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(caught.exception.field_path, "$")
+
+    def test_synthetic_key_loader_pins_upstream_per_descriptor(self):
+        # R9.1 (S1): the loader validates the selected descriptor's pins --
+        # a matching document runs, every drift is rejected at its path.
+        module = self.real_run()
+        key = "archetype/application"
+        with tempfile.TemporaryDirectory() as directory:
+            approval = self.write_synthetic_artifact(directory, key)
+            transport = self.happy_transport()
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=key,
+            )
+            self.assertEqual(result.attempt_count, _ATTEMPT_TOTAL)
+            self.assertEqual(result.status, "sufficient_sample")
+
+            def drift(field, value):
+                def mutate(document):
+                    document["upstream"][field] = value
+
+                return mutate
+
+            cases = [
+                ("repository", drift("repository", "lima-synth/other"),
+                 "$.upstream.repository"),
+                ("requested_name", drift("requested_name", "lima-synth/other"),
+                 "$.upstream.requested_name"),
+                ("commit_sha", drift("commit_sha", "0" * 40),
+                 "$.upstream.commit_sha"),
+                ("tarball_url",
+                 drift("tarball_url", "https://lima-synth.invalid/other/tar.gz/x"),
+                 "$.upstream.tarball_url"),
+            ]
+
+            def drift_approval_type(document):
+                document["approval_type"] = "PR3D-REAL-RUN-LIMITED"
+
+            def drift_run_name(document):
+                document["run_name"] = "pr3d-real-2026-09-28"
+
+            cases.append(("approval_type", drift_approval_type, "$.approval_type"))
+            cases.append(("run_name", drift_run_name, "$.run_name"))
+            for label, mutate, field_path in cases:
+                with self.subTest(drift=label):
+                    drifted = self.write_synthetic_artifact(directory, key, mutate)
+                    with self.assertRaises(module.RealRunError) as caught:
+                        self.run_entry(
+                            pathlib.Path(directory) / "out",
+                            transport=self.happy_transport(),
+                            artifact_path=drifted,
+                            artifact_key=key,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(caught.exception.field_path, field_path)
+
+    def test_zero_budget_synthetic_keys_refuse_before_invoke(self):
+        # R9.3(a)/R9.4(3)(4): every synthetic key under a zero-budget
+        # document refuses at the first reserve with zero transport calls,
+        # a zero ledger, and exactly the frozen five-file evidence set.
+        def zero_budget(document):
+            for level in ("per_run", "batch"):
+                for dimension in _AUTH_PER_RUN:
+                    document["budget"][level][dimension] = 0
+
+        for key in _SYNTHETIC_ARTIFACT_KEYS:
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    approval = self.write_synthetic_artifact(directory, key, zero_budget)
+                    transport = self.happy_transport()
+                    result = self.run_entry(
+                        directory,
+                        transport=transport,
+                        artifact_path=approval,
+                        artifact_key=key,
+                    )
+                    self.assertEqual(transport.chat_calls, 0)
+                    self.assertEqual(transport.download_calls, 0)
+                    self.assertEqual(result.status, "insufficient_sample")
+                    attempt = self.read_attempt(directory, 0)
+                    self.assertEqual(attempt["error_code"], "RUN_BUDGET_EXCEEDED")
+                    self.assertEqual(
+                        attempt["error_field_path"], "$.budget.per_run.calls"
+                    )
+                    book = result.ledger_snapshot.batch
+                    self.assertEqual(book["calls"], 0)
+                    for dimension in _LEDGER_BOOK_DIMENSIONS:
+                        self.assertEqual(book["consumed"][dimension], 0, dimension)
+                    self.assertEqual(
+                        {path.name for path in root.iterdir() if path.is_file()},
+                        {
+                            "approval.md",
+                            "approval.json",
+                            "ledger.json",
+                            "manifest.json",
+                            "machine_profile.json",
+                        },
+                    )
+                    self.assertEqual(
+                        sorted(path.name for path in (root / "attempts").iterdir()),
+                        [f"attempt-{index:02d}.json" for index in range(_ATTEMPT_TOTAL)],
+                    )
+
+    def test_offline_full_chain_synthetic_key_with_fake_transport(self):
+        # R9.3(b)/R9.5: the offline full chain under a synthetic key with
+        # the gates unrelaxed -- canary, identity, and the seven-dimension
+        # budget all behave exactly as on the llamafactory path.
+        module = self.real_run()
+        key = "archetype/application"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            approval = self.write_synthetic_artifact(directory, key)
+            transport = self.happy_transport()
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=key,
+            )
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            self.assertEqual(result.status, "sufficient_sample")
+            self.assertEqual(result.canary_status, "passed")
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["canary"]["status"], "passed")
+            self.assertEqual(set(manifest["canary"]["checks"]), _CANARY_CHECK_KEYS)
+            self.assertEqual(set(manifest["canary"]["checks"].values()), {True})
+            self.assertEqual(manifest["cold_count"], _COLD_COUNT)
+            self.assertEqual(manifest["warm_count"], _WARM_COUNT)
+            descriptor = self.artifact_catalog()[key]
+            self.assertTrue(
+                (
+                    root
+                    / "_materialized"
+                    / "tarball"
+                    / f"lima-synth-application-{descriptor['commit_sha']}.tar.gz"
+                ).is_file()
+            )
+        # Identity gate: an unknown served form is rejected identically.
+        with tempfile.TemporaryDirectory() as directory:
+            approval = self.write_synthetic_artifact(directory, key)
+            transport = self.happy_transport(
+                responses=[_chat_response(model=_UNKNOWN_MODEL_FORM)]
+            )
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=key,
+            )
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.canary_status, "failed")
+            self.assertEqual(
+                self.read_attempt(directory, 0)["error_code"],
+                "REAL_RUN_RESPONSE_INVALID",
+            )
+        # Seven-dimension budget gate: a shrunken per-run cost refuses
+        # before invoke identically.
+        worst_call = (
+            math.ceil(_AUTH_PRICES[0] * _REQUEST_BYTE_CAP / 1_000_000)
+            + math.ceil(_AUTH_PRICES[1] * _AUTH_PER_RUN["completion_tokens"] / 1_000_000)
+        )
+
+        def shrink_cost(document):
+            document["budget"]["per_run"]["cost_micro_usd"] = worst_call - 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            approval = self.write_synthetic_artifact(directory, key, shrink_cost)
+            transport = self.happy_transport()
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=key,
+            )
+            self.assertEqual(transport.chat_calls, 0)
+            self.assertEqual(transport.download_calls, 0)
+            attempt = self.read_attempt(directory, 0)
+            self.assertEqual(attempt["error_code"], "RUN_BUDGET_EXCEEDED")
+            self.assertEqual(
+                attempt["error_field_path"], "$.budget.per_run.cost_micro_usd"
+            )
+            self.assertEqual(
+                {member.value for member in module.RealRunErrorCode},
+                _FROZEN_ERROR_CODES,
+            )
+
+    def _build_guarded_evaluator(self, directory):
+        """Direct evaluator construction (g3/g4 precedent); no attempt yet."""
+        module = self.real_run()
+        root = pathlib.Path(directory)
+        approval_path = self.write_artifact(root)
+        contract = module._load_and_validate_approval(approval_path)
+        ledger = BudgetLedger(contract.budget_spec, contract.pricing)
+        (root / "_materialized" / "tarball").mkdir(parents=True, exist_ok=True)
+        (root / "_materialized" / "snapshot").mkdir(parents=True, exist_ok=True)
+        transport = self.happy_transport()
+        guarded = module._GuardedRealEvaluator(
+            ledger=ledger,
+            transport=transport,
+            api_key=_FAKE_KEY,
+            timeout_seconds=120,
+            approval=contract,
+            output_root=root,
+        )
+        return guarded, transport, root
+
+    def test_cold_reset_entry_reextracts_rebuilds_and_observes(self):
+        # R8.1-R8.3: the reset re-extracts the cached tarball into a fresh
+        # per-cold snapshot directory, rebuilds the request body, performs
+        # zero GET calls, and returns the frozen observation document.
+        with tempfile.TemporaryDirectory(prefix="lima-ip0036-reset-") as directory:
+            guarded, transport, root = self._build_guarded_evaluator(directory)
+            reset = getattr(guarded, "reset_cold_state", None)
+            self.assertIsNotNone(reset, "reset_cold_state is missing (C5 deliverable)")
+            guarded()  # attempt-0: materialize, chat, settle
+            first_tree = fixtures_module.compute_tree_fingerprint(
+                root / "_materialized" / "snapshot"
+            )
+            first_body_sha = hashlib.sha256(transport.chat_payloads[0]).hexdigest()
+            self.assertEqual(transport.download_calls, 1)
+            observation = reset()
+            self.assertEqual(set(observation), _COLD_RESET_KEYS)
+            state_reuse = observation["state_reuse"]
+            self.assertEqual(set(state_reuse), _STATE_REUSE_KEYS)
+            self.assertIs(state_reuse["materialized"], True)
+            self.assertIs(state_reuse["snapshot_reused"], False)
+            self.assertIs(state_reuse["request_body_rebuilt"], True)
+            self.assertIsNotNone(
+                _SF01_TOKEN_PATTERN.match(state_reuse["process_identity"])
+            )
+            timings = observation["timings"]
+            self.assertEqual(
+                set(timings), {"extract_ms", "download_ms", "attempt_wall_ms"}
+            )
+            self.assertIsInstance(timings["extract_ms"], int)
+            self.assertGreaterEqual(timings["extract_ms"], 0)
+            self.assertIsNone(timings["download_ms"])
+            self.assertIsInstance(timings["attempt_wall_ms"], int)
+            self.assertGreaterEqual(timings["attempt_wall_ms"], 0)
+            self.assertEqual(observation["snapshot_tree_sha256"], first_tree)
+            self.assertEqual(observation["request_body_sha256"], first_body_sha)
+            self.assertEqual(observation["materialization_count"], 2)
+            self.assertEqual(transport.download_calls, 1)
+            self.assertEqual(
+                sorted(
+                    path.name
+                    for path in (root / "_materialized").iterdir()
+                    if _PER_COLD_DIR_PATTERN.match(path.name)
+                ),
+                ["snapshot-cold-2"],
+            )
+            self.assertTrue((root / "_materialized" / "snapshot-cold-2").is_dir())
+            self.assertEqual(len(guarded.records), 1)
+
+    def test_cold_reset_repeat_deterministic_and_full_state_sequence(self):
+        # R8.3: two resets are deterministic (identical digests, distinct
+        # per-cold directories, incrementing materialization count) and the
+        # full default batch sequence stays (T,F,T) + (F,T,F)x9 with the
+        # reset observations carrying (T,F,T).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0036-seq-") as directory:
+            guarded, transport, root = self._build_guarded_evaluator(directory)
+            self.assertTrue(
+                callable(getattr(guarded, "reset_cold_state", None)),
+                "reset_cold_state is missing (C5 deliverable)",
+            )
+            summary = orchestrate.run_repeats(
+                self.spec_mapping(),
+                self.load_manifest(),
+                guarded,
+                root,
+                repeat=_COLD_COUNT,
+                sources=self.fixed_sources(),
+            )
+            self.assertEqual(len(summary.attempts), _ATTEMPT_TOTAL)
+            first_tree = fixtures_module.compute_tree_fingerprint(
+                root / "_materialized" / "snapshot"
+            )
+            first_body_sha = hashlib.sha256(transport.chat_payloads[0]).hexdigest()
+            sequence = [
+                (
+                    record.state_reuse["materialized"],
+                    record.state_reuse["snapshot_reused"],
+                    record.state_reuse["request_body_rebuilt"],
+                )
+                for record in guarded.records
+            ]
+            self.assertEqual(
+                sequence, [(True, False, True)] + [(False, True, False)] * 9
+            )
+            self.assertEqual(transport.download_calls, 1)
+            first_reset = guarded.reset_cold_state()
+            second_reset = guarded.reset_cold_state()
+            for label, observation in (
+                ("first", first_reset),
+                ("second", second_reset),
+            ):
+                with self.subTest(reset=label):
+                    self.assertEqual(observation["snapshot_tree_sha256"], first_tree)
+                    self.assertEqual(observation["request_body_sha256"], first_body_sha)
+                    self.assertIs(observation["state_reuse"]["materialized"], True)
+                    self.assertIs(observation["state_reuse"]["snapshot_reused"], False)
+                    self.assertIs(
+                        observation["state_reuse"]["request_body_rebuilt"], True
+                    )
+            self.assertEqual(first_reset["materialization_count"], 2)
+            self.assertEqual(second_reset["materialization_count"], 3)
+            self.assertEqual(transport.download_calls, 1)
+            self.assertEqual(
+                sorted(
+                    path.name
+                    for path in (root / "_materialized").iterdir()
+                    if _PER_COLD_DIR_PATTERN.match(path.name)
+                ),
+                ["snapshot-cold-2", "snapshot-cold-3"],
+            )
+
+    def test_default_batch_unchanged_and_no_per_cold_dirs(self):
+        # R8.1: the default batch keeps the frozen v5 behavior -- no reset
+        # is invoked, no per-cold directory appears, and the state_reuse
+        # sequence, mode labels, and manifest counts stay verbatim.
+        with tempfile.TemporaryDirectory(prefix="lima-ip0036-def-") as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport()
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(result.status, "sufficient_sample")
+            self.assertEqual(
+                [
+                    path.name
+                    for path in (root / "_materialized").iterdir()
+                    if _PER_COLD_DIR_PATTERN.match(path.name)
+                ],
+                [],
+            )
+            commit = self.canonical_tarball_url().rsplit("/", 1)[1]
+            self.assertEqual(
+                sorted(path.name for path in (root / "_materialized" / "tarball").iterdir()),
+                [f"llamafactory-{commit}.tar.gz"],
+            )
+            sequence = []
+            modes = []
+            for index in range(_ATTEMPT_TOTAL):
+                document = self.read_attempt(directory, index)
+                reuse = document["state_reuse"]
+                sequence.append(
+                    (
+                        reuse["materialized"],
+                        reuse["snapshot_reused"],
+                        reuse["request_body_rebuilt"],
+                    )
+                )
+                modes.append(document["mode"])
+            self.assertEqual(
+                sequence, [(True, False, True)] + [(False, True, False)] * 9
+            )
+            self.assertEqual(modes, ["cold"] * _COLD_COUNT + ["warm"] * _WARM_COUNT)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["cold_count"], _COLD_COUNT)
+            self.assertEqual(manifest["warm_count"], _WARM_COUNT)
+            self.assertEqual(manifest["attempt_count"], _ATTEMPT_TOTAL)
 
 
 if __name__ == "__main__":  # pragma: no cover

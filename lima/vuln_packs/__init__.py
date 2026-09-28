@@ -99,7 +99,13 @@ def registry_cwe_ids() -> frozenset[str]:
 
 
 def registry_cwe_display_order() -> tuple[str, ...]:
-    """CWE coverage in display order (pack order, then pack display order)."""
+    """CWE coverage in display order, always covering every cwe_ids entry.
+
+    Pack registration order first, then each pack's ``cwe_display_order``
+    (or sorted ``cwe_ids`` when empty).  Any ``cwe_ids`` entry the display
+    order misses is appended deterministically (sorted) so the prompt's CWE
+    enum always matches the parser's vocabulary exactly.
+    """
 
     ordered: list[str] = []
     seen: set[str] = set()
@@ -110,6 +116,11 @@ def registry_cwe_display_order() -> tuple[str, ...]:
             if cwe in pack.cwe_ids and cwe not in seen:
                 ordered.append(cwe)
                 seen.add(cwe)
+        # Deterministic fallback: append any cwe_ids the display order missed.
+        missed = sorted(pack.cwe_ids - seen)
+        for cwe in missed:
+            ordered.append(cwe)
+            seen.add(cwe)
     return tuple(ordered)
 
 

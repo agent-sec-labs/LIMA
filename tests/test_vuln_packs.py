@@ -642,6 +642,47 @@ class RegistryVocabularyTests(unittest.TestCase):
         self.assertIn("CWE-121", markers)
         self.assertIn("stack-buffer-overflow", markers["CWE-121"])
 
+    def test_incomplete_display_order_never_loses_cwe_ids(self):
+        """Review #235: a pack with a partial cwe_display_order must not
+        create a gap between the prompt enum and the parser vocabulary."""
+
+        from lima.vuln_packs import VulnPack, register_pack
+        register_pack(VulnPack(
+            name="test-incomplete-display",
+            cwe_ids=frozenset({"CWE-121", "CWE-122"}),
+            specialist_prompt_addendum="Stack overflow family.",
+            seed_patterns=(),
+            driver_templates={},
+            asan_markers={
+                "CWE-121": ("stack-buffer-overflow",),
+                "CWE-122": ("global-buffer-overflow",),
+            },
+            integer_overflow_markers={},
+            # Deliberately incomplete: only lists CWE-121, misses CWE-122.
+            cwe_display_order=("CWE-121",),
+        ))
+
+        from lima.vuln_packs import registry_cwe_display_order, registry_cwe_ids
+        display = registry_cwe_display_order()
+        vocabulary = registry_cwe_ids()
+
+        # Both CWEs appear in the display order (the missing one appended).
+        self.assertIn("CWE-121", display)
+        self.assertIn("CWE-122", display)
+
+        # The display order always covers the full vocabulary.
+        self.assertLessEqual(vocabulary, frozenset(display))
+
+        # The orchestrator's prompt carries both CWEs.
+        import lima.agent_orchestrator as orchestrator
+        prompt = orchestrator._system_platform_specialist()
+        self.assertIn("CWE-121", prompt)
+        self.assertIn("CWE-122", prompt)
+
+        # The prompt enum matches the parser vocabulary exactly.
+        cwe_enum = "|".join(display)
+        self.assertIn(f'"cwe":"{cwe_enum}"', prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

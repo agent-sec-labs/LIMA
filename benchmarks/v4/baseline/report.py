@@ -1,6 +1,6 @@
 """Frozen report projection for LIMA v4 baseline runs (IP-0029).
 
-This module owns the independent ``lima.baseline-report`` v1 document: an
+This module owns the independent ``lima.baseline-report`` document: an
 offline, canonical, sealable aggregate report that projects the FR-04
 counting face (signals, security issues, hypotheses, confirmed and
 inconclusive counts, scanned files, coverage gap) and the compression
@@ -9,6 +9,22 @@ one injected evaluator payload -- a repository scan result, an e2e harness
 output, or a real-world evaluation output -- plus the expert active-time
 face consumed from expert-timing sidecar documents and the automation
 percentile face passed through from the frozen run aggregate.
+
+IP-0036 evolves the schema to v2 (nineteen top-level fields): the three
+additive stage-metric faces ``vep``/``rvr`` (three-valued count shape) and
+``stage_outcome`` (the frozen audit/mining/repair mapping over the closed
+stage vocabulary) plus the optional evaluator-payload ``domain`` source
+block.  The domain rules are frozen: a present block must be compliant
+(unknown keys, type violations, negatives, off-vocabulary stage values and
+missing stage keys all fail closed under the existing
+``EVALUATOR_PAYLOAD_INVALID``); a compliant block wires the counts faces,
+the three new faces, and the resources face to ``measured``; an absent
+block keeps the honest ``null`` + ``unavailable`` status quo everywhere;
+an injected ``EvidenceDomainBundle`` keeps precedence over the domain
+block for the counts faces while the three new faces and resources stay
+domain-sourced only.  A v1 document under the v2 strict parse fails closed
+with the existing ``SCHEMA_VERSION_INVALID`` (honest versioning; no
+dual-version leniency).
 
 Honest-absence discipline is structural: every position without a faithful
 derivation is ``null`` under an explicit ``unavailable`` or
@@ -68,7 +84,7 @@ __all__ = [
 ]
 
 BASELINE_REPORT_SCHEMA_NAME = "lima.baseline-report"
-BASELINE_REPORT_SCHEMA_VERSION = 1
+BASELINE_REPORT_SCHEMA_VERSION = 2
 BASELINE_REPORT_DECLARATIONS = ("baseline_mode_legacy_report_parameters_inert",)
 
 _REPORT_FIELDS = (
@@ -88,6 +104,10 @@ _REPORT_FIELDS = (
     "expert",
     "automation",
     "resources",
+    # IP-0036 v2 (R2.1): the three additive stage-metric top-level faces.
+    "vep",
+    "rvr",
+    "stage_outcome",
 )
 _REPORT_FIELD_SET = frozenset(_REPORT_FIELDS)
 
@@ -135,6 +155,25 @@ _SIDECAR_FIELDS = (
     "events",
 )
 _SIDECAR_FIELD_SET = frozenset(_SIDECAR_FIELDS)
+
+# IP-0036 v2 (R2.1/DR-IP-0036-PV-1): the frozen stage mapping and its closed
+# value vocabulary (completed=ran to terminal state; skipped=explicitly not
+# configured/executed; failed=ran and failed; inconclusive=ran with no
+# decidable terminal state), shared by the stage_outcome face and the
+# evaluator-payload domain block.
+_STAGE_KEYS = ("audit", "mining", "repair")
+_STAGE_KEY_SET = frozenset(_STAGE_KEYS)
+_STAGE_OUTCOME_VALUES = frozenset({"completed", "skipped", "failed", "inconclusive"})
+
+# IP-0036 v2 (R2.3): the frozen evaluator-payload domain-block key set.  The
+# six scalar/mapping keys are required exactly; the optional resources
+# sub-block must carry its own three-key closed set.
+_DOMAIN_BLOCK_FIELDS = frozenset(
+    {"signals", "security_issues", "hypotheses", "vep", "rvr", "stage_outcome"}
+)
+_DOMAIN_RESOURCE_FIELDS = frozenset(
+    {"prompt_tokens", "completion_tokens", "cost_micro_usd"}
+)
 
 # Transcribed verbatim from lima.repository_scanner.COVERAGE_AFFECTING_SKIPS
 # (frozen at the IP-0029 baseline 8e61ddd, blob 97b80b0c, lines 43-51) and
@@ -375,6 +414,19 @@ class CountEntry:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class StageOutcomeEntry:
+    """One stage face: a closed-vocabulary value plus its projection mark.
+
+    IP-0036 v2 (R2.1): the value is one frozen stage word or ``None`` --
+    never an integer -- and the same ``(projection == "unavailable") ==
+    (value is None)`` pairing discipline as the counting face applies.
+    """
+
+    value: str | None
+    projection: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class RatioLink:
     """One compression link with integer basis points (floor semantics)."""
 
@@ -429,11 +481,12 @@ class BaselineReport:
 
     Instances are constructed through :func:`build_baseline_report` or
     :func:`from_mapping` so that every field carries the validated
-    schema-v1 shape; the full strict validation runs on both paths.  The
-    nested ``counts`` and ``coverage_gap_reasons`` containers are deeply
-    immutable read-only mapping views and the list-like fields are tuples.
-    Canonical bytes and the SHA-256 digest are always recomputed from the
-    frozen content exclusively through ``lima.contracts.codec``.
+    schema-v2 shape; the full strict validation runs on both paths.  The
+    nested ``counts``, ``stage_outcome``, and ``coverage_gap_reasons``
+    containers are deeply immutable read-only mapping views and the
+    list-like fields are tuples.  Canonical bytes and the SHA-256 digest
+    are always recomputed from the frozen content exclusively through
+    ``lima.contracts.codec``.
     """
 
     schema_name: str
@@ -452,6 +505,9 @@ class BaselineReport:
     expert: ExpertFace
     automation: AutomationFace
     resources: ResourcesFace
+    vep: CountEntry
+    rvr: CountEntry
+    stage_outcome: _ReadOnlyMapping
 
     def to_canonical_value(self) -> dict[str, object]:
         """Return a fresh, plain JSON-subset tree sharing no mutable state."""
@@ -513,6 +569,17 @@ class BaselineReport:
                 "completion_tokens": self.resources.completion_tokens,
                 "cost_micro_usd": self.resources.cost_micro_usd,
             },
+            # IP-0036 v2 (R2.1): the three additive stage-metric faces,
+            # appended in the frozen field order.
+            "vep": {"value": self.vep.value, "projection": self.vep.projection},
+            "rvr": {"value": self.rvr.value, "projection": self.rvr.projection},
+            "stage_outcome": {
+                stage: {
+                    "value": self.stage_outcome[stage].value,  # type: ignore[index]
+                    "projection": self.stage_outcome[stage].projection,  # type: ignore[index]
+                }
+                for stage in _STAGE_KEYS
+            },
         }
 
     def canonical_bytes(self) -> bytes:
@@ -561,7 +628,12 @@ def _check_exact_fields(
 
 
 def _validated_count_entry(value: object, key: str) -> CountEntry:
-    prefix = f"$.counts.{key}"
+    return _validated_metric_entry(value, f"$.counts.{key}")
+
+
+def _validated_metric_entry(value: object, prefix: str) -> CountEntry:
+    """One integer metric face (a count, vep, or rvr) in the frozen shape."""
+
     if not isinstance(value, dict):
         _fail(BaselineReportErrorCode.INVALID_FIELD_TYPE, prefix)
     _check_exact_fields(value, ("value", "projection"), prefix)
@@ -572,6 +644,31 @@ def _validated_count_entry(value: object, key: str) -> CountEntry:
     if (projection == "unavailable") != (count_value is None):
         _fail(BaselineReportErrorCode.INVALID_FIELD_VALUE, f"{prefix}.value")
     return CountEntry(value=count_value, projection=projection)
+
+
+def _validated_stage_entry(value: object, prefix: str) -> StageOutcomeEntry:
+    """One stage face: a closed-vocabulary stage word plus its projection.
+
+    IP-0036 v2 (R2.1): the value is ``None`` or one of the frozen stage
+    words (``completed``/``skipped``/``failed``/``inconclusive``); the same
+    unavailable-null pairing discipline as the counting face applies, and a
+    non-vocabulary value is an ``INVALID_FIELD_VALUE``.
+    """
+
+    if not isinstance(value, dict):
+        _fail(BaselineReportErrorCode.INVALID_FIELD_TYPE, prefix)
+    _check_exact_fields(value, ("value", "projection"), prefix)
+    stage_value = value["value"]
+    projection = value["projection"]
+    if not isinstance(projection, str) or projection not in _PROJECTIONS:
+        _fail(BaselineReportErrorCode.INVALID_FIELD_VALUE, f"{prefix}.projection")
+    if stage_value is not None and (
+        not isinstance(stage_value, str) or stage_value not in _STAGE_OUTCOME_VALUES
+    ):
+        _fail(BaselineReportErrorCode.INVALID_FIELD_VALUE, f"{prefix}.value")
+    if (projection == "unavailable") != (stage_value is None):
+        _fail(BaselineReportErrorCode.INVALID_FIELD_VALUE, f"{prefix}.value")
+    return StageOutcomeEntry(value=stage_value, projection=projection)
 
 
 def _validated_ratio_link(value: object, prefix: str) -> RatioLink:
@@ -790,9 +887,34 @@ def _freeze_document(mapping: object) -> BaselineReport:
     if not isinstance(resources_value, dict):
         _fail(BaselineReportErrorCode.INVALID_FIELD_TYPE, "$.resources")
     _check_exact_fields(resources_value, _RESOURCE_FIELDS, "$.resources")
-    for field in _RESOURCE_FIELDS:
-        if resources_value[field] is not None:
-            _fail(BaselineReportErrorCode.INVALID_FIELD_VALUE, f"$.resources.{field}")
+    # IP-0036 v2 (R2.3): the resources face keeps its three-key shape but
+    # now admits exact non-negative ints wired from a compliant domain
+    # block; absent sources keep the honest null (never zero).
+    resources = ResourcesFace(
+        prompt_tokens=_validated_non_negative(
+            resources_value["prompt_tokens"], "$.resources.prompt_tokens"
+        ),
+        completion_tokens=_validated_non_negative(
+            resources_value["completion_tokens"], "$.resources.completion_tokens"
+        ),
+        cost_micro_usd=_validated_non_negative(
+            resources_value["cost_micro_usd"], "$.resources.cost_micro_usd"
+        ),
+    )
+
+    # IP-0036 v2 (R2.1): the three additive stage-metric faces share the
+    # counting-face pairing discipline; stage_outcome is the frozen
+    # audit/mining/repair mapping over the closed vocabulary.
+    vep = _validated_metric_entry(mapping["vep"], "$.vep")
+    rvr = _validated_metric_entry(mapping["rvr"], "$.rvr")
+    stage_value = mapping["stage_outcome"]
+    if not isinstance(stage_value, dict):
+        _fail(BaselineReportErrorCode.INVALID_FIELD_TYPE, "$.stage_outcome")
+    _check_exact_fields(stage_value, _STAGE_KEYS, "$.stage_outcome")
+    stage_outcome = {
+        stage: _validated_stage_entry(stage_value[stage], f"$.stage_outcome.{stage}")
+        for stage in _STAGE_KEYS
+    }
 
     return BaselineReport(
         schema_name=schema_name,
@@ -814,21 +936,24 @@ def _freeze_document(mapping: object) -> BaselineReport:
             reviewer_digests=tuple(digests),
         ),
         automation=automation,
-        resources=ResourcesFace(
-            prompt_tokens=None, completion_tokens=None, cost_micro_usd=None
-        ),
+        resources=resources,
+        vep=vep,
+        rvr=rvr,
+        stage_outcome=_ReadOnlyMapping(stage_outcome),
     )
 
 
 def from_mapping(mapping: object) -> BaselineReport:
-    """Strictly validate and freeze one baseline report mapping (schema v1).
+    """Strictly validate and freeze one baseline report mapping (schema v2).
 
     Required-field presence, unknown-key rejection at every nesting level,
     exact types, value domains, digest shapes, enum domains, and every
     frozen cross-field rule (legacy-projection pairing, unavailable-null
     pairing, coverage-reason sums, all-or-nothing automation percentiles,
-    ratio floor arithmetic, null-only resources) are enforced; any
-    violation raises :class:`BaselineReportError`.
+    ratio floor arithmetic, int-or-null resources, stage-vocabulary
+    membership) are enforced; any violation raises
+    :class:`BaselineReportError`.  A v1 document fails closed at
+    ``$.schema_version`` (honest versioning; no dual-version leniency).
     """
 
     return _freeze_document(mapping)
@@ -1019,6 +1144,49 @@ def _validate_scanner_payload(evaluator_payload: object) -> None:
         )
 
 
+def _validated_domain_block(payload: dict[object, object]) -> dict[str, object] | None:
+    """Validate the optional evaluator-payload ``domain`` block (IP-0036 R2.3).
+
+    Returns ``None`` when the block is absent.  A present block must be
+    compliant: exactly the six frozen scalar/mapping keys (five exact
+    non-negative ints plus the three-key stage mapping over the closed
+    vocabulary) with an optional three-key ``resources`` sub-block of exact
+    non-negative ints.  Every violation -- unknown key, missing key, type
+    violation, negative value, off-vocabulary stage value, missing stage
+    key, or a malformed resources sub-block -- fails closed with the
+    existing ``EVALUATOR_PAYLOAD_INVALID`` (zero new error codes).
+    """
+
+    if "domain" not in payload:
+        return None
+    block = payload["domain"]
+    invalid = BaselineReportErrorCode.EVALUATOR_PAYLOAD_INVALID
+    if not isinstance(block, dict):
+        _fail(invalid, "$.evaluator_payload")
+    keys = set(block)
+    if not _DOMAIN_BLOCK_FIELDS <= keys or keys - _DOMAIN_BLOCK_FIELDS - {"resources"}:
+        _fail(invalid, "$.evaluator_payload")
+    for name in ("signals", "security_issues", "hypotheses", "vep", "rvr"):
+        if type(block[name]) is not int or block[name] < 0:  # type: ignore[arg-type]
+            _fail(invalid, "$.evaluator_payload")
+    stage = block["stage_outcome"]
+    if not isinstance(stage, dict) or set(stage) != _STAGE_KEY_SET:
+        _fail(invalid, "$.evaluator_payload")
+    for value in stage.values():
+        if not isinstance(value, str) or value not in _STAGE_OUTCOME_VALUES:
+            _fail(invalid, "$.evaluator_payload")
+    if "resources" in block:
+        domain_resources = block["resources"]
+        if not isinstance(domain_resources, dict) or set(domain_resources) != (
+            _DOMAIN_RESOURCE_FIELDS
+        ):
+            _fail(invalid, "$.evaluator_payload")
+        for value in domain_resources.values():
+            if type(value) is not int or value < 0:
+                _fail(invalid, "$.evaluator_payload")
+    return block
+
+
 def _fingerprint(wire_value: object) -> str:
     """The frozen input-fingerprint rule for wire-value payloads.
 
@@ -1088,11 +1256,16 @@ def build_baseline_report(
     result, an e2e harness output, or a real-world evaluation output; the
     scanner shape is then deep-validated), an optional sequence of
     expert-timing sidecar documents, and an optional ``EvidenceDomainBundle``
-    whose structural presence alone marks the v2 evidence domain.  The gate
-    order is frozen: summary shape, aggregate digest cross-check, sidecar
-    documents, bundle, payload recognition, payload deep validation,
-    projection, strict freeze.  Every position without a faithful
-    derivation stays null and explicitly marked; nothing is fabricated.
+    whose structural presence alone marks the v2 evidence domain.  A dict
+    payload may additionally carry the optional ``domain`` block (IP-0036):
+    present means compliant-or-fail-closed, compliant wires the counts faces
+    (absent a bundle), the vep/rvr/stage_outcome faces, and the resources
+    face to ``measured``; absent keeps the honest null + ``unavailable``.
+    The gate order is frozen: summary shape, aggregate digest cross-check,
+    sidecar documents, bundle, payload recognition, payload deep validation
+    (domain block included), projection, strict freeze.  Every position
+    without a faithful derivation stays null and explicitly marked; nothing
+    is fabricated.
     """
 
     aggregate = _gate_summary(summary)
@@ -1103,6 +1276,14 @@ def build_baseline_report(
     if bundle is not None and not isinstance(bundle, EvidenceDomainBundle):
         _fail(BaselineReportErrorCode.INVALID_FIELD_TYPE, "$.bundle")
     kind = _recognize_evaluator_payload(evaluator_payload)
+
+    domain: dict[str, object] | None = None
+    if kind != "scanner":
+        # IP-0036 v2 (R2.3): the optional domain block exists only on the two
+        # recognized dict payload shapes (e2e v1 and real-world v2); a
+        # present block is validated fail-closed here, before any projection
+        # runs (the scanner shape is an object and carries no block).
+        domain = _validated_domain_block(evaluator_payload)
 
     counts_doc: dict[str, tuple[int | None, str]] = {}
     source_pairs: list[tuple[str, str]] = []
@@ -1163,6 +1344,9 @@ def build_baseline_report(
         source_pairs.append(("scanner", _fingerprint(wire)))
     else:
         if bundle is not None:
+            # DR-IP-0036-PV-2: the injected bundle keeps precedence over the
+            # domain block for the counts faces (the more complete evidence
+            # domain source).
             counts_doc["signals"] = (len(bundle.signals), "measured")
             counts_doc["security_issues"] = (
                 len(bundle.security_issues),
@@ -1172,6 +1356,10 @@ def build_baseline_report(
                 len(bundle.vulnerability_hypotheses),
                 "measured",
             )
+        elif domain is not None:
+            counts_doc["signals"] = (domain["signals"], "measured")
+            counts_doc["security_issues"] = (domain["security_issues"], "measured")
+            counts_doc["hypotheses"] = (domain["hypotheses"], "measured")
         else:
             counts_doc["signals"] = (None, "unavailable")
             counts_doc["security_issues"] = (None, "unavailable")
@@ -1215,6 +1403,34 @@ def build_baseline_report(
     else:
         active_time_ms_total = None
     reviewer_digests = sorted({sidecar["reviewer_digest"] for sidecar in sidecars})
+
+    # IP-0036 v2 (R2.1/R2.3): the three additive stage-metric faces and the
+    # resources face are wired from the domain block only -- it is their sole
+    # source on every recognized payload path (DR-IP-0036-PV-2); absence
+    # keeps the honest null + "unavailable" status quo (no constants, no
+    # synthetic stand-ins).
+    if domain is not None:
+        vep_face: tuple[int | None, str] = (domain["vep"], "measured")
+        rvr_face: tuple[int | None, str] = (domain["rvr"], "measured")
+        stage_face: dict[str, tuple[str | None, str]] = {
+            stage: (domain["stage_outcome"][stage], "measured")  # type: ignore[index]
+            for stage in _STAGE_KEYS
+        }
+        domain_resources = domain.get("resources")
+        resources_face: dict[str, int | None] = (
+            dict(domain_resources)  # type: ignore[arg-type]
+            if isinstance(domain_resources, dict)
+            else {"prompt_tokens": None, "completion_tokens": None, "cost_micro_usd": None}
+        )
+    else:
+        vep_face = (None, "unavailable")
+        rvr_face = (None, "unavailable")
+        stage_face = {stage: (None, "unavailable") for stage in _STAGE_KEYS}
+        resources_face = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "cost_micro_usd": None,
+        }
 
     document = {
         "schema_name": BASELINE_REPORT_SCHEMA_NAME,
@@ -1260,10 +1476,12 @@ def build_baseline_report(
             "warm_p50_wall_time_ms": aggregate.warm_p50_wall_time_ms,
             "warm_p95_wall_time_ms": aggregate.warm_p95_wall_time_ms,
         },
-        "resources": {
-            "prompt_tokens": None,
-            "completion_tokens": None,
-            "cost_micro_usd": None,
+        "resources": resources_face,
+        "vep": {"value": vep_face[0], "projection": vep_face[1]},
+        "rvr": {"value": rvr_face[0], "projection": rvr_face[1]},
+        "stage_outcome": {
+            stage: {"value": stage_face[stage][0], "projection": stage_face[stage][1]}
+            for stage in _STAGE_KEYS
         },
     }
     return _freeze_document(document)

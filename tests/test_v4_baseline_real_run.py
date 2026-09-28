@@ -54,6 +54,25 @@ assertions fail on the unmodified real_run.py of the 45a7ec7 baseline
 (missing diagnostic/resources evidence keys, the v2 all-usage-discarded
 settlement), never through import or arrange errors; the pre-freeze baseline
 run of the v2 file (35/35 green) is archived alongside the RED log.
+
+IP-0034 evolution to frozen version v4 (CA-IP-0034-v1.0 of 2026-09-28; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0034_Identity_SF01.md
+section 10): all 47 v3 methods are retained without weakening -- the fixture
+base moves to the 2026-09-28 approval artifact (the closed served_model_forms
+list replaces served_as), the identity-failure anchors move from the
+now-approved deepseek-flash form to an unknown form, three verbatim-value
+expectations become the SF-01 digest-token form derived by formula, and the
+value-domain audits admit exactly the expected fingerprint token -- and seven
+new methods in two new classes pin the three-form identity expansion (FR-01)
+and the SF-01 bounded-transform channels (FR-02), including the
+legacy-artifact run_name rejection (FR-03) and the v3-shape compatibility
+criterion (FR-06).  The RED anchor is capability absence: on the unmodified
+real_run.py of the 6d69078 baseline the 2026-09-28 artifact is refused at
+$.run_name by the current loader pins, so every entry-driven arrange fails
+there and the token expectations fail against verbatim recording; the
+pre-freeze baseline run of the v3 file (47/47 green, nine frozen files
+298/298, discover 2631 OK with 24 skips) is archived alongside the RED log.
 """
 
 import ast
@@ -96,7 +115,7 @@ from lima.contracts.codec import canonical_encode, compute_content_digest
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _PACKET_RELATIVE_PATH = "docs/LIMA_Implementation_Packet_IP-0032_Real_Run.md"
-_APPROVAL_RELATIVE_PATH = "docs/LIMA_PR3d_Real_Run_Approval_2026-09-27.md"
+_APPROVAL_RELATIVE_PATH = "docs/LIMA_PR3d_Real_Run_Approval_2026-09-28.md"
 _DOCKERFILE_RELATIVE_PATH = "Dockerfile"
 _MODULE_RELATIVE_PATH = "benchmarks/v4/baseline/real_run.py"
 _MANIFEST_RELATIVE_PATH = "evaluation_data/v4/baseline_manifest.json"
@@ -129,10 +148,15 @@ _COLD_COUNT = 5
 _WARM_COUNT = 5
 _ATTEMPT_TOTAL = _COLD_COUNT + _WARM_COUNT
 _BASELINE_SHA = "888793f1a46db6924009e7ec33f9ff1b633f01fa"
-_RUN_NAME = "pr3d-real-2026-09-27"
-_AUTHORIZATION_DATE = "2026-09-27"
+_RUN_NAME = "pr3d-real-2026-09-28"
+_AUTHORIZATION_DATE = "2026-09-28"
+# IP-0034 v4 (R8): the loader-pin triplet that migrates with the 2026-09-28
+# approval artifact (run name, authorization date, pricing retrieval date).
+_PRICING_RETRIEVAL_DATE = "2026-09-28"
 _REQUEST_MODEL = "deepseek-v4-flash"
-_SERVED_MODEL = "DeepSeek-V4.1-Flash"
+# IP-0034 v4 (R2): the closed, order-sensitive served-form list of the
+# 2026-09-28 artifact model block (served_model_forms replaces served_as).
+_SERVED_MODEL_FORMS = ("DeepSeek-V4.1-Flash", "deepseek-flash")
 _BASE_URL = "https://api.deepseek.com"
 _CANONICAL_REPOSITORY = "hiyouga/LlamaFactory"
 
@@ -225,11 +249,33 @@ _IP0033_COPY_LINE = (
     "COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0033_Real_Run_"
     "Diagnostics.md ./docs/"
 )
+# IP-0034 v4 static deliverables (Packet section 8): the identity/SF-01
+# packet document, the 2026-09-28 approval artifact, and their two container
+# copy lines; the legacy 2026-09-27 artifact stays in the repository as
+# historical evidence and must fail closed at $.run_name after the pin
+# migration (R8).
+_PACKET_IP0034_RELATIVE_PATH = (
+    "docs/LIMA_Implementation_Packet_IP-0034_Identity_SF01.md"
+)
+_IP0034_PACKET_COPY_LINE = (
+    "COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0034_Identity_"
+    "SF01.md ./docs/"
+)
+_IP0034_APPROVAL_COPY_LINE = (
+    "COPY --chown=lima:lima docs/LIMA_PR3d_Real_Run_Approval_2026-09-28.md"
+    " ./docs/"
+)
+_APPROVAL_2026_09_27_RELATIVE_PATH = (
+    "docs/LIMA_PR3d_Real_Run_Approval_2026-09-27.md"
+)
 # The served form the last real canary actually returned (2026-09-27 attempt-0
-# evidence, ERR-D issuecomment-5856555608): its normalization is outside the
-# pinned allowed forms, so the failure checkpoint is derivable as
-# response_identity and must reproduce offline (AC-1).
+# evidence, ERR-D issuecomment-5856555608).  IP-0034 v4 (R2) flips its
+# meaning: deepseek-flash is now an APPROVED form -- pinned in the
+# 2026-09-28 artifact served_model_forms list and recorded verbatim in the
+# persisted evidence -- so the identity-FAILURE anchor duty (rd1/rd2/u3/ie2)
+# moves to the unknown form below.
 _LAST_ROUND_SERVED_FORM = "deepseek-flash"
+_UNKNOWN_MODEL_FORM = "deepseek-v9-ultra"
 _RESPONSE_CHECKPOINTS = (
     "response_json",
     "response_dict",
@@ -289,6 +335,39 @@ _RESOURCES_KEYS = frozenset({"download_bytes", "storage_bytes"})
 _EMPTY_CONTENT_SHA256 = (
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 )
+# IP-0034 v4 SF-01 frozen faces (Packet 7.4/7.5): the controlled key and
+# finish-reason enumerations (the frozen minimal supersets), the fingerprint
+# format predicate, and the irreversible digest-token grammar.  Expected
+# tokens are always DERIVED through _sf01_token (PC3), never hardcoded.
+_EXPECTED_RESPONSE_KEYS = frozenset(
+    {
+        "id",
+        "object",
+        "created",
+        "model",
+        "choices",
+        "usage",
+        "system_fingerprint",
+        "service_tier",
+        "role",
+        "content",
+        "reasoning_content",
+        "tool_calls",
+        "refusal",
+    }
+)
+_EXPECTED_FINISH_REASONS = frozenset(
+    {
+        "stop",
+        "length",
+        "content_filter",
+        "tool_calls",
+        "function_call",
+        "insufficient_system_resource",
+    }
+)
+_FINGERPRINT_PATTERN = re.compile(r"^fp_[A-Za-z0-9]{1,63}$")
+_SF01_TOKEN_PATTERN = re.compile(r"^~d:[0-9]+:[0-9a-f]{64}$")
 
 _NOMINAL_MACHINE_PROFILE = {
     "profile_id": "lima-baseline-profile-001",
@@ -545,6 +624,19 @@ def _string_values(value):
     return []
 
 
+def _sf01_token(value):
+    """The frozen SF-01 irreversible digest token of one controlled string.
+
+    Grammar (IP-0034 Packet 7.4): ``~d:<len>:<sha256-hex64>`` where ``len`` is
+    the Python character count of the value and the digest covers the full
+    UTF-8 bytes.  Derived here by formula so every expectation in this file
+    is recomputed, never hardcoded (PC3).
+    """
+    return "~d:" + f"{len(value)}:" + hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()
+
+
 def _fixed_sources(durations_ms):
     """Injectable platform sources with fixed per-attempt wall/cpu durations."""
     durations = [value * 1_000_000 for value in durations_ms]
@@ -753,6 +845,17 @@ class TestApprovalArtifact(_RealRunTestCase):
                 f" {_PACKET_IP0033_RELATIVE_PATH}"
             )
         self.assertIn(_IP0033_COPY_LINE, dockerfile)
+        # IP-0034 v4 (Packet section 8): the identity/SF-01 packet document
+        # and the 2026-09-28 approval artifact are static C1 deliverables,
+        # each with its own container copy line.
+        packet_ip0034 = _REPO_ROOT / _PACKET_IP0034_RELATIVE_PATH
+        if not packet_ip0034.is_file():
+            self.fail(
+                f"required deliverable document is missing:"
+                f" {_PACKET_IP0034_RELATIVE_PATH}"
+            )
+        self.assertIn(_IP0034_PACKET_COPY_LINE, dockerfile)
+        self.assertIn(_IP0034_APPROVAL_COPY_LINE, dockerfile)
 
     def test_authorized_numbers_match_maintainer_constants(self):
         document = self.load_repo_approval()
@@ -785,7 +888,26 @@ class TestApprovalArtifact(_RealRunTestCase):
         )
         self.assertEqual(document["upstream"]["tarball_url"], self.canonical_tarball_url())
         self.assertEqual(document["model"]["request_name"], _REQUEST_MODEL)
-        self.assertEqual(document["model"]["served_as"], _SERVED_MODEL)
+        # IP-0034 v4 (FR-01/AC-1, R2): the closed served-form list replaces
+        # served_as and must equal the frozen pin tuple exactly (two-source
+        # agreement between the artifact and this file's authorization
+        # constants); the model block stays a five-key closed set.
+        self.assertEqual(
+            set(document["model"]),
+            {
+                "provider",
+                "request_name",
+                "served_model_forms",
+                "base_url",
+                "system_fingerprint_policy",
+            },
+        )
+        self.assertEqual(
+            tuple(document["model"]["served_model_forms"]), _SERVED_MODEL_FORMS
+        )
+        self.assertEqual(
+            document["pricing"]["retrieval_date"], _PRICING_RETRIEVAL_DATE
+        )
         self.assertEqual(document["model"]["base_url"], _BASE_URL)
         policy = document["attempt_policy"]
         self.assertEqual(policy["cold"], _COLD_COUNT)
@@ -1205,7 +1327,7 @@ class TestUsageAndIdentity(_RealRunTestCase):
             self.assertEqual(set(codes[2:]), {"REAL_RUN_CANARY_FAILED"})
 
     def test_canary_model_mismatch_rejected(self):
-        responses = [_chat_response(model="deepseek-v9-ultra")]
+        responses = [_chat_response(model=_UNKNOWN_MODEL_FORM)]
         with tempfile.TemporaryDirectory() as directory:
             transport = self.happy_transport(responses=responses)
             result = self.run_entry(directory, transport=transport)
@@ -1222,10 +1344,13 @@ class TestUsageAndIdentity(_RealRunTestCase):
             )
             # IP-0033 v3 (FR-01/AC-1): the served-form rejection carries the
             # first-class identity checkpoint and the sanitized model meta.
+            # IP-0034 v4 (FR-02/R4): the persisted model value of an
+            # unapproved form is the digest token derived by formula (PC3).
             diagnostic = self.read_attempt(directory, 0)["diagnostic"]
             self.assertEqual(diagnostic["checkpoint"], "response_identity")
             self.assertEqual(
-                diagnostic["response_meta"]["model"], "deepseek-v9-ultra"
+                diagnostic["response_meta"]["model"],
+                _sf01_token(_UNKNOWN_MODEL_FORM),
             )
 
     def test_usage_consumed_matches_fake_response_values(self):
@@ -1562,11 +1687,23 @@ class TestRealSuiteResultAndEvidence(_RealRunTestCase):
                     happy_body["choices"][0]["finish_reason"],
                 }
             )
+            # IP-0034 v4 (FR-02/AC-2, R4): the value-domain audit admits the
+            # digest-token form ONLY as the expected token of the fixture's
+            # non-format-compliant fingerprint -- an arbitrary token value is
+            # still a leak.
+            expected_tokens = {_sf01_token(happy_body["system_fingerprint"])}
             for index in range(_ATTEMPT_TOTAL):
                 document = self.read_attempt(directory, index)
                 self.assertIn("diagnostic", document)
                 for value in _string_values(document["diagnostic"]):
                     if _HEX64_PATTERN.match(value):
+                        continue
+                    if _SF01_TOKEN_PATTERN.match(value):
+                        self.assertIn(
+                            value,
+                            expected_tokens,
+                            f"attempt {index} unexpected token {value!r}",
+                        )
                         continue
                     self.assertIn(
                         value, allowlist, f"attempt {index} leaked {value!r}"
@@ -1743,10 +1880,13 @@ class TestResponseDiagnostics(_RealRunTestCase):
         )
         model_not_str = _chat_response()
         model_not_str["model"] = 1234
-        # ERR-D anchor (issuecomment-5856555608): the last real canary failed
-        # at the identity checkpoint because the served form normalizes
-        # outside the pinned allowed forms -- reproduced offline (AC-1).
-        identity_drift = _chat_response(model=_LAST_ROUND_SERVED_FORM)
+        # ERR-D anchor (issuecomment-5856555608), evolved by IP-0034 v4
+        # (FR-01/R2): the last-round served form deepseek-flash is now an
+        # approved form, so the identity-failure reproduction uses an unknown
+        # form whose normalization stays outside the three-form allowed set
+        # (AC-1); the eleven distinct (checkpoint, field_path) pairs must
+        # survive the SF-01 transformation unchanged.
+        identity_drift = _chat_response(model=_UNKNOWN_MODEL_FORM)
         choices_missing = _chat_response()
         del choices_missing["choices"]
         choice0_not_dict = _chat_response()
@@ -1793,7 +1933,13 @@ class TestResponseDiagnostics(_RealRunTestCase):
         )
 
     def test_response_meta_nine_keys_sorting_and_none_discipline(self):
-        identity_form = _chat_response(model=_LAST_ROUND_SERVED_FORM)
+        # IP-0034 v4 (FR-02/R4): the identity failure uses an unknown form;
+        # every fixture response key sits inside the controlled enumeration,
+        # so the sorted key lists stay verbatim (the sort-then-transform order
+        # keeps normal responses byte-identical to v3), while the model value
+        # and the non-format-compliant fingerprint value become the derived
+        # digest tokens.
+        identity_form = _chat_response(model=_UNKNOWN_MODEL_FORM)
         with tempfile.TemporaryDirectory() as directory:
             transport = self.happy_transport(responses=[identity_form])
             self.run_entry(directory, transport=transport)
@@ -1812,8 +1958,10 @@ class TestResponseDiagnostics(_RealRunTestCase):
             )
             self.assertEqual(meta["finish_reason"], "stop")
             self.assertIs(meta["usage_present"], True)
-            self.assertEqual(meta["model"], _LAST_ROUND_SERVED_FORM)
-            self.assertEqual(meta["system_fingerprint"], "fp-stable-001")
+            self.assertEqual(meta["model"], _sf01_token(_UNKNOWN_MODEL_FORM))
+            self.assertEqual(
+                meta["system_fingerprint"], _sf01_token("fp-stable-001")
+            )
         # None discipline (ERR-C): an unparseable body read nothing, so every
         # meta field is null -- never an empty collection or zero.
         with tempfile.TemporaryDirectory() as directory:
@@ -1841,8 +1989,13 @@ class TestResponseDiagnostics(_RealRunTestCase):
             self.assertIsNone(meta["finish_reason"])
 
     def test_success_attempts_carry_null_checkpoint_full_meta(self):
+        # IP-0034 v4 (FR-01/R2): the success-path fixture returns the
+        # first-round observed served form deepseek-flash -- now an approved
+        # form recorded verbatim across the full chain (all ten attempts).
         with tempfile.TemporaryDirectory() as directory:
-            transport = self.happy_transport()
+            transport = self.happy_transport(
+                responses=[_chat_response(model=_LAST_ROUND_SERVED_FORM)]
+            )
             self.run_entry(directory, transport=transport)
             content = _chat_response()["choices"][0]["message"]["content"]
             for index in range(_ATTEMPT_TOTAL):
@@ -1855,7 +2008,7 @@ class TestResponseDiagnostics(_RealRunTestCase):
                     self.assertIsNone(diagnostic["checkpoint"])
                     meta = diagnostic["response_meta"]
                     self.assertEqual(set(meta), _RESPONSE_META_KEYS)
-                    self.assertEqual(meta["model"], _REQUEST_MODEL)
+                    self.assertEqual(meta["model"], _LAST_ROUND_SERVED_FORM)
                     self.assertIs(meta["usage_present"], True)
                     self.assertEqual(meta["choices_count"], 1)
                     self.assertEqual(meta["content_len"], len(content))
@@ -1919,11 +2072,21 @@ class TestResponseDiagnostics(_RealRunTestCase):
                     bait["choices"][0]["finish_reason"],
                 }
             )
+            # IP-0034 v4 (FR-02/AC-2, R4): same tight token admission as e2 --
+            # only the expected digest token of the fixture fingerprint.
+            expected_tokens = {_sf01_token(bait["system_fingerprint"])}
             for index in range(_ATTEMPT_TOTAL):
                 document = self.read_attempt(directory, index)
                 self.assertIn("diagnostic", document)
                 for value in _string_values(document["diagnostic"]):
                     if _HEX64_PATTERN.match(value):
+                        continue
+                    if _SF01_TOKEN_PATTERN.match(value):
+                        self.assertIn(
+                            value,
+                            expected_tokens,
+                            f"attempt {index} unexpected token {value!r}",
+                        )
                         continue
                     self.assertIn(value, allowlist, f"attempt {index} leak {value!r}")
 
@@ -2154,6 +2317,341 @@ class TestResourceObservation(_RealRunTestCase):
             )
             self.assertEqual(result.ledger_snapshot.batch["calls"], _ATTEMPT_TOTAL)
             self.assertEqual(result.ledger_snapshot.violations, 0)
+
+
+class TestIdentityExpansion(_RealRunTestCase):
+    """FR-01 / AC-1: the three approved forms pass; anything else fails."""
+
+    def test_three_approved_forms_pass_identity_gate_full_chain(self):
+        forms = (_REQUEST_MODEL, _SERVED_MODEL_FORMS[0], _SERVED_MODEL_FORMS[1])
+        for form in forms:
+            with self.subTest(form=form):
+                with tempfile.TemporaryDirectory() as directory:
+                    transport = self.happy_transport(
+                        responses=[_chat_response(model=form)]
+                    )
+                    result = self.run_entry(directory, transport=transport)
+                    self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+                    self.assertEqual(result.status, "sufficient_sample")
+                    self.assertEqual(result.canary_status, "passed")
+                    attempt0 = self.read_attempt(directory, 0)
+                    self.assertIsNone(attempt0["error_code"])
+                    self.assertIsNone(attempt0["diagnostic"]["checkpoint"])
+                    # An approved canonical identity is recorded verbatim on
+                    # every persisted face (R4 verbatim predicate), including
+                    # the deepseek-flash full chain of ten successes.
+                    self.assertEqual(
+                        attempt0["diagnostic"]["response_meta"]["model"], form
+                    )
+                    self.assertEqual(attempt0["response"]["model"], form)
+                    self.assertEqual(self.read_manifest(directory)["model"], form)
+
+    def test_vision_exp_and_unknown_forms_rejected_with_tokenized_evidence(self):
+        for form in ("deepseek-v4-flash-vision-exp", _UNKNOWN_MODEL_FORM):
+            with self.subTest(form=form):
+                with tempfile.TemporaryDirectory() as directory:
+                    transport = self.happy_transport(
+                        responses=[_chat_response(model=form)]
+                    )
+                    result = self.run_entry(directory, transport=transport)
+                    self.assertEqual(transport.chat_calls, 1)
+                    self.assertEqual(result.canary_status, "failed")
+                    attempt0 = self.read_attempt(directory, 0)
+                    self.assertEqual(
+                        attempt0["error_code"], "REAL_RUN_RESPONSE_INVALID"
+                    )
+                    self.assertEqual(
+                        attempt0["diagnostic"]["checkpoint"], "response_identity"
+                    )
+                    expected = _sf01_token(form)
+                    self.assertEqual(
+                        attempt0["diagnostic"]["response_meta"]["model"], expected
+                    )
+                    self.assertEqual(attempt0["response"]["model"], expected)
+                    # None discipline: an unapproved form never becomes the
+                    # batch baseline, so the manifest model face stays null
+                    # instead of carrying an unbounded hostile string.
+                    self.assertIsNone(self.read_manifest(directory)["model"])
+
+    def test_artifact_served_model_forms_negative_matrix(self):
+        module = self.real_run()
+
+        def non_list(document):
+            document["model"]["served_model_forms"] = _SERVED_MODEL_FORMS[0]
+
+        def non_str_element(document):
+            document["model"]["served_model_forms"] = [
+                _SERVED_MODEL_FORMS[0],
+                42,
+            ]
+
+        def unpinned_form(document):
+            document["model"]["served_model_forms"] = [
+                _SERVED_MODEL_FORMS[0],
+                "deepseek-v4-flash-vision-exp",
+            ]
+
+        def order_drift(document):
+            document["model"]["served_model_forms"] = [
+                _SERVED_MODEL_FORMS[1],
+                _SERVED_MODEL_FORMS[0],
+            ]
+
+        def length_mismatch(document):
+            document["model"]["served_model_forms"] = [_SERVED_MODEL_FORMS[0]]
+
+        cases = (
+            ("non-list", non_list),
+            ("non-str-element", non_str_element),
+            ("unpinned-form", unpinned_form),
+            ("order-drift", order_drift),
+            ("length-mismatch", length_mismatch),
+        )
+        for label, mutate in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    approval = self.write_artifact(directory, mutate)
+                    with self.assertRaises(module.RealRunError) as caught:
+                        self.run_entry(
+                            pathlib.Path(directory) / "out",
+                            transport=self.happy_transport(),
+                            artifact_path=approval,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(
+                        caught.exception.field_path, "$.model.served_model_forms"
+                    )
+
+
+class TestSF01Sanitization(_RealRunTestCase):
+    """FR-02 / AC-2: server-controlled strings stay bounded on every face."""
+
+    def test_hostile_key_names_tokenized_counts_preserved(self):
+        marker_key = f"evil-top-{_RAW_CONTENT_MARKER}"
+        unicode_key = "evil\u2045unicode\u2046key"
+        long_key = "k" * 4096
+        credential_key = "leak-sk-" + "a" * 24
+        message_key = f"evil-msg-{_RAW_CONTENT_MARKER}"
+        body = _chat_response()
+        for key in (marker_key, unicode_key, long_key, credential_key):
+            body[key] = 1
+        message = body["choices"][0]["message"]
+        message[message_key] = 1
+        hostile_keys = (
+            marker_key,
+            unicode_key,
+            long_key,
+            credential_key,
+            message_key,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            self.run_entry(directory, transport=transport)
+            meta = self.read_attempt(directory, 0)["diagnostic"]["response_meta"]
+            # Sort by original key names, then transform item by item: an
+            # enumerated key stays verbatim, anything else becomes the
+            # derived token (Packet 7.4 ordering; expectations derived, PC3).
+            self.assertEqual(
+                meta["top_level_keys"],
+                [
+                    key if key in _EXPECTED_RESPONSE_KEYS else _sf01_token(key)
+                    for key in sorted(body)
+                ],
+            )
+            self.assertEqual(
+                meta["message_keys"],
+                [
+                    key if key in _EXPECTED_RESPONSE_KEYS else _sf01_token(key)
+                    for key in sorted(message)
+                ],
+            )
+            # Counts and digests are untouched by the transformation.
+            self.assertEqual(meta["choices_count"], 1)
+            content = message["content"]
+            self.assertEqual(meta["content_len"], len(content))
+            self.assertEqual(
+                meta["content_sha256"],
+                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
+            offenders = []
+            for path in sorted(pathlib.Path(directory).rglob("*")):
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+                for key in hostile_keys:
+                    if key.encode("utf-8") in data:
+                        offenders.append((path.name, key[:24]))
+                if _RAW_CONTENT_MARKER.encode("utf-8") in data:
+                    offenders.append((path.name, "marker"))
+            self.assertEqual(offenders, [])
+
+    def test_identity_string_channels_tokenized_across_three_faces(self):
+        long_model = "m" * 200 + _RAW_CONTENT_MARKER + "x" * 7
+        self.assertEqual(len(long_model), 230)
+        hostile_fingerprint = "fingerprint-" + _RAW_CONTENT_MARKER + "-nope"
+        hostile_finish = "finish-" + _RAW_CONTENT_MARKER
+        compliant_fingerprint = "fp_" + "a" * 32
+        self.assertIsNotNone(_FINGERPRINT_PATTERN.match(compliant_fingerprint))
+        self.assertIsNone(_FINGERPRINT_PATTERN.match(hostile_fingerprint))
+        self.assertNotIn(hostile_finish, _EXPECTED_FINISH_REASONS)
+        # Hostile model string: rejected at the identity checkpoint; both
+        # response faces carry the derived token and the manifest face stays
+        # null (an unapproved form never latches as the batch baseline).
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(
+                responses=[_chat_response(model=long_model)]
+            )
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.canary_status, "failed")
+            attempt0 = self.read_attempt(directory, 0)
+            self.assertEqual(
+                attempt0["diagnostic"]["checkpoint"], "response_identity"
+            )
+            model_token = _sf01_token(long_model)
+            self.assertEqual(
+                attempt0["diagnostic"]["response_meta"]["model"], model_token
+            )
+            self.assertEqual(attempt0["response"]["model"], model_token)
+            self.assertIsNone(self.read_manifest(directory)["model"])
+            self.assertEqual(self._marker_hits(directory), [])
+        # Hostile fingerprint plus out-of-enum finish reason on a successful
+        # run: every persisted face of each channel carries the token.
+        with tempfile.TemporaryDirectory() as directory:
+            body = _chat_response(fingerprint=hostile_fingerprint)
+            body["choices"][0]["finish_reason"] = hostile_finish
+            transport = self.happy_transport(responses=[body])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(result.status, "sufficient_sample")
+            fingerprint_token = _sf01_token(hostile_fingerprint)
+            finish_token = _sf01_token(hostile_finish)
+            for index in range(_ATTEMPT_TOTAL):
+                with self.subTest(index=index):
+                    document = self.read_attempt(directory, index)
+                    meta = document["diagnostic"]["response_meta"]
+                    self.assertEqual(
+                        meta["system_fingerprint"], fingerprint_token
+                    )
+                    self.assertEqual(meta["finish_reason"], finish_token)
+                    self.assertEqual(
+                        document["response"]["system_fingerprint"],
+                        fingerprint_token,
+                    )
+                    self.assertEqual(
+                        document["response"]["finish_reason"], finish_token
+                    )
+            manifest = self.read_manifest(directory)
+            self.assertEqual(
+                manifest["system_fingerprint_baseline"], fingerprint_token
+            )
+            self.assertEqual(self._marker_hits(directory), [])
+        # Positive controls: the approved form, a format-compliant
+        # fingerprint, and the enumerated finish reason stay verbatim on all
+        # of their persisted faces.
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(
+                responses=[
+                    _chat_response(
+                        model=_LAST_ROUND_SERVED_FORM,
+                        fingerprint=compliant_fingerprint,
+                    )
+                ]
+            )
+            self.run_entry(directory, transport=transport)
+            attempt0 = self.read_attempt(directory, 0)
+            meta = attempt0["diagnostic"]["response_meta"]
+            self.assertEqual(meta["model"], _LAST_ROUND_SERVED_FORM)
+            self.assertEqual(meta["system_fingerprint"], compliant_fingerprint)
+            self.assertEqual(meta["finish_reason"], "stop")
+            self.assertEqual(
+                attempt0["response"]["system_fingerprint"], compliant_fingerprint
+            )
+            self.assertEqual(attempt0["response"]["finish_reason"], "stop")
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["model"], _LAST_ROUND_SERVED_FORM)
+            self.assertEqual(
+                manifest["system_fingerprint_baseline"], compliant_fingerprint
+            )
+
+    def test_legacy_2026_09_27_artifact_rejected_at_run_name(self):
+        module = self.real_run()
+        legacy = _REPO_ROOT / _APPROVAL_2026_09_27_RELATIVE_PATH
+        if not legacy.is_file():
+            self.fail(
+                "required legacy approval artifact is missing:"
+                f" {_APPROVAL_2026_09_27_RELATIVE_PATH}"
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(module.RealRunError) as caught:
+                self.run_entry(
+                    directory,
+                    transport=self.happy_transport(),
+                    artifact_path=legacy,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+            )
+            self.assertEqual(caught.exception.field_path, "$.run_name")
+
+    def test_normal_response_evidence_matches_v3_shape(self):
+        # Compatibility criterion (Packet 7.8): with the standard key set, an
+        # approved model, a format-compliant fingerprint, and the enumerated
+        # finish reason, the sanitized evidence is byte-for-byte the v3 shape
+        # -- sorted verbatim key lists, verbatim identity channels, and no
+        # digest token anywhere in the response metadata.
+        compliant_fingerprint = "fp_" + "a" * 32
+        body = _chat_response(
+            model=_LAST_ROUND_SERVED_FORM, fingerprint=compliant_fingerprint
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            transport = self.happy_transport(responses=[body])
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(result.status, "sufficient_sample")
+            message = body["choices"][0]["message"]
+            for index in range(_ATTEMPT_TOTAL):
+                with self.subTest(index=index):
+                    document = self.read_attempt(directory, index)
+                    meta = document["diagnostic"]["response_meta"]
+                    self.assertEqual(set(meta), _RESPONSE_META_KEYS)
+                    self.assertEqual(meta["top_level_keys"], sorted(body))
+                    self.assertEqual(meta["message_keys"], sorted(message))
+                    self.assertEqual(meta["model"], _LAST_ROUND_SERVED_FORM)
+                    self.assertEqual(
+                        meta["system_fingerprint"], compliant_fingerprint
+                    )
+                    self.assertEqual(meta["finish_reason"], "stop")
+                    self.assertEqual(meta["choices_count"], 1)
+                    self.assertEqual(meta["content_len"], len(message["content"]))
+                    self.assertEqual(
+                        meta["content_sha256"],
+                        hashlib.sha256(
+                            message["content"].encode("utf-8")
+                        ).hexdigest(),
+                    )
+                    self.assertEqual(
+                        document["response"]["model"], _LAST_ROUND_SERVED_FORM
+                    )
+                    for value in _string_values(meta):
+                        self.assertIsNone(_SF01_TOKEN_PATTERN.match(value))
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["model"], _LAST_ROUND_SERVED_FORM)
+            self.assertEqual(
+                manifest["system_fingerprint_baseline"], compliant_fingerprint
+            )
+
+    def _marker_hits(self, directory):
+        """Evidence files whose bytes still contain the raw leak marker."""
+        hits = []
+        for path in sorted(pathlib.Path(directory).rglob("*")):
+            if path.is_file() and _RAW_CONTENT_MARKER.encode("utf-8") in (
+                path.read_bytes()
+            ):
+                hits.append(path.name)
+        return hits
 
 
 if __name__ == "__main__":  # pragma: no cover

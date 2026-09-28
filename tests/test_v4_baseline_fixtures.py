@@ -35,6 +35,26 @@ deliverables -- the module-absence anchor is
 The suite is offline and secretless: stdlib plus the frozen
 ``lima.contracts.codec`` only, tempdir isolation, no network, no environment
 reads, no paid model calls.
+
+IP-0036 evolution (CA-IP-0036-v1.0 of 2026-09-28; the formal one-time
+frozen-surface evolution authorization and its six conditions are recorded
+in docs/LIMA_Implementation_Packet_IP-0036_PR3e_Offline_Integration.md
+section 10): all 34 methods are retained without weakening -- the synthetic
+key count moves eleven -> twelve (``archetype/signal-storm`` appended), the
+registry entry count twelve -> thirteen, the distinct-fingerprint count
+eleven -> twelve, and the materialize-all method gains a derived-count
+branch for signal-storm (the shape's file count N is frozen once by the C3
+deliverable; the expectation is always derived from the materialized tree,
+PC3) -- while six new methods in one new class pin the twelfth archetype:
+deterministic bounded pattern tree (N > 12, total bytes <= 262144, ASCII/LF,
+inert header, exactly one constant-argument os.system pattern site per
+file, byte-identical double materialization), registry entry agreement
+(fingerprint == tree digest == independent oracle), thirteen-entry byte
+regeneration, the additive relationship-note sentence with zero deletion of
+the existing sentences, and the no-url/no-real-identity hygiene extension.
+The RED anchor is the missing C3 deliverable: on the unmodified fixtures.py
+of the 1046501d baseline the key is not registered
+(``UNKNOWN_FIXTURE_KEY``) and the registry still holds twelve entries.
 """
 
 import ast
@@ -305,21 +325,34 @@ class _FixtureContractTestCase(unittest.TestCase):
 class TestFixtureMaterialization(_FixtureContractTestCase):
     """AC-1 / FR-01..FR-03: eleven synthetic fixtures materialize to frozen shapes."""
 
-    def test_materializes_all_eleven_synthetic_fixtures_with_declared_counts(self):
+    def test_materializes_all_twelve_synthetic_fixtures_with_declared_counts(self):
         fixtures = self.fixtures()
-        self.assertEqual(len(fixtures.SYNTHETIC_FIXTURE_KEYS), 11)
+        # IP-0036 (R3.1): the synthetic family grows eleven -> twelve with
+        # archetype/signal-storm as the appended twelfth key.
+        self.assertEqual(len(fixtures.SYNTHETIC_FIXTURE_KEYS), 12)
         for key in fixtures.SYNTHETIC_FIXTURE_KEYS:
             with self.subTest(key=key):
                 result, root = self._materialize(key)
                 self.assertEqual(result.key, key)
                 self.assertEqual(result.root, root.resolve())
-                self.assertEqual(result.file_count, _EXPECTED_FILE_COUNTS[key])
                 materialized = _relative_files(root)
-                self.assertEqual(len(materialized), _EXPECTED_FILE_COUNTS[key])
+                self.assertEqual(result.file_count, len(materialized))
                 self.assertEqual(
                     result.size_bytes, sum(len(payload) for payload in materialized.values())
                 )
                 self.assertRegex(result.fingerprint, _FINGERPRINT_HEX_PATTERN)
+                if key == "archetype/signal-storm":
+                    # IP-0036 (R3.2, PC3): the signal-storm file count N is
+                    # frozen once by the C3 shape; the expectation here is
+                    # derived from the materialized tree itself and must
+                    # exceed twelve (the hidden-cap probe material).
+                    pattern_files = [
+                        relative for relative in materialized if relative.endswith(".py")
+                    ]
+                    self.assertGreater(len(pattern_files), 12)
+                else:
+                    self.assertEqual(len(materialized), _EXPECTED_FILE_COUNTS[key])
+                    self.assertEqual(result.file_count, _EXPECTED_FILE_COUNTS[key])
 
     def test_empty_repository_materializes_zero_files_with_sentinel(self):
         result, root = self._materialize("archetype/empty-repository")
@@ -478,7 +511,8 @@ class TestDeterminism(_FixtureContractTestCase):
         for key in fixtures.SYNTHETIC_FIXTURE_KEYS:
             result, _ = self._materialize(key)
             fingerprints[key] = result.fingerprint
-        self.assertEqual(len(set(fingerprints.values())), 11)
+        # IP-0036 (R3.1): twelve distinct synthetic fingerprints.
+        self.assertEqual(len(set(fingerprints.values())), 12)
         repeat, _ = self._materialize("archetype/application")
         self.assertEqual(repeat.fingerprint, fingerprints["archetype/application"])
 
@@ -526,20 +560,22 @@ class TestRegistryContract(_FixtureContractTestCase):
         self.assertTrue(offline_note.strip())
         self.assertIn("offline", offline_note)
         self.assertIsInstance(registry["fixtures"], list)
-        self.assertEqual(len(registry["fixtures"]), 12)
+        # IP-0036 (R3.6): the registry grows twelve -> thirteen entries.
+        self.assertEqual(len(registry["fixtures"]), 13)
 
     def test_registry_keys_form_closed_set_matching_fixture_keys(self):
         fixtures = self.fixtures()
         registry = fixtures.load_registry()
         keys = [entry["key"] for entry in registry["fixtures"]]
-        self.assertEqual(len(keys), 12)
-        self.assertEqual(len(set(keys)), 12)
+        # IP-0036 (R3.1): thirteen entries, twelve synthetic keys.
+        self.assertEqual(len(keys), 13)
+        self.assertEqual(len(set(keys)), 13)
         self.assertEqual(set(keys), set(fixtures.FIXTURE_KEYS))
         self.assertEqual(
             set(fixtures.SYNTHETIC_FIXTURE_KEYS) | set(fixtures.EXTERNAL_IDENTITY_KEYS),
             set(fixtures.FIXTURE_KEYS),
         )
-        self.assertEqual(len(fixtures.SYNTHETIC_FIXTURE_KEYS), 11)
+        self.assertEqual(len(fixtures.SYNTHETIC_FIXTURE_KEYS), 12)
         self.assertEqual(fixtures.EXTERNAL_IDENTITY_KEYS, ("external/llamafactory-replay",))
         self.assertEqual(fixtures.registry_relative_path, _REGISTRY_RELATIVE_PATH)
 
@@ -929,6 +965,142 @@ class TestLlamaFactoryIdentityRegistration(_FixtureContractTestCase):
             with self.subTest(notes_token=token):
                 self.assertIn(token, notes)
         self.assertNotIn("https://", notes)
+
+
+class TestSignalStormFixture(_FixtureContractTestCase):
+    """IP-0036 FR-05/AC-3 (Packet 7.2): the twelfth synthetic archetype."""
+
+    def test_signal_storm_is_the_twelfth_synthetic_archetype(self):
+        fixtures = self.fixtures()
+        self.assertEqual(len(fixtures.SYNTHETIC_FIXTURE_KEYS), 12)
+        self.assertEqual(fixtures.SYNTHETIC_FIXTURE_KEYS[-1], "archetype/signal-storm")
+        self.assertIn("archetype/signal-storm", fixtures.FIXTURE_KEYS)
+        self.assertEqual(len(fixtures.FIXTURE_KEYS), 13)
+        self.assertEqual(
+            fixtures.EXTERNAL_IDENTITY_KEYS, ("external/llamafactory-replay",)
+        )
+
+    def test_signal_storm_materializes_deterministic_bounded_pattern_tree(self):
+        result, root = self._materialize("archetype/signal-storm")
+        materialized = _relative_files(root)
+        pattern_files = sorted(
+            relative for relative in materialized if relative.endswith(".py")
+        )
+        self.assertGreater(len(pattern_files), 12)
+        self.assertLessEqual(result.size_bytes, _LARGE_REPO_MAX_BYTES)
+        self.assertLessEqual(
+            sum(len(payload) for payload in materialized.values()), _LARGE_REPO_MAX_BYTES
+        )
+        for relative in sorted(materialized):
+            payload = materialized[relative]
+            with self.subTest(path=relative):
+                self.assertNotIn(b"\r", payload)
+                payload.decode("ascii")
+                if relative.endswith(".py"):
+                    text = payload.decode("utf-8")
+                    self.assertTrue(
+                        text.startswith("# SYNTHETIC INERT BASELINE FIXTURE"),
+                        f"missing inert header in {relative}",
+                    )
+                    self.assertEqual(text.count("os.system("), 1)
+        second, second_root = self._materialize("archetype/signal-storm")
+        first_files = {
+            relative: hashlib.sha256(payload).hexdigest()
+            for relative, payload in _relative_files(root).items()
+        }
+        second_files = {
+            relative: hashlib.sha256(payload).hexdigest()
+            for relative, payload in _relative_files(second_root).items()
+        }
+        self.assertEqual(first_files, second_files)
+        self.assertEqual(result.fingerprint, second.fingerprint)
+        self.assertEqual(result.file_count, second.file_count)
+        self.assertEqual(result.size_bytes, second.size_bytes)
+
+    def test_signal_storm_registry_entry_and_fingerprints_agree(self):
+        fixtures = self.fixtures()
+        entries = self._registry_entries_by_key()
+        self.assertIn("archetype/signal-storm", entries)
+        entry = entries["archetype/signal-storm"]
+        self.assertEqual(set(entry), _SYNTHETIC_FIELD_SET)
+        self.assertEqual(entry["kind"], "synthetic-fixture")
+        self.assertEqual(entry["origin"], "synthetic-lima-authored")
+        self.assertEqual(
+            entry["license"], "Apache-2.0 (LIMA-authored synthetic content)"
+        )
+        self.assertTrue(entry["purpose"].startswith("baseline archetype: "))
+        self.assertRegex(entry["fingerprint"], _FINGERPRINT_HEX_PATTERN)
+        result, root = self._materialize("archetype/signal-storm")
+        self.assertEqual(entry["fingerprint"], result.fingerprint)
+        self.assertEqual(fixtures.compute_tree_fingerprint(root), entry["fingerprint"])
+        self.assertEqual(_oracle_fingerprint(root), entry["fingerprint"])
+        self.assertEqual(entry["file_count"], result.file_count)
+        self.assertEqual(entry["declared_size_bytes"], result.size_bytes)
+        self.assertEqual(
+            entry["generation"],
+            {
+                "mode": "deterministic-script",
+                "entrypoint": "benchmarks.v4.baseline.fixtures.materialize_fixture",
+            },
+        )
+
+    def test_registry_regenerates_thirteen_entry_bytes(self):
+        fixtures = self.fixtures()
+        with tempfile.TemporaryDirectory(prefix="lima-ip0036-reg1-") as first, (
+            tempfile.TemporaryDirectory(prefix="lima-ip0036-reg2-")
+        ) as second:
+            first_bytes = fixtures.write_registry(pathlib.Path(first) / "registry.json")
+            second_bytes = fixtures.write_registry(
+                pathlib.Path(second) / "registry.json"
+            )
+        self.assertEqual(first_bytes, second_bytes)
+        self.assertEqual(first_bytes, self.read_registry_artifact())
+        document = json.loads(first_bytes.decode("utf-8"))
+        self.assertEqual(len(document["fixtures"]), 13)
+        self.assertEqual(
+            [entry["key"] for entry in document["fixtures"]][-1],
+            "archetype/signal-storm",
+        )
+
+    def test_relationship_note_additive_and_notes_registered(self):
+        registry = self.fixtures().load_registry()
+        relationship = registry["relationship_to_support_matrix"]
+        self.assertIsInstance(relationship, str)
+        # IP-0036 (R3.5): exactly one additive sentence registers the PR3-e
+        # requirement-level matrix document ...
+        self.assertIn("LIMA_PR3e_Requirement_Matrix_v2", relationship)
+        # ... while every pre-existing sentence survives verbatim (zero
+        # deletion: the IP-0026 artifact-matrix rows stay honestly
+        # unsupported and the deferral note stays true).
+        for token in (
+            "baseline_manifest.json",
+            "python_mvp_support_matrix.json",
+            "unsupported",
+            "PR3-e",
+            "deferred to #57 PR3-e",
+        ):
+            with self.subTest(relationship_token=token):
+                self.assertIn(token, relationship)
+        entry = self._registry_entries_by_key()["archetype/signal-storm"]
+        notes = entry["notes"]
+        self.assertIsInstance(notes, str)
+        self.assertTrue(notes.strip())
+        for token in ("SYNTHETIC", "INERT"):
+            with self.subTest(notes_token=token):
+                self.assertIn(token, notes)
+
+    def test_signal_storm_no_url_no_real_identity(self):
+        self.fixtures()
+        registry_text = self.read_registry_artifact().decode("utf-8")
+        # The single registry URL stays the external entry's fetch URL.
+        self.assertEqual(registry_text.count("https://"), 1)
+        entry = self._registry_entries_by_key()["archetype/signal-storm"]
+        self.assertNotIn("http", json.dumps(entry))
+        _, root = self._materialize("archetype/signal-storm")
+        combined = b"\n".join(_relative_files(root).values())
+        for token in _REAL_IDENTITY_TOKENS:
+            with self.subTest(token=token):
+                self.assertNotIn(token.encode("ascii"), combined)
 
 
 if __name__ == "__main__":

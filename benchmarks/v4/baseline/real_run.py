@@ -53,6 +53,22 @@ re-raised unchanged, and the attempt documents gain the additive
 state_reuse/provider_cache/timings observation sub-blocks while the
 manifest gains ``batch_wall_ms`` and the pure-observation deadline block.
 
+IP-0036 adds the offline artifact-family face: the frozen
+``REAL_RUN_ARTIFACT_FAMILY`` catalog (ten keys -- the nine synthetic
+archetypes plus the verbatim llamafactory descriptor) parameterizes the
+entry through one trailing keyword-only ``artifact_key`` whose default
+keeps the llamafactory path byte-identical.  The loader pins every
+descriptor field per selected artifact (upstream four pins plus the
+document identity pins; an unknown key is the structure-only rejection
+under the existing code family), the synthetic artifacts carry the
+zero-budget offline-proof identity (``.invalid`` never-fetchable URLs,
+local fixture materialization with zero download bytes and zero GET
+calls), and the cold-reset program ``reset_cold_state`` re-extracts the
+cached tarball into a fresh per-cold snapshot directory, rebuilds the
+request body, performs zero transport calls, and returns the frozen
+five-key observation document -- the default batch behavior (5 cold + 5
+warm, attempt-0 materialization, attempts 1-9 reuse) stays unchanged.
+
 The locked IP-0031 gate face is untouched: ``budget.REAL_RUN_GATE_UNLOCKED``
 stays ``False``, ``require_real_run_unlock`` is neither called nor modified,
 and this authorized path is independent of both.  The module reads no
@@ -90,6 +106,11 @@ from benchmarks.v4.baseline.budget import (
     CallUsage,
     LedgerSnapshot,
     Pricing,
+)
+from benchmarks.v4.baseline.fixtures import (
+    compute_tree_fingerprint,
+    load_registry,
+    materialize_fixture,
 )
 from benchmarks.v4.baseline.orchestrate import (
     BaselineOrchestrationError,
@@ -291,6 +312,100 @@ _MODEL_FINGERPRINT_POLICY_PIN: typing.Final[str] = "record-and-latch-on-change"
 _PRICING_SOURCE_PIN: typing.Final[str] = "api-docs.deepseek.com"
 _PRICING_RETRIEVAL_DATE_PIN: typing.Final[str] = "2026-09-28"
 _PRICING_BASIS_PIN: typing.Final[str] = "peak cache-miss per million tokens"
+
+#: The llamafactory document-identity pins (IP-0036 R9.1): the descriptor
+#: values the default artifact key resolves to, verbatim the v5 constants.
+_APPROVAL_TYPE_PIN: typing.Final[str] = "PR3D-REAL-RUN-LIMITED"
+_RUN_NAME_PIN: typing.Final[str] = "pr3d-real-2026-09-28"
+
+#: The frozen zero-budget offline-proof family discriminator (IP-0036
+#: R9.4-1): the nine synthetic descriptors never carry approval wording and
+#: never open an api_key channel with usable request capability.
+_ZERO_BUDGET_FAMILY_VALUE: typing.Final[str] = "PR3E-OFFLINE-PROOF-ZERO-BUDGET"
+
+#: The default artifact key (DR-IP-0036-PV-5): every pre-existing call site
+#: keeps exercising the byte-identical llamafactory path.
+_DEFAULT_ARTIFACT_KEY: typing.Final[str] = "external/llamafactory-replay"
+
+#: The nine synthetic archetype keys of the frozen artifact family (the
+#: catalog is closed: these plus the default external key, nothing else).
+_SYNTHETIC_ARTIFACT_KEYS: typing.Final[tuple[str, ...]] = (
+    "archetype/application",
+    "archetype/library",
+    "archetype/cli",
+    "archetype/docs-content",
+    "archetype/test-heavy",
+    "archetype/monorepo",
+    "archetype/large-repo",
+    "archetype/malicious-layout",
+    "archetype/dependency-blocked",
+)
+
+
+def _synthetic_artifact_descriptor(key: str, fingerprint: str) -> dict[str, str]:
+    """Derive one synthetic descriptor from the fixture tree fingerprint.
+
+    IP-0036 R9.1 / DR-IP-0036-PV-4: the commit sha is the frozen derivation
+    ``sha256("lima-synth-artifact:<key>:<registry-fingerprint>")[:40]`` -- a
+    deterministic 40-hex identity derived from the fixture tree, never a
+    git commit.  The tarball URL is an RFC 2606 ``.invalid`` value that is
+    never fetchable and never fetched (synthetic materialization is local);
+    the filename template keeps the ``{commit_sha}`` placeholder form.
+    """
+    archetype = key.removeprefix("archetype/")
+    commit_sha = hashlib.sha256(
+        ("lima-synth-artifact:" + key + ":" + fingerprint).encode("utf-8")
+    ).hexdigest()[:40]
+    return {
+        "repository": f"lima-synth/{archetype}",
+        "requested_name": f"lima-synth/{archetype}",
+        "commit_sha": commit_sha,
+        "tarball_url": f"https://lima-synth.invalid/{archetype}/tar.gz/{commit_sha}",
+        "tarball_filename": f"lima-synth-{archetype}-{{commit_sha}}.tar.gz",
+        "approval_type": _ZERO_BUDGET_FAMILY_VALUE,
+        "run_name": f"pr3e-offline-proof-{archetype}",
+    }
+
+
+def _build_artifact_family() -> dict[str, dict[str, str]]:
+    """Build the frozen artifact-family catalog (ten keys, seven fields each).
+
+    The llamafactory descriptor carries the verbatim current pins; every
+    synthetic descriptor is derived once from its registry fingerprint, so
+    the catalog is recomputable offline from the committed registry alone.
+    """
+    registry = load_registry()
+    fingerprints = {
+        entry["key"]: entry["fingerprint"]
+        for entry in registry["fixtures"]
+        if entry.get("kind") == "synthetic-fixture"
+    }
+    family: dict[str, dict[str, str]] = {
+        key: _synthetic_artifact_descriptor(key, fingerprints[key])
+        for key in _SYNTHETIC_ARTIFACT_KEYS
+    }
+    family[_DEFAULT_ARTIFACT_KEY] = {
+        "repository": _UPSTREAM_REPOSITORY_PIN,
+        "requested_name": _UPSTREAM_REQUESTED_NAME_PIN,
+        "commit_sha": _UPSTREAM_COMMIT_PIN,
+        "tarball_url": _UPSTREAM_TARBALL_PIN,
+        "tarball_filename": "llamafactory-{commit_sha}.tar.gz",
+        "approval_type": _APPROVAL_TYPE_PIN,
+        "run_name": _RUN_NAME_PIN,
+    }
+    return family
+
+
+#: The frozen artifact-family catalog (IP-0036 Packet 7.4.1, DR-IP-0036-PV-3):
+#: a closed ten-key mapping (nine synthetic archetypes plus the external
+#: llamafactory replay), every descriptor a closed seven-field set.  The
+#: constant is intentionally not exported in ``__all__`` (the six frozen
+#: symbols stay verbatim); consumers read it through the module attribute.
+REAL_RUN_ARTIFACT_FAMILY: typing.Final[dict[str, dict[str, str]]] = (
+    _build_artifact_family()
+)
+
+_SYNTHETIC_SET: typing.Final[frozenset[str]] = frozenset(_SYNTHETIC_ARTIFACT_KEYS)
 
 
 class RealRunErrorCode(str, enum.Enum):  # noqa: UP042 -- frozen by IP-0032 Packet 7.1
@@ -494,7 +609,14 @@ class RealSuiteResult:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _ApprovalContract:
-    """The validated approval artifact plus its derived budget objects."""
+    """The validated approval artifact plus its derived budget objects.
+
+    IP-0036 adds the artifact-family resolution: ``artifact_key`` is the
+    selected catalog key, ``tarball_filename`` the expanded destination
+    template (the llamafactory expansion stays byte-identical to the v5
+    literal), and ``fixture_key`` the synthetic fixture materialized locally
+    (``None`` on the external path, whose tarball is downloaded).
+    """
 
     document: dict[str, object]
     raw: bytes
@@ -509,6 +631,9 @@ class _ApprovalContract:
     budget_spec: BudgetSpec
     pricing: Pricing
     machine_profile: dict[str, object]
+    artifact_key: str
+    tarball_filename: str
+    fixture_key: str | None
 
 
 @dataclasses.dataclass(slots=True)
@@ -634,16 +759,28 @@ def _require_int_pin(value: object, expected: int, field_path: str) -> None:
 
 def _load_and_validate_approval(
     approval_path: str | pathlib.Path,
+    artifact_key: str = _DEFAULT_ARTIFACT_KEY,
 ) -> _ApprovalContract:
     """Load and fully validate the approval artifact (Packet 7.3).
 
-    Fail-closed order: the raw bytes must decode as UTF-8, the first json
-    fenced block must parse into a dict, the top-level and sub-block field
-    sets must be closed, every identity pin must match verbatim, the price
+    Fail-closed order: the artifact key must resolve to one descriptor of
+    the frozen family catalog (an unknown key is the structure-only ``$``
+    rejection under the existing code family, zero new codes); the raw
+    bytes must decode as UTF-8, the first json fenced block must parse
+    into a dict, the top-level and sub-block field sets must be closed,
+    the per-descriptor pins (upstream four pins plus the document identity
+    pins; IP-0036 S1) and every shared pin must match verbatim, the price
     pin must equal the module constants as positive ints, and the seven
     budget dimensions must construct ``BudgetLimits``/``BudgetSpec`` (whose
-    own ``BUDGET_SPEC_INVALID`` passes through unchanged).
+    own ``BUDGET_SPEC_INVALID`` passes through unchanged).  The default
+    key resolves to the verbatim llamafactory pins, so the default path is
+    byte-identical to the v5 loader.
     """
+    if not isinstance(artifact_key, str):
+        raise _invalid("$")
+    descriptor = REAL_RUN_ARTIFACT_FAMILY.get(artifact_key)
+    if descriptor is None:
+        raise _invalid("$")
     try:
         raw = pathlib.Path(approval_path).read_bytes()
     except OSError as exc:
@@ -665,9 +802,9 @@ def _load_and_validate_approval(
 
     _require_int_pin(document["schema_version"], 1, "$.schema_version")
     _require_str_pin(
-        document["approval_type"], "PR3D-REAL-RUN-LIMITED", "$.approval_type"
+        document["approval_type"], descriptor["approval_type"], "$.approval_type"
     )
-    _require_str_pin(document["run_name"], "pr3d-real-2026-09-28", "$.run_name")
+    _require_str_pin(document["run_name"], descriptor["run_name"], "$.run_name")
     _require_str_pin(document["date"], "2026-09-28", "$.date")
     _require_str_pin(document["authorized_by"], "Maintainer", "$.authorized_by")
     _require_str_pin(document["baseline_sha"], _BASELINE_SHA_PIN, "$.baseline_sha")
@@ -675,18 +812,18 @@ def _load_and_validate_approval(
     upstream = document["upstream"]
     _require_exact_keys(upstream, _UPSTREAM_FIELDS, "$.upstream")
     _require_str_pin(
-        upstream["repository"], _UPSTREAM_REPOSITORY_PIN, "$.upstream.repository"
+        upstream["repository"], descriptor["repository"], "$.upstream.repository"
     )
     _require_str_pin(
         upstream["requested_name"],
-        _UPSTREAM_REQUESTED_NAME_PIN,
+        descriptor["requested_name"],
         "$.upstream.requested_name",
     )
     _require_str_pin(
-        upstream["commit_sha"], _UPSTREAM_COMMIT_PIN, "$.upstream.commit_sha"
+        upstream["commit_sha"], descriptor["commit_sha"], "$.upstream.commit_sha"
     )
     _require_str_pin(
-        upstream["tarball_url"], _UPSTREAM_TARBALL_PIN, "$.upstream.tarball_url"
+        upstream["tarball_url"], descriptor["tarball_url"], "$.upstream.tarball_url"
     )
     if not isinstance(upstream["name_equivalence_note"], str):
         raise _invalid("$.upstream.name_equivalence_note")
@@ -799,6 +936,11 @@ def _load_and_validate_approval(
             ],
         ),
         machine_profile=profile,
+        artifact_key=artifact_key,
+        tarball_filename=descriptor["tarball_filename"].format(
+            commit_sha=descriptor["commit_sha"]
+        ),
+        fixture_key=artifact_key if artifact_key in _SYNTHETIC_SET else None,
     )
 
 
@@ -1085,6 +1227,21 @@ def _write_exclusive(path: pathlib.Path, payload: bytes) -> pathlib.Path:
     return path
 
 
+def _remove_tree(root: pathlib.Path) -> None:
+    """Remove one directory tree (synthetic-fixture staging cleanup only).
+
+    Depth-first unlink then rmdir, pathlib only; the staged trees are
+    plain-file fixture shapes generated by the frozen fixture module, so
+    no symlink or special-file handling is needed.
+    """
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix(), reverse=True):
+        if path.is_dir() and not path.is_symlink():
+            path.rmdir()
+        else:
+            path.unlink()
+    root.rmdir()
+
+
 class _GuardedRealEvaluator:
     """Gate-before-invoke execution body handed to ``run_repeats``.
 
@@ -1132,6 +1289,11 @@ class _GuardedRealEvaluator:
         )
         self._invocations = 0
         self._latched = False
+        # IP-0036 (Packet 7.5.2): the completed-materialization count.  The
+        # initial attempt-0 materialization moves it to 1 and every
+        # reset_cold_state call increments it again; the real cold count is
+        # this number, never the mode label.
+        self._materialization_count = 0
         # One digest-token process identity per suite (IP-0035 Packet 7.5.1):
         # captured once here, identical across every attempt of the batch,
         # and changed by a process restart.  The raw pid digit string never
@@ -1268,15 +1430,20 @@ class _GuardedRealEvaluator:
 
     def _typed(
         self,
-        record: _AttemptRecord,
+        record: _AttemptRecord | None,
         code: RealRunErrorCode,
         field_path: str = "$",
     ) -> RealRunError:
-        """Book one typed failure onto the record and build the error."""
-        record.outcome = "failure"
-        record.failure_code = "EXECUTION_ERROR"
-        record.error_code = code.value
-        record.error_field_path = field_path
+        """Book one typed failure onto the record and build the error.
+
+        ``record is None`` (the reset path re-extracting an already
+        validated archive) builds the same typed error without booking.
+        """
+        if record is not None:
+            record.outcome = "failure"
+            record.failure_code = "EXECUTION_ERROR"
+            record.error_code = code.value
+            record.error_field_path = field_path
         return RealRunError(code, field_path)
 
     def _past_deadline(self, anchor: float, deadline_ms: int) -> bool:
@@ -1284,19 +1451,21 @@ class _GuardedRealEvaluator:
         return (_monotonic() - anchor) * 1000.0 >= deadline_ms
 
     def _timeout_failure(
-        self, record: _AttemptRecord, field_path: str
+        self, record: _AttemptRecord | None, field_path: str
     ) -> RealRunError:
         """Book one typed deadline failure onto the record and build the error.
 
         The EXECUTION_TIMEOUT family (IP-0035 Packet 7.2): the wire error
         code stays the frozen transport failure while the free-string
         ``failure_code`` channel and the phase structure path carry the
-        taxonomy; the settlement is release-only (D7).
+        taxonomy; the settlement is release-only (D7).  ``record is None``
+        (the reset path) builds the same typed error without booking.
         """
-        record.outcome = "timeout"
-        record.failure_code = "EXECUTION_TIMEOUT"
-        record.error_code = RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED.value
-        record.error_field_path = field_path
+        if record is not None:
+            record.outcome = "timeout"
+            record.failure_code = "EXECUTION_TIMEOUT"
+            record.error_code = RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED.value
+            record.error_field_path = field_path
         return RealRunError(RealRunErrorCode.REAL_RUN_TRANSPORT_FAILED, field_path)
 
     def _attempt_deadline_ms(self) -> int:
@@ -1476,7 +1645,22 @@ class _GuardedRealEvaluator:
     # -- attempt-0 materialization ------------------------------------------
 
     def _materialize(self, record: _AttemptRecord, deadline_ms: int) -> None:
-        destination = self._tarball_dir / f"llamafactory-{self._approval.commit_sha}.tar.gz"
+        destination = self._tarball_dir / self._approval.tarball_filename
+        if self._approval.fixture_key is not None:
+            # IP-0036 (Packet 7.4.1): a synthetic artifact's tarball URL is
+            # RFC 2606 .invalid and never fetched -- the archive is
+            # generated locally from the frozen fixture shape into the same
+            # destination the template names, with zero download bytes and
+            # zero transport calls (the honest download channel stays
+            # unread, never a fabricated zero-duration phase).
+            self._materialize_synthetic_fixture(destination)
+            self._extract_tarball(record, deadline_ms)
+            self._materialization_count = 1
+            record.resources = {
+                "download_bytes": self._download_bytes,
+                "storage_bytes": self._storage_bytes,
+            }
+            return
         cap = self._approval.budget_spec.per_run.download_bytes
         digest = hashlib.sha256()
         total = 0
@@ -1543,82 +1727,51 @@ class _GuardedRealEvaluator:
         self._tarball_sha256 = digest.hexdigest()
         self._download_bytes = total
         self._extract_tarball(record, deadline_ms)
+        self._materialization_count = 1
         record.resources = {
             "download_bytes": self._download_bytes,
             "storage_bytes": self._storage_bytes,
         }
 
+    def _materialize_synthetic_fixture(self, destination: pathlib.Path) -> None:
+        """Generate one synthetic artifact tarball locally (zero network).
+
+        The frozen fixture shape is materialized into a staging directory,
+        packed into the template-named ``.tar.gz`` under a single top-level
+        directory (the two-phase extraction requires exactly one), and the
+        staging tree is removed again.  No transport call happens, so the
+        download phase is honestly absent (``download_ms`` stays ``None``
+        and ``_download_bytes`` stays zero).
+        """
+        stage = self._root / "_materialized" / "fixture-stage"
+        if stage.exists():
+            _remove_tree(stage)
+        materialize_fixture(self._approval.fixture_key, stage)
+        top = "lima-synth-" + self._approval.artifact_key.removeprefix("archetype/")
+        try:
+            with tarfile.open(destination, "w:gz", compresslevel=1) as archive:
+                for path in sorted(
+                    (item for item in stage.rglob("*") if item.is_file()),
+                    key=lambda item: item.as_posix(),
+                ):
+                    info = tarfile.TarInfo(
+                        f"{top}/{path.relative_to(stage).as_posix()}"
+                    )
+                    info.size = path.stat().st_size
+                    with open(path, "rb") as handle:
+                        archive.addfile(info, handle)
+        finally:
+            _remove_tree(stage)
+        self._tarball_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+        self._download_bytes = 0
+
     def _extract_tarball(self, record: _AttemptRecord, deadline_ms: int) -> None:
-        """Two-phase safe extraction: validate every member, then materialize."""
-        storage_cap = self._approval.budget_spec.per_run.storage_bytes
-        snapshot_root = self._snapshot_dir.resolve()
-        unsafe = RealRunErrorCode.REAL_RUN_ARCHIVE_UNSAFE
+        """Two-phase safe extraction into the canonical snapshot directory."""
         extract_start = _monotonic()
         try:
-            with tarfile.open(
-                self._tarball_dir / f"llamafactory-{self._approval.commit_sha}.tar.gz",
-                "r:gz",
-            ) as archive:
-                members = archive.getmembers()
-                if len(members) > MEMBER_COUNT_CAP:
-                    raise self._typed(record, unsafe, "$.archive")
-                regular: list[tarfile.TarInfo] = []
-                top_directories: set[str] = set()
-                declared_total = 0
-                for member in members:
-                    parts = pathlib.PurePosixPath(member.name).parts
-                    if member.name.startswith("/") or ".." in parts:
-                        raise self._typed(record, unsafe, "$.archive")
-                    top_directories.add(parts[0] if parts else member.name)
-                    if member.isdir():
-                        continue
-                    if member.issym() or member.islnk():
-                        continue
-                    if member.size > MEMBER_BYTE_CAP:
-                        raise self._typed(record, unsafe, "$.archive")
-                    declared_total += member.size
-                    regular.append(member)
-                if declared_total > storage_cap:
-                    raise self._typed(record, unsafe, "$.archive")
-                if len(top_directories) != 1:
-                    raise self._typed(record, unsafe, "$.archive")
-                for member in regular:
-                    target = self._snapshot_member_path(member.name)
-                    try:
-                        target.resolve().relative_to(snapshot_root)
-                    except ValueError as exc:
-                        raise self._typed(record, unsafe, "$.archive") from exc
-                written_total = 0
-                file_count = 0
-                for member in members:
-                    if member.isdir():
-                        directory = self._snapshot_member_path(member.name)
-                        directory.mkdir(parents=True, exist_ok=True)
-                for member in regular:
-                    # Per-member and per-chunk deadline checks (IP-0035
-                    # Packet 7.3.2-2): the extraction aborts at the archive
-                    # phase the moment the attempt window crosses.
-                    if self._past_deadline(record.wall_anchor, deadline_ms):
-                        raise self._timeout_failure(record, "$.archive")
-                    target = self._snapshot_member_path(member.name)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    source = archive.extractfile(member)
-                    if source is None:  # pragma: no cover - defensive
-                        raise self._typed(record, unsafe, "$.archive")
-                    with open(target, "wb") as handle:
-                        while True:
-                            chunk = source.read(DOWNLOAD_CHUNK_BYTES)
-                            if not chunk:
-                                break
-                            written_total += len(chunk)
-                            handle.write(chunk)
-                            if written_total > storage_cap:
-                                raise self._typed(record, unsafe, "$.archive")
-                            if self._past_deadline(
-                                record.wall_anchor, deadline_ms
-                            ):
-                                raise self._timeout_failure(record, "$.archive")
-                    file_count += 1
+            written_total, file_count = self._extract_archive_into(
+                self._snapshot_dir, record, record.wall_anchor, deadline_ms
+            )
         finally:
             record.extract_ms = max(
                 0, int((_monotonic() - extract_start) * 1000)
@@ -1626,14 +1779,115 @@ class _GuardedRealEvaluator:
         self._storage_bytes = written_total
         self._snapshot_files = file_count
 
-    def _snapshot_member_path(self, name: str) -> pathlib.Path:
-        """Map one archive member name onto the snapshot root (POSIX parts)."""
-        return self._snapshot_dir.joinpath(*pathlib.PurePosixPath(name).parts)
+    def _extract_archive_into(
+        self,
+        target: pathlib.Path,
+        record: _AttemptRecord | None,
+        wall_anchor: float | None,
+        deadline_ms: int | None,
+    ) -> tuple[int, int]:
+        """Two-phase safe extraction of the cached tarball into ``target``.
+
+        The frozen guards are identical on every caller (attempt-0
+        materialization and the IP-0036 cold reset): validate every member
+        first (traversal, symlink, member-count, per-member, and total byte
+        caps, single top-level directory), then materialize.  The per-member
+        and per-chunk deadline checks run only inside an attempt window
+        (``wall_anchor is not None``); the reset re-extracts an already
+        validated archive outside any attempt, books nothing onto a record
+        (``record is None`` builds the typed errors unbooked), and returns
+        the written byte total and file count to its caller.
+        """
+        storage_cap = self._approval.budget_spec.per_run.storage_bytes
+        snapshot_root = target.resolve()
+        unsafe = RealRunErrorCode.REAL_RUN_ARCHIVE_UNSAFE
+        target.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(
+            self._tarball_dir / self._approval.tarball_filename, "r:gz"
+        ) as archive:
+            members = archive.getmembers()
+            if len(members) > MEMBER_COUNT_CAP:
+                raise self._typed(record, unsafe, "$.archive")
+            regular: list[tarfile.TarInfo] = []
+            top_directories: set[str] = set()
+            declared_total = 0
+            for member in members:
+                parts = pathlib.PurePosixPath(member.name).parts
+                if member.name.startswith("/") or ".." in parts:
+                    raise self._typed(record, unsafe, "$.archive")
+                top_directories.add(parts[0] if parts else member.name)
+                if member.isdir():
+                    continue
+                if member.issym() or member.islnk():
+                    continue
+                if member.size > MEMBER_BYTE_CAP:
+                    raise self._typed(record, unsafe, "$.archive")
+                declared_total += member.size
+                regular.append(member)
+            if declared_total > storage_cap:
+                raise self._typed(record, unsafe, "$.archive")
+            if len(top_directories) != 1:
+                raise self._typed(record, unsafe, "$.archive")
+            for member in regular:
+                candidate = target.joinpath(*pathlib.PurePosixPath(member.name).parts)
+                try:
+                    candidate.resolve().relative_to(snapshot_root)
+                except ValueError as exc:
+                    raise self._typed(record, unsafe, "$.archive") from exc
+            written_total = 0
+            file_count = 0
+            for member in members:
+                if member.isdir():
+                    directory = target.joinpath(
+                        *pathlib.PurePosixPath(member.name).parts
+                    )
+                    directory.mkdir(parents=True, exist_ok=True)
+            for member in regular:
+                # Per-member and per-chunk deadline checks (IP-0035
+                # Packet 7.3.2-2): the extraction aborts at the archive
+                # phase the moment the attempt window crosses.
+                if wall_anchor is not None and self._past_deadline(
+                    wall_anchor, deadline_ms
+                ):
+                    raise self._timeout_failure(record, "$.archive")
+                member_path = target.joinpath(
+                    *pathlib.PurePosixPath(member.name).parts
+                )
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:  # pragma: no cover - defensive
+                    raise self._typed(record, unsafe, "$.archive")
+                with open(member_path, "wb") as handle:
+                    while True:
+                        chunk = source.read(DOWNLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        written_total += len(chunk)
+                        handle.write(chunk)
+                        if written_total > storage_cap:
+                            raise self._typed(record, unsafe, "$.archive")
+                        if wall_anchor is not None and self._past_deadline(
+                            wall_anchor, deadline_ms
+                        ):
+                            raise self._timeout_failure(record, "$.archive")
+                file_count += 1
+        return written_total, file_count
 
     # -- request construction ------------------------------------------------
 
-    def _prepare_request(self, record: _AttemptRecord) -> None:
-        texts = _select_candidate_texts(self._snapshot_dir)
+    def _build_request_body(
+        self, snapshot_root: pathlib.Path
+    ) -> tuple[bytes, int, int]:
+        """Build the frozen request body from one snapshot tree.
+
+        Returns the serialized body bytes, the context character count, and
+        the selected candidate-file count.  Purely deterministic in the
+        snapshot content, so re-extracting the same archive and rebuilding
+        yields byte-identical request bytes (the cold-reset proof, Packet
+        7.5.3).  Shared by the attempt-0 preparation (which enforces the
+        request byte cap and books the record fields) and the reset path.
+        """
+        texts = _select_candidate_texts(snapshot_root)
         sections: list[str] = []
         total = 0
         for text in texts:
@@ -1658,16 +1912,70 @@ class _GuardedRealEvaluator:
         body = json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
-        record.context_chars = len(context)
-        record.candidate_files = len(sections)
+        return body, len(context), len(sections)
+
+    def _prepare_request(self, record: _AttemptRecord) -> None:
+        body, context_chars, candidate_files = self._build_request_body(
+            self._snapshot_dir
+        )
+        record.context_chars = context_chars
+        record.candidate_files = candidate_files
         record.body_bytes = len(body)
         if len(body) > REQUEST_BODY_BYTE_CAP:
             raise self._typed(
                 record, RealRunErrorCode.REAL_RUN_REQUEST_TOO_LARGE, "$.request"
             )
         self._body_bytes = body
-        self._context_chars = len(context)
-        self._candidate_files = len(sections)
+        self._context_chars = context_chars
+        self._candidate_files = candidate_files
+
+    # -- the cold-reset program (IP-0036 Packet 7.5) --------------------------
+
+    def reset_cold_state(self) -> dict[str, object]:
+        """Re-extract the cached tarball and rebuild the request body (7.5.2).
+
+        One verifiable local cold reset: the already cached tarball is
+        re-extracted into a fresh per-cold snapshot directory
+        (``_materialized/snapshot-cold-{n}`` with ``n`` the completed
+        materialization count after this reset), the request body is rebuilt
+        from the re-extracted tree, and the frozen five-key observation
+        document is returned.  No transport call happens (``download_ms``
+        is the honest ``None`` of an unexecuted phase, never a fabricated
+        zero), no attempt record is appended, no ledger face is touched,
+        and the default batch behavior is unchanged -- the future real
+        batches drive this entry per the DR-IP-0035-01 structure (three
+        verifiable resets per class, counted by ``materialization_count``).
+        """
+        reset_start = _monotonic()
+        self._materialization_count += 1
+        cold_dir = self._root / "_materialized" / (
+            f"snapshot-cold-{self._materialization_count}"
+        )
+        extract_start = _monotonic()
+        self._extract_archive_into(cold_dir, None, None, None)
+        extract_ms = max(0, int((_monotonic() - extract_start) * 1000))
+        body, context_chars, candidate_files = self._build_request_body(cold_dir)
+        self._body_bytes = body
+        self._context_chars = context_chars
+        self._candidate_files = candidate_files
+        return {
+            "state_reuse": {
+                "materialized": True,
+                "snapshot_reused": False,
+                "request_body_rebuilt": True,
+                "process_identity": self._process_identity,
+            },
+            "timings": {
+                "extract_ms": extract_ms,
+                "download_ms": None,
+                "attempt_wall_ms": max(
+                    0, int((_monotonic() - reset_start) * 1000)
+                ),
+            },
+            "snapshot_tree_sha256": compute_tree_fingerprint(cold_dir),
+            "request_body_sha256": hashlib.sha256(body).hexdigest(),
+            "materialization_count": self._materialization_count,
+        }
 
     # -- the single chat completion -------------------------------------------
 
@@ -2063,27 +2371,35 @@ def run_real_baseline_suite(
     timeout_seconds: int = 120,
     manifest_path: str | pathlib.Path | None = None,
     sources: object = None,
+    artifact_key: str = _DEFAULT_ARTIFACT_KEY,
 ) -> RealSuiteResult:
     """Run one gated real baseline suite under the frozen order 1-9.
 
-    Order: the approval artifact is loaded and fully validated (identity
-    pins, price pins, closed field sets, budget construction); the one-time
-    output root is gated (an existing non-empty directory is refused); the
-    timeout must fit the artifact's per-run wall reservation (a positive
-    wall dimension; a zero wall dimension is the IP-0031 zero-budget state
-    whose first reserve already fails closed); the manifest loads; the
-    ``_materialized`` directories are pre-created before the
-    ``run_repeats`` difference window opens; the ledger and guarded
-    evaluator are built; ``run_repeats`` drives 5 cold + 5 warm attempts
-    under the measured batch wall; the evidence set is written after the
-    window closes -- the full set on a normal return, or the identical
-    partial five-file set (approval/ledger/machine_profile/attempts/
-    manifest, with ``EXECUTION_CANCELLED`` in the manifest failures) when a
-    control-flow ``BaseException`` unwinds, after which the original
-    exception is re-raised unchanged and no :class:`RealSuiteResult` is
-    built (IP-0035 Packet 7.4); the real-world v2 payload feeds the frozen
+    Order: the approval artifact is loaded and fully validated against the
+    selected artifact-family descriptor (``artifact_key``, IP-0036 R9.2:
+    per-descriptor upstream and identity pins, default
+    ``external/llamafactory-replay`` whose pins resolve to the verbatim v5
+    constants so the default path is byte-identical; an unknown key is the
+    structure-only ``$`` rejection); the one-time output root is gated (an
+    existing non-empty directory is refused); the timeout must fit the
+    artifact's per-run wall reservation (a positive wall dimension; a zero
+    wall dimension is the IP-0031 zero-budget state whose first reserve
+    already fails closed); the manifest loads; the ``_materialized``
+    directories are pre-created before the ``run_repeats`` difference
+    window opens; the ledger and guarded evaluator are built;
+    ``run_repeats`` drives 5 cold + 5 warm attempts under the measured
+    batch wall; the evidence set is written after the window closes -- the
+    full set on a normal return, or the identical partial five-file set
+    (approval/ledger/machine_profile/attempts/manifest, with
+    ``EXECUTION_CANCELLED`` in the manifest failures) when a control-flow
+    ``BaseException`` unwinds, after which the original exception is
+    re-raised unchanged and no :class:`RealSuiteResult` is built
+    (IP-0035 Packet 7.4); the real-world v2 payload feeds the frozen
     report; the :class:`RealSuiteResult` is returned with ``real_run``
-    constant ``True``.
+    constant ``True``.  A synthetic artifact key materializes its tarball
+    locally from the frozen fixture shape (zero transport GET calls, zero
+    download bytes) while every gate, canary item, and evidence rule stays
+    identical to the downloaded path.
 
     Budget-gate refusals propagate unchanged (``BudgetGateError`` passthrough,
     never wrapped); every typed real-run failure carries its closed code and
@@ -2091,7 +2407,7 @@ def run_real_baseline_suite(
     """
     if not isinstance(api_key, str) or not api_key:
         raise TypeError("api_key must be a non-empty str")
-    approval = _load_and_validate_approval(approval_path)  # (1)
+    approval = _load_and_validate_approval(approval_path, artifact_key)  # (1)
     root = pathlib.Path(output_root)  # (2)
     if root.exists():
         # The one-time-directory gate targets stale run products: any

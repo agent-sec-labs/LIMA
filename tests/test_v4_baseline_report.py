@@ -31,6 +31,24 @@ fails with ``ModuleNotFoundError: No module named
 'benchmarks.v4.baseline.report'`` (the package exists, the submodule does
 not), so every test fails closed, attributable solely to the missing product
 module.
+
+IP-0036 evolution to frozen version v2 (CA-IP-0036-v1.0 of 2026-09-28; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0036_PR3e_Offline_Integration.md
+section 10): all 29 v1 methods are retained without weakening -- the frozen
+field tuple grows additively to nineteen keys (vep/rvr/stage_outcome), the
+schema-version pin moves 1->2 with the v1-fail-closed probe value moving
+2->1, and the allowed-string domain admits the frozen stage-outcome
+vocabulary -- while nine new methods in one new class pin the three additive
+top-level metric faces, the optional evaluator-payload ``domain`` source
+block (compliant -> measured, absent -> null+"unavailable", malformed ->
+the frozen EVALUATOR_PAYLOAD_INVALID fail-closed, bundle precedence for the
+counts faces), and the IP-0036 expert-review-package example sidecar passing
+the current frozen sidecar validators.  The RED anchor is capability
+absence: on the unmodified report.py of the 1046501d baseline the schema is
+still v1 (16 fields), the three faces are absent, and the domain block is
+not wired; the expert-package example sidecar probe passes by design
+against the unchanged frozen sidecar shape.
 """
 
 import ast
@@ -83,6 +101,10 @@ _REPORT_FIELDS = (
     "expert",
     "automation",
     "resources",
+    # IP-0036 v2 (R2.1): the three additive stage-metric top-level faces.
+    "vep",
+    "rvr",
+    "stage_outcome",
 )
 
 _COUNT_KEYS = (
@@ -129,6 +151,7 @@ _ALLOWED_PRODUCT_IMPORTS = frozenset(
 
 # AC-2 structural boundary: every string in a built document is one of these
 # frozen enum literals, a 64-hex digest, or a coverage-affecting skip reason.
+# IP-0036 v2 (R2.1): the frozen stage-outcome vocabulary joins the domain.
 _ALLOWED_DOC_STRINGS = frozenset(
     {
         "lima.baseline-report",
@@ -144,8 +167,22 @@ _ALLOWED_DOC_STRINGS = frozenset(
         "scanner",
         "evidence-domain",
         "baseline_mode_legacy_report_parameters_inert",
+        # IP-0036 v2: the closed stage-outcome value vocabulary (DR-IP-0036-PV-1).
+        "completed",
+        "skipped",
+        "failed",
+        "inconclusive",
     }
 )
+
+#: IP-0036 v2 (R2.1): the closed stage-outcome vocabulary shared by the
+#: audit/mining/repair stage faces and the payload domain block.
+_STAGE_OUTCOME_VALUES = ("completed", "skipped", "failed", "inconclusive")
+
+#: IP-0036: the expert-review-package document and its verified example
+#: sidecar (Packet 7.3 / R5.5).
+_EXPERT_PACKAGE_RELATIVE_PATH = "docs/LIMA_PR3e_Expert_Review_Package.md"
+_EXPERT_EXAMPLE_REVIEWER_ID = "lima-expert-alice-fixture"
 
 _NOMINAL_ANALYZER_FINGERPRINT = "a" * 64
 _NOMINAL_CONFIG_DIGEST = "b" * 64
@@ -319,6 +356,38 @@ def _sidecar(digest=_DIGEST_A, reviewer_digest=_DIGEST_B, active_ms=5):
     }
 
 
+def _domain_block(
+    signals=3,
+    security_issues=2,
+    hypotheses=1,
+    vep=2,
+    rvr=1,
+    stage_outcome=None,
+    resources=True,
+):
+    """One compliant evaluator-payload domain block (IP-0036 R2.3)."""
+    outcome = stage_outcome or {
+        "audit": "completed",
+        "mining": "inconclusive",
+        "repair": "skipped",
+    }
+    block = {
+        "signals": signals,
+        "security_issues": security_issues,
+        "hypotheses": hypotheses,
+        "vep": vep,
+        "rvr": rvr,
+        "stage_outcome": dict(outcome),
+    }
+    if resources:
+        block["resources"] = {
+            "prompt_tokens": 1500,
+            "completion_tokens": 300,
+            "cost_micro_usd": 900,
+        }
+    return block
+
+
 def _payload_digest(payload):
     """The frozen input-fingerprint rule for dict and wire-value payloads."""
     encoded = json.dumps(
@@ -487,7 +556,9 @@ class TestReportSchemaAndCanonical(_IP0029ReportTestCase):
             "SCHEMA_NAME_INVALID", "$.schema_name", lambda: report.from_mapping(wrong_name)
         )
         wrong_version = dict(value)
-        wrong_version["schema_version"] = 2
+        # IP-0036 v2 (R2.2): schema v1 is the honest fail-closed version
+        # under the v2 strict parse (the probe value moves 2 -> 1).
+        wrong_version["schema_version"] = 1
         self._assert_typed_error(
             "SCHEMA_VERSION_INVALID", "$.schema_version", lambda: report.from_mapping(wrong_version)
         )
@@ -545,7 +616,8 @@ class TestReportSchemaAndCanonical(_IP0029ReportTestCase):
             self.assertEqual(str(error), _FROZEN_ERROR_MESSAGES[name])
         self.assertTrue(issubclass(report.BaselineReportError, ValueError))
         self.assertEqual(report.BASELINE_REPORT_SCHEMA_NAME, "lima.baseline-report")
-        self.assertEqual(report.BASELINE_REPORT_SCHEMA_VERSION, 1)
+        # IP-0036 v2 (R2.2): the schema version pin moves 1 -> 2.
+        self.assertEqual(report.BASELINE_REPORT_SCHEMA_VERSION, 2)
         self.assertEqual(
             report.BASELINE_REPORT_DECLARATIONS,
             ("baseline_mode_legacy_report_parameters_inert",),
@@ -1246,6 +1318,344 @@ class TestHygieneAndSurface(unittest.TestCase):
             report.BASELINE_REPORT_DECLARATIONS,
             ("baseline_mode_legacy_report_parameters_inert",),
         )
+
+
+class TestV5SchemaFaces(_IP0029ReportTestCase):
+    """IP-0036 FR-02/FR-06/AC-1/AC-3: the v2 schema faces and domain wiring."""
+
+    def test_schema_v2_surface_and_v1_rejected(self):
+        # R2.1/R2.2: nineteen additive fields, version 2, v1 fail-closed.
+        self.assertEqual(len(_REPORT_FIELDS), 19)
+        self.assertEqual(_REPORT_FIELDS[-3:], ("vep", "rvr", "stage_outcome"))
+        document = self._build(_scan_payload(states=("candidate",)))
+        value = document.to_canonical_value()
+        self.assertEqual(value["schema_version"], 2)
+        self.assertEqual(tuple(value), _REPORT_FIELDS)
+        self.assertEqual(
+            tuple(
+                field.name for field in dataclasses.fields(report.BaselineReport)
+            ),
+            _REPORT_FIELDS,
+        )
+        v1 = dict(value)
+        v1["schema_version"] = 1
+        self._assert_typed_error(
+            "SCHEMA_VERSION_INVALID", "$.schema_version", lambda: report.from_mapping(v1)
+        )
+
+    def test_vep_rvr_stage_outcome_null_discipline(self):
+        # R2.1: absent source -> null + "unavailable" on every new face,
+        # null-not-zero, and from_mapping rejects every malformed shape.
+        for payload_kind, payload in (
+            ("scanner", _scan_payload(states=("confirmed",))),
+            ("e2e", _e2e_payload()),
+            ("real-world", _rw_payload([_rw_case()])),
+        ):
+            # ALLOWED_ONCE defect 1 (2026-09-28): the label must be a literal
+            # kind string -- _scan_payload() returns a RepositoryScanResult,
+            # which is not subscriptable, so the previous
+            # payload["schema_version"] label always raised TypeError before
+            # any behaviour assertion ran.  Mechanical label fix only.
+            with self.subTest(payload=payload_kind):
+                value = self._doc(payload)
+                self.assertEqual(value["vep"], _count(None, "unavailable"))
+                self.assertEqual(value["rvr"], _count(None, "unavailable"))
+                self.assertEqual(
+                    value["stage_outcome"],
+                    {
+                        stage: _count(None, "unavailable")
+                        for stage in ("audit", "mining", "repair")
+                    },
+                )
+                self.assertIsNone(value["vep"]["value"])
+                self.assertNotEqual(value["vep"]["value"], 0)
+        wired = self._doc(_rw_payload([_rw_case()]))
+        bad_type = json.loads(json.dumps(wired))
+        bad_type["vep"] = "not-a-mapping"
+        self._assert_typed_error(
+            "INVALID_FIELD_TYPE", "$.vep", lambda: report.from_mapping(bad_type)
+        )
+        missing_projection = json.loads(json.dumps(wired))
+        del missing_projection["rvr"]["projection"]
+        self._assert_typed_error(
+            "REQUIRED_FIELD_MISSING",
+            "$.rvr.projection",
+            lambda: report.from_mapping(missing_projection),
+        )
+        measured_null = json.loads(json.dumps(wired))
+        measured_null["vep"] = {"value": None, "projection": "measured"}
+        self._assert_typed_error(
+            "INVALID_FIELD_VALUE",
+            "$.vep.value",
+            lambda: report.from_mapping(measured_null),
+        )
+        bad_stage_value = json.loads(json.dumps(wired))
+        bad_stage_value["stage_outcome"]["audit"] = {
+            "value": "bogus-terminal",
+            "projection": "measured",
+        }
+        self._assert_typed_error(
+            "INVALID_FIELD_VALUE",
+            "$.stage_outcome.audit.value",
+            lambda: report.from_mapping(bad_stage_value),
+        )
+        missing_stage = json.loads(json.dumps(wired))
+        del missing_stage["stage_outcome"]["repair"]
+        self._assert_typed_error(
+            "REQUIRED_FIELD_MISSING",
+            "$.stage_outcome.repair",
+            lambda: report.from_mapping(missing_stage),
+        )
+        unknown_stage = json.loads(json.dumps(wired))
+        unknown_stage["stage_outcome"]["deploy"] = _count("completed", "measured")
+        self._assert_typed_error(
+            "UNKNOWN_FIELD",
+            "$.stage_outcome.deploy",
+            lambda: report.from_mapping(unknown_stage),
+        )
+
+    def test_realworld_domain_block_wires_measured_faces(self):
+        # R2.3: a compliant domain block on a real-world v2 payload wires the
+        # counts faces, the three new faces, and the resources face.
+        payload = _rw_payload([_rw_case(files_v=5, files_f=6, total_v=8, total_f=9)])
+        payload["domain"] = _domain_block()
+        value = self._doc(payload)
+        self.assertEqual(value["counts"]["signals"], _count(3, "measured"))
+        self.assertEqual(value["counts"]["security_issues"], _count(2, "measured"))
+        self.assertEqual(value["counts"]["hypotheses"], _count(1, "measured"))
+        self.assertEqual(value["vep"], _count(2, "measured"))
+        self.assertEqual(value["rvr"], _count(1, "measured"))
+        self.assertEqual(
+            value["stage_outcome"],
+            {
+                "audit": _count("completed", "measured"),
+                "mining": _count("inconclusive", "measured"),
+                "repair": _count("skipped", "measured"),
+            },
+        )
+        self.assertEqual(
+            value["resources"],
+            {"prompt_tokens": 1500, "completion_tokens": 300, "cost_micro_usd": 900},
+        )
+        # Unchanged faces: payload-derived measured counts stay measured.
+        self.assertEqual(value["counts"]["scanned_files"], _count(11, "measured"))
+        self.assertEqual(value["compression_chain"]["raw_candidates"], 17)
+        self.assertEqual(value["evidence_domain"], "legacy")
+        self.assertTrue(value["legacy_projection"])
+        self.assertEqual(
+            value["sources"],
+            [{"kind": "real-world", "payload_sha256": _payload_digest(payload)}],
+        )
+
+    def test_e2e_domain_block_wires_measured_faces(self):
+        # R2.3: the same wiring covers the e2e path's currently-unavailable
+        # positions; the remaining e2e projections stay unchanged.
+        payload = _e2e_payload(tp=3, fp=4)
+        payload["domain"] = _domain_block()
+        value = self._doc(payload)
+        self.assertEqual(value["counts"]["signals"], _count(3, "measured"))
+        self.assertEqual(value["counts"]["security_issues"], _count(2, "measured"))
+        self.assertEqual(value["counts"]["hypotheses"], _count(1, "measured"))
+        self.assertEqual(value["vep"], _count(2, "measured"))
+        self.assertEqual(value["rvr"], _count(1, "measured"))
+        self.assertEqual(
+            value["stage_outcome"]["audit"], _count("completed", "measured")
+        )
+        self.assertEqual(
+            value["resources"],
+            {"prompt_tokens": 1500, "completion_tokens": 300, "cost_micro_usd": 900},
+        )
+        self.assertEqual(value["compression_chain"]["raw_candidates"], 7)
+        self.assertEqual(value["counts"]["scanned_files"], _count(None, "unavailable"))
+        self.assertEqual(value["counts"]["coverage_gap"], _count(None, "unavailable"))
+        self.assertEqual(value["coverage_gap_reasons"], {})
+
+    def test_domain_absent_keeps_unavailable_everywhere(self):
+        # R2.3: absence keeps the honest null + "unavailable" status quo on
+        # both payload paths (no constants, no synthetic stand-ins).
+        for payload in (
+            _rw_payload([_rw_case()]),
+            _e2e_payload(),
+        ):
+            with self.subTest(kind=payload["schema_version"]):
+                value = self._doc(payload)
+                self.assertEqual(value["vep"], _count(None, "unavailable"))
+                self.assertEqual(value["rvr"], _count(None, "unavailable"))
+                self.assertEqual(
+                    value["stage_outcome"]["mining"],
+                    _count(None, "unavailable"),
+                )
+                self.assertEqual(
+                    value["resources"],
+                    {"prompt_tokens": None, "completion_tokens": None, "cost_micro_usd": None},
+                )
+                self.assertEqual(
+                    value["counts"]["signals"], _count(None, "unavailable")
+                )
+
+    def test_domain_violations_fail_closed(self):
+        # R2.3: a present domain block must be compliant -- every violation
+        # is the frozen EVALUATOR_PAYLOAD_INVALID (zero new error codes).
+        cases = {}
+        unknown_key = _rw_payload([_rw_case()])
+        unknown_key["domain"] = {**_domain_block(), "unexpected": 1}
+        cases["unknown-key"] = unknown_key
+        str_value = _rw_payload([_rw_case()])
+        str_value["domain"] = {**_domain_block(), "signals": "3"}
+        cases["str-value"] = str_value
+        negative = _rw_payload([_rw_case()])
+        negative["domain"] = {**_domain_block(), "vep": -1}
+        cases["negative"] = negative
+        missing_stage = _rw_payload([_rw_case()])
+        missing_stage["domain"] = _domain_block(
+            stage_outcome={"audit": "completed", "mining": "completed"}
+        )
+        cases["missing-stage-key"] = missing_stage
+        bad_vocab = _rw_payload([_rw_case()])
+        bad_vocab["domain"] = _domain_block(
+            stage_outcome={"audit": "bogus", "mining": "completed", "repair": "skipped"}
+        )
+        cases["vocabulary-drift"] = bad_vocab
+        bad_resources = _rw_payload([_rw_case()])
+        bad_resources["domain"] = {
+            **_domain_block(resources=False),
+            "resources": {"prompt_tokens": 1500, "completion_tokens": 300},
+        }
+        cases["resources-missing-key"] = bad_resources
+        str_resources = _rw_payload([_rw_case()])
+        str_resources["domain"] = {
+            **_domain_block(resources=False),
+            "resources": {
+                "prompt_tokens": 1500,
+                "completion_tokens": 300,
+                "cost_micro_usd": "900",
+            },
+        }
+        cases["resources-str-value"] = str_resources
+        e2e_unknown = _e2e_payload()
+        e2e_unknown["domain"] = {**_domain_block(), "unexpected": 1}
+        cases["e2e-unknown-key"] = e2e_unknown
+        for label, payload in cases.items():
+            with self.subTest(case=label):
+                self._assert_typed_error(
+                    "EVALUATOR_PAYLOAD_INVALID",
+                    "$.evaluator_payload",
+                    lambda payload=payload: self._build(payload),
+                )
+
+    def test_bundle_precedence_over_domain_counts(self):
+        # DR-IP-0036-PV-2: the evidence-domain bundle keeps precedence for
+        # the counts faces; the domain block stays the sole source of the
+        # three new faces and resources.
+        bundle = _synthetic_bundle()
+        wired = _rw_payload([_rw_case()])
+        wired["domain"] = _domain_block()
+        document = report.build_baseline_report(
+            self._fixture_summary(), wired, bundle=bundle
+        )
+        value = document.to_canonical_value()
+        self.assertEqual(value["evidence_domain"], "v2")
+        self.assertFalse(value["legacy_projection"])
+        self.assertEqual(value["counts"]["signals"], _count(1, "measured"))
+        self.assertEqual(value["counts"]["security_issues"], _count(1, "measured"))
+        self.assertEqual(value["counts"]["hypotheses"], _count(1, "measured"))
+        self.assertEqual(value["vep"], _count(2, "measured"))
+        self.assertEqual(value["rvr"], _count(1, "measured"))
+        self.assertEqual(
+            value["stage_outcome"]["repair"], _count("skipped", "measured")
+        )
+        self.assertEqual(value["resources"]["prompt_tokens"], 1500)
+        self.assertEqual(
+            {entry.kind for entry in document.sources}, {"real-world", "evidence-domain"}
+        )
+
+    def test_expert_package_example_sidecar_passes_frozen_validators(self):
+        # R5.5/FR-06/AC-3: the expert-review-package example sidecar parses
+        # out of the C1 document and passes the current frozen validators --
+        # both the injection face (through the public build path) and the
+        # artifact-discovery face -- and equals the documented process output.
+        path = _REPO_ROOT / _EXPERT_PACKAGE_RELATIVE_PATH
+        if not path.is_file():
+            self.fail(
+                f"required deliverable document is missing: {_EXPERT_PACKAGE_RELATIVE_PATH}"
+            )
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r"```json\n(.*?)\n```", text, re.DOTALL)
+        self.assertIsNotNone(match, "expert package carries no example json block")
+        example = json.loads(match.group(1))
+        self.assertEqual(example["schema_version"], 1)
+        self.assertTrue(_HEX64.fullmatch(example["run_spec_digest"]))
+        self.assertTrue(_HEX64.fullmatch(example["reviewer_digest"]))
+        document = report.build_baseline_report(
+            self._fixture_summary(digest=example["run_spec_digest"]),
+            _scan_payload(states=("candidate",)),
+            expert_sidecars=(example,),
+        )
+        self.assertEqual(
+            document.to_canonical_value()["expert"],
+            {
+                "active_time_ms_total": example["active_time_ms"],
+                "sessions": 1,
+                "reviewer_digests": [example["reviewer_digest"]],
+            },
+        )
+        report._validate_sidecar_artifact(json.loads(json.dumps(example)))
+        session = expert_timing.ExpertTimingSession(_EXPERT_EXAMPLE_REVIEWER_ID)
+        session.start(1_000_000_000)
+        session.pause(1_005_000_000)
+        session.resume(1_010_000_000)
+        session.finish(1_020_000_000)
+        self.assertEqual(
+            session.to_sidecar_document(example["run_spec_digest"]), example
+        )
+        self.assertEqual(
+            example["reviewer_digest"],
+            hashlib.sha256(
+                _EXPERT_EXAMPLE_REVIEWER_ID.encode("utf-8")
+            ).hexdigest(),
+        )
+        # Absence discipline stays structural: zero sidecars keep the honest
+        # empty face (the v1 zero-sidecar assertion is retained unchanged).
+        empty = self._build(_scan_payload(states=("candidate",)))
+        self.assertEqual(
+            empty.to_canonical_value()["expert"],
+            {"active_time_ms_total": None, "sessions": 0, "reviewer_digests": []},
+        )
+
+    def test_v2_canonical_roundtrip_and_string_domain(self):
+        # R2.1: a domain-wired document builds stably, round-trips losslessly
+        # and every string stays inside the frozen domains (vocabulary
+        # included).
+        payload = _rw_payload([_rw_case()])
+        payload["domain"] = _domain_block(
+            stage_outcome={
+                "audit": "completed",
+                "mining": "failed",
+                "repair": "inconclusive",
+            }
+        )
+        document = self._build(payload)
+        second = self._build(payload)
+        self.assertEqual(document.canonical_bytes(), second.canonical_bytes())
+        value = document.to_canonical_value()
+        self.assertEqual(value["vep"], _count(2, "measured"))
+        self.assertEqual(
+            value["stage_outcome"]["mining"], _count("failed", "measured")
+        )
+        roundtripped = report.from_mapping(json.loads(json.dumps(value)))
+        self.assertEqual(roundtripped.canonical_bytes(), document.canonical_bytes())
+        self.assertEqual(roundtripped.to_canonical_value(), value)
+        for leaked in _walk_floats(value):
+            self.fail(f"float leaked into report: {leaked!r}")
+        for text in _walk_strings(value):
+            self.assertTrue(
+                text in _ALLOWED_DOC_STRINGS
+                or text in COVERAGE_AFFECTING_SKIPS
+                or _HEX64.fullmatch(text) is not None,
+                f"free-text string leaked into report: {text!r}",
+            )
+        data = document.canonical_bytes()
+        self.assertNotIn(b"\n", data)
 
 
 if __name__ == "__main__":

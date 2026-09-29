@@ -4422,7 +4422,16 @@ class TestBatchShapeProtocol(_RealRunTestCase):
             )
             self.assertEqual(result.status, "insufficient_sample")
         with tempfile.TemporaryDirectory(prefix="lima-ip0037-twotwo-bad-") as directory:
-            approval = self.write_artifact(directory, _shaped_policy(2, 3))
+            # ALLOWED_ONCE 2026-09-29 (re-freeze v7'): the shared helper
+            # always derives max_attempts == cold+warm (PC3), so the {2,3}
+            # control face overwrites it to 6 here; only then is
+            # max_attempts != cold+warm the rejection cause the method
+            # asserts.
+            def mutate(document):
+                _shaped_policy(2, 3)(document)
+                document["attempt_policy"]["max_attempts"] = 6
+
+            approval = self.write_artifact(directory, mutate)
             transport = self.happy_transport()
             with self.assertRaises(module.RealRunError) as caught:
                 self.run_entry(

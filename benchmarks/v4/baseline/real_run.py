@@ -1419,6 +1419,24 @@ class _GuardedRealEvaluator:
         scanned = self._candidate_files or 0
         return max(0, self._snapshot_files - scanned)
 
+    # IP-0038 (Packet 7.1.2, R2): the approved planned shape carried from the
+    # validated batch shape.  ``None`` (the default construction / the {5,5}
+    # path) keeps the ``_REPEAT_COUNT`` boundary, byte-identically to the
+    # frozen behavior.
+    @property
+    def planned_cold_count(self) -> int:
+        """The approved planned cold count carried from the validated shape."""
+        if self._batch_shape is None:
+            return _REPEAT_COUNT
+        return self._batch_shape[0]
+
+    @property
+    def planned_warm_count(self) -> int:
+        """The approved planned warm count carried from the validated shape."""
+        if self._batch_shape is None:
+            return _REPEAT_COUNT
+        return self._batch_shape[1]
+
     def build_payload(self) -> dict[str, object]:
         """The real-world v2 evaluator payload built from module accounting."""
         revision = (
@@ -2436,8 +2454,10 @@ def _build_manifest_document(
         "approval_digest": approval_digest,
         "baseline_sha": approval.baseline_sha,
         "attempt_count": attempt_count,
-        "cold_count": _REPEAT_COUNT,
-        "warm_count": _REPEAT_COUNT,
+        # IP-0038 (Packet 7.1.3, R2): the approved planned shape from the
+        # carried state (never a second parse of the approval document).
+        "cold_count": guarded.planned_cold_count,
+        "warm_count": guarded.planned_warm_count,
         "failures": failures,
         "coverage_gap": guarded.coverage_gap,
         "canary": {

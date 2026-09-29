@@ -25,6 +25,10 @@ MEMORY_PACK = VulnPack(
     cwe_ids=frozenset({
         "CWE-416", "CWE-415", "CWE-787", "CWE-125", "CWE-476", "CWE-190",
     }),
+    # Display order preserved from the pre-registry hand-written schema string.
+    cwe_display_order=(
+        "CWE-416", "CWE-415", "CWE-787", "CWE-125", "CWE-476", "CWE-190",
+    ),
     specialist_prompt_addendum=(
         "\n\nMemory bug-class knowledge:\n"
         "- CWE-416 use-after-free: the object's lifetime ended (free/delete) "

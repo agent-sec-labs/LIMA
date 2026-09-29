@@ -40,6 +40,8 @@ class VulnPack:
     driver_templates: tuple[str, ...]
     asan_markers: Mapping[str, tuple[str, ...]]
     integer_overflow_markers: Mapping[str, str]
+    #: Display order for the CWE enum in prompts (empty = sorted).
+    cwe_display_order: tuple[str, ...] = ()
 
 
 def runtime_markers(pack: VulnPack) -> dict[str, tuple[str, ...]]:
@@ -87,11 +89,74 @@ from .memory import MEMORY_PACK  # noqa: E402 -- data module needs VulnPack abov
 register_pack(MEMORY_PACK)
 
 
+def registry_cwe_ids() -> frozenset[str]:
+    """The union of every registered pack's CWE coverage."""
+
+    merged: set[str] = set()
+    for name in list_packs():
+        merged.update(get_pack(name).cwe_ids)
+    return frozenset(merged)
+
+
+def registry_cwe_display_order() -> tuple[str, ...]:
+    """CWE coverage in display order, always covering every cwe_ids entry.
+
+    Pack registration order first, then each pack's ``cwe_display_order``
+    (or sorted ``cwe_ids`` when empty).  Any ``cwe_ids`` entry the display
+    order misses is appended deterministically (sorted) so the prompt's CWE
+    enum always matches the parser's vocabulary exactly.
+    """
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in list_packs():
+        pack = get_pack(name)
+        display = pack.cwe_display_order or tuple(sorted(pack.cwe_ids))
+        for cwe in display:
+            if cwe in pack.cwe_ids and cwe not in seen:
+                ordered.append(cwe)
+                seen.add(cwe)
+        # Deterministic fallback: append any cwe_ids the display order missed.
+        missed = sorted(pack.cwe_ids - seen)
+        for cwe in missed:
+            ordered.append(cwe)
+            seen.add(cwe)
+    return tuple(ordered)
+
+
+def registry_runtime_markers() -> dict[str, tuple[str, ...]]:
+    """The merged error-type matching table across all registered packs.
+
+    Preserves per-CWE insertion order: earlier packs' markers come first,
+    later packs append unseen markers.
+    """
+
+    merged: dict[str, tuple[str, ...]] = {}
+    for name in list_packs():
+        for cwe, markers in runtime_markers(get_pack(name)).items():
+            existing = merged.get(cwe, ())
+            merged[cwe] = existing + tuple(
+                marker for marker in markers if marker not in existing
+            )
+    return merged
+
+
+def registry_prompt_addenda() -> str:
+    """Every registered pack's specialist prompt addendum, joined."""
+
+    return "\n".join(
+        get_pack(name).specialist_prompt_addendum for name in list_packs()
+    )
+
+
 __all__ = [
     "MEMORY_PACK",
     "VulnPack",
     "get_pack",
     "list_packs",
     "register_pack",
+    "registry_cwe_ids",
+    "registry_prompt_addenda",
+    "registry_runtime_markers",
     "runtime_markers",
 ]

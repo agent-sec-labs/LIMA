@@ -32,7 +32,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lima.agent_orchestrator import (
-    _SYSTEM_PLATFORM_SPECIALIST,
     PLATFORM_HYPOTHESIS_FIELDS,
     PlatformFormatError,
     _experiment_hit,
@@ -208,13 +207,18 @@ class OrchestratorPackWiringTests(unittest.TestCase):
     def test_orchestrator_uses_pack_markers(self):
         import lima.agent_orchestrator as orchestrator
 
-        # The matching table is derived from the pack, not re-hard-coded.
+        # C0.1: the matching table is derived from the registry (which for
+        # now equals the single memory pack), read at call time.
+        from lima.vuln_packs import registry_runtime_markers
         self.assertEqual(
-            dict(runtime_markers(MEMORY_PACK)),
-            orchestrator._ASAN_CWE_MARKERS,
+            registry_runtime_markers(),
+            orchestrator._asan_cwe_markers(),
         )
         source = inspect.getsource(orchestrator)
-        self.assertIn("MEMORY_PACK", source)
+        self.assertIn("registry_cwe_ids", source)
+        self.assertIn("registry_runtime_markers", source)
+        self.assertIn("registry_prompt_addenda", source)
+        self.assertNotIn("MEMORY_PACK", source)
         self.assertNotIn('"use-after-free"', source)
         self.assertNotIn('"double-free"', source)
         self.assertNotIn('"buffer-overflow"', source)
@@ -247,15 +251,31 @@ class OrchestratorPackWiringTests(unittest.TestCase):
         with self.assertRaises(PlatformFormatError):
             parse_hypothesis_reply(forged, known)
         # The Specialist prompt carries the pack knowledge and the extended
-        # closed CWE enumeration; the legacy enumeration stays verbatim.
-        for cwe in MEMORY_PACK.cwe_ids:
-            self.assertIn(cwe, _SYSTEM_PLATFORM_SPECIALIST)
+        # closed CWE enumeration; the original order is preserved via
+        # cwe_display_order.
+        from lima.vuln_packs import registry_cwe_display_order as _rcdo
+        prompt = orchestrator._system_platform_specialist()
+        for cwe in _rcdo():
+            self.assertIn(cwe, prompt)
+        cwe_enum = "|".join(_rcdo())
+        self.assertIn(f'"cwe":"{cwe_enum}"', prompt)
+        self.assertIn(MEMORY_PACK.specialist_prompt_addendum, prompt)
+
+    def test_default_prompt_is_byte_identical_to_pre_registry(self):
+        """C0.1 golden baseline: the default prompt matches pre-registry."""
+        import lima.agent_orchestrator as orchestrator
+
+        prompt = orchestrator._system_platform_specialist()
+        # The original hand-written CWE enum order is preserved.
         self.assertIn(
             '"cwe":"CWE-416|CWE-415|CWE-787|CWE-125|CWE-476|CWE-190"',
-            _SYSTEM_PLATFORM_SPECIALIST,
+            prompt,
         )
-        self.assertIn(MEMORY_PACK.specialist_prompt_addendum,
-                      _SYSTEM_PLATFORM_SPECIALIST)
+        # The addendum is directly concatenated (no extra separator).
+        self.assertIn(
+            "never invent ids." + MEMORY_PACK.specialist_prompt_addendum,
+            prompt,
+        )
 
 
 class SeedPatternTests(unittest.TestCase):
@@ -521,6 +541,147 @@ class NullDerefEndToEndTests(unittest.TestCase):
             record.kind == "runtime" and record.source == "asan"
             for record in target.evidence_records
         ))
+
+
+class RegistryVocabularyTests(unittest.TestCase):
+    """C0.1: every consumer reads the registry, not a single-pack constant.
+
+    Registering a new pack must automatically widen the platform's CWE
+    vocabulary, error-type markers, and specialist prompt without any
+    kernel changes.
+    """
+
+    def setUp(self):
+        # Save and restore the registry around each test.
+        from lima.vuln_packs import _PACKS
+        self._original = dict(_PACKS)
+
+    def tearDown(self):
+        from lima.vuln_packs import _PACKS
+        _PACKS.clear()
+        _PACKS.update(self._original)
+
+    def _register_test_pack(self):
+        from lima.vuln_packs import VulnPack, register_pack
+        register_pack(VulnPack(
+            name="test-registry-expansion",
+            cwe_ids=frozenset({"CWE-121"}),
+            specialist_prompt_addendum="Stack overflow: check fixed-size buffers.",
+            seed_patterns=(),
+            driver_templates={},
+            asan_markers={"CWE-121": ("stack-buffer-overflow",)},
+            integer_overflow_markers={},
+        ))
+
+    def test_registry_cwe_ids_grows_with_new_pack(self):
+        from lima.vuln_packs import registry_cwe_ids
+        before = registry_cwe_ids()
+        self.assertNotIn("CWE-121", before)
+        self._register_test_pack()
+        after = registry_cwe_ids()
+        self.assertIn("CWE-121", after)
+        # All existing coverage is preserved.
+        self.assertTrue(before <= after)
+
+    def test_registry_markers_merge_across_packs(self):
+        from lima.vuln_packs import registry_runtime_markers
+        self._register_test_pack()
+        markers = registry_runtime_markers()
+        self.assertIn("CWE-121", markers)
+        self.assertIn("stack-buffer-overflow", markers["CWE-121"])
+        # Original pack's markers are still present.
+        self.assertIn("CWE-416", markers)
+        self.assertIn("use-after-free", markers["CWE-416"])
+
+    def test_registry_prompt_includes_all_addenda(self):
+        from lima.vuln_packs import registry_prompt_addenda
+        self._register_test_pack()
+        prompt = registry_prompt_addenda()
+        self.assertIn("Stack overflow", prompt)
+
+    def test_orchestrator_schema_uses_registry_vocabulary(self):
+        """The platform's JSON schema CWE enum comes from the registry."""
+        import lima.agent_orchestrator as orchestrator
+
+        # With the default registry, the known CWEs are all present.
+        schema = orchestrator._platform_schema()
+        for cwe in ("CWE-416", "CWE-787", "CWE-476", "CWE-190"):
+            self.assertIn(cwe, schema)
+        self.assertNotIn("CWE-121", schema)
+
+    def test_orchestrator_marker_table_uses_registry(self):
+        """The platform's error-type marker table merges all packs."""
+        import lima.agent_orchestrator as orchestrator
+
+        markers = orchestrator._asan_cwe_markers()
+        self.assertIn("CWE-416", markers)
+        self.assertIn("use-after-free", markers["CWE-416"])
+        self.assertIn("CWE-190", markers)
+
+    def test_late_registration_updates_all_consumers(self):
+        """Review #235: registering after import updates everything live.
+
+        The Specialist prompt, the CWE parsing vocabulary and the error-type
+        marker table must all pick up a pack registered after the module
+        was imported -- no frozen module-level state.
+        """
+        import lima.agent_orchestrator as orchestrator
+
+        self._register_test_pack()
+
+        # The parser accepts the new CWE.
+        from lima.vuln_packs import registry_cwe_ids
+        self.assertIn("CWE-121", registry_cwe_ids())
+
+        # The Specialist prompt carries the new CWE in its enum.
+        prompt = orchestrator._system_platform_specialist()
+        self.assertIn("CWE-121", prompt)
+
+        # The error-type marker table includes the new pack's markers.
+        markers = orchestrator._asan_cwe_markers()
+        self.assertIn("CWE-121", markers)
+        self.assertIn("stack-buffer-overflow", markers["CWE-121"])
+
+    def test_incomplete_display_order_never_loses_cwe_ids(self):
+        """Review #235: a pack with a partial cwe_display_order must not
+        create a gap between the prompt enum and the parser vocabulary."""
+
+        from lima.vuln_packs import VulnPack, register_pack
+        register_pack(VulnPack(
+            name="test-incomplete-display",
+            cwe_ids=frozenset({"CWE-121", "CWE-122"}),
+            specialist_prompt_addendum="Stack overflow family.",
+            seed_patterns=(),
+            driver_templates={},
+            asan_markers={
+                "CWE-121": ("stack-buffer-overflow",),
+                "CWE-122": ("global-buffer-overflow",),
+            },
+            integer_overflow_markers={},
+            # Deliberately incomplete: only lists CWE-121, misses CWE-122.
+            cwe_display_order=("CWE-121",),
+        ))
+
+        from lima.vuln_packs import registry_cwe_display_order, registry_cwe_ids
+        display = registry_cwe_display_order()
+        vocabulary = registry_cwe_ids()
+
+        # Both CWEs appear in the display order (the missing one appended).
+        self.assertIn("CWE-121", display)
+        self.assertIn("CWE-122", display)
+
+        # The display order always covers the full vocabulary.
+        self.assertLessEqual(vocabulary, frozenset(display))
+
+        # The orchestrator's prompt carries both CWEs.
+        import lima.agent_orchestrator as orchestrator
+        prompt = orchestrator._system_platform_specialist()
+        self.assertIn("CWE-121", prompt)
+        self.assertIn("CWE-122", prompt)
+
+        # The prompt enum matches the parser vocabulary exactly.
+        cwe_enum = "|".join(display)
+        self.assertIn(f'"cwe":"{cwe_enum}"', prompt)
 
 
 if __name__ == "__main__":

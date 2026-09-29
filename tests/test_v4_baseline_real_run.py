@@ -152,6 +152,38 @@ the {5,5} routing pin pass by design (guard rejections and the old path are
 the current behavior); the pre-freeze baseline run of the v6 file (76/76
 green, ten frozen files 322/322, discover 2692 OK with 24 skips) is archived
 alongside the RED log.
+
+IP-0038 evolution to frozen version v8 (CA-IP-0038-v1.0 of 2026-09-29; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0038_Preflight_Calibration.md
+section 10): all 90 v7' methods are retained without any modification -- the
+existing method bodies gain nothing and lose nothing -- while seven new
+methods in one new class pin the pilot preflight calibration (FR-01..06 /
+AC-1..5): the manifest planned-shape three states (DR-IP-0037-PV-8: pilot 1/4
+and formal 3/5 derived from the carried batch shape; the old {5,5} path
+byte-identical through a complete inline expected manifest document under a
+constant monotonic clock), the offline rehearsal full chain on the option-b
+calibrated artifact (licensed download/storage ceilings of 250,000,000 /
+500,000,000 exactly admitting the frozen first-round conservative
+reservation; consumed.download=0 with released.download=250,000,000 on the
+synthetic large-repo key; exactly five POSTs; one cold_reset observation,
+performed False at the initial materialization with zero claimed resets,
+DR-IP-0038-PV-2; four warm reuses; zero budget refusals; and every
+source-less V5 report field null + unavailable, DR-IP-0037-01), the
+one-byte-short download-ceiling refusals (both frozen fail-closed faces with
+zero transmission, DR-IP-0038-PV-3), the estimate constants and the
+first-round reservation wiring statically pinned, the manifest derivation
+discipline (class read-only properties never exported in ``__all__`` and a
+builder that reads only the carried state -- no second parse, no hardcoded
+repeat count), and the numeric-table dual-source loader check.  The RED
+anchor is capability absence: on the unmodified real_run.py of the ae613ce3
+baseline the manifest still writes the frozen 5/5 pair and the planned-count
+properties are absent, so the three planned-shape methods fail on exactly
+those assertions; the old-path byte identity, the ceiling refusals, the
+static pins, and the loader check pass by design (the current behavior is
+the target behavior); the pre-freeze baseline run of the v7' file (90/90
+green, ten frozen files 322/322, discover 2706 OK with 24 skips) is archived
+alongside the RED log.
 """
 
 import ast
@@ -560,6 +592,74 @@ _COLD_RESET_VALUE_KEYS = frozenset(
 # status honestly from the shape instead of hardcoding it (PC3).
 _COLD_MIN_SUCCESSES = 3
 _WARM_MIN_SUCCESSES = 5
+
+# IP-0038 v8 (R5, Packet 7.3): the preflight-calibration budget vector -- a
+# verbatim replica of the Packet numeric table, the sole source of the
+# seven-dimension pilot values (the decision pack v6 quotes it verbatim and
+# may not establish a second one).  batch keeps the licensed resource
+# ceilings exactly at the frozen first-round reservation constants and
+# derives the four free dimensions as five times the per-attempt worst-case
+# reservation (DR-IP-0038-PV-1); the first-round reservation itself stays
+# untouched (never zeroed).
+_PREFLIGHT_PER_RUN = {
+    "cost_micro_usd": 100_000,
+    "calls": 1,
+    "prompt_tokens": 150_000,
+    "completion_tokens": 8_000,
+    "wall_ms": 1_200_000,
+    "download_bytes": 250_000_000,
+    "storage_bytes": 500_000_000,
+}
+_PREFLIGHT_BATCH = {
+    "cost_micro_usd": 198_000,
+    "calls": 5,
+    "prompt_tokens": 500_000,
+    "completion_tokens": 40_000,
+    "wall_ms": 6_000_000,
+    "download_bytes": 250_000_000,
+    "storage_bytes": 500_000_000,
+}
+# The synthetic rehearsal key: local fixture materialization performs zero
+# GET calls, which is exactly the honest consumed.download=0 /
+# released.download=250,000,000 accounting face of Packet 7.4.
+_PREFLIGHT_REHEARSAL_KEY = "archetype/large-repo"
+# One byte below the licensed download ceiling (and the frozen first-round
+# reservation constant): the fail-closed refusal arrange of Packet 8-3.
+_PREFLIGHT_ONE_BYTE_SHORT = 249_999_999
+# The frozen canary-checklist construction order (real_run
+# _run_canary_checklist insertion order; the manifest embeds it verbatim).
+_PREFLIGHT_CANARY_ORDER = (
+    "usage_within_reservation",
+    "identity_matches",
+    "attempt0_digest_verified",
+    "batch_margin_positive",
+    "canary_sample_success",
+)
+
+
+def _preflight_policy(cold, warm, *, batch=None, per_run=None):
+    """Mutate one repo approval document into the calibrated variant.
+
+    Only the attempt-policy shape and the seven budget dimensions change
+    (the Packet 7.3 numeric table by default); every other pin stays the
+    frozen transcription, so the arrange keeps going through the same
+    document the frozen loader validates (PC2).  ``max_attempts`` is always
+    derived as cold+warm (PC3).
+    """
+
+    def mutate(document):
+        policy = document["attempt_policy"]
+        policy["cold"] = cold
+        policy["warm"] = warm
+        policy["max_attempts"] = cold + warm
+        for level, table in (
+            ("per_run", per_run if per_run is not None else _PREFLIGHT_PER_RUN),
+            ("batch", batch if batch is not None else _PREFLIGHT_BATCH),
+        ):
+            for dimension, value in table.items():
+                document["budget"][level][dimension] = value
+
+    return mutate
 
 
 def _shaped_policy(cold, warm, *, batch_calls=None):
@@ -4735,6 +4835,468 @@ class TestBatchShapeProtocol(_RealRunTestCase):
             consumed = result.ledger_snapshot.batch["consumed"]
             self.assertEqual(consumed["prompt_tokens"], (total - 1) * 1_000)
             self.assertEqual(consumed["completion_tokens"], (total - 1) * 500)
+
+
+class TestPreflightCalibration(_RealRunTestCase):
+    """IP-0038 FR-01..06 / AC-1..5: the pilot preflight calibration.
+
+    Seven methods pinning the manifest planned-shape three states
+    (DR-IP-0037-PV-8: pilot 1/4 and formal 3/5 derived from the carried
+    batch shape, the old {5,5} path byte-identical), the option-b calibrated
+    budget vector (licensed ceilings exactly admitting the frozen first-round
+    reservation), the offline rehearsal full chain with the honest
+    source-less V5 unavailable faces (DR-IP-0037-01), the one-byte-short
+    ceiling refusals, the static estimate pins, and the manifest derivation
+    discipline (Packet sections 7.1-7.5 and 9.1, methods N1-N7).  Everything
+    is offline: calibrated artifacts are repo/synthetic document variants,
+    the transport is always an injected fake, and no test ever touches a
+    network socket.
+    """
+
+    def test_manifest_planned_shape_pilot_and_formal(self):
+        # N1 (FR-01/AC-1, Packet 7.1): the manifest cold_count/warm_count
+        # pair is the approved planned shape derived from the artifact's
+        # attempt policy -- pilot {1,4} with the calibrated numeric table
+        # writes 1/4, the formal batch {3,5} writes 3/5 -- while the
+        # attempt-level actual evidence stays separated in the attempt
+        # documents (one cold_reset observation on the initial
+        # materialization, none on the warm reuses).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-pilot-") as directory:
+            approval = self.write_artifact(
+                directory, _preflight_policy(_PILOT_COLD, _PILOT_WARM)
+            )
+            result = self.run_entry(
+                directory, transport=self.happy_transport(), artifact_path=approval
+            )
+            self.assertEqual(result.attempt_count, _PILOT_COLD + _PILOT_WARM)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["cold_count"], _PILOT_COLD)
+            self.assertEqual(manifest["warm_count"], _PILOT_WARM)
+            self.assertEqual(manifest["attempt_count"], _PILOT_COLD + _PILOT_WARM)
+            cold_document = self.read_attempt(directory, 0)
+            self.assertIn("cold_reset", cold_document)
+            self.assertIs(cold_document["cold_reset"]["performed"], False)
+            self.assertEqual(cold_document["cold_reset"]["materialization_count"], 1)
+            for index in range(_PILOT_COLD, _PILOT_COLD + _PILOT_WARM):
+                with self.subTest(warm_attempt=index):
+                    self.assertNotIn("cold_reset", self.read_attempt(directory, index))
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-formal-") as directory:
+            approval = self.write_artifact(
+                directory,
+                _shaped_policy(
+                    _FORMAL_COLD, _FORMAL_WARM, batch_calls=_FORMAL_COLD + _FORMAL_WARM
+                ),
+            )
+            result = self.run_entry(
+                directory, transport=self.happy_transport(), artifact_path=approval
+            )
+            self.assertEqual(result.attempt_count, _FORMAL_COLD + _FORMAL_WARM)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(
+                (manifest["cold_count"], manifest["warm_count"]),
+                (_FORMAL_COLD, _FORMAL_WARM),
+            )
+            self.assertEqual(manifest["attempt_count"], _FORMAL_COLD + _FORMAL_WARM)
+
+    def test_manifest_old_shape_full_document_byte_identical(self):
+        # N1-old (FR-01/AC-4, Packet 7.1.4): the {5,5} default artifact keeps
+        # producing the byte-identical manifest under the derived-value
+        # construction -- the complete inline expected document (every key,
+        # every value, PC3-recomputed: digests, the SF-01 token, the worst-
+        # case cost formula, the remaining arithmetic) equals the written
+        # document and canonical_encode(expected) equals the manifest.json
+        # bytes (the persisted order is the canonical sorted order; the byte
+        # equality is the order-total carrier).  Deterministic arrange: the
+        # constant monotonic clock (batch_wall_ms 0, zero wall consumption).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-old-") as directory:
+            self.patch_monotonic(_JumpClock())
+            transport = self.happy_transport()
+            self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            happy_files = _happy_files()
+            candidates = sum(1 for name in happy_files if name.endswith(".py"))
+            per_attempt_cost = math.ceil(
+                _AUTH_PRICES[0] * 1_000 / 1_000_000
+            ) + math.ceil(_AUTH_PRICES[1] * 500 / 1_000_000)
+            tarball = _happy_tarball()
+            consumed = {
+                "cost_micro_usd": _ATTEMPT_TOTAL * per_attempt_cost,
+                "prompt_tokens": _ATTEMPT_TOTAL * 1_000,
+                "completion_tokens": _ATTEMPT_TOTAL * 500,
+                "wall_ms": 0,
+                "download_bytes": len(tarball),
+                "storage_bytes": sum(
+                    len(content.encode("utf-8")) for content in happy_files.values()
+                ),
+            }
+            remaining = {
+                dimension: _AUTH_PER_RUN[dimension]
+                * _AUTH_BATCH_MULTIPLIERS[dimension]
+                - consumed[dimension]
+                for dimension in (
+                    "cost_micro_usd",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "wall_ms",
+                    "download_bytes",
+                    "storage_bytes",
+                )
+            }
+            remaining["calls"] = (
+                _AUTH_PER_RUN["calls"] * _AUTH_BATCH_MULTIPLIERS["calls"]
+                - _ATTEMPT_TOTAL
+            )
+            expected = {
+                "schema_version": 1,
+                "run_name": _RUN_NAME,
+                "approval_digest": hashlib.sha256(
+                    (_REPO_ROOT / _APPROVAL_RELATIVE_PATH).read_bytes()
+                ).hexdigest(),
+                "baseline_sha": _BASELINE_SHA,
+                "attempt_count": _ATTEMPT_TOTAL,
+                "cold_count": _COLD_COUNT,
+                "warm_count": _WARM_COUNT,
+                "failures": [],
+                "coverage_gap": len(happy_files) - candidates,
+                "canary": {
+                    "status": "passed",
+                    "checks": dict.fromkeys(_PREFLIGHT_CANARY_ORDER, True),
+                },
+                "batch_remaining": remaining,
+                "batch_wall_ms": 0,
+                "deadline": {"batch_wall_exceeded": False},
+                "tarball_sha256": hashlib.sha256(tarball).hexdigest(),
+                "model": _REQUEST_MODEL,
+                "system_fingerprint_baseline": _sf01_token("fp-stable-001"),
+                "execution_commit_sha": "pending-operator-record",
+            }
+            manifest = self.read_manifest(directory)
+            self.assertEqual(list(manifest), sorted(manifest))
+            self.assertEqual(manifest, expected)
+            raw = (pathlib.Path(directory) / "manifest.json").read_bytes()
+            self.assertEqual(canonical_encode(expected), raw)
+
+    def test_pilot_rehearsal_full_chain_offline_report(self):
+        # N2 (FR-02/FR-03/FR-04/FR-05/AC-2/AC-3, Packet 7.2/7.4/7.5 and 8-2):
+        # the offline rehearsal full chain -- the exact numeric-table pilot
+        # artifact under the synthetic large-repo key, the formal entry, a
+        # fake transport, and an empty output directory to the report.
+        # Exactly five POSTs and five attempt documents, zero budget
+        # refusals, the licensed-ceiling vs actual-download distinction in
+        # the released bucket, one cold_reset observation on the initial
+        # materialization (performed False, count 1; a {1,4} pilot performs
+        # zero verifiable resets and claims none -- DR-IP-0038-PV-2), four
+        # warm reuses, the planned manifest shape, and every source-less V5
+        # report field honestly null + unavailable.
+        total = _PILOT_COLD + _PILOT_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-rehearsal-") as directory:
+            root = pathlib.Path(directory)
+            approval = self.write_synthetic_artifact(
+                directory,
+                _PREFLIGHT_REHEARSAL_KEY,
+                _preflight_policy(_PILOT_COLD, _PILOT_WARM),
+            )
+            transport = self.happy_transport()
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=_PREFLIGHT_REHEARSAL_KEY,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(transport.download_calls, 0)
+            self.assertEqual(result.attempt_count, total)
+            self.assertEqual(result.canary_status, "passed")
+            documents = [self.read_attempt(directory, index) for index in range(total)]
+            for index, document in enumerate(documents):
+                with self.subTest(attempt=index):
+                    self.assertEqual(document["outcome"], "success")
+                    self.assertIsNone(document["error_code"])
+            self.assertLess(_PILOT_COLD, _COLD_MIN_SUCCESSES)
+            self.assertEqual(result.status, "insufficient_sample")
+            ledger = json.loads((root / "ledger.json").read_bytes())
+            self.assertEqual(ledger["violations"], 0)
+            book = ledger["batch"]
+            self.assertEqual(book["calls"], total)
+            self.assertEqual(book["consumed"]["download_bytes"], 0)
+            self.assertEqual(
+                book["released"]["download_bytes"], _PREFLIGHT_BATCH["download_bytes"]
+            )
+            self.assertEqual(
+                book["released"]["storage_bytes"],
+                _PREFLIGHT_BATCH["storage_bytes"]
+                - book["consumed"]["storage_bytes"],
+            )
+            with_reset = [
+                index
+                for index, document in enumerate(documents)
+                if "cold_reset" in document
+            ]
+            self.assertEqual(with_reset, [0])
+            self.assertIs(documents[0]["cold_reset"]["performed"], False)
+            self.assertEqual(documents[0]["cold_reset"]["materialization_count"], 1)
+            self.assertEqual(
+                sum(
+                    1
+                    for document in documents
+                    if document.get("cold_reset", {}).get("performed") is True
+                ),
+                0,
+            )
+            for index in range(_PILOT_COLD, total):
+                state = documents[index]["state_reuse"]
+                with self.subTest(warm_attempt=index):
+                    self.assertIs(state["materialized"], False)
+                    self.assertIs(state["snapshot_reused"], True)
+                    self.assertIs(state["request_body_rebuilt"], False)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(
+                (manifest["cold_count"], manifest["warm_count"]),
+                (_PILOT_COLD, _PILOT_WARM),
+            )
+            self.assertEqual(manifest["failures"], [])
+            self.assertEqual(manifest["attempt_count"], total)
+            report = json.loads(pathlib.Path(result.report_path).read_bytes())
+            for key in (
+                "signals",
+                "security_issues",
+                "hypotheses",
+                "confirmed",
+                "inconclusive",
+            ):
+                with self.subTest(counts=key):
+                    self.assertEqual(
+                        report["counts"][key],
+                        {"value": None, "projection": "unavailable"},
+                    )
+            for face in ("vep", "rvr"):
+                self.assertEqual(
+                    report[face], {"value": None, "projection": "unavailable"}, face
+                )
+            for stage in ("audit", "mining", "repair"):
+                self.assertEqual(
+                    report["stage_outcome"][stage],
+                    {"value": None, "projection": "unavailable"},
+                    stage,
+                )
+            self.assertEqual(
+                report["resources"],
+                {"prompt_tokens": None, "completion_tokens": None, "cost_micro_usd": None},
+            )
+            self.assertIsNone(report["expert"]["active_time_ms_total"])
+            self.assertEqual(report["evidence_domain"], "legacy")
+            self.assertEqual(report["attempt_count"], total)
+
+    def test_download_ceiling_one_byte_short_refused_zero_posts(self):
+        # N3 (FR-03/AC-2, Packet 8-3): a licensed ceiling one byte below the
+        # frozen first-round conservative reservation (250,000,000) never
+        # pays for a call.  With per_run at the numeric table the artifact is
+        # itself contradictory (batch < per_run) and the frozen BudgetSpec
+        # construction refuses it under the batch download field path; with
+        # both levels one byte short the first reserve of the very first
+        # attempt is refused (the per-run gate precedes the batch gate) and
+        # the canary then latches the batch -- in both faces zero POSTs and
+        # zero GETs (DR-IP-0038-PV-3, probe-verified frozen mechanics).
+        short = _PREFLIGHT_ONE_BYTE_SHORT
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-short-batch-") as directory:
+            approval = self.write_artifact(
+                directory,
+                _preflight_policy(
+                    _PILOT_COLD,
+                    _PILOT_WARM,
+                    batch={**_PREFLIGHT_BATCH, "download_bytes": short},
+                ),
+            )
+            transport = self.happy_transport()
+            with self.assertRaises(BudgetGateError) as caught:
+                self.run_entry(
+                    directory, transport=transport, artifact_path=approval
+                )
+            self.assertIs(
+                caught.exception.code, BudgetGateErrorCode.BUDGET_SPEC_INVALID
+            )
+            self.assertEqual(
+                caught.exception.field_path, "$.budget.batch.download_bytes"
+            )
+            self.assertEqual(transport.chat_calls, 0)
+            self.assertEqual(transport.download_calls, 0)
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-short-both-") as directory:
+            approval = self.write_artifact(
+                directory,
+                _preflight_policy(
+                    _PILOT_COLD,
+                    _PILOT_WARM,
+                    batch={**_PREFLIGHT_BATCH, "download_bytes": short},
+                    per_run={**_PREFLIGHT_PER_RUN, "download_bytes": short},
+                ),
+            )
+            transport = self.happy_transport()
+            result = self.run_entry(
+                directory, transport=transport, artifact_path=approval
+            )
+            self.assertEqual(transport.chat_calls, 0)
+            self.assertEqual(transport.download_calls, 0)
+            self.assertEqual(result.canary_status, "failed")
+            refused = self.read_attempt(directory, 0)
+            self.assertEqual(refused["outcome"], "failure")
+            self.assertEqual(refused["error_code"], "RUN_BUDGET_EXCEEDED")
+            self.assertEqual(
+                refused["error_field_path"], "$.budget.per_run.download_bytes"
+            )
+            for index in range(1, _PILOT_COLD + _PILOT_WARM):
+                with self.subTest(latched_attempt=index):
+                    latched = self.read_attempt(directory, index)
+                    self.assertEqual(latched["outcome"], "failure")
+                    self.assertEqual(latched["error_code"], "REAL_RUN_CANARY_FAILED")
+            book = json.loads(
+                (pathlib.Path(directory) / "ledger.json").read_bytes()
+            )["batch"]
+            self.assertEqual(book["calls"], 0)
+
+    def test_estimate_constants_and_first_round_wiring_pinned(self):
+        # N4 (FR-03/AC-2, Packet 8-4): the first-round conservative
+        # reservation is never relaxed -- the frozen module constants keep
+        # their values and the attempt-0 estimate branch wires exactly the
+        # byte cap, the token cap, the per-run wall bound, and both resource
+        # constants (AST-level pinning so a hidden relaxation cannot pass
+        # silently).
+        module = self.real_run()
+        self.assertEqual(module._DOWNLOAD_ESTIMATE_BYTES, 250_000_000)
+        self.assertEqual(module._STORAGE_ESTIMATE_BYTES, 500_000_000)
+        self.assertEqual(module._WALL_ESTIMATE_MS, 1_200_000)
+        tree = ast.parse(self.product_source(_MODULE_RELATIVE_PATH))
+        estimate_functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_estimate_for"
+        ]
+        self.assertEqual(len(estimate_functions), 1)
+        first_round = None
+        for node in ast.walk(estimate_functions[0]):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+                keywords = {keyword.arg: keyword.value for keyword in node.value.keywords}
+                if "download_bytes" in keywords:
+                    first_round = keywords
+        self.assertIsNotNone(first_round)
+        self.assertIsInstance(first_round["prompt_tokens"], ast.Name)
+        self.assertEqual(first_round["prompt_tokens"].id, "REQUEST_BODY_BYTE_CAP")
+        self.assertIsInstance(first_round["completion_tokens"], ast.Name)
+        self.assertEqual(first_round["completion_tokens"].id, "MAX_TOKENS")
+        self.assertEqual(
+            ast.unparse(first_round["wall_ms"]),
+            "self._approval.budget_spec.per_run.wall_ms",
+        )
+        self.assertIsInstance(first_round["download_bytes"], ast.Name)
+        self.assertEqual(first_round["download_bytes"].id, "_DOWNLOAD_ESTIMATE_BYTES")
+        self.assertIsInstance(first_round["storage_bytes"], ast.Name)
+        self.assertEqual(first_round["storage_bytes"].id, "_STORAGE_ESTIMATE_BYTES")
+
+    def test_manifest_derivation_discipline_carried_state_only(self):
+        # N6 (FR-01/AC-1, Packet 8-6): the planned counts are class read-only
+        # properties (never exported in __all__), they resolve the carried
+        # batch shape with the (5,5) default, and the manifest builder reads
+        # only the carried state -- the builder source references the
+        # properties, never the approval document's attempt_policy (no
+        # second parse) and never the hardcoded repeat count.
+        module = self.real_run()
+        for name in ("planned_cold_count", "planned_warm_count"):
+            attribute = getattr(module._GuardedRealEvaluator, name, None)
+            self.assertIsInstance(attribute, property, name)
+        self.assertEqual(tuple(module.__all__), _REAL_RUN_ALL)
+        for name in ("planned_cold_count", "planned_warm_count"):
+            self.assertNotIn(name, module.__all__)
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-carried-") as directory:
+            root = pathlib.Path(directory)
+            approval = self.write_artifact(root)
+            contract = module._load_and_validate_approval(approval)
+            (root / "_materialized" / "tarball").mkdir(parents=True, exist_ok=True)
+            (root / "_materialized" / "snapshot").mkdir(parents=True, exist_ok=True)
+
+            def build(shape):
+                return module._GuardedRealEvaluator(
+                    ledger=BudgetLedger(contract.budget_spec, contract.pricing),
+                    transport=self.happy_transport(),
+                    api_key=_FAKE_KEY,
+                    timeout_seconds=120,
+                    approval=contract,
+                    output_root=root,
+                    batch_shape=shape,
+                )
+
+            default = build(None)
+            self.assertEqual(
+                (default.planned_cold_count, default.planned_warm_count),
+                (_COLD_COUNT, _WARM_COUNT),
+            )
+            pilot = build((_PILOT_COLD, _PILOT_WARM))
+            self.assertEqual(
+                (pilot.planned_cold_count, pilot.planned_warm_count),
+                (_PILOT_COLD, _PILOT_WARM),
+            )
+            formal = build((_FORMAL_COLD, _FORMAL_WARM))
+            self.assertEqual(
+                (formal.planned_cold_count, formal.planned_warm_count),
+                (_FORMAL_COLD, _FORMAL_WARM),
+            )
+        tree = ast.parse(self.product_source(_MODULE_RELATIVE_PATH))
+        builders = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_build_manifest_document"
+        ]
+        self.assertEqual(len(builders), 1)
+        builder_source = ast.unparse(builders[0])
+        self.assertIn("guarded.planned_cold_count", builder_source)
+        self.assertIn("guarded.planned_warm_count", builder_source)
+        self.assertNotIn("attempt_policy", builder_source)
+        self.assertNotIn("_REPEAT_COUNT", builder_source)
+
+    def test_numeric_table_artifact_loader_dual_source(self):
+        # N7 (FR-03/AC-2, Packet 8-7): the artifact built from the test-side
+        # replica of the Packet numeric table loads through the frozen
+        # validator and the parsed budget spec equals the table on both
+        # levels and every dimension (dual-source consistency), and the R5
+        # admission constraints hold as recomputed relations (each batch
+        # dimension at or above its per-run counterpart and at or above the
+        # first-round worst-case reservation; the resource ceilings exactly
+        # at the frozen estimate constants).
+        module = self.real_run()
+        with tempfile.TemporaryDirectory(prefix="lima-ip0038-table-") as directory:
+            approval = self.write_artifact(
+                directory, _preflight_policy(_PILOT_COLD, _PILOT_WARM)
+            )
+            contract = module._load_and_validate_approval(approval)
+            for level, table in (
+                ("per_run", _PREFLIGHT_PER_RUN),
+                ("batch", _PREFLIGHT_BATCH),
+            ):
+                for dimension, value in table.items():
+                    with self.subTest(level=level, dimension=dimension):
+                        self.assertEqual(
+                            getattr(getattr(contract.budget_spec, level), dimension),
+                            value,
+                        )
+            policy = contract.document["attempt_policy"]
+            self.assertEqual(
+                (policy["cold"], policy["warm"], policy["max_attempts"]),
+                (_PILOT_COLD, _PILOT_WARM, _PILOT_COLD + _PILOT_WARM),
+            )
+            per_run = contract.budget_spec.per_run
+            batch = contract.budget_spec.batch
+            for dimension in _PREFLIGHT_PER_RUN:
+                self.assertGreaterEqual(
+                    getattr(batch, dimension), getattr(per_run, dimension), dimension
+                )
+            first_round_cost = math.ceil(
+                _AUTH_PRICES[0] * module.REQUEST_BODY_BYTE_CAP / 1_000_000
+            ) + math.ceil(_AUTH_PRICES[1] * module.MAX_TOKENS / 1_000_000)
+            self.assertGreaterEqual(batch.prompt_tokens, module.REQUEST_BODY_BYTE_CAP)
+            self.assertGreaterEqual(batch.completion_tokens, module.MAX_TOKENS)
+            self.assertGreaterEqual(batch.wall_ms, per_run.wall_ms)
+            self.assertGreaterEqual(batch.cost_micro_usd, first_round_cost)
+            self.assertEqual(batch.download_bytes, module._DOWNLOAD_ESTIMATE_BYTES)
+            self.assertEqual(batch.storage_bytes, module._STORAGE_ESTIMATE_BYTES)
 
 
 if __name__ == "__main__":  # pragma: no cover

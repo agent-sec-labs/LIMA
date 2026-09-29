@@ -119,6 +119,39 @@ full attempt-sequence assertion, and the unchanged default batch).  The RED
 anchor is capability absence: on the unmodified real_run.py of the 1046501d
 baseline the parameter, the catalog and the reset entry are absent; the
 default-batch compatibility method passes by design.
+
+IP-0037 evolution to frozen version v7 (CA-IP-0037-v1.0 of 2026-09-29; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0037_Batch_Protocol.md
+section 10): all 76 v6 methods are retained without any modification -- the
+existing method bodies gain nothing and lose nothing, so the old ten-attempt
+path regression is exactly the unchanged v6 suite -- while fourteen new
+methods in one new class pin the artifact-signed batch protocol (FR-01..06 /
+AC-1..5): the open-interval attempt-policy generalization with the exact
+``$.attempt_policy.*`` tamper field paths and the {2,2} well-formed member,
+the {5,5}-only routing to the byte-identical ``run_repeats`` path, the
+shaped driver executing exactly cold+warm frozen ``run_baseline_attempt``
+calls (pilot {1,4} = five POSTs, formal {3,5} = eight POSTs, aggregate
+isomorphism), the cold-reset wiring with the additive ``cold_reset``
+four-key observation (performed/materialization_count 1->2->3, digests
+identical to the first materialization, ``snapshot-cold-{n}`` directories,
+warm reuse (F,T,F) and the 16/15/15 key-presence matrix), the sixth/ninth
+guarded-call refusals at ``$.budget.batch.calls`` with zero transmission,
+the missing-reset typed failure that is never claimed as a cold success, the
+shaped canary latch, the dual-batch ledger isolation with the one-time
+directory gate, and the shaped missing-usage violation that is never booked
+as zero.  The RED anchor is capability absence: on the unmodified real_run.py
+of the ddb8675 baseline the loader still pins cold==5/warm==5/max==10, so
+every shaped artifact is refused at ``$.attempt_policy.cold`` before any
+shaped behavior exists, the ``_run_shaped_repeats`` driver and the
+``cold_reset`` observation key are absent, and the aggregate-status rule
+stays the frozen one (three cold plus five warm successes are the
+sufficient-sample minimum, so an all-success {1,4} pilot honestly reports
+``insufficient_sample`` -- never failure-masquerade).  The tamper matrix and
+the {5,5} routing pin pass by design (guard rejections and the old path are
+the current behavior); the pre-freeze baseline run of the v6 file (76/76
+green, ten frozen files 322/322, discover 2692 OK with 24 skips) is archived
+alongside the RED log.
 """
 
 import ast
@@ -503,6 +536,51 @@ _COLD_RESET_KEYS = frozenset(
 )
 _PER_COLD_DIR_PATTERN = re.compile(r"^snapshot-cold-[0-9]+$")
 
+# IP-0037 v7 (R2/R3/R6): the pinned batch shapes of the artifact-signed
+# batch protocol -- pilot 1c+4w (five POSTs), formal batch 3c+5w (eight
+# POSTs), and the open-interval well-formed member {2,2} that keeps the
+# generalized validator from ever silently regrowing a whitelist.
+_PILOT_COLD = 1
+_PILOT_WARM = 4
+_FORMAL_COLD = 3
+_FORMAL_WARM = 5
+_TWO_TWO_COLD = 2
+_TWO_TWO_WARM = 2
+_COLD_RESET_VALUE_KEYS = frozenset(
+    {
+        "performed",
+        "materialization_count",
+        "snapshot_tree_sha256",
+        "request_body_sha256",
+    }
+)
+# The frozen aggregate-status minimums (lima/baseline_run_result.py,
+# read-only): three cold and five warm successes are the lower bound of
+# ``sufficient_sample``, so the shaped expectations below derive every
+# status honestly from the shape instead of hardcoding it (PC3).
+_COLD_MIN_SUCCESSES = 3
+_WARM_MIN_SUCCESSES = 5
+
+
+def _shaped_policy(cold, warm, *, batch_calls=None):
+    """Mutate one repo approval document into a shaped artifact variant.
+
+    Only the attempt-policy shape (and optionally the artifact-signed batch
+    call ceiling) changes; every other pin stays the frozen transcription,
+    so the arrange keeps going through the same document the frozen loader
+    validates (PC2).  ``max_attempts`` is always derived as cold+warm (PC3).
+    """
+
+    def mutate(document):
+        policy = document["attempt_policy"]
+        policy["cold"] = cold
+        policy["warm"] = warm
+        policy["max_attempts"] = cold + warm
+        if batch_calls is not None:
+            document["budget"]["batch"]["calls"] = batch_calls
+
+    return mutate
+
 
 def _synthetic_commit_sha(key, fingerprint):
     """The frozen synthetic-descriptor commit-sha derivation (Packet 7.4.1).
@@ -827,6 +905,30 @@ class _ClockJumpChatTransport(_FakeTransport):
     def __call__(self, url, payload, headers, timeout):
         if payload is not None:
             self._clock.jump_ms(self._chat_jump_ms)
+        return super().__call__(url, payload, headers, timeout)
+
+
+class _TarballDeletingTransport(_FakeTransport):
+    """Chat double that removes the cached tarball right after the first POST.
+
+    IP-0037 v7 (R6 wiring, Packet 9.1): at the moment of the first chat POST
+    attempt-0's materialization is complete and the tarball is cached, so
+    deleting it there makes every later cold reset's re-extraction fail
+    closed while the warm reuse path (in-memory request state) stays
+    unaffected -- the injection point for the missing-reset negative.
+    """
+
+    def __init__(self, *, tarball_dir, **kwargs):
+        super().__init__(**kwargs)
+        self._tarball_dir = pathlib.Path(tarball_dir)
+        self.deleted = False
+
+    def __call__(self, url, payload, headers, timeout):
+        if payload is not None and not self.deleted:
+            for path in self._tarball_dir.iterdir():
+                if path.is_file():
+                    path.unlink()
+            self.deleted = True
         return super().__call__(url, payload, headers, timeout)
 
 
@@ -4013,6 +4115,626 @@ class TestArtifactFamilyAndColdReset(_RealRunTestCase):
             self.assertEqual(manifest["cold_count"], _COLD_COUNT)
             self.assertEqual(manifest["warm_count"], _WARM_COUNT)
             self.assertEqual(manifest["attempt_count"], _ATTEMPT_TOTAL)
+
+
+class TestBatchShapeProtocol(_RealRunTestCase):
+    """IP-0037 FR-01..06 / AC-1..5: the artifact-signed batch protocol.
+
+    Fourteen methods pinning the open-interval attempt-policy
+    generalization, the {5,5}-only routing, the shaped driver, the cold-reset
+    wiring with the additive ``cold_reset`` observation, the over-budget
+    refusals, the missing-reset honesty, the shaped canary latch, the
+    dual-batch ledger isolation, and the shaped missing-usage violation
+    (Packet sections 7.1-7.6 and 9.1, methods N1-N14).  Everything is
+    offline: shaped artifacts are repo-document variants, the transport is
+    always an injected fake, and no test ever touches a network socket.
+    """
+
+    def _run_shaped_entry(
+        self, directory, *, cold, warm, batch_calls, transport=None, responses=None
+    ):
+        """Entry-driven shaped run through one artifact-signed document."""
+        approval = self.write_artifact(
+            directory, _shaped_policy(cold, warm, batch_calls=batch_calls)
+        )
+        if transport is None:
+            transport = self.happy_transport(responses=responses)
+        result = self.run_entry(
+            directory, transport=transport, artifact_path=approval
+        )
+        return result, transport
+
+    def _build_shaped_evaluator(self, directory, *, cold, warm, batch_calls):
+        """Direct shaped evaluator + driver run (g3/g4 construction basis).
+
+        Used by the sixth/ninth-call refusals: the entry path cannot fire an
+        extra guarded call on the same ledger (one-time directory gate plus
+        one fresh ledger per suite), so the overrun face is driven on a
+        directly constructed evaluator whose contract carries the shaped
+        artifact's own batch.call ceiling.  The first cold+warm attempts go
+        through the frozen private driver (so the canary checklist's
+        attempt-0 result-file digest verifies exactly as under the entry);
+        only the over-budget call is direct.
+        """
+        module = self.real_run()
+        root = pathlib.Path(directory)
+        approval = self.write_artifact(
+            root, _shaped_policy(cold, warm, batch_calls=batch_calls)
+        )
+        contract = module._load_and_validate_approval(approval)
+        ledger = BudgetLedger(contract.budget_spec, contract.pricing)
+        (root / "_materialized" / "tarball").mkdir(parents=True, exist_ok=True)
+        (root / "_materialized" / "snapshot").mkdir(parents=True, exist_ok=True)
+        transport = self.happy_transport()
+        guarded = module._GuardedRealEvaluator(
+            ledger=ledger,
+            transport=transport,
+            api_key=_FAKE_KEY,
+            timeout_seconds=120,
+            approval=contract,
+            output_root=root,
+        )
+        summary = module._run_shaped_repeats(
+            self.spec_mapping(),
+            self.load_manifest(),
+            guarded,
+            root,
+            cold=cold,
+            warm=warm,
+            sources=self.fixed_sources(),
+        )
+        return guarded, transport, root, summary
+
+    def test_batch_protocol_static_surface_frozen(self):
+        # N-static (FR-01/AC-4/R6, Packet 5.6): the untouched frozen surface
+        # plus the one new private driver symbol with its frozen signature.
+        module = self.real_run()
+        self.assertEqual(module._REPEAT_COUNT, 5)
+        self.assertEqual(tuple(module.__all__), _REAL_RUN_ALL)
+        self.assertEqual(
+            module._ATTEMPT_POLICY_FIELDS,
+            ("cold", "warm", "max_attempts", "canary_required", "canary_first_attempt"),
+        )
+        self.assertEqual(
+            {member.value for member in module.RealRunErrorCode}, _FROZEN_ERROR_CODES
+        )
+        driver = getattr(module, "_run_shaped_repeats", None)
+        self.assertIsNotNone(
+            driver, "_run_shaped_repeats is missing (C3 deliverable)"
+        )
+        signature = inspect.signature(driver)
+        self.assertEqual(
+            list(signature.parameters),
+            ["spec_mapping", "manifest", "guarded", "output_dir", "cold", "warm",
+             "sources"],
+        )
+        self.assertEqual(
+            {
+                name
+                for name, parameter in signature.parameters.items()
+                if parameter.kind == inspect.Parameter.KEYWORD_ONLY
+            },
+            {"cold", "warm", "sources"},
+        )
+        self.assertIsNone(signature.parameters["sources"].default)
+
+    def test_pilot_shape_executes_exactly_five_posts(self):
+        # N1 (FR-01/FR-02/AC-1, Packet 7.3/7.4): the pilot artifact
+        # {cold:1, warm:4, max:5} with its own batch.calls=5 ceiling executes
+        # exactly five successful POSTs -- the count is a success-path
+        # count, never failure masquerade (every attempt document succeeds
+        # and the canary passes); the aggregate status is the frozen
+        # statistical rule applied to 1c+4w, honestly insufficient.
+        total = _PILOT_COLD + _PILOT_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-pilot-") as directory:
+            result, transport = self._run_shaped_entry(
+                directory,
+                cold=_PILOT_COLD,
+                warm=_PILOT_WARM,
+                batch_calls=total,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(transport.download_calls, 1)
+            self.assertEqual(result.attempt_count, total)
+            self.assertEqual(result.canary_status, "passed")
+            self.assertLess(_PILOT_COLD, _COLD_MIN_SUCCESSES)
+            self.assertEqual(result.status, "insufficient_sample")
+            documents = [self.read_attempt(directory, index) for index in range(total)]
+            self.assertEqual(
+                [document["mode"] for document in documents],
+                ["cold"] * _PILOT_COLD + ["warm"] * _PILOT_WARM,
+            )
+            for index, document in enumerate(documents):
+                with self.subTest(attempt=index):
+                    self.assertEqual(document["outcome"], "success")
+                    self.assertIsNone(document["failure_code"])
+                    self.assertIsNone(document["error_code"])
+            digest16 = result.run_spec_digest[:16]
+            self.assertEqual(
+                [path.name for path in result.result_paths],
+                [f"{digest16}-run-{n}.json" for n in range(1, total + 1)],
+            )
+            self.assertEqual(
+                result.aggregate_path.name, f"{digest16}-run-{total + 1}.json"
+            )
+            self.assertEqual(result.ledger_snapshot.batch["calls"], total)
+
+    def test_formal_batch_executes_exactly_eight_posts(self):
+        # N2 (FR-01/FR-02/AC-1, Packet 7.3/7.4): the formal-batch artifact
+        # {3,5,8} with batch.calls=8 executes exactly eight POSTs; 3c+5w
+        # exactly meets the frozen sufficient-sample minimums.
+        total = _FORMAL_COLD + _FORMAL_WARM
+        self.assertEqual((total, _FORMAL_WARM), (8, 5))
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-formal-") as directory:
+            result, transport = self._run_shaped_entry(
+                directory,
+                cold=_FORMAL_COLD,
+                warm=_FORMAL_WARM,
+                batch_calls=total,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(transport.download_calls, 1)
+            self.assertEqual(result.attempt_count, total)
+            self.assertEqual(result.canary_status, "passed")
+            self.assertEqual(
+                (_FORMAL_COLD, _FORMAL_WARM),
+                (_COLD_MIN_SUCCESSES, _WARM_MIN_SUCCESSES),
+            )
+            self.assertEqual(result.status, "sufficient_sample")
+            documents = [self.read_attempt(directory, index) for index in range(total)]
+            self.assertEqual(
+                [document["mode"] for document in documents],
+                ["cold"] * _FORMAL_COLD + ["warm"] * _FORMAL_WARM,
+            )
+            for index, document in enumerate(documents):
+                with self.subTest(attempt=index):
+                    self.assertEqual(document["outcome"], "success")
+                    self.assertIsNone(document["error_code"])
+            self.assertEqual(result.ledger_snapshot.batch["calls"], total)
+            digest16 = result.run_spec_digest[:16]
+            self.assertEqual(
+                result.aggregate_path.name, f"{digest16}-run-{total + 1}.json"
+            )
+
+    def test_formal_batch_cold_reset_chain_observability(self):
+        # N4 (FR-03/AC-2, Packet 7.5): every cold attempt of the shaped run
+        # carries the additive four-key cold_reset observation -- performed
+        # False at the initial materialization then True on each verifiable
+        # reset, materialization_count monotonically 1->2->3, both digests
+        # identical to the first materialization (PC3 recomputation), the
+        # per-cold snapshot directories present, resets zero-GET, and the
+        # warm attempts reusing with (F,T,F) and no cold_reset key.
+        total = _FORMAL_COLD + _FORMAL_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-chain-") as directory:
+            root = pathlib.Path(directory)
+            result, transport = self._run_shaped_entry(
+                directory,
+                cold=_FORMAL_COLD,
+                warm=_FORMAL_WARM,
+                batch_calls=total,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(transport.download_calls, 1)  # resets are zero-GET
+            first_tree = fixtures_module.compute_tree_fingerprint(
+                root / "_materialized" / "snapshot"
+            )
+            first_body_sha = hashlib.sha256(transport.chat_payloads[0]).hexdigest()
+            expected = [(False, 1), (True, 2), (True, 3)]
+            for index, (performed, count) in enumerate(expected):
+                with self.subTest(cold_attempt=index):
+                    document = self.read_attempt(directory, index)
+                    cold_reset = document["cold_reset"]
+                    self.assertEqual(set(cold_reset), _COLD_RESET_VALUE_KEYS)
+                    self.assertIs(cold_reset["performed"], performed)
+                    self.assertEqual(cold_reset["materialization_count"], count)
+                    self.assertEqual(cold_reset["snapshot_tree_sha256"], first_tree)
+                    self.assertEqual(cold_reset["request_body_sha256"], first_body_sha)
+                    reuse = document["state_reuse"]
+                    self.assertIs(reuse["materialized"], True)
+                    self.assertIs(reuse["snapshot_reused"], False)
+                    self.assertIs(reuse["request_body_rebuilt"], True)
+            counts = [
+                self.read_attempt(directory, index)["cold_reset"][
+                    "materialization_count"
+                ]
+                for index in range(_FORMAL_COLD)
+            ]
+            self.assertEqual(counts, sorted(set(counts)))
+            self.assertTrue((root / "_materialized" / "snapshot-cold-2").is_dir())
+            self.assertTrue((root / "_materialized" / "snapshot-cold-3").is_dir())
+            for index in range(_FORMAL_COLD, total):
+                with self.subTest(warm_attempt=index):
+                    document = self.read_attempt(directory, index)
+                    self.assertNotIn("cold_reset", document)
+                    reuse = document["state_reuse"]
+                    self.assertIs(reuse["materialized"], False)
+                    self.assertIs(reuse["snapshot_reused"], True)
+                    self.assertIs(reuse["request_body_rebuilt"], False)
+            self.assertEqual(result.status, "sufficient_sample")
+
+    def test_shape_tamper_matrix_rejected(self):
+        # N3 (FR-01/AC-3, Packet 7.2): every shape tamper is refused by the
+        # loader with the existing code and the exact ``$.attempt_policy.*``
+        # field path, zero transport.  Each case is one where the pinned
+        # v6 validator and the generalized v7 validator reject at the same
+        # position, so the whole matrix passes by design in the RED state.
+        module = self.real_run()
+        cases = [
+            ("cold_zero", {"cold": 0}, "$.attempt_policy.cold"),
+            ("warm_zero", {"warm": 0}, "$.attempt_policy.warm"),
+            ("cold_negative", {"cold": -3}, "$.attempt_policy.cold"),
+            ("warm_string", {"warm": "4"}, "$.attempt_policy.warm"),
+            ("cold_bool", {"cold": True}, "$.attempt_policy.cold"),
+            ("max_mismatch", {"max_attempts": 9}, "$.attempt_policy.max_attempts"),
+            (
+                "canary_required_false",
+                {"canary_required": False},
+                "$.attempt_policy.canary_required",
+            ),
+            (
+                "canary_first_attempt_one",
+                {"canary_first_attempt": 1},
+                "$.attempt_policy.canary_first_attempt",
+            ),
+        ]
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-tamper-") as directory:
+            for label, overrides, field_path in cases:
+                with self.subTest(case=label):
+                    def mutate(document, overrides=overrides):
+                        document["attempt_policy"].update(overrides)
+
+                    approval = self.write_artifact(directory, mutate)
+                    transport = self.happy_transport()
+                    with self.assertRaises(module.RealRunError) as caught:
+                        self.run_entry(
+                            pathlib.Path(directory) / f"out-{label}",
+                            transport=transport,
+                            artifact_path=approval,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(caught.exception.field_path, field_path)
+                    self.assertEqual(transport.chat_calls, 0)
+                    self.assertEqual(transport.download_calls, 0)
+
+    def test_open_interval_shape_two_two_executes(self):
+        # N6 (FR-01/AC-1, Packet 7.1/7.2): the open interval admits the
+        # well-formed member {2,2,4} (loading and executing exactly four
+        # POSTs -- the pin that keeps a shape whitelist from ever silently
+        # returning), while max_attempts != cold+warm ({2,3,6}) is refused
+        # at the max_attempts position under the generalized semantics.
+        module = self.real_run()
+        total = _TWO_TWO_COLD + _TWO_TWO_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-twotwo-") as directory:
+            result, transport = self._run_shaped_entry(
+                directory,
+                cold=_TWO_TWO_COLD,
+                warm=_TWO_TWO_WARM,
+                batch_calls=total,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(result.attempt_count, total)
+            self.assertEqual(
+                [self.read_attempt(directory, index)["mode"] for index in range(total)],
+                ["cold"] * _TWO_TWO_COLD + ["warm"] * _TWO_TWO_WARM,
+            )
+            self.assertEqual(result.status, "insufficient_sample")
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-twotwo-bad-") as directory:
+            # ALLOWED_ONCE 2026-09-29 (re-freeze v7'): the shared helper
+            # always derives max_attempts == cold+warm (PC3), so the {2,3}
+            # control face overwrites it to 6 here; only then is
+            # max_attempts != cold+warm the rejection cause the method
+            # asserts.
+            def mutate(document):
+                _shaped_policy(2, 3)(document)
+                document["attempt_policy"]["max_attempts"] = 6
+
+            approval = self.write_artifact(directory, mutate)
+            transport = self.happy_transport()
+            with self.assertRaises(module.RealRunError) as caught:
+                self.run_entry(
+                    pathlib.Path(directory) / "out",
+                    transport=transport,
+                    artifact_path=approval,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+            )
+            self.assertEqual(
+                caught.exception.field_path, "$.attempt_policy.max_attempts"
+            )
+            self.assertEqual(transport.chat_calls, 0)
+
+    def test_pilot_sixth_guarded_call_refused_zero_transport(self):
+        # N5 (FR-04/AC-3, Packet 8-2): after five successful pilot attempts
+        # the sixth guarded call is refused at the artifact-signed batch
+        # ceiling with zero transmission.
+        total = _PILOT_COLD + _PILOT_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-sixth-") as directory:
+            guarded, transport, _root, summary = self._build_shaped_evaluator(
+                directory, cold=_PILOT_COLD, warm=_PILOT_WARM, batch_calls=total
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(len(summary.attempts), total)
+            self.assertEqual(transport.download_calls, 1)
+            with self.assertRaises(BudgetGateError) as caught:
+                guarded()
+            self.assertEqual(
+                caught.exception.code, BudgetGateErrorCode.BATCH_BUDGET_EXCEEDED
+            )
+            self.assertEqual(caught.exception.field_path, "$.budget.batch.calls")
+            self.assertEqual(transport.chat_calls, total)  # zero transmission
+            self.assertEqual(len(guarded.records), total + 1)
+            refused = guarded.records[total]
+            self.assertEqual(refused.outcome, "failure")
+            self.assertEqual(refused.error_code, "BATCH_BUDGET_EXCEEDED")
+
+    def test_formal_batch_ninth_guarded_call_refused_zero_transport(self):
+        # N6-overrun (FR-04/AC-3, Packet 8-3): the same refusal face one
+        # call past the formal batch's eight.
+        total = _FORMAL_COLD + _FORMAL_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-ninth-") as directory:
+            guarded, transport, _root, summary = self._build_shaped_evaluator(
+                directory, cold=_FORMAL_COLD, warm=_FORMAL_WARM, batch_calls=total
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(len(summary.attempts), total)
+            with self.assertRaises(BudgetGateError) as caught:
+                guarded()
+            self.assertEqual(
+                caught.exception.code, BudgetGateErrorCode.BATCH_BUDGET_EXCEEDED
+            )
+            self.assertEqual(caught.exception.field_path, "$.budget.batch.calls")
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(transport.download_calls, 1)
+
+    def test_cold_reset_failure_not_claimed_as_cold_success(self):
+        # N7 (FR-03/AC-2, Packet 7.4.3): with the cached tarball deleted
+        # after the first POST, the later cold resets fail typed and are
+        # never claimed as cold successes (outcome failure, performed never
+        # true, materialized honestly not True) while the suite continues
+        # fail-closed and the warm reuse path stays unaffected.
+        total = _FORMAL_COLD + _FORMAL_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-noreset-") as directory:
+            root = pathlib.Path(directory)
+            approval = self.write_artifact(
+                directory,
+                _shaped_policy(_FORMAL_COLD, _FORMAL_WARM, batch_calls=total),
+            )
+            transport = _TarballDeletingTransport(
+                tarball_dir=root / "_materialized" / "tarball",
+                tarball=_happy_tarball(),
+            )
+            result = self.run_entry(
+                directory, transport=transport, artifact_path=approval
+            )
+            self.assertTrue(transport.deleted)
+            self.assertEqual(transport.chat_calls, 1 + _FORMAL_WARM)
+            self.assertEqual(result.attempt_count, total)
+            self.assertEqual(result.status, "insufficient_sample")
+            cold0 = self.read_attempt(directory, 0)
+            self.assertEqual(cold0["outcome"], "success")
+            self.assertIs(cold0["cold_reset"]["performed"], False)
+            for index in range(1, _FORMAL_COLD):
+                with self.subTest(cold_attempt=index):
+                    document = self.read_attempt(directory, index)
+                    self.assertEqual(document["outcome"], "failure")
+                    self.assertEqual(document["failure_code"], "EXECUTION_ERROR")
+                    self.assertIn(document["error_code"], _FROZEN_ERROR_CODES)
+                    self.assertIsNot(document["state_reuse"]["materialized"], True)
+                    cold_reset = document.get("cold_reset")
+                    if cold_reset is not None:
+                        self.assertIsNot(cold_reset["performed"], True)
+            for index in range(_FORMAL_COLD, total):
+                with self.subTest(warm_attempt=index):
+                    self.assertEqual(
+                        self.read_attempt(directory, index)["outcome"], "success"
+                    )
+
+    def test_shaped_canary_failure_latches_zero_follow_on_posts(self):
+        # N8 (FR-04/AC-3, Packet 8-5): on the shaped path the canary
+        # checklist still runs at index 1 and its failure latches the batch
+        # -- zero POSTs after the first, every remaining attempt typed
+        # REAL_RUN_CANARY_FAILED.
+        total = _PILOT_COLD + _PILOT_WARM
+        responses = [_chat_response(prompt_tokens=_REQUEST_BYTE_CAP * 2)]
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-canary-") as directory:
+            result, transport = self._run_shaped_entry(
+                directory,
+                cold=_PILOT_COLD,
+                warm=_PILOT_WARM,
+                batch_calls=total,
+                responses=responses,
+            )
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.canary_status, "failed")
+            manifest = self.read_manifest(directory)
+            self.assertIs(manifest["canary"]["checks"]["usage_within_reservation"], False)
+            self.assertEqual(result.status, "insufficient_sample")
+            for index in range(1, total):
+                with self.subTest(attempt=index):
+                    self.assertEqual(
+                        self.read_attempt(directory, index)["error_code"],
+                        "REAL_RUN_CANARY_FAILED",
+                    )
+
+    def test_dual_batch_ledger_isolation_and_root_reuse_refused(self):
+        # N9 (FR-05/AC-3, Packet 7.6): two batches in one process each run
+        # on their own artifact and output root with their own ledger
+        # starting from zero (the second batch's five successes prove no
+        # inheritance of the first batch's spent calls), and a forged third
+        # batch pointing at the sealed first root is refused by the
+        # one-time directory gate with zero transmission.
+        module = self.real_run()
+        total = _PILOT_COLD + _PILOT_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-b1-") as first:
+            with tempfile.TemporaryDirectory(prefix="lima-ip0037-b2-") as second:
+                approval1 = self.write_artifact(
+                    first, _shaped_policy(_PILOT_COLD, _PILOT_WARM, batch_calls=total)
+                )
+                transport1 = self.happy_transport()
+                result1 = self.run_entry(
+                    first, transport=transport1, artifact_path=approval1
+                )
+                self.assertEqual(transport1.chat_calls, total)
+                approval2 = self.write_artifact(
+                    second, _shaped_policy(_PILOT_COLD, _PILOT_WARM, batch_calls=total)
+                )
+                transport2 = self.happy_transport()
+                result2 = self.run_entry(
+                    second, transport=transport2, artifact_path=approval2
+                )
+                self.assertEqual(transport2.chat_calls, total)
+                self.assertEqual(result2.ledger_snapshot.batch["calls"], total)
+                self.assertEqual(result2.status, result1.status)
+                ledgers = [
+                    json.loads(
+                        (pathlib.Path(run_root) / "ledger.json").read_bytes()
+                    )
+                    for run_root in (first, second)
+                ]
+                self.assertEqual(
+                    [book["batch"]["calls"] for book in ledgers], [total, total]
+                )
+                transport3 = self.happy_transport()
+                with self.assertRaises(module.RealRunError) as caught:
+                    self.run_entry(
+                        first, transport=transport3, artifact_path=approval1
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    module.RealRunErrorCode.REAL_RUN_OUTPUT_NOT_EMPTY,
+                )
+                self.assertEqual(caught.exception.field_path, "$.output_root")
+                self.assertEqual(transport3.chat_calls, 0)
+                self.assertEqual(transport3.download_calls, 0)
+
+    def test_default_shape_routes_to_run_repeats_verbatim(self):
+        # N10 (FR-02/AC-4, Packet 7.3): the {5,5,10} artifacts keep walking
+        # the byte-identical run_repeats path -- ten POSTs, the baseline
+        # aggregate family run-1..run-11, the 5+5 mode labels, fifteen-key
+        # attempt documents (no cold_reset), and zero per-cold directories
+        # -- for the default llamafactory key and for a synthetic key alike
+        # (the route depends on the shape only, never the artifact key).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-old-") as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport()
+            result = self.run_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            self.assertEqual(result.attempt_count, _ATTEMPT_TOTAL)
+            digest16 = result.run_spec_digest[:16]
+            self.assertEqual(
+                [path.name for path in result.result_paths],
+                [f"{digest16}-run-{n}.json" for n in range(1, _ATTEMPT_TOTAL + 1)],
+            )
+            self.assertEqual(
+                result.aggregate_path.name, f"{digest16}-run-{_ATTEMPT_TOTAL + 1}.json"
+            )
+            self.assertEqual(
+                [self.read_attempt(directory, index)["mode"] for index in range(_ATTEMPT_TOTAL)],
+                ["cold"] * _COLD_COUNT + ["warm"] * _WARM_COUNT,
+            )
+            for index in range(_ATTEMPT_TOTAL):
+                with self.subTest(attempt=index):
+                    self.assertEqual(
+                        set(self.read_attempt(directory, index)), _ATTEMPT_DOC_KEYS
+                    )
+            self.assertEqual(
+                [
+                    path.name
+                    for path in (root / "_materialized").iterdir()
+                    if _PER_COLD_DIR_PATTERN.match(path.name)
+                ],
+                [],
+            )
+        key = "archetype/application"
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-oldsyn-") as directory:
+            root = pathlib.Path(directory)
+            approval = self.write_synthetic_artifact(directory, key)
+            transport = self.happy_transport()
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=key,
+            )
+            self.assertEqual(transport.chat_calls, _ATTEMPT_TOTAL)
+            self.assertEqual(result.attempt_count, _ATTEMPT_TOTAL)
+            self.assertEqual(set(self.read_attempt(directory, 0)), _ATTEMPT_DOC_KEYS)
+            self.assertEqual(
+                [
+                    path.name
+                    for path in (root / "_materialized").iterdir()
+                    if _PER_COLD_DIR_PATTERN.match(path.name)
+                ],
+                [],
+            )
+
+    def test_cold_reset_key_presence_matrix(self):
+        # N11 (FR-03/AC-2, Packet 7.5.2): the presence rule as a matrix --
+        # shaped cold attempts carry sixteen keys with the closed four-key
+        # cold_reset value, shaped warm attempts carry the fifteen-key
+        # document with the key absent (not a None value), and every {5,5}
+        # old-path attempt stays fifteen-key.
+        shaped_total = _PILOT_COLD + _PILOT_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-matrix-") as directory:
+            self._run_shaped_entry(
+                directory,
+                cold=_PILOT_COLD,
+                warm=_PILOT_WARM,
+                batch_calls=shaped_total,
+            )
+            cold_doc = self.read_attempt(directory, 0)
+            self.assertEqual(set(cold_doc), _ATTEMPT_DOC_KEYS | {"cold_reset"})
+            self.assertEqual(set(cold_doc["cold_reset"]), _COLD_RESET_VALUE_KEYS)
+            for index in range(_PILOT_COLD, shaped_total):
+                with self.subTest(warm_attempt=index):
+                    document = self.read_attempt(directory, index)
+                    self.assertEqual(set(document), _ATTEMPT_DOC_KEYS)
+                    self.assertNotIn("cold_reset", document)
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-matrix-old-") as directory:
+            self.run_entry(directory, transport=self.happy_transport())
+            for index in range(_ATTEMPT_TOTAL):
+                with self.subTest(old_attempt=index):
+                    self.assertEqual(
+                        set(self.read_attempt(directory, index)), _ATTEMPT_DOC_KEYS
+                    )
+
+    def test_shaped_missing_usage_violation_not_zero(self):
+        # N12 (FR-04/AC-3, Packet 8-7): on the shaped path a warm attempt
+        # whose response reports no usage is a REAL_RUN_USAGE_MISSING
+        # violation -- never booked as zero -- while the successful
+        # attempts' scripted usage carries the consumption (PC3: the
+        # expected consumption is recomputed from the scripted values).
+        total = _PILOT_COLD + _PILOT_WARM
+        responses = [
+            _chat_response(),
+            _chat_response(),
+            _chat_response(with_usage=False),
+            _chat_response(),
+            _chat_response(),
+        ]
+        self.assertEqual(len(responses), total)
+        with tempfile.TemporaryDirectory(prefix="lima-ip0037-usage-") as directory:
+            result, transport = self._run_shaped_entry(
+                directory,
+                cold=_PILOT_COLD,
+                warm=_PILOT_WARM,
+                batch_calls=total,
+                responses=responses,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(result.ledger_snapshot.violations, 1)
+            document = self.read_attempt(directory, 2)
+            self.assertEqual(document["outcome"], "failure")
+            self.assertEqual(document["failure_code"], "EXECUTION_ERROR")
+            self.assertEqual(document["error_code"], "REAL_RUN_USAGE_MISSING")
+            consumed = result.ledger_snapshot.batch["consumed"]
+            self.assertEqual(consumed["prompt_tokens"], (total - 1) * 1_000)
+            self.assertEqual(consumed["completion_tokens"], (total - 1) * 500)
 
 
 if __name__ == "__main__":  # pragma: no cover

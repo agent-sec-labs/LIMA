@@ -69,6 +69,22 @@ request body, performs zero transport calls, and returns the frozen
 five-key observation document -- the default batch behavior (5 cold + 5
 warm, attempt-0 materialization, attempts 1-9 reuse) stays unchanged.
 
+IP-0037 adds the artifact-signed batch protocol face: the attempt-policy
+validation generalizes to the open interval (``cold >= 1`` and
+``warm >= 1`` as exact ints, ``max_attempts == cold + warm``, the canary
+pins; the same rejection code and ``$.attempt_policy.*`` paths, zero new
+codes -- a well-formed shape is never a call authorization, which stays
+artifact-signed in the seven budget dimensions), the entry routes on the
+validated shape alone (``{5,5}`` keeps the byte-identical ``run_repeats``
+path; any other well-formed shape takes the private ``_run_shaped_repeats``
+driver executing exactly ``cold + warm`` frozen attempts with the
+isomorphic aggregation), and the shaped cold attempts wire the cold-reset
+program in (the attempt-0 materialization plus one ``reset_cold_state``
+-mechanism reset before every later cold attempt, observed through the
+additive four-key ``cold_reset`` evidence key present exactly on shaped
+cold attempts -- warm attempts and the whole {5,5} path keep the closed
+fifteen-key attempt documents).
+
 The locked IP-0031 gate face is untouched: ``budget.REAL_RUN_GATE_UNLOCKED``
 stays ``False``, ``require_real_run_unlock`` is neither called nor modified,
 and this authorized path is independent of both.  The module reads no
@@ -112,10 +128,22 @@ from benchmarks.v4.baseline.fixtures import (
     load_registry,
     materialize_fixture,
 )
+
+# IP-0037 (Packet 5.6-6): the shaped driver consumes the frozen primitives
+# through the already-imported orchestration module's namespace (the
+# module-attribute latitude the Packet registers) -- ``run_baseline_attempt``
+# and ``write_result_file`` (imported there from ``...baseline.run``),
+# ``result_from_mapping`` (imported there from ``lima.baseline_run_result``),
+# and ``BaselineRunSummary`` (defined there).  No new import statement and
+# no new first-level import root joins the module.
 from benchmarks.v4.baseline.orchestrate import (
     BaselineOrchestrationError,
     BaselineOrchestrationErrorCode,
+    BaselineRunSummary,
+    result_from_mapping,
+    run_baseline_attempt,
     run_repeats,
+    write_result_file,
 )
 from benchmarks.v4.baseline.report import build_baseline_report, write_report_file
 from lima.contracts.codec import canonical_encode, compute_content_digest
@@ -653,6 +681,10 @@ class _AttemptRecord:
     ``attempt_wall_ms``/``download_ms``/``extract_ms`` (with
     ``api_latency_ms`` composed from ``latency_ms`` at emission), and the
     internal-only monotonic attempt anchor ``wall_anchor`` -- never emitted.
+    IP-0037 adds the additive optional ``cold_reset`` carrier (the frozen
+    four-key shaped cold-reset observation of Packet 7.5.2), emitted only on
+    the shape-driven cold attempts -- a ``None`` carrier keeps the closed
+    fifteen-key document face everywhere else.
     """
 
     attempt_index: int
@@ -682,10 +714,18 @@ class _AttemptRecord:
     download_ms: int | None = None
     extract_ms: int | None = None
     wall_anchor: float | None = None
+    cold_reset: dict[str, object] | None = None
 
     def to_document(self) -> dict[str, object]:
-        """The closed-key per-attempt evidence mapping (Packets 7.9 and 7.4)."""
-        return {
+        """The closed-key per-attempt evidence mapping (Packets 7.9 and 7.4).
+
+        IP-0037 (Packet 7.5.2): the additive ``cold_reset`` observation key
+        joins the document exactly when its carrier is set -- the shaped
+        cold attempts -- so every warm attempt and every {5,5}-path attempt
+        keeps the fifteen-key face with the key absent (never a ``None``
+        value placeholder).
+        """
+        document: dict[str, object] = {
             "attempt_index": self.attempt_index,
             "mode": self.mode,
             "outcome": self.outcome,
@@ -717,6 +757,9 @@ class _AttemptRecord:
                 "extract_ms": self.extract_ms,
             },
         }
+        if self.cold_reset is not None:
+            document["cold_reset"] = dict(self.cold_reset)
+        return document
 
 
 def _invalid(field_path: str) -> RealRunError:
@@ -904,16 +947,32 @@ def _load_and_validate_approval(
 
     policy = document["attempt_policy"]
     _require_exact_keys(policy, _ATTEMPT_POLICY_FIELDS, "$.attempt_policy")
-    _require_int_pin(policy["cold"], _REPEAT_COUNT, "$.attempt_policy.cold")
-    _require_int_pin(policy["warm"], _REPEAT_COUNT, "$.attempt_policy.warm")
-    _require_int_pin(
-        policy["max_attempts"], 2 * _REPEAT_COUNT, "$.attempt_policy.max_attempts"
-    )
+    # IP-0037 (Packet 7.2, R3): the open-interval shape predicate.  This
+    # validates well-formedness only and never grants call authorization
+    # (Packet 7.1: the per-batch authorization stays artifact-signed in the
+    # seven budget dimensions and is executed by the ledger).  The type
+    # discipline follows the frozen ``_require_int_pin`` rule (``type() is
+    # int``, so the bool trap stays rejected), the five-key closed set and
+    # its order are unchanged, and the error face is unchanged: every
+    # violation is the existing APPROVAL_ARTIFACT_INVALID under the same
+    # ``$.attempt_policy.*`` structure path.  The legacy {5,5,10} artifact
+    # is one legal instance of the open interval (AC-4).
+    if type(policy["cold"]) is not int or policy["cold"] < 1:
+        raise _invalid("$.attempt_policy.cold")
+    if type(policy["warm"]) is not int or policy["warm"] < 1:
+        raise _invalid("$.attempt_policy.warm")
+    if (
+        type(policy["max_attempts"]) is not int
+        or policy["max_attempts"] != policy["cold"] + policy["warm"]
+    ):
+        raise _invalid("$.attempt_policy.max_attempts")
     if policy["canary_required"] is not True:
         raise _invalid("$.attempt_policy.canary_required")
-    _require_int_pin(
-        policy["canary_first_attempt"], 0, "$.attempt_policy.canary_first_attempt"
-    )
+    if (
+        type(policy["canary_first_attempt"]) is not int
+        or policy["canary_first_attempt"] != 0
+    ):
+        raise _invalid("$.attempt_policy.canary_first_attempt")
 
     return _ApprovalContract(
         document=document,
@@ -1256,7 +1315,13 @@ class _GuardedRealEvaluator:
     recorded even when the response contract fails or the identity changes,
     missing usage is a violation with the reservation then released, every
     other failure releases the reservation, identity change latches the
-    batch).
+    batch).  IP-0037 adds the private shape carrier: a ``batch_shape`` of
+    ``(cold, warm)`` (the validated artifact policy) switches the mode-label
+    boundary and the cold/warm branch criteria of ``_run_attempt`` to the
+    artifact-signed shape -- every later cold attempt performs one
+    ``reset_cold_state``-mechanism reset before its chat and books the
+    additive ``cold_reset`` observation -- while the default construction
+    (``None``) keeps the frozen {5,5} behavior byte-identical.
     """
 
     def __init__(
@@ -1268,6 +1333,7 @@ class _GuardedRealEvaluator:
         timeout_seconds: int,
         approval: _ApprovalContract,
         output_root: pathlib.Path,
+        batch_shape: tuple[int, int] | None = None,
     ) -> None:
         self._ledger = ledger
         self._transport = transport
@@ -1279,6 +1345,17 @@ class _GuardedRealEvaluator:
         self._timeout = timeout_seconds
         self._approval = approval
         self._root = output_root
+        # IP-0037 (Packet 7.4.4, R6): the validated batch shape carried
+        # privately (a kw-only parameter; the public entry signature is
+        # unchanged).  ``None`` is the default construction: the mode-label
+        # boundary stays ``_REPEAT_COUNT`` and every follow-on attempt
+        # reuses the snapshot, byte-identically to the frozen path.  A
+        # ``(cold, warm)`` tuple drives the mode labels and the reset
+        # boundary from the shape.
+        self._batch_shape = batch_shape
+        self._cold_count = (
+            _REPEAT_COUNT if batch_shape is None else batch_shape[0]
+        )
         self._tarball_dir = output_root / "_materialized" / "tarball"
         self._snapshot_dir = output_root / "_materialized" / "snapshot"
         self._allowed_model_forms = {
@@ -1379,7 +1456,11 @@ class _GuardedRealEvaluator:
         self._invocations += 1
         record = _AttemptRecord(
             attempt_index=index,
-            mode="cold" if index < _REPEAT_COUNT else "warm",
+            # IP-0037 (Packet 7.4.4): the mode-label boundary driven by the
+            # carried shape; the default construction keeps the frozen
+            # ``index < _REPEAT_COUNT`` boundary (``self._cold_count`` is
+            # ``_REPEAT_COUNT`` there).
+            mode="cold" if index < self._cold_count else "warm",
             state_reuse={
                 "materialized": False,
                 "snapshot_reused": False,
@@ -1518,6 +1599,22 @@ class _GuardedRealEvaluator:
                 self._materialize(record, deadline_ms)
                 record.state_reuse["request_body_rebuilt"] = True
                 self._prepare_request(record)
+                if self._batch_shape is not None:
+                    # IP-0037 (Packet 7.4.3): on the shaped path the initial
+                    # materialization itself is a cold attempt, so its four
+                    # key observation joins the document (performed False --
+                    # the count, tree digest, and request-body digest of the
+                    # first materialization).
+                    record.cold_reset = self._cold_reset_observation(
+                        performed=False
+                    )
+            elif self._batch_shape is not None and index < self._cold_count:
+                # IP-0037 (Packet 7.4.3): a shaped cold follow-on attempt
+                # performs one verifiable reset through the frozen
+                # ``reset_cold_state`` mechanism before its chat.  The
+                # default {5,5} construction never reaches this branch, so
+                # its reuse path stays byte-identical.
+                record.cold_reset = self._reset_cold_state_for(record)
             else:
                 record.state_reuse["snapshot_reused"] = True
                 record.body_bytes = len(self._body_bytes or b"")
@@ -1527,6 +1624,70 @@ class _GuardedRealEvaluator:
         except RealRunError as exc:
             self._settle(run_id, record, exc)
             raise
+
+    def _cold_reset_observation(self, *, performed: bool) -> dict[str, object]:
+        """The frozen four-key cold-reset observation (IP-0037 Packet 7.5.2).
+
+        ``performed`` is ``False`` on the initial materialization and
+        ``True`` after one completed in-attempt reset; the count is the
+        completed-materialization count, and both digests read the freshly
+        materialized state, so a deterministic re-extraction keeps them
+        identical to the first materialization (the cold-reset proof).
+        """
+        return {
+            "performed": performed,
+            "materialization_count": self._materialization_count,
+            "snapshot_tree_sha256": compute_tree_fingerprint(self._snapshot_dir),
+            "request_body_sha256": hashlib.sha256(
+                self._body_bytes or b""
+            ).hexdigest(),
+        }
+
+    def _reset_cold_state_for(self, record: _AttemptRecord) -> dict[str, object]:
+        """One in-attempt cold reset through the frozen mechanism (R6/R4).
+
+        The reset itself is the frozen ``reset_cold_state`` program:
+        re-extract the cached tarball into the next per-cold snapshot
+        directory and rebuild the request body (zero transport GET calls,
+        the honest ``download_ms`` stays ``None``).  On success the attempt
+        books the (T,F,T) state-reuse flags, the re-extract window, the
+        rebuilt request observation, and returns the four-key observation
+        with ``performed`` ``True``.  A reset-phase failure is booked as the
+        typed EXECUTION_ERROR-family failure (never a cold success): the
+        observation stays absent, the materialization count rolls back to
+        the completed count, and ``state_reuse.materialized`` stays
+        honestly not ``True`` (the failed phase never completed a
+        materialization).
+        """
+        count_before = self._materialization_count
+        try:
+            observation = self.reset_cold_state()
+        except RealRunError as exc:
+            # The frozen reset path raises its typed errors unbooked
+            # (``record is None`` inside the extraction guards); book them
+            # onto this attempt's record under the same code and path.
+            self._materialization_count = count_before
+            raise self._typed(record, exc.code, exc.field_path) from exc
+        except (OSError, tarfile.TarError) as exc:
+            # An unreadable or unusable cached archive (the missing-reset
+            # face): the frozen archive code under its frozen structure
+            # path, zero new codes.
+            self._materialization_count = count_before
+            raise self._typed(
+                record, RealRunErrorCode.REAL_RUN_ARCHIVE_UNSAFE, "$.archive"
+            ) from exc
+        record.state_reuse["materialized"] = True
+        record.state_reuse["request_body_rebuilt"] = True
+        record.extract_ms = observation["timings"]["extract_ms"]
+        record.body_bytes = len(self._body_bytes or b"")
+        record.context_chars = self._context_chars
+        record.candidate_files = self._candidate_files
+        return {
+            "performed": True,
+            "materialization_count": observation["materialization_count"],
+            "snapshot_tree_sha256": observation["snapshot_tree_sha256"],
+            "request_body_sha256": observation["request_body_sha256"],
+        }
 
     def _settle(self, run_id: str, record: _AttemptRecord, exc: RealRunError) -> None:
         """Settle one typed failure exactly once (IP-0032 7.7; IP-0033 7.5).
@@ -2361,6 +2522,93 @@ def _write_core_evidence(
     return snapshot, approval_digest
 
 
+def _run_shaped_repeats(
+    spec_mapping: object,
+    manifest: object,
+    guarded: _GuardedRealEvaluator,
+    output_dir: str | pathlib.Path,
+    *,
+    cold: int,
+    warm: int,
+    sources: object = None,
+) -> BaselineRunSummary:
+    """Execute one artifact-signed batch shape (IP-0037 Packet 7.4, R6).
+
+    Exactly ``cold + warm`` calls of the frozen ``run_baseline_attempt``
+    primitive under the global index convention of ``run_repeats`` (cold
+    attempts ``0..cold-1``, warm attempts ``cold..cold+warm-1``).  The
+    aggregation is isomorphic to the frozen orchestration: the samples are
+    sorted by attempt index and assembled only through the frozen
+    ``from_mapping``, the aggregate is persisted through the existing
+    ``write_result_file`` under the same digest prefix with the next free
+    sequence number, and the ``result_paths`` difference window is computed
+    identically.  ``cold``/``warm`` are the already validated policy values
+    (no shape re-validation here, R6-4) and the driver itself never catches
+    a ``BaseException`` the frozen primitive re-raises after persisting --
+    the entry cancellation handler settles both routes through the same
+    partial-evidence path.  The aggregate status keeps the frozen
+    statistical rule (``lima/baseline_run_result.py``, read-only), so an
+    honestly undersized shape reports ``insufficient_sample`` without any
+    failure masquerade.
+    """
+    directory = pathlib.Path(output_dir)
+    before = {path.name for path in directory.iterdir()} if directory.is_dir() else set()
+    attempts = []
+    for index in range(cold):
+        attempts.append(
+            run_baseline_attempt(
+                spec_mapping,
+                manifest,
+                guarded,
+                output_dir,
+                attempt_index=index,
+                mode="cold",
+                sources=sources,
+            )
+        )
+    for index in range(warm):
+        attempts.append(
+            run_baseline_attempt(
+                spec_mapping,
+                manifest,
+                guarded,
+                output_dir,
+                attempt_index=cold + index,
+                mode="warm",
+                sources=sources,
+            )
+        )
+    aggregate = result_from_mapping(
+        {
+            "schema_version": 1,
+            "run_spec_digest": attempts[0].run_spec_digest,
+            "samples": [
+                dict(result.samples[0].items())
+                for result in sorted(
+                    attempts, key=lambda result: result.samples[0]["attempt_index"]
+                )
+            ],
+        }
+    )
+    artifacts = write_result_file(aggregate, output_dir)
+    after = {path.name for path in directory.iterdir()}
+    new_names = after - before - {artifacts.result_path.name}
+    result_paths = tuple(
+        sorted(
+            (directory / name for name in new_names),
+            key=lambda path: int(path.stem.rsplit("-", 1)[1]),
+        )
+    )
+    return BaselineRunSummary(
+        attempts=tuple(attempts),
+        result_paths=result_paths,
+        aggregate=aggregate,
+        aggregate_path=artifacts.result_path,
+        aggregate_sha256=artifacts.result_sha256,
+        status=aggregate.status,
+    )
+
+
 def run_real_baseline_suite(
     approval_path: str | pathlib.Path,
     api_key: str,
@@ -2388,7 +2636,11 @@ def run_real_baseline_suite(
     directories are pre-created before the ``run_repeats`` difference
     window opens; the ledger and guarded evaluator are built;
     ``run_repeats`` drives 5 cold + 5 warm attempts under the measured
-    batch wall; the evidence set is written after the window closes -- the
+    batch wall (IP-0037: the validated {5,5} shape keeps this call
+    byte-identical; any other well-formed shape routes to the private
+    ``_run_shaped_repeats`` driver with the same cancellation, canary, and
+    evidence discipline); the evidence set is written after the window
+    closes -- the
     full set on a normal return, or the identical partial five-file set
     (approval/ledger/machine_profile/attempts/manifest, with
     ``EXECUTION_CANCELLED`` in the manifest failures) when a control-flow
@@ -2441,6 +2693,19 @@ def run_real_baseline_suite(
     snapshot_dir = root / "_materialized" / "snapshot"
     tarball_dir.mkdir(parents=True, exist_ok=True)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
+    # IP-0037 (Packet 7.3, R2): the route reads the validated contract's
+    # attempt-policy shape exactly once (the same parsed document the
+    # loader validated -- never a second parse): {5,5} keeps the frozen
+    # ``run_repeats`` call below unchanged, any other well-formed shape
+    # carries the ``(cold, warm)`` tuple into the evaluator and the private
+    # shaped driver.  The route depends on the shape alone -- never the
+    # artifact key, the budget numbers, or the run name.
+    policy = approval.document["attempt_policy"]
+    batch_shape = (
+        None
+        if (policy["cold"], policy["warm"]) == (_REPEAT_COUNT, _REPEAT_COUNT)
+        else (policy["cold"], policy["warm"])
+    )
     ledger = BudgetLedger(approval.budget_spec, approval.pricing)  # (6)
     guarded = _GuardedRealEvaluator(
         ledger=ledger,
@@ -2449,12 +2714,24 @@ def run_real_baseline_suite(
         timeout_seconds=timeout_seconds,
         approval=approval,
         output_root=root,
+        batch_shape=batch_shape,
     )
     batch_start = _monotonic()
     try:
-        summary = run_repeats(  # (7)
-            spec_mapping, manifest, guarded, root, repeat=_REPEAT_COUNT, sources=sources
-        )
+        if batch_shape is None:
+            summary = run_repeats(  # (7)
+                spec_mapping, manifest, guarded, root, repeat=_REPEAT_COUNT, sources=sources
+            )
+        else:
+            summary = _run_shaped_repeats(  # (7) shaped route (IP-0037 R2)
+                spec_mapping,
+                manifest,
+                guarded,
+                root,
+                cold=batch_shape[0],
+                warm=batch_shape[1],
+                sources=sources,
+            )
     except BaseException as exc:
         # Cancellation path (IP-0035 Packet 7.4): settle the trailing
         # unsettled attempt (D8), write the partial five-file evidence set

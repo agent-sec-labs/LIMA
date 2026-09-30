@@ -184,6 +184,45 @@ static pins, and the loader check pass by design (the current behavior is
 the target behavior); the pre-freeze baseline run of the v7' file (90/90
 green, ten frozen files 322/322, discover 2706 OK with 24 skips) is archived
 alongside the RED log.
+
+IP-0039 evolution to frozen version v9 (CA-IP-0039-v1.0 of 2026-09-30; the
+formal one-time frozen-surface evolution authorization and its six conditions
+are recorded in docs/LIMA_Implementation_Packet_IP-0039_Real_Pilot_Descriptor.md
+section 10): all 97 v8 methods are retained without any modification except
+the single uniquely authorized sync set -- the ``_FROZEN_ERROR_CODES``
+constant and the ``_ARTIFACT_FAMILY_KEYS``/``_SYNTHETIC_ARTIFACT_KEYS`` pair
+grow by exactly one error code and one catalog key (closed sets, additions
+only; the derivation filter excludes both non-synthetic keys so the nine
+synthetic keys stay exactly the v6 set, K6) and the one static anchor
+``test_artifact_family_catalog_frozen_ten_keys`` gains exactly three hunks
+(len 11, the per-key field-set branch for the new key, its comment) -- while
+fifteen new methods in one new class pin the real-pilot descriptor and the
+first-failure stop gate (FR-01..04 / AC-1..4): the eleven-key closed catalog
+with the real-pilot descriptor's four added fields (fixture_key / date_pin /
+retrieval_date_pin / stop_on_first_failure) and its five provenance fields
+verbatim-identical to the large-repo synthetic derivation, the eleven-code
+error face with the frozen batch-stopped message, the offline-twin full
+chain on the new key (exactly five fake POSTs, planned shape 1/4, zero
+budget refusals, zero GET), the dual-regime date pinning (new key accepts
+2026-09-30 and rejects 2026-09-28 verbatim; old keys reject 2026-09-30 on
+both faces), the six failure-class stop-gate injections (transport /
+response contract / usage / identity / budget / deadline -- zero new POSTs
+after the first failure, first cause kept, follow-ons REAL_RUN_BATCH_STOPPED;
+the identity class keeps the frozen D4 identity-latch face per Packet
+DR-IP-0039-PV-2), the stop gate preceding the canary checklist (status
+"failed" with empty checks), the canary latch preserved on the new key, the
+old-key regression with the gate inactive, the loader and output-root
+negatives, the budget negative faces, and the stopped-batch zero-reservation
+ledger face.  The RED anchor is capability absence: on the unmodified
+real_run.py of the 352646b baseline the real-pilot key is refused at ``$``
+before any new behavior exists, the catalog holds ten keys and the error
+enum ten members, so every new-key arrange fails at the loader rejection and
+the static anchors fail on the grown constants (four old methods, attributed
+as the authorized sync); the old-key half of the date pinning, the
+unknown-key negative, and the old-key stop-gate regression pass by design
+(the current behavior is the target behavior); the pre-freeze baseline run
+of the v8 file (97/97 green, ten frozen files 322/322, discover 2713 OK
+with 24 skips) is archived alongside the RED log.
 """
 
 import ast
@@ -522,6 +561,9 @@ _FROZEN_ERROR_CODES = frozenset(
         "REAL_RUN_RESPONSE_INVALID",
         "REAL_RUN_IDENTITY_CHANGED",
         "REAL_RUN_CANARY_FAILED",
+        # IP-0039 v9 (R4.2-3): the eleventh member -- the real-pilot
+        # first-failure stop gate (closed set, addition only).
+        "REAL_RUN_BATCH_STOPPED",
     }
 )
 
@@ -540,9 +582,17 @@ _ARTIFACT_FAMILY_KEYS = (
     "archetype/malicious-layout",
     "archetype/dependency-blocked",
     "external/llamafactory-replay",
+    # IP-0039 v9 (R2/R4.2-5): the eleventh key -- the real-pilot
+    # descriptor (closed catalog, addition only).
+    "real-pilot/large-repo",
 )
 _SYNTHETIC_ARTIFACT_KEYS = tuple(
-    key for key in _ARTIFACT_FAMILY_KEYS if key != "external/llamafactory-replay"
+    # IP-0039 v9 (R6/K6): the derivation filter excludes both non-synthetic
+    # keys (the external default and the real-pilot descriptor) so the nine
+    # synthetic keys stay exactly the v6 set.
+    key
+    for key in _ARTIFACT_FAMILY_KEYS
+    if key not in ("external/llamafactory-replay", "real-pilot/large-repo")
 )
 _DEFAULT_ARTIFACT_KEY = "external/llamafactory-replay"
 _ZERO_BUDGET_FAMILY_VALUE = "PR3E-OFFLINE-PROOF-ZERO-BUDGET"
@@ -626,6 +676,133 @@ _PREFLIGHT_REHEARSAL_KEY = "archetype/large-repo"
 # One byte below the licensed download ceiling (and the frozen first-round
 # reservation constant): the fail-closed refusal arrange of Packet 8-3.
 _PREFLIGHT_ONE_BYTE_SHORT = 249_999_999
+# IP-0039 v9 (Packet 7.1/7.4, CA R2/R4/R5): the real-pilot descriptor face
+# -- the eleventh catalog key, its fixture binding, its approval type / run
+# name / date pins, the four-field addition to the seven-field descriptor
+# set, and the frozen batch-stopped message (with the canary message it must
+# stay distinguishable from).  Every identity value is the Coordinator's
+# verbatim pin; the five provenance fields are never hardcoded here (they
+# are derived by the frozen synthetic formula in the helper below, PC3).
+_REAL_PILOT_KEY = "real-pilot/large-repo"
+_REAL_PILOT_FIXTURE_KEY = "archetype/large-repo"
+_REAL_PILOT_APPROVAL_TYPE = "PR3D-REAL-PILOT-ONE-SHOT"
+_REAL_PILOT_RUN_NAME = "pr3d-real-pilot-2026-09-30"
+_REAL_PILOT_DATE_PIN = "2026-09-30"
+_REAL_PILOT_RETRIEVAL_DATE_PIN = "2026-09-30"
+_REAL_PILOT_EXTRA_FIELDS = frozenset(
+    {"fixture_key", "date_pin", "retrieval_date_pin", "stop_on_first_failure"}
+)
+_REAL_PILOT_STOP_MESSAGE = (
+    "A real-pilot failure was already recorded; the first-failure stop gate"
+    " blocks every further call in this batch."
+)
+_CANARY_STOP_MESSAGE = (
+    "The canary check failed; no further real calls are permitted in this"
+    " batch."
+)
+# The ten pre-v9 error codes in frozen declaration order with their verbatim
+# stable messages (N2: the evolution touches neither).
+_FROZEN_MESSAGES_BEFORE_V9 = (
+    (
+        "APPROVAL_ARTIFACT_INVALID",
+        "The real-run approval artifact is invalid for this schema version.",
+    ),
+    (
+        "REAL_RUN_OUTPUT_NOT_EMPTY",
+        "The real-run output directory already exists and is not empty.",
+    ),
+    (
+        "REAL_RUN_DOWNLOAD_EXCEEDED",
+        "The download exceeded its per-attempt byte cap and was aborted.",
+    ),
+    (
+        "REAL_RUN_ARCHIVE_UNSAFE",
+        "The downloaded archive failed the safe-extraction checks.",
+    ),
+    (
+        "REAL_RUN_REQUEST_TOO_LARGE",
+        "The serialized request body exceeded the byte cap and was not sent.",
+    ),
+    (
+        "REAL_RUN_TRANSPORT_FAILED",
+        "The real-run transport call failed or timed out.",
+    ),
+    (
+        "REAL_RUN_USAGE_MISSING",
+        "The response did not report usable usage; missing usage is a"
+        " violation, not zero.",
+    ),
+    (
+        "REAL_RUN_RESPONSE_INVALID",
+        "The model response violated the frozen response contract.",
+    ),
+    (
+        "REAL_RUN_IDENTITY_CHANGED",
+        "The served model identity fingerprint changed within the batch.",
+    ),
+    ("REAL_RUN_CANARY_FAILED", _CANARY_STOP_MESSAGE),
+)
+
+
+def _real_pilot_descriptor():
+    """The real-pilot descriptor derived by the frozen formulas (PC3).
+
+    The five provenance fields are recomputed exactly as the module's
+    ``_synthetic_artifact_descriptor("archetype/large-repo", fingerprint)``
+    derives them (same registry fingerprint, same slug/URL/filename
+    templates, same 40-hex sha rule) so no arrange copies a product value;
+    the identity fields carry the Coordinator's verbatim pins, and the stop
+    flag is the Python bool the loader contract carries (R2.3/R2.5).
+    """
+    registry = fixtures_module.load_registry()
+    entry = next(
+        item
+        for item in registry["fixtures"]
+        if item["key"] == _REAL_PILOT_FIXTURE_KEY
+    )
+    commit_sha = _synthetic_commit_sha(
+        _REAL_PILOT_FIXTURE_KEY, entry["fingerprint"]
+    )
+    return {
+        "repository": "lima-synth/large-repo",
+        "requested_name": "lima-synth/large-repo",
+        "commit_sha": commit_sha,
+        "tarball_url": f"https://lima-synth.invalid/large-repo/tar.gz/{commit_sha}",
+        "tarball_filename": "lima-synth-large-repo-{commit_sha}.tar.gz",
+        "approval_type": _REAL_PILOT_APPROVAL_TYPE,
+        "run_name": _REAL_PILOT_RUN_NAME,
+        "fixture_key": _REAL_PILOT_FIXTURE_KEY,
+        "date_pin": _REAL_PILOT_DATE_PIN,
+        "retrieval_date_pin": _REAL_PILOT_RETRIEVAL_DATE_PIN,
+        "stop_on_first_failure": True,
+    }
+
+
+def _real_pilot_mutate(extra=None):
+    """Mutate one repo approval document into the real-pilot variant.
+
+    Only the descriptor-driven pins (approval type / run name / the two date
+    pins / the four upstream provenance fields), the pilot attempt-policy
+    shape, and the seven budget dimensions change; every other pin stays the
+    frozen transcription, so the arrange keeps going through the same
+    document the frozen loader validates (PC2).  ``extra`` composes one more
+    mutation for the negative arranges.
+    """
+
+    def mutate(document):
+        descriptor = _real_pilot_descriptor()
+        document["approval_type"] = descriptor["approval_type"]
+        document["run_name"] = descriptor["run_name"]
+        document["date"] = descriptor["date_pin"]
+        document["pricing"]["retrieval_date"] = descriptor["retrieval_date_pin"]
+        upstream = document["upstream"]
+        for field in ("repository", "requested_name", "commit_sha", "tarball_url"):
+            upstream[field] = descriptor[field]
+        _preflight_policy(_PILOT_COLD, _PILOT_WARM)(document)
+        if extra is not None:
+            extra(document)
+
+    return mutate
 # The frozen canary-checklist construction order (real_run
 # _run_canary_checklist insertion order; the manifest embeds it verbatim).
 _PREFLIGHT_CANARY_ORDER = (
@@ -3767,13 +3944,22 @@ class TestArtifactFamilyAndColdReset(_RealRunTestCase):
     def test_artifact_family_catalog_frozen_ten_keys(self):
         # R9.1: the closed ten-key catalog with the verbatim llamafactory
         # descriptor (four pins, identity pins, byte-identical filename
-        # template).
+        # template).  IP-0039 v9 (R4.2-5): the catalog grows to the closed
+        # eleven-key set -- the ten v6 keys keep exactly the seven-field
+        # descriptor and the real-pilot key carries the seven fields plus
+        # the four R2 additions (closed set, additions only).
         catalog = self.artifact_catalog()
         self.assertEqual(set(catalog), set(_ARTIFACT_FAMILY_KEYS))
-        self.assertEqual(len(catalog), 10)
+        self.assertEqual(len(catalog), 11)
         for key in _ARTIFACT_FAMILY_KEYS:
             with self.subTest(key=key):
-                self.assertEqual(set(catalog[key]), _DESCRIPTOR_FIELDS)
+                if key == _REAL_PILOT_KEY:
+                    self.assertEqual(
+                        set(catalog[key]),
+                        _DESCRIPTOR_FIELDS | _REAL_PILOT_EXTRA_FIELDS,
+                    )
+                else:
+                    self.assertEqual(set(catalog[key]), _DESCRIPTOR_FIELDS)
         descriptor = catalog["external/llamafactory-replay"]
         commit = self.canonical_tarball_url().rsplit("/", 1)[1]
         self.assertEqual(descriptor["repository"], _CANONICAL_REPOSITORY)
@@ -5297,6 +5483,747 @@ class TestPreflightCalibration(_RealRunTestCase):
             self.assertGreaterEqual(batch.cost_micro_usd, first_round_cost)
             self.assertEqual(batch.download_bytes, module._DOWNLOAD_ESTIMATE_BYTES)
             self.assertEqual(batch.storage_bytes, module._STORAGE_ESTIMATE_BYTES)
+
+
+class TestRealPilotDescriptorAndStopGate(_RealRunTestCase):
+    """IP-0039 FR-01..FR-04 / AC-1..AC-4 (Packet 7/8/9): the real-pilot
+    descriptor (eleven-key catalog, four added fields, dual-regime date
+    pinning, offline-twin full chain) and the first-failure stop gate (six
+    failure classes, canary interaction, old-key regression, negatives,
+    stopped-batch ledger face)."""
+
+    def _run_real_pilot_entry(self, directory, *, transport, mutate=None):
+        """Entry-driven real-pilot run through one new-key artifact document."""
+        approval = self.write_artifact(directory, _real_pilot_mutate(mutate))
+        result = self.run_entry(
+            directory,
+            transport=transport,
+            artifact_path=approval,
+            artifact_key=_REAL_PILOT_KEY,
+        )
+        return result
+
+    def test_real_pilot_catalog_eleven_keys_and_field_sets(self):
+        # N1 (FR-01/AC-1, Packet 7.1): the closed eleven-key catalog -- the
+        # ten v6 keys keep their exact seven-field descriptors byte-identical
+        # (llamafactory pins and the nine synthetic derivations), the new
+        # key carries the seven fields plus exactly the four R2 additions
+        # with every value pinned verbatim, and its five provenance fields
+        # equal the large-repo synthetic derivation (same registry
+        # fingerprint, same formula, independently recomputed -- PC3).
+        catalog = self.artifact_catalog()
+        self.assertEqual(set(catalog), set(_ARTIFACT_FAMILY_KEYS))
+        self.assertEqual(len(catalog), 11)
+        for key in _SYNTHETIC_ARTIFACT_KEYS:
+            with self.subTest(synthetic=key):
+                self.assertEqual(set(catalog[key]), _DESCRIPTOR_FIELDS)
+        descriptor = catalog["external/llamafactory-replay"]
+        commit = self.canonical_tarball_url().rsplit("/", 1)[1]
+        self.assertEqual(
+            (
+                descriptor["repository"],
+                descriptor["requested_name"],
+                descriptor["commit_sha"],
+                descriptor["tarball_url"],
+                descriptor["tarball_filename"],
+                descriptor["approval_type"],
+                descriptor["run_name"],
+            ),
+            (
+                _CANONICAL_REPOSITORY,
+                "hiyouga/LLaMA-Factory",
+                commit,
+                self.canonical_tarball_url(),
+                "llamafactory-{commit_sha}.tar.gz",
+                "PR3D-REAL-RUN-LIMITED",
+                _RUN_NAME,
+            ),
+        )
+        pilot = catalog[_REAL_PILOT_KEY]
+        self.assertEqual(
+            set(pilot), _DESCRIPTOR_FIELDS | _REAL_PILOT_EXTRA_FIELDS
+        )
+        expected = _real_pilot_descriptor()
+        for field in (
+            "repository",
+            "requested_name",
+            "commit_sha",
+            "tarball_url",
+            "tarball_filename",
+            "approval_type",
+            "run_name",
+            "fixture_key",
+            "date_pin",
+            "retrieval_date_pin",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(pilot[field], expected[field])
+        self.assertIs(pilot["stop_on_first_failure"], True)
+        # The provenance five are verbatim the large-repo derivation (the
+        # fixture is that synthetic fixture -- honest provenance, R2.3).
+        large_repo = catalog[_REAL_PILOT_FIXTURE_KEY]
+        for field in (
+            "repository",
+            "requested_name",
+            "commit_sha",
+            "tarball_url",
+            "tarball_filename",
+        ):
+            with self.subTest(provenance=field):
+                self.assertEqual(pilot[field], large_repo[field])
+        registry = fixtures_module.load_registry()
+        entry = next(
+            item
+            for item in registry["fixtures"]
+            if item["key"] == _REAL_PILOT_FIXTURE_KEY
+        )
+        self.assertEqual(
+            pilot["commit_sha"],
+            _synthetic_commit_sha(_REAL_PILOT_FIXTURE_KEY, entry["fingerprint"]),
+        )
+
+    def test_real_pilot_error_code_eleven_members_and_messages(self):
+        # N2 (FR-03/AC-2, Packet 7.4): the error face grows by exactly one
+        # tail member -- eleven values equal the updated closed set, the
+        # first ten keep the frozen order and their verbatim messages, the
+        # new message is verbatim the R4.1 wording with no digits and
+        # distinguishable from the canary message.
+        module = self.real_run()
+        codes = [member.value for member in module.RealRunErrorCode]
+        self.assertEqual(set(codes), _FROZEN_ERROR_CODES)
+        self.assertEqual(len(codes), 11)
+        self.assertEqual(codes[10], "REAL_RUN_BATCH_STOPPED")
+        self.assertEqual(
+            codes[:10], [value for value, _ in _FROZEN_MESSAGES_BEFORE_V9]
+        )
+        messages = module._STABLE_MESSAGES
+        self.assertEqual(set(messages), set(module.RealRunErrorCode))
+        self.assertEqual(
+            messages[module.RealRunErrorCode.REAL_RUN_BATCH_STOPPED],
+            _REAL_PILOT_STOP_MESSAGE,
+        )
+        self.assertNotEqual(_REAL_PILOT_STOP_MESSAGE, _CANARY_STOP_MESSAGE)
+        self.assertFalse(any(character.isdigit() for character in _REAL_PILOT_STOP_MESSAGE))
+        for value, message in _FROZEN_MESSAGES_BEFORE_V9:
+            with self.subTest(message=value):
+                self.assertEqual(
+                    messages[module.RealRunErrorCode(value)], message
+                )
+
+    def test_real_pilot_offline_twin_full_chain_positive(self):
+        # N3 (FR-01/FR-02/FR-04/AC-1/AC-3, Packet 7.5/8): the offline-twin
+        # full chain -- the exact numeric-table real-pilot artifact under
+        # the new key, the formal entry, a fake transport, and an empty
+        # output directory to the report (the ruling section-4 success
+        # checklist verbatim: five fake POSTs, five attempt documents,
+        # ledger.calls=5, planned shape 1/4, zero budget refusals, four
+        # warm reuses, the honest cold_reset observation, zero GET, the
+        # source-less V5 faces null + unavailable, insufficient_sample).
+        total = _PILOT_COLD + _PILOT_WARM
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-twin-") as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport()
+            result = self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(transport.download_calls, 0)
+            self.assertEqual(result.attempt_count, total)
+            self.assertEqual(result.canary_status, "passed")
+            documents = [self.read_attempt(directory, index) for index in range(total)]
+            for index, document in enumerate(documents):
+                with self.subTest(attempt=index):
+                    self.assertEqual(document["outcome"], "success")
+                    self.assertIsNone(document["error_code"])
+            self.assertLess(_PILOT_COLD, _COLD_MIN_SUCCESSES)
+            self.assertEqual(result.status, "insufficient_sample")
+            ledger = json.loads((root / "ledger.json").read_bytes())
+            self.assertEqual(ledger["violations"], 0)
+            book = ledger["batch"]
+            self.assertEqual(book["calls"], total)
+            self.assertEqual(book["consumed"]["download_bytes"], 0)
+            self.assertEqual(
+                book["released"]["download_bytes"], _PREFLIGHT_BATCH["download_bytes"]
+            )
+            self.assertEqual(
+                book["released"]["storage_bytes"],
+                _PREFLIGHT_BATCH["storage_bytes"] - book["consumed"]["storage_bytes"],
+            )
+            with_reset = [
+                index
+                for index, document in enumerate(documents)
+                if "cold_reset" in document
+            ]
+            self.assertEqual(with_reset, [0])
+            self.assertIs(documents[0]["cold_reset"]["performed"], False)
+            self.assertEqual(documents[0]["cold_reset"]["materialization_count"], 1)
+            self.assertEqual(
+                sum(
+                    1
+                    for document in documents
+                    if document.get("cold_reset", {}).get("performed") is True
+                ),
+                0,
+            )
+            for index in range(_PILOT_COLD, total):
+                state = documents[index]["state_reuse"]
+                with self.subTest(warm_attempt=index):
+                    self.assertIs(state["materialized"], False)
+                    self.assertIs(state["snapshot_reused"], True)
+                    self.assertIs(state["request_body_rebuilt"], False)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(manifest["run_name"], _REAL_PILOT_RUN_NAME)
+            self.assertEqual(
+                (manifest["cold_count"], manifest["warm_count"]),
+                (_PILOT_COLD, _PILOT_WARM),
+            )
+            self.assertEqual(manifest["failures"], [])
+            self.assertEqual(manifest["attempt_count"], total)
+            self.assertEqual(manifest["canary"]["status"], "passed")
+            self.assertEqual(set(manifest["canary"]["checks"]), _CANARY_CHECK_KEYS)
+            report = json.loads(pathlib.Path(result.report_path).read_bytes())
+            for key in (
+                "signals",
+                "security_issues",
+                "hypotheses",
+                "confirmed",
+                "inconclusive",
+            ):
+                with self.subTest(counts=key):
+                    self.assertEqual(
+                        report["counts"][key],
+                        {"value": None, "projection": "unavailable"},
+                    )
+            for face in ("vep", "rvr"):
+                self.assertEqual(
+                    report[face], {"value": None, "projection": "unavailable"}, face
+                )
+            for stage in ("audit", "mining", "repair"):
+                self.assertEqual(
+                    report["stage_outcome"][stage],
+                    {"value": None, "projection": "unavailable"},
+                    stage,
+                )
+            self.assertEqual(
+                report["resources"],
+                {"prompt_tokens": None, "completion_tokens": None, "cost_micro_usd": None},
+            )
+            self.assertIsNone(report["expert"]["active_time_ms_total"])
+            self.assertEqual(report["evidence_domain"], "legacy")
+            self.assertEqual(report["attempt_count"], total)
+
+    def test_real_pilot_date_pinning_dual_regime(self):
+        # N4 (FR-02/AC-1, Packet 7.2): the dual-regime date pinning.  The
+        # old-key half is the current behavior and passes by design: the
+        # default and one synthetic key reject 2026-09-30 on both faces
+        # (the old family default is untouched).  The new-key half is the
+        # deliverable: 2026-09-30/2026-09-30 loads through the frozen
+        # validator while 2026-09-28 is refused verbatim on either face --
+        # no leniency, no wildcard, per R5.
+        module = self.real_run()
+        old_date = "2026-09-30"
+
+        def set_date(document):
+            document["date"] = old_date
+
+        def set_retrieval(document):
+            document["pricing"]["retrieval_date"] = old_date
+
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-date-") as directory:
+            root = pathlib.Path(directory)
+            for face, mutate in (
+                ("$.date", set_date),
+                ("$.pricing.retrieval_date", set_retrieval),
+            ):
+                with self.subTest(old_key="default", face=face):
+                    bad = self.write_artifact(root, mutate)
+                    with self.assertRaises(module.RealRunError) as ctx:
+                        module._load_and_validate_approval(bad)
+                    self.assertIs(
+                        ctx.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(ctx.exception.field_path, face)
+                with self.subTest(old_key="synthetic", face=face):
+                    bad = self.write_synthetic_artifact(
+                        root, "archetype/application", mutate
+                    )
+                    with self.assertRaises(module.RealRunError) as ctx:
+                        module._load_and_validate_approval(
+                            bad, "archetype/application"
+                        )
+                    self.assertIs(
+                        ctx.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(ctx.exception.field_path, face)
+            # -- the new-key regime (the deliverable under test) ----------
+            approval = self.write_artifact(root, _real_pilot_mutate())
+            contract = module._load_and_validate_approval(approval, _REAL_PILOT_KEY)
+            self.assertEqual(contract.run_name, _REAL_PILOT_RUN_NAME)
+            self.assertEqual(contract.document["date"], _REAL_PILOT_DATE_PIN)
+            self.assertEqual(
+                contract.document["pricing"]["retrieval_date"],
+                _REAL_PILOT_RETRIEVAL_DATE_PIN,
+            )
+
+            def stale_date(document):
+                document["date"] = "2026-09-28"
+
+            def stale_retrieval(document):
+                document["pricing"]["retrieval_date"] = "2026-09-28"
+
+            for face, mutate in (
+                ("$.date", stale_date),
+                ("$.pricing.retrieval_date", stale_retrieval),
+            ):
+                with self.subTest(new_key=_REAL_PILOT_KEY, face=face):
+                    bad = self.write_artifact(root, _real_pilot_mutate(mutate))
+                    with self.assertRaises(module.RealRunError) as ctx:
+                        module._load_and_validate_approval(bad, _REAL_PILOT_KEY)
+                    self.assertIs(
+                        ctx.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(ctx.exception.field_path, face)
+
+    def _assert_stopped_batch(self, directory, *, transport, first_code,
+                              first_path, first_index=0, posted=None):
+        """Shared stop-gate assertions: first cause kept, follow-ons typed.
+
+        Returns the manifest failures list for caller-specific checks.
+        ``posted`` is the expected transport chat-call count (zero new POSTs
+        after the first failure), ``first_path`` the first cause's frozen
+        structure path.
+        """
+        total = _PILOT_COLD + _PILOT_WARM
+        manifest = self.read_manifest(directory)
+        failures = manifest["failures"]
+        self.assertEqual(
+            [entry["attempt_index"] for entry in failures],
+            list(range(first_index, total)),
+        )
+        self.assertEqual(failures[0]["error_code"], first_code)
+        self.assertEqual(failures[0]["error_field_path"], first_path)
+        self.assertEqual(
+            [entry["error_code"] for entry in failures[1:]],
+            ["REAL_RUN_BATCH_STOPPED"] * (total - first_index - 1),
+        )
+        for entry in failures[1:]:
+            self.assertEqual(entry["failure_code"], "EXECUTION_ERROR")
+            self.assertEqual(entry["error_field_path"], "$")
+        self.assertNotIn(
+            "REAL_RUN_CANARY_FAILED", {entry["error_code"] for entry in failures}
+        )
+        first = self.read_attempt(directory, first_index)
+        self.assertEqual(first["error_code"], first_code)
+        self.assertEqual(first["error_field_path"], first_path)
+        for index in range(first_index + 1, total):
+            with self.subTest(stopped_attempt=index):
+                document = self.read_attempt(directory, index)
+                self.assertEqual(document["error_code"], "REAL_RUN_BATCH_STOPPED")
+                self.assertEqual(document["error_field_path"], "$")
+        if posted is not None:
+            self.assertEqual(transport.chat_calls, posted)
+        return manifest
+
+    def test_real_pilot_stop_gate_transport_failure(self):
+        # N5-transport (FR-03/AC-2, Packet 7.3/8-8): a first-attempt
+        # transport failure stops the batch -- the first cause keeps its
+        # code and path, every follow-on attempt is REAL_RUN_BATCH_STOPPED
+        # at the batch root "$", zero new POSTs, the canary checklist never
+        # runs (status "failed" with empty checks), and the blocked attempts
+        # reserve and book nothing (ledger.calls stays at the one real
+        # attempt -- the N13 face on the same arrange).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-stop-transport-") as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport(
+                responses=[ConnectionError("transport down")]
+            )
+            result = self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(transport.download_calls, 0)
+            manifest = self._assert_stopped_batch(
+                directory,
+                transport=transport,
+                first_code="REAL_RUN_TRANSPORT_FAILED",
+                first_path="$.transport",
+                posted=1,
+            )
+            self.assertEqual(manifest["canary"]["status"], "failed")
+            self.assertEqual(manifest["canary"]["checks"], {})
+            ledger = json.loads((root / "ledger.json").read_bytes())
+            self.assertEqual(ledger["batch"]["calls"], 1)
+            self.assertEqual(result.status, "insufficient_sample")
+
+    def test_real_pilot_stop_gate_contract_and_usage_failures(self):
+        # N5-contract + N5-usage (FR-03/AC-2, Packet 7.3/8-8): both
+        # non-latching response-face failure classes trigger the gate -- a
+        # verdict-shape contract violation and a missing-usage violation
+        # each keep their first cause and type every follow-on attempt
+        # REAL_RUN_BATCH_STOPPED with zero new POSTs.
+        regimes = (
+            ("REAL_RUN_RESPONSE_INVALID", "$.response.verdict", [_verdict_shape_failure_body()]),
+            ("REAL_RUN_USAGE_MISSING", "$.usage", [_chat_response(with_usage=False)]),
+        )
+        for first_code, first_path, responses in regimes:
+            with self.subTest(first=first_code):
+                with tempfile.TemporaryDirectory(
+                    prefix="lima-ip0039-stop-response-"
+                ) as directory:
+                    transport = self.happy_transport(responses=responses)
+                    self._run_real_pilot_entry(directory, transport=transport)
+                    self.assertEqual(transport.chat_calls, 1)
+                    self._assert_stopped_batch(
+                        directory,
+                        transport=transport,
+                        first_code=first_code,
+                        first_path=first_path,
+                        posted=1,
+                    )
+
+    def test_real_pilot_stop_gate_identity_drift_first_cause_kept(self):
+        # N5-identity (FR-03/AC-2, Packet 7.3/7.4.3, DR-IP-0039-PV-2): an
+        # index-1 identity drift books REAL_RUN_IDENTITY_CHANGED as the
+        # kept first cause and freezes the transport count at two (zero
+        # new POSTs after the failure -- the ruling's hard requirement).
+        # The follow-ons carry the frozen D4 identity-latch face
+        # REAL_RUN_CANARY_FAILED (the pre-existing latch fires before the
+        # gate's position; the K4 "BATCH_STOPPED" wording is mechanically
+        # unreachable there and is flagged in the Packet for the
+        # Coordinator), the checklist itself ran and passed at index 1,
+        # and no BATCH_STOPPED mislabels the first cause.
+        total = _PILOT_COLD + _PILOT_WARM
+        responses = [_chat_response(), _chat_response(fingerprint="fp-drift-002")]
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-stop-identity-") as directory:
+            transport = self.happy_transport(responses=responses)
+            self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 2)
+            drift = self.read_attempt(directory, 1)
+            self.assertEqual(drift["error_code"], "REAL_RUN_IDENTITY_CHANGED")
+            self.assertEqual(drift["error_field_path"], "$.identity")
+            for index in range(2, total):
+                with self.subTest(attempt=index):
+                    document = self.read_attempt(directory, index)
+                    self.assertEqual(document["error_code"], "REAL_RUN_CANARY_FAILED")
+            manifest = self.read_manifest(directory)
+            self.assertEqual(
+                [entry["error_code"] for entry in manifest["failures"]],
+                ["REAL_RUN_IDENTITY_CHANGED"] + ["REAL_RUN_CANARY_FAILED"] * 3,
+            )
+            self.assertEqual(manifest["canary"]["status"], "passed")
+            self.assertEqual(set(manifest["canary"]["checks"]), _CANARY_CHECK_KEYS)
+            self.assertNotIn(
+                "REAL_RUN_BATCH_STOPPED",
+                {entry["error_code"] for entry in manifest["failures"]},
+            )
+
+    def test_real_pilot_stop_gate_budget_refusal_mid_batch(self):
+        # N5-budget (FR-03/AC-2, Packet 7.3/8-8): the genuinely reachable
+        # BATCH_BUDGET_EXCEEDED mid-batch face (DR-IP-0039-PV-3): with the
+        # artifact-signed batch call ceiling at two, attempts 0 and 1
+        # succeed, attempt 2's reserve is refused at $.budget.batch.calls
+        # (the pre-existing no-latch gap F4 -- without the gate attempts 3
+        # and 4 would POST again and be refused again), and the gate types
+        # attempts 3 and 4 REAL_RUN_BATCH_STOPPED with zero new POSTs.
+        def cap_batch_calls(document):
+            document["budget"]["batch"]["calls"] = 2
+
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-stop-budget-") as directory:
+            transport = self.happy_transport()
+            self._run_real_pilot_entry(
+                directory, transport=transport, mutate=cap_batch_calls
+            )
+            self.assertEqual(transport.chat_calls, 2)
+            self._assert_stopped_batch(
+                directory,
+                transport=transport,
+                first_code="BATCH_BUDGET_EXCEEDED",
+                first_path="$.budget.batch.calls",
+                first_index=2,
+                posted=2,
+            )
+
+    def test_real_pilot_stop_gate_deadline_timeout(self):
+        # N5-deadline (FR-03/AC-2, Packet 7.3/8-8): a deterministic clock
+        # jump past the executable attempt window (the frozen _monotonic
+        # seam, never a real sleep) books the EXECUTION_TIMEOUT family on
+        # attempt 0; the gate types every follow-on attempt
+        # REAL_RUN_BATCH_STOPPED with zero new POSTs.
+        clock = _JumpClock()
+        self.patch_monotonic(clock)
+        transport = _ClockJumpChatTransport(
+            clock=clock,
+            chat_jump_ms=_PREFLIGHT_PER_RUN["wall_ms"] + 1,
+            responses=[_chat_response()],
+        )
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-stop-deadline-") as directory:
+            self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            first = self.read_attempt(directory, 0)
+            self.assertEqual(first["failure_code"], "EXECUTION_TIMEOUT")
+            self.assertEqual(first["error_code"], "REAL_RUN_TRANSPORT_FAILED")
+            self._assert_stopped_batch(
+                directory,
+                transport=transport,
+                first_code="REAL_RUN_TRANSPORT_FAILED",
+                first_path="$.transport",
+                posted=1,
+            )
+
+    def test_real_pilot_stop_gate_precedes_canary_checklist(self):
+        # N6 (FR-03/AC-2, Packet 7.4.2): a first-attempt failure precedes
+        # the index-1 canary checklist -- the checklist never runs, the
+        # manifest keeps the pre-existing initial face (status "failed"
+        # with the empty checks dict, machine-distinguishable from an
+        # evaluated failure), and no follow-on attempt is mislabeled
+        # REAL_RUN_CANARY_FAILED (they are REAL_RUN_BATCH_STOPPED).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-precanary-") as directory:
+            transport = self.happy_transport(
+                responses=[_chat_response(with_usage=False)]
+            )
+            self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            manifest = self._assert_stopped_batch(
+                directory,
+                transport=transport,
+                first_code="REAL_RUN_USAGE_MISSING",
+                first_path="$.usage",
+                posted=1,
+            )
+            self.assertEqual(manifest["canary"]["status"], "failed")
+            self.assertEqual(manifest["canary"]["checks"], {})
+
+    def test_real_pilot_canary_latch_preserved_on_new_key(self):
+        # N7 (FR-03/AC-2, Packet 7.4.2): the canary latch keeps its frozen
+        # semantics on the new path -- attempt 0 succeeds, the index-1
+        # checklist fails (usage beyond the reservation), the batch latches
+        # REAL_RUN_CANARY_FAILED with zero follow-on POSTs, and the stop
+        # gate does not interfere (no prior failure, so the checklist runs
+        # exactly as before).
+        total = _PILOT_COLD + _PILOT_WARM
+        responses = [_chat_response(prompt_tokens=_REQUEST_BYTE_CAP * 2)]
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-canary-") as directory:
+            transport = self.happy_transport(responses=responses)
+            result = self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            self.assertEqual(result.canary_status, "failed")
+            manifest = self.read_manifest(directory)
+            self.assertIs(
+                manifest["canary"]["checks"]["usage_within_reservation"], False
+            )
+            for index in range(1, total):
+                with self.subTest(attempt=index):
+                    self.assertEqual(
+                        self.read_attempt(directory, index)["error_code"],
+                        "REAL_RUN_CANARY_FAILED",
+                    )
+
+    def test_real_pilot_stop_gate_inactive_on_old_keys(self):
+        # N8 (FR-03/AC-2 regression, Packet 7.3.5): the gate is inactive on
+        # the old keys -- a mid-batch transport failure under the shaped
+        # synthetic large-repo key leaves the follow-on attempts executing
+        # normally (the full five-POST batch), zero BATCH_STOPPED anywhere,
+        # and the manifest carries exactly the one original failure.  The
+        # current behavior is the target behavior (passes by design).
+        total = _PILOT_COLD + _PILOT_WARM
+        responses = [
+            _chat_response(),
+            _chat_response(),
+            ConnectionError("mid-batch transport down"),
+            _chat_response(),
+            _chat_response(),
+        ]
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-oldkey-") as directory:
+            approval = self.write_synthetic_artifact(
+                directory,
+                _PREFLIGHT_REHEARSAL_KEY,
+                _preflight_policy(_PILOT_COLD, _PILOT_WARM),
+            )
+            transport = self.happy_transport(responses=responses)
+            result = self.run_entry(
+                directory,
+                transport=transport,
+                artifact_path=approval,
+                artifact_key=_PREFLIGHT_REHEARSAL_KEY,
+            )
+            self.assertEqual(transport.chat_calls, total)
+            self.assertEqual(result.attempt_count, total)
+            manifest = self.read_manifest(directory)
+            self.assertEqual(
+                [(entry["attempt_index"], entry["error_code"]) for entry in manifest["failures"]],
+                [(2, "REAL_RUN_TRANSPORT_FAILED")],
+            )
+            self.assertNotIn(
+                "REAL_RUN_BATCH_STOPPED",
+                {self.read_attempt(directory, index)["error_code"] for index in range(total)},
+            )
+            self.assertEqual(
+                [
+                    self.read_attempt(directory, index)["outcome"]
+                    for index in range(total)
+                ],
+                ["success", "success", "failure", "success", "success"],
+            )
+
+    def test_real_pilot_negative_matrix_loader_and_output_root(self):
+        # N9 + N10 + N12 (FR-01/FR-04/AC-3, Packet 8-1/2/6): unknown
+        # descriptor keys keep the structure-only "$" rejection (the
+        # current behavior, passes by design); under the new key a wrong
+        # run_name and a wrong approval_type are refused at their frozen
+        # structure paths; a non-empty output directory is refused
+        # REAL_RUN_OUTPUT_NOT_EMPTY with zero POSTs.
+        module = self.real_run()
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-neg-") as directory:
+            root = pathlib.Path(directory)
+            approval = self.write_artifact(root, _real_pilot_mutate())
+            for unknown in ("real-pilot/unknown", "real-pilot/large-repo-typo"):
+                with self.subTest(unknown=unknown):
+                    with self.assertRaises(module.RealRunError) as ctx:
+                        module._load_and_validate_approval(approval, unknown)
+                    self.assertIs(
+                        ctx.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(ctx.exception.field_path, "$")
+            for face, mutate in (
+                (
+                    "$.run_name",
+                    lambda document: document.__setitem__(
+                        "run_name", "pr3d-real-pilot-2026-09-29"
+                    ),
+                ),
+                (
+                    "$.approval_type",
+                    lambda document: document.__setitem__(
+                        "approval_type", "PR3D-REAL-PILOT-TWO-SHOT"
+                    ),
+                ),
+            ):
+                with self.subTest(face=face):
+                    bad = self.write_artifact(root, _real_pilot_mutate(mutate))
+                    with self.assertRaises(module.RealRunError) as ctx:
+                        module._load_and_validate_approval(bad, _REAL_PILOT_KEY)
+                    self.assertIs(
+                        ctx.exception.code,
+                        module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                    )
+                    self.assertEqual(ctx.exception.field_path, face)
+            output_root = root / "out"
+            output_root.mkdir()
+            (output_root / "stale.txt").write_text("stale\n", encoding="utf-8")
+            (root / "valid").mkdir()
+            valid = self.write_artifact(root / "valid", _real_pilot_mutate())
+            transport = self.happy_transport()
+            with self.subTest(face="output-not-empty"):
+                with self.assertRaises(module.RealRunError) as ctx:
+                    self.run_entry(
+                        output_root,
+                        transport=transport,
+                        artifact_path=valid,
+                        artifact_key=_REAL_PILOT_KEY,
+                    )
+                self.assertIs(
+                    ctx.exception.code,
+                    module.RealRunErrorCode.REAL_RUN_OUTPUT_NOT_EMPTY,
+                )
+                self.assertEqual(ctx.exception.field_path, "$.output_root")
+                self.assertEqual(transport.chat_calls, 0)
+                self.assertEqual(transport.download_calls, 0)
+
+    def test_real_pilot_negative_budget_faces(self):
+        # N11 (FR-04/AC-3, Packet 8-4/5, DR-IP-0039-PV-3): the budget
+        # negatives on their actually-reachable faces -- a removed budget
+        # dimension key is refused by the loader's exact-keys gate; a
+        # batch ceiling one byte below per_run is refused by the BudgetSpec
+        # construction with BUDGET_SPEC_INVALID passing through unchanged;
+        # and with both download levels one byte short the first-round
+        # reserve refuses at the per-run gate (the frozen gate order) with
+        # zero POSTs while the gate types the follow-ons BATCH_STOPPED.
+        module = self.real_run()
+
+        def drop_dimension(document):
+            del document["budget"]["batch"]["wall_ms"]
+
+        def shrink_batch_download(document):
+            document["budget"]["batch"]["download_bytes"] = _PREFLIGHT_ONE_BYTE_SHORT
+
+        def shrink_both_downloads(document):
+            for level in ("per_run", "batch"):
+                document["budget"][level]["download_bytes"] = _PREFLIGHT_ONE_BYTE_SHORT
+
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-budget-") as directory:
+            root = pathlib.Path(directory)
+            with self.subTest(face="missing-dimension"):
+                bad = self.write_artifact(root, _real_pilot_mutate(drop_dimension))
+                with self.assertRaises(module.RealRunError) as ctx:
+                    module._load_and_validate_approval(bad, _REAL_PILOT_KEY)
+                self.assertIs(
+                    ctx.exception.code,
+                    module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
+                )
+                self.assertEqual(
+                    ctx.exception.field_path, "$.budget.batch.wall_ms"
+                )
+            with self.subTest(face="batch-ceiling-short"):
+                bad = self.write_artifact(
+                    root, _real_pilot_mutate(shrink_batch_download)
+                )
+                with self.assertRaises(BudgetGateError) as ctx:
+                    module._load_and_validate_approval(bad, _REAL_PILOT_KEY)
+                self.assertIs(
+                    ctx.exception.code, BudgetGateErrorCode.BUDGET_SPEC_INVALID
+                )
+                self.assertEqual(
+                    ctx.exception.field_path, "$.budget.batch.download_bytes"
+                )
+            with self.subTest(face="first-round-refusal"):
+                transport = self.happy_transport()
+                (root / "out").mkdir()
+                self._run_real_pilot_entry(
+                    root / "out",
+                    transport=transport,
+                    mutate=shrink_both_downloads,
+                )
+                self.assertEqual(transport.chat_calls, 0)
+                self.assertEqual(transport.download_calls, 0)
+                manifest = self._assert_stopped_batch(
+                    root / "out",
+                    transport=transport,
+                    first_code="RUN_BUDGET_EXCEEDED",
+                    first_path="$.budget.per_run.download_bytes",
+                    posted=0,
+                )
+                self.assertEqual(manifest["canary"]["checks"], {})
+                ledger = json.loads(
+                    (root / "out" / "ledger.json").read_bytes()
+                )
+                self.assertEqual(ledger["batch"]["calls"], 0)
+
+    def test_real_pilot_stopped_attempts_zero_ledger_face(self):
+        # N13 (FR-03/AC-2, Packet 7.3.4): the stopped-batch ledger face --
+        # after the first failure the blocked attempts reserve and book
+        # nothing: the ledger snapshot carries exactly the one real call,
+        # every reserved bucket is back to zero (the one reservation was
+        # settled and released), and the blocked attempt documents carry no
+        # usage (only the really-executed attempt is accounted).
+        with tempfile.TemporaryDirectory(prefix="lima-ip0039-ledger-") as directory:
+            root = pathlib.Path(directory)
+            transport = self.happy_transport(
+                responses=[ConnectionError("transport down")]
+            )
+            self._run_real_pilot_entry(directory, transport=transport)
+            self.assertEqual(transport.chat_calls, 1)
+            ledger = json.loads((root / "ledger.json").read_bytes())
+            self.assertEqual(ledger["violations"], 0)
+            book = ledger["batch"]
+            self.assertEqual(book["calls"], 1)
+            for dimension in book["reserved"]:
+                with self.subTest(reserved=dimension):
+                    self.assertEqual(book["reserved"][dimension], 0)
+            for index in range(1, _PILOT_COLD + _PILOT_WARM):
+                with self.subTest(attempt=index):
+                    self.assertIsNone(
+                        self.read_attempt(directory, index).get("usage")
+                    )
 
 
 if __name__ == "__main__":  # pragma: no cover

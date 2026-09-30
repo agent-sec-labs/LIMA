@@ -369,6 +369,21 @@ _SYNTHETIC_ARTIFACT_KEYS: typing.Final[tuple[str, ...]] = (
     "archetype/dependency-blocked",
 )
 
+#: The real-pilot family entry (IP-0039 Packet 7.1): the eleventh catalog
+#: key -- a real-pilot approval identity explicitly bound to the existing
+#: deterministic large-repo synthetic fixture (local materialization, never
+#: a download) and carrying its own Asia/Shanghai date pins.  The eleventh
+#: descriptor is the large-repo seven-field derivation (the five provenance
+#: fields verbatim, the approval identity replaced) plus exactly the four
+#: R2 additions, so every old descriptor keeps its closed seven-field face
+#: byte-identical.
+_REAL_PILOT_ARTIFACT_KEY: typing.Final[str] = "real-pilot/large-repo"
+_REAL_PILOT_FIXTURE_KEY: typing.Final[str] = "archetype/large-repo"
+_REAL_PILOT_APPROVAL_TYPE_PIN: typing.Final[str] = "PR3D-REAL-PILOT-ONE-SHOT"
+_REAL_PILOT_RUN_NAME_PIN: typing.Final[str] = "pr3d-real-pilot-2026-09-30"
+_REAL_PILOT_DATE_PIN: typing.Final[str] = "2026-09-30"
+_REAL_PILOT_RETRIEVAL_DATE_PIN: typing.Final[str] = "2026-09-30"
+
 
 def _synthetic_artifact_descriptor(key: str, fingerprint: str) -> dict[str, str]:
     """Derive one synthetic descriptor from the fixture tree fingerprint.
@@ -395,12 +410,14 @@ def _synthetic_artifact_descriptor(key: str, fingerprint: str) -> dict[str, str]
     }
 
 
-def _build_artifact_family() -> dict[str, dict[str, str]]:
-    """Build the frozen artifact-family catalog (ten keys, seven fields each).
+def _build_artifact_family() -> dict[str, dict[str, object]]:
+    """Build the frozen artifact-family catalog (eleven keys, closed sets).
 
     The llamafactory descriptor carries the verbatim current pins; every
     synthetic descriptor is derived once from its registry fingerprint, so
     the catalog is recomputable offline from the committed registry alone.
+    IP-0039 appends the eleventh entry (the real-pilot descriptor) as an
+    independent block after the untouched ten-key derivation above.
     """
     registry = load_registry()
     fingerprints = {
@@ -408,7 +425,7 @@ def _build_artifact_family() -> dict[str, dict[str, str]]:
         for entry in registry["fixtures"]
         if entry.get("kind") == "synthetic-fixture"
     }
-    family: dict[str, dict[str, str]] = {
+    family: dict[str, dict[str, object]] = {
         key: _synthetic_artifact_descriptor(key, fingerprints[key])
         for key in _SYNTHETIC_ARTIFACT_KEYS
     }
@@ -421,15 +438,33 @@ def _build_artifact_family() -> dict[str, dict[str, str]]:
         "approval_type": _APPROVAL_TYPE_PIN,
         "run_name": _RUN_NAME_PIN,
     }
+    # IP-0039 (Packet 7.1.1): the eleventh entry.  The five provenance
+    # fields reuse the large-repo synthetic derivation verbatim (the fixture
+    # is that synthetic fixture -- honest provenance), the approval identity
+    # carries the real-pilot pins, and exactly the four R2 fields join.
+    real_pilot: dict[str, object] = dict(
+        _synthetic_artifact_descriptor(
+            _REAL_PILOT_FIXTURE_KEY, fingerprints[_REAL_PILOT_FIXTURE_KEY]
+        )
+    )
+    real_pilot["approval_type"] = _REAL_PILOT_APPROVAL_TYPE_PIN
+    real_pilot["run_name"] = _REAL_PILOT_RUN_NAME_PIN
+    real_pilot["fixture_key"] = _REAL_PILOT_FIXTURE_KEY
+    real_pilot["date_pin"] = _REAL_PILOT_DATE_PIN
+    real_pilot["retrieval_date_pin"] = _REAL_PILOT_RETRIEVAL_DATE_PIN
+    real_pilot["stop_on_first_failure"] = True
+    family[_REAL_PILOT_ARTIFACT_KEY] = real_pilot
     return family
 
 
-#: The frozen artifact-family catalog (IP-0036 Packet 7.4.1, DR-IP-0036-PV-3):
-#: a closed ten-key mapping (nine synthetic archetypes plus the external
-#: llamafactory replay), every descriptor a closed seven-field set.  The
-#: constant is intentionally not exported in ``__all__`` (the six frozen
-#: symbols stay verbatim); consumers read it through the module attribute.
-REAL_RUN_ARTIFACT_FAMILY: typing.Final[dict[str, dict[str, str]]] = (
+#: The frozen artifact-family catalog (IP-0036 Packet 7.4.1, DR-IP-0036-PV-3;
+#: IP-0039 Packet 7.1): a closed eleven-key mapping (nine synthetic
+#: archetypes plus the external llamafactory replay plus the real-pilot
+#: entry), every old descriptor a closed seven-field set and the real-pilot
+#: descriptor the seven fields plus the four R2 additions.  The constant is
+#: intentionally not exported in ``__all__`` (the six frozen symbols stay
+#: verbatim); consumers read it through the module attribute.
+REAL_RUN_ARTIFACT_FAMILY: typing.Final[dict[str, dict[str, object]]] = (
     _build_artifact_family()
 )
 
@@ -449,6 +484,7 @@ class RealRunErrorCode(str, enum.Enum):  # noqa: UP042 -- frozen by IP-0032 Pack
     REAL_RUN_RESPONSE_INVALID = "REAL_RUN_RESPONSE_INVALID"
     REAL_RUN_IDENTITY_CHANGED = "REAL_RUN_IDENTITY_CHANGED"
     REAL_RUN_CANARY_FAILED = "REAL_RUN_CANARY_FAILED"
+    REAL_RUN_BATCH_STOPPED = "REAL_RUN_BATCH_STOPPED"
 
 
 _STABLE_MESSAGES: dict[RealRunErrorCode, str] = {
@@ -483,6 +519,10 @@ _STABLE_MESSAGES: dict[RealRunErrorCode, str] = {
     RealRunErrorCode.REAL_RUN_CANARY_FAILED: (
         "The canary check failed; no further real calls are permitted in this"
         " batch."
+    ),
+    RealRunErrorCode.REAL_RUN_BATCH_STOPPED: (
+        "A real-pilot failure was already recorded; the first-failure stop"
+        " gate blocks every further call in this batch."
     ),
 }
 
@@ -644,6 +684,10 @@ class _ApprovalContract:
     template (the llamafactory expansion stays byte-identical to the v5
     literal), and ``fixture_key`` the synthetic fixture materialized locally
     (``None`` on the external path, whose tarball is downloaded).
+    IP-0039 adds the tail default ``stop_on_first_failure`` -- the
+    real-pilot descriptor's first-failure stop-gate flag; every old
+    descriptor keeps the ``False`` default, so the old constructions are
+    unchanged.
     """
 
     document: dict[str, object]
@@ -662,6 +706,7 @@ class _ApprovalContract:
     artifact_key: str
     tarball_filename: str
     fixture_key: str | None
+    stop_on_first_failure: bool = False
 
 
 @dataclasses.dataclass(slots=True)
@@ -848,7 +893,12 @@ def _load_and_validate_approval(
         document["approval_type"], descriptor["approval_type"], "$.approval_type"
     )
     _require_str_pin(document["run_name"], descriptor["run_name"], "$.run_name")
-    _require_str_pin(document["date"], "2026-09-28", "$.date")
+    # IP-0039 (Packet 7.2.2): the date pin is descriptor-driven -- the
+    # real-pilot entry carries its own ``date_pin``; every old key keeps the
+    # verbatim "2026-09-28" default, still a verbatim comparison.
+    _require_str_pin(
+        document["date"], descriptor.get("date_pin", "2026-09-28"), "$.date"
+    )
     _require_str_pin(document["authorized_by"], "Maintainer", "$.authorized_by")
     _require_str_pin(document["baseline_sha"], _BASELINE_SHA_PIN, "$.baseline_sha")
 
@@ -897,9 +947,12 @@ def _load_and_validate_approval(
     _require_str_pin(
         pricing["source_url"], _PRICING_SOURCE_PIN, "$.pricing.source_url"
     )
+    # IP-0039 (Packet 7.2.2): the retrieval-date pin is descriptor-driven
+    # like ``$.date`` above; every old key keeps the verbatim module
+    # constant, still a verbatim comparison.
     _require_str_pin(
         pricing["retrieval_date"],
-        _PRICING_RETRIEVAL_DATE_PIN,
+        descriptor.get("retrieval_date_pin", _PRICING_RETRIEVAL_DATE_PIN),
         "$.pricing.retrieval_date",
     )
     _require_str_pin(pricing["basis"], _PRICING_BASIS_PIN, "$.pricing.basis")
@@ -999,7 +1052,16 @@ def _load_and_validate_approval(
         tarball_filename=descriptor["tarball_filename"].format(
             commit_sha=descriptor["commit_sha"]
         ),
-        fixture_key=artifact_key if artifact_key in _SYNTHETIC_SET else None,
+        # IP-0039 (Packet 7.2.2): the fixture dispatch is descriptor-driven
+        # -- the real-pilot entry binds its own synthetic fixture explicitly;
+        # every old key keeps the verbatim synthetic-set dispatch (a
+        # synthetic key resolves to itself, the default key to ``None``).
+        fixture_key=(
+            descriptor["fixture_key"]
+            if "fixture_key" in descriptor
+            else (artifact_key if artifact_key in _SYNTHETIC_SET else None)
+        ),
+        stop_on_first_failure=descriptor.get("stop_on_first_failure", False),
     )
 
 
@@ -1321,7 +1383,13 @@ class _GuardedRealEvaluator:
     artifact-signed shape -- every later cold attempt performs one
     ``reset_cold_state``-mechanism reset before its chat and books the
     additive ``cold_reset`` observation -- while the default construction
-    (``None``) keeps the frozen {5,5} behavior byte-identical.
+    (``None``) keeps the frozen {5,5} behavior byte-identical.  IP-0039
+    adds the first-failure stop gate: on the real-pilot descriptor only
+    (``stop_on_first_failure``), once any prior record carries a failure
+    code every later call is refused between the latch check and the
+    checklist/reserve as ``REAL_RUN_BATCH_STOPPED`` -- zero reservations,
+    zero POSTs, zero checklist runs, the first real cause kept verbatim --
+    while every old-key path never enters the branch.
     """
 
     def __init__(
@@ -1366,6 +1434,15 @@ class _GuardedRealEvaluator:
         )
         self._invocations = 0
         self._latched = False
+        # IP-0039 (Packet 7.3.3): the first-failure stop gate's carried
+        # state.  ``_stop_on_first_failure`` is the descriptor flag
+        # (``False`` on every old key, so the gate never engages there and
+        # the frozen paths stay byte-identical); ``_batch_stopped`` is the
+        # gate's own sticky bit -- deliberately never the canary
+        # ``_latched``, so a stopped follow-on attempt is never mislabeled
+        # a canary failure.
+        self._stop_on_first_failure = approval.stop_on_first_failure
+        self._batch_stopped = False
         # IP-0036 (Packet 7.5.2): the completed-materialization count.  The
         # initial attempt-0 materialization moves it to 1 and every
         # reset_cold_state call increments it again; the real cold count is
@@ -1491,6 +1568,20 @@ class _GuardedRealEvaluator:
         try:
             if self._latched:
                 raise self._typed(record, RealRunErrorCode.REAL_RUN_CANARY_FAILED)
+            # IP-0039 (Packet 7.3.1, R3.1): the first-failure stop gate,
+            # exactly between the canary-latch check and the index-1
+            # checklist/reserve.  It engages only on the real-pilot
+            # descriptor; once any prior record carries a failure code, or
+            # after the private sticky bit is set, the call is refused
+            # before any reservation, POST, or checklist run, and the
+            # follow-on attempt is honestly typed REAL_RUN_BATCH_STOPPED
+            # (the first real cause keeps its own code in its own record).
+            if self._stop_on_first_failure and (
+                self._batch_stopped
+                or any(prior.failure_code is not None for prior in self.records[:-1])
+            ):
+                self._batch_stopped = True
+                raise self._typed(record, RealRunErrorCode.REAL_RUN_BATCH_STOPPED)
             if index == 1:
                 self._run_canary_checklist()
                 if self._canary_status != "passed":

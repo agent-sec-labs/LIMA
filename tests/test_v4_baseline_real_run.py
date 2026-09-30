@@ -6160,7 +6160,9 @@ class TestRealPilotDescriptorAndStopGate(_RealRunTestCase):
                     ctx.exception.code,
                     module.RealRunErrorCode.APPROVAL_ARTIFACT_INVALID,
                 )
-                self.assertEqual(ctx.exception.field_path, "$.budget.batch")
+                self.assertEqual(
+                    ctx.exception.field_path, "$.budget.batch.wall_ms"
+                )
             with self.subTest(face="batch-ceiling-short"):
                 bad = self.write_artifact(
                     root, _real_pilot_mutate(shrink_batch_download)
@@ -6175,6 +6177,7 @@ class TestRealPilotDescriptorAndStopGate(_RealRunTestCase):
                 )
             with self.subTest(face="first-round-refusal"):
                 transport = self.happy_transport()
+                (root / "out").mkdir()
                 self._run_real_pilot_entry(
                     root / "out",
                     transport=transport,

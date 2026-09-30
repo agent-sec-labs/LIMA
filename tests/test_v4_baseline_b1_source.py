@@ -339,12 +339,22 @@ class _B1SourceTestCase(unittest.TestCase):
         )
         return scanner.scan(workspace)
 
-    def scanner_wire_digest(self, scan_result):
-        """Independent mirror of the frozen scanner fingerprint rule (PC3)."""
+    def scanner_wire_digest(self, scan_result, fixture_key):
+        """Independent mirror of the frozen scanner fingerprint rule (PC3).
+
+        The wire is canonicalized exactly like the product's
+        ``_canonical_payload`` rule (NFR-01/AC-2 path independence): the
+        materialization-path dependent ``repository`` and ``workspace.root``
+        labels are replaced by the fixture key before hashing, so the
+        mirrored fingerprint is a pure function of snapshot content and
+        analyzer configuration, not of the tempdir.
+        """
         wire = {
             **scan_result.report.to_dict(),
             "workspace": scan_result.inventory.to_dict(),
         }
+        wire["repository"] = fixture_key
+        wire["workspace"] = {**wire["workspace"], "root": fixture_key}
         encoded = json.dumps(
             wire,
             sort_keys=True,
@@ -354,7 +364,7 @@ class _B1SourceTestCase(unittest.TestCase):
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def expected_faces(self, scan_result):
+    def expected_faces(self, scan_result, fixture_key):
         """Direct-scanner-output recomputation of every reported count (PC3)."""
         findings = scan_result.report.findings
         states = [finding.verification_state for finding in findings]
@@ -378,7 +388,7 @@ class _B1SourceTestCase(unittest.TestCase):
             "coverage_gap_reasons": reasons,
             "signals": len(findings),
             "security_issues": len(findings),
-            "scanner_digest": self.scanner_wire_digest(scan_result),
+            "scanner_digest": self.scanner_wire_digest(scan_result, fixture_key),
         }
 
     def read_json(self, path):
@@ -432,7 +442,9 @@ class TestB1EntryFullChain(_B1SourceTestCase):
             scan = self.direct_scan(materialization.root)
             self.assertEqual(
                 report["sources"][0]["payload_sha256"],
-                self.scanner_wire_digest(scan),
+                self.scanner_wire_digest(
+                    scan, "archetype/minimal-python-repository"
+                ),
             )
             # Receipts: one per attempt, all carrying the suite digest.
             receipts = self.receipts_of(output)
@@ -479,7 +491,7 @@ class TestB1EntryFullChain(_B1SourceTestCase):
             result = self.run_suite(output, fixture_key=key)
             materialization = self.materialize(key, pathlib.Path(temporary) / "direct")
             scan = self.direct_scan(materialization.root)
-            faces = self.expected_faces(scan)
+            faces = self.expected_faces(scan, key)
             self.assertGreater(faces["raw_candidates"], _CANDIDATE_FILE_CAP)
             report = self.report_of(result)
             chain = report["compression_chain"]
@@ -572,7 +584,9 @@ class TestB1IdentityAndDigests(_B1SourceTestCase):
             scan = self.direct_scan(materialization.root)
             self.assertEqual(
                 digests[0][1],
-                self.scanner_wire_digest(scan),
+                self.scanner_wire_digest(
+                    scan, "archetype/minimal-python-repository"
+                ),
             )
 
     def test_b1_identity_changes_on_snapshot_config_workload_seed(self):
@@ -976,7 +990,9 @@ class TestB1BoundarySamples(_B1SourceTestCase):
                     materialization = self.materialize(
                         key, pathlib.Path(temporary) / "direct"
                     )
-                    faces = self.expected_faces(self.direct_scan(materialization.root))
+                    faces = self.expected_faces(
+                        self.direct_scan(materialization.root), key
+                    )
                     report = self.report_of(result)
                     self.assertEqual(
                         report["compression_chain"]["raw_candidates"],
@@ -1044,7 +1060,7 @@ class TestB1BoundarySamples(_B1SourceTestCase):
             output.mkdir()
             result = self.run_suite(output, fixture_key=key)
             materialization = self.materialize(key, pathlib.Path(temporary) / "direct")
-            faces = self.expected_faces(self.direct_scan(materialization.root))
+            faces = self.expected_faces(self.direct_scan(materialization.root), key)
             report = self.report_of(result)
             self.assertEqual(
                 report["compression_chain"]["raw_candidates"], faces["raw_candidates"]
@@ -1080,7 +1096,7 @@ class TestB1BoundarySamples(_B1SourceTestCase):
             result = self.run_suite(output, fixture_key=key)
             materialization = self.materialize(key, pathlib.Path(temporary) / "direct")
             scan = self.direct_scan(materialization.root)
-            faces = self.expected_faces(scan)
+            faces = self.expected_faces(scan, key)
             report = self.report_of(result)
             self.assertEqual(report["compression_chain"]["raw_candidates"], 0)
             self.assertEqual(

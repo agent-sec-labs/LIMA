@@ -556,14 +556,19 @@ class TestDisciplineProbes(_V5NegativesTestCase):
         # R9.4 (1)/(2) as mechanical criteria over the frozen catalog: the
         # nine synthetic descriptors carry the offline-proof family
         # discriminator and offline-proof run names, and neither value ever
-        # carries the frozen approval wording.
+        # carries the frozen approval wording.  IP-0039 CA v1.1 erratum: the
+        # real-pilot key joins the llamafactory key in the same exclusion
+        # pattern, so the discipline keeps holding on its original domain
+        # (the nine offline-proof synthetic descriptors).
         module = self.real_run()
         catalog = getattr(module, "REAL_RUN_ARTIFACT_FAMILY", None)
         self.assertIsNotNone(
             catalog, "REAL_RUN_ARTIFACT_FAMILY is missing (C5 deliverable)"
         )
         synthetic_keys = sorted(
-            key for key in catalog if key != "external/llamafactory-replay"
+            key
+            for key in catalog
+            if key not in ("external/llamafactory-replay", "real-pilot/large-repo")
         )
         self.assertEqual(len(synthetic_keys), 9)
         for key in synthetic_keys:
@@ -580,6 +585,10 @@ class TestDisciplineProbes(_V5NegativesTestCase):
         # Catalog <-> registry consistency: every synthetic artifact key is
         # a registry key, and its commit_sha equals the frozen derivation
         # recomputed from the registry fingerprint (PC3, Packet 7.4.1).
+        # IP-0039 CA v1.1 erratum: the real-pilot key joins the llamafactory
+        # key in the same exclusion pattern (its provenance is the
+        # archetype/large-repo derivation, not a registry key of its own),
+        # so the match keeps holding on its original domain.
         module = self.real_run()
         fixtures = self.fixtures()
         catalog = getattr(module, "REAL_RUN_ARTIFACT_FAMILY", None)
@@ -589,7 +598,7 @@ class TestDisciplineProbes(_V5NegativesTestCase):
         registry = fixtures.load_registry()
         entries = {entry["key"]: entry for entry in registry["fixtures"]}
         for key, descriptor in sorted(catalog.items()):
-            if key == "external/llamafactory-replay":
+            if key in ("external/llamafactory-replay", "real-pilot/large-repo"):
                 continue
             with self.subTest(key=key):
                 self.assertIn(key, entries)

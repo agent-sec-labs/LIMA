@@ -384,6 +384,28 @@ _REAL_PILOT_RUN_NAME_PIN: typing.Final[str] = "pr3d-real-pilot-2026-09-30"
 _REAL_PILOT_DATE_PIN: typing.Final[str] = "2026-09-30"
 _REAL_PILOT_RETRIEVAL_DATE_PIN: typing.Final[str] = "2026-09-30"
 
+#: The B1 real-entry family entry (IP-0041 Packet 7.3): the twelfth catalog
+#: key -- a one-time B1 real-pilot identity explicitly bound to the
+#: deterministic signal-storm synthetic fixture (local materialization,
+#: never a download) with its own Asia/Shanghai date pins, the frozen
+#: offline scanner-configuration reference and digest, and the B1 source
+#: binding contract.  The twelfth descriptor is the signal-storm
+#: seven-field derivation (the five provenance fields verbatim, the
+#: approval identity replaced by the new pins) plus exactly the four R2
+#: additions plus exactly the five B1 binding fields, so every old
+#: descriptor keeps its closed field set byte-identical.  The constants
+#: stay out of ``__all__`` (the six frozen symbols are unchanged).
+_B1_REAL_ARTIFACT_KEY: typing.Final[str] = "real-pilot/signal-storm"
+_B1_REAL_FIXTURE_KEY: typing.Final[str] = "archetype/signal-storm"
+_B1_REAL_APPROVAL_TYPE_PIN: typing.Final[str] = "PR3D-B1-REAL-ENTRY-ONE-SHOT"
+_B1_REAL_RUN_NAME_PIN: typing.Final[str] = "pr3d-b1-real-signal-storm-2026-10-01"
+_B1_REAL_DATE_PIN: typing.Final[str] = "2026-10-01"
+_B1_REAL_RETRIEVAL_DATE_PIN: typing.Final[str] = "2026-10-01"
+_B1_REAL_WORKLOAD: typing.Final[str] = "b1-real-signal-storm-v1"
+_B1_REAL_SCANNER_CONFIG_REF: typing.Final[str] = "b1-source-offline-scan-v1"
+_B1_REAL_SOURCE_CONTRACT: typing.Final[str] = "b1-real-source-binding"
+_B1_REAL_SOURCE_CONTRACT_VERSION: typing.Final[int] = 1
+
 
 def _synthetic_artifact_descriptor(key: str, fingerprint: str) -> dict[str, str]:
     """Derive one synthetic descriptor from the fixture tree fingerprint.
@@ -454,6 +476,58 @@ def _build_artifact_family() -> dict[str, dict[str, object]]:
     real_pilot["retrieval_date_pin"] = _REAL_PILOT_RETRIEVAL_DATE_PIN
     real_pilot["stop_on_first_failure"] = True
     family[_REAL_PILOT_ARTIFACT_KEY] = real_pilot
+    # IP-0041 (Packet 7.3): the twelfth entry.  The five provenance fields
+    # reuse the signal-storm synthetic derivation verbatim (the fixture is
+    # that synthetic fixture -- honest provenance), the approval identity
+    # carries the B1 real-entry pins, the four R2 fields join exactly as on
+    # the real-pilot entry, and exactly the five B1 binding fields complete
+    # the closed sixteen-field set.  The B1 scanner-configuration document
+    # mirrors the frozen b1_source config-document shape (the workload, the
+    # fixture binding, the registry tree fingerprint, the pinned seed, and
+    # the one-time {1,4} pilot shape) so its canonical digest is
+    # independently recomputable offline from the committed registry alone.
+    b1_scanner_config: dict[str, object] = {
+        "workload": _B1_REAL_WORKLOAD,
+        "fixture_key": _B1_REAL_FIXTURE_KEY,
+        "snapshot_tree_sha256": fingerprints[_B1_REAL_FIXTURE_KEY],
+        "seed": 0,
+        "cold_count": 1,
+        "warm_count": 4,
+        "scanner": {
+            "sast_mode": "off",
+            "sast_adapters": [],
+            "cxx_memory_mode": "off",
+            "cxx_memory_adapter": None,
+            "cxx_agent_mode": "off",
+            "cxx_agent_budget_factory": None,
+            "cxx_uaf_llm_factory": None,
+            "dataflow_enabled": True,
+            "reviewers": "security-rule-reviewer",
+            "should_cancel": None,
+        },
+        "workspace": {
+            "max_files": 5000,
+            "max_file_bytes": 512 * 1024,
+            "max_total_bytes": 20 * 1024 * 1024,
+        },
+    }
+    b1_real: dict[str, object] = dict(
+        _synthetic_artifact_descriptor(
+            _B1_REAL_FIXTURE_KEY, fingerprints[_B1_REAL_FIXTURE_KEY]
+        )
+    )
+    b1_real["approval_type"] = _B1_REAL_APPROVAL_TYPE_PIN
+    b1_real["run_name"] = _B1_REAL_RUN_NAME_PIN
+    b1_real["fixture_key"] = _B1_REAL_FIXTURE_KEY
+    b1_real["date_pin"] = _B1_REAL_DATE_PIN
+    b1_real["retrieval_date_pin"] = _B1_REAL_RETRIEVAL_DATE_PIN
+    b1_real["stop_on_first_failure"] = True
+    b1_real["workload"] = _B1_REAL_WORKLOAD
+    b1_real["scanner_config_ref"] = _B1_REAL_SCANNER_CONFIG_REF
+    b1_real["scanner_config_sha256"] = compute_content_digest(b1_scanner_config)
+    b1_real["source_contract"] = _B1_REAL_SOURCE_CONTRACT
+    b1_real["source_contract_version"] = _B1_REAL_SOURCE_CONTRACT_VERSION
+    family[_B1_REAL_ARTIFACT_KEY] = b1_real
     return family
 
 
@@ -707,6 +781,11 @@ class _ApprovalContract:
     tarball_filename: str
     fixture_key: str | None
     stop_on_first_failure: bool = False
+    # IP-0041 (Packet 7.4 E1): the B1 source-binding snapshot (the five
+    # descriptor binding fields), carried only when the selected descriptor
+    # carries both binding gate keys; every old key keeps the ``None`` tail
+    # default, so the old constructions are unchanged.
+    b1_source_binding: dict[str, object] | None = None
 
 
 @dataclasses.dataclass(slots=True)
@@ -1062,6 +1141,22 @@ def _load_and_validate_approval(
             else (artifact_key if artifact_key in _SYNTHETIC_SET else None)
         ),
         stop_on_first_failure=descriptor.get("stop_on_first_failure", False),
+        # IP-0041 (Packet 7.4 E1): the B1 binding gate reads the descriptor
+        # by key existence with a tail default (zero new validation
+        # branches on the old keys) -- only the twelfth entry carries both
+        # gate keys (``workload`` and ``source_contract``), so every old
+        # contract keeps the ``None`` default.
+        b1_source_binding=(
+            {
+                "workload": descriptor["workload"],
+                "scanner_config_ref": descriptor["scanner_config_ref"],
+                "scanner_config_sha256": descriptor["scanner_config_sha256"],
+                "source_contract": descriptor["source_contract"],
+                "source_contract_version": descriptor["source_contract_version"],
+            }
+            if "workload" in descriptor and "source_contract" in descriptor
+            else None
+        ),
     )
 
 
@@ -1468,6 +1563,14 @@ class _GuardedRealEvaluator:
         self._attempt0_success = False
         self._attempt0_usage: dict[str, int] | None = None
         self._attempt0_estimate: dict[str, int] | None = None
+        # IP-0041 (Packet 7.4 E2): the B1 source-binding state slots, pure
+        # assignments with no branch.  ``_b1_binding`` carries the loaded
+        # contract's binding snapshot (``None`` on every old key, so the
+        # scanner hook and the gated report payload never engage there) and
+        # ``_b1_scan_result`` is the scan-result slot, empty until the
+        # attempt-0 hook fills it exactly once.
+        self._b1_binding = approval.b1_source_binding
+        self._b1_scan_result = None
 
     # -- public read-only state for the evidence phase ---------------------
 
@@ -1516,6 +1619,15 @@ class _GuardedRealEvaluator:
 
     def build_payload(self) -> dict[str, object]:
         """The real-world v2 evaluator payload built from module accounting."""
+        # IP-0041 (Packet 7.4 E4): the B1 report-payload gate -- when the
+        # twelfth-key binding engaged and the attempt-0 scan completed, the
+        # report payload is the scanner result itself, so the order-(9)
+        # report takes the frozen scanner-type path over the same snapshot
+        # the request body was built from.  Every old key (and a B1 run
+        # whose scan never completed) keeps the frozen real-world v2 dict
+        # below verbatim.
+        if self._b1_binding is not None and self._b1_scan_result is not None:
+            return self._b1_scan_result
         revision = (
             self._approval.repository.rsplit("/", 1)[-1].lower()
             + "-"
@@ -1717,6 +1829,12 @@ class _GuardedRealEvaluator:
                     record.cold_reset = self._cold_reset_observation(
                         performed=False
                     )
+                # IP-0041 (Packet 7.4 E3): the B1 scanner-execution hook --
+                # after the initial materialization, the request build, and
+                # the cold observation, before the first POST, inside the
+                # reserve and deadline window.  The hook's own gate keeps
+                # every old-key path (and every later cold attempt) out.
+                self._b1_execute_scanner(record, deadline_ms)
             elif self._batch_shape is not None and index < self._cold_count:
                 # IP-0037 (Packet 7.4.3): a shaped cold follow-on attempt
                 # performs one verifiable reset through the frozen
@@ -1733,6 +1851,41 @@ class _GuardedRealEvaluator:
         except RealRunError as exc:
             self._settle(run_id, record, exc)
             raise
+
+    def _b1_execute_scanner(
+        self, record: _AttemptRecord, deadline_ms: int
+    ) -> None:
+        """Execute the B1 source scanner once inside the attempt-0 window.
+
+        IP-0041 (Packet 7.4 E3 / 7.5.1).  The gate is the loaded B1 binding
+        plus the empty scan slot, so the scanner executes exactly once --
+        only the twelfth key's descriptor engages the binding and only the
+        cold attempt-0 reaches this call site, before the first POST, with
+        the scan wall inside the attempt wall the ledger already reserved.
+        The scanner itself is the frozen offline ``b1_source._scan_snapshot``
+        program over ``self._snapshot_dir`` -- the same materialized
+        snapshot the request body was built from (the lazy import keeps the
+        module-level import list unchanged and only fires inside the gate).
+        A scan-phase failure becomes a booked failure sample under the
+        closed code family (zero new codes, zero POST, the first-failure
+        stop gate keeps the first cause and refuses every follow-on); a
+        deadline miss after the scan follows the frozen timeout discipline.
+        """
+        if self._b1_binding is None or self._b1_scan_result is not None:
+            return
+        import benchmarks.v4.baseline.b1_source as b1_source
+
+        try:
+            result = b1_source._scan_snapshot(self._snapshot_dir)
+        except RealRunError:
+            raise
+        except Exception as exc:
+            raise self._typed(
+                record, RealRunErrorCode.REAL_RUN_ARCHIVE_UNSAFE, "$.scanner"
+            ) from exc
+        if self._past_deadline(record.wall_anchor, deadline_ms):
+            raise self._timeout_failure(record, "$.scanner")
+        self._b1_scan_result = result
 
     def _cold_reset_observation(self, *, performed: bool) -> dict[str, object]:
         """The frozen four-key cold-reset observation (IP-0037 Packet 7.5.2).

@@ -61,6 +61,8 @@ import inspect
 import json
 import pathlib
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -263,8 +265,17 @@ _FORBIDDEN_BUDGET_LITERALS = (
     "500_000_000",
 )
 
+# The canonical source contract version (IP-0042 Packet 7.2.1): the V2
+# artifact family's self-describing digest-rule version, carried by the
+# companion manifest and every receipt as the
+# ``canonical_source_contract_version`` key.  The twelfth descriptor's
+# b1-real-source-binding/v1 pair is a different, unchanged binding contract
+# and stays exactly as pinned above.
+_B1_CANONICAL_SOURCE_CONTRACT_VERSION = "b1-canonical-source-v1"
+
 # The B1-real receipt key set (Packet 7.5.3: the sixteen b1_source keys with
-# their semantics preserved plus the seven real-binding keys).
+# their semantics preserved plus the seven real-binding keys, plus the
+# IP-0042 V2 family version key -- 7.2.2 / 8.1 S1).
 _B1_REAL_RECEIPT_KEYS = frozenset(
     {
         # -- the b1_source sixteen (semantics preserved) --
@@ -292,6 +303,8 @@ _B1_REAL_RECEIPT_KEYS = frozenset(
         "attempt_document_name",
         "suite_run_name",
         "ledger_sha256",
+        # -- the IP-0042 V2 family version key (Packet 7.2.2 / 8.1 S1) --
+        "canonical_source_contract_version",
     }
 )
 _B1_REAL_MANIFEST_KEYS = frozenset(
@@ -326,6 +339,8 @@ _B1_REAL_MANIFEST_KEYS = frozenset(
         "companion_bytes_total",
         "transport_face",
         "declarations",
+        # -- the IP-0042 V2 family version key (Packet 7.2.2 / 8.1 S1) --
+        "canonical_source_contract_version",
     }
 )
 _SCANNER_PHASE_FACE = {
@@ -1185,6 +1200,19 @@ class TestB1RealSourceBinding(_B1RealTestCase):
             self.assertEqual(
                 manifest["source_contract_version"], _B1_REAL_SOURCE_CONTRACT_VERSION
             )
+            # IP-0042 (Packet 8.1 S2): the V2 family version key is in the
+            # closed set and carries the canonical source contract version
+            # on the manifest and on every receipt (each receipt is
+            # self-describing, single-artifact family-decidable).
+            self.assertEqual(
+                manifest["canonical_source_contract_version"],
+                _B1_CANONICAL_SOURCE_CONTRACT_VERSION,
+            )
+            for receipt in receipts:
+                self.assertEqual(
+                    receipt["canonical_source_contract_version"],
+                    _B1_CANONICAL_SOURCE_CONTRACT_VERSION,
+                )
             # The companion family is exactly the five receipts plus the
             # manifest, never colliding with any frozen family.
             names = {path.name for path in output.iterdir()}
@@ -1216,11 +1244,22 @@ class TestB1RealDigestCross(_B1RealTestCase):
             output = pathlib.Path(temporary) / "run"
             output.mkdir()
             result = self.run_twin(output)
-            # The independent re-scan of the persisted snapshot recomputes
-            # the frozen scanner wire fingerprint (the same rule the report
-            # projection applies -- PC3 through the frozen module).
+            # The independent re-scan of the persisted snapshot is projected
+            # onto the canonical payload first -- the fixture-key label
+            # replaces the materialization-path repository and workspace
+            # root -- and only then fingerprinted (IP-0042 Packet 8.1 S3;
+            # the scanner_wire_digest mirror style).  The digest chain below
+            # binds the canonical value.
             persisted_scan = self.direct_scan(output / "_materialized" / "snapshot")
-            scanner_digest = self.b1_source()._wire_fingerprint(persisted_scan)
+            canonical_payload = self.b1_source()._canonical_payload(
+                persisted_scan, _B1_REAL_FIXTURE_KEY
+            )
+            scanner_digest = self.b1_source()._wire_fingerprint(canonical_payload)
+            # The independent counter-example: the raw-path fingerprint of
+            # the very same scan is a different value, proving the
+            # projection is real (never a no-op "fake canonical" alias).
+            raw_digest = self.b1_source()._wire_fingerprint(persisted_scan)
+            self.assertNotEqual(raw_digest, scanner_digest)
             report = self.report_of(result)
             self.assertEqual(report["sources"][0]["payload_sha256"], scanner_digest)
             receipts = self.companion_receipts(output)
@@ -1336,6 +1375,619 @@ class TestB1RealDigestCross(_B1RealTestCase):
                     path.write_bytes(payload)
             # The restored directory verifies again (fail-closed is pure).
             module.verify_b1_real_evidence(output)
+
+
+class TestB1RealCanonicalWiring(_B1RealTestCase):
+    """IP-0042 N-cluster (Packet 8.3): the canonical source wiring faces.
+
+    N-A the canonical equivalence faces (two distinct empty roots through
+    the formal entry with the fake transport; the same equality across
+    subprocesses under two different PYTHONHASHSEED values; the independent
+    transcription of the b1-canonical-source-v1 rule; the cross-entry
+    anchor against the frozen b1_source offline suite plus the b1_source
+    zero-change anchor).  N-B the artifact version families (the
+    synthesized V1 legacy family verifies under the legacy raw rules and a
+    mislabeled raw tree is refused on the digest face; V2 version
+    mismatch/unknown values and receipts-vs-manifest inconsistency or mixed
+    key sets fail closed).  N-C the tamper and label faces.  N-D the E3
+    single-storage canonical anchor.  Everything here stays offline and
+    hermetic: tempfile roots only, the injected fake transport, and the
+    test-side transcription below never calls the product projection
+    functions (Packet 7.4 -- no product-function-and-alias self-proof).
+    """
+
+    # -- the shared helpers (N-cluster only; Packet 7.4 / 8.3) -------------
+
+    def canonical_wire_digest(self, scan_result, label):
+        """The independent ``b1-canonical-source-v1`` transcription.
+
+        The wire document is built here from the scan result's own dict
+        faces -- never through the product projection functions -- with the
+        two label fields replaced, then encoded as sorted-key compact
+        UTF-8 JSON and hashed with SHA-256: exactly the frozen rule the
+        report projection and the receipt digest chain bind to.
+        """
+        wire = {
+            **scan_result.report.to_dict(),
+            "workspace": scan_result.inventory.to_dict(),
+        }
+        wire["repository"] = label
+        wire["workspace"] = {**wire["workspace"], "root": label}
+        encoded = json.dumps(
+            wire,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def write_json(self, path, document):
+        pathlib.Path(path).write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def rewrite_family_tree(self, output, *, version, scanner_digest):
+        """Rewrite one twin tree onto an artifact family (hermetic N-cluster).
+
+        ``version=None`` strips the canonical version key everywhere (the
+        V1 legacy family: the closed 30/23 key sets of the round-8 sealed
+        shape); a string sets it on the manifest and every receipt (the V2
+        family key shape).  ``scanner_digest`` rewrites the scanner digest
+        chain (receipts, manifest, report sources) and the receipts
+        aggregate is recomputed, so the synthesized tree is internally
+        consistent for the family it carries.
+        """
+        manifest_path = output / "b1-real-manifest.json"
+        manifest = self.read_json(manifest_path)
+        receipts = []
+        for index in range(manifest["attempt_count"]):
+            path = output / "b1-real-attempts" / f"b1-real-attempt-{index:02d}.json"
+            receipt = self.read_json(path)
+            receipt["scanner_payload_sha256"] = scanner_digest
+            if version is None:
+                receipt.pop("canonical_source_contract_version", None)
+            else:
+                receipt["canonical_source_contract_version"] = version
+            self.write_json(path, receipt)
+            receipts.append(receipt)
+        manifest["source_receipts"] = receipts
+        manifest["source_receipts_digest"] = self.content_digest(receipts)
+        manifest["scanner_payload_sha256"] = scanner_digest
+        if version is None:
+            manifest.pop("canonical_source_contract_version", None)
+        else:
+            manifest["canonical_source_contract_version"] = version
+        self.write_json(manifest_path, manifest)
+        report_path = output / f"{manifest['run_spec_digest'][:16]}-report-1.json"
+        report = self.read_json(report_path)
+        report["sources"][0]["payload_sha256"] = scanner_digest
+        self.write_json(report_path, report)
+        return manifest
+
+    # -- N-A: the canonical equivalence faces -------------------------------
+
+    def test_b1_real_canonical_two_root_equivalence(self):
+        # N-A1 (Packet 8.3): two distinct empty roots through the formal
+        # entry -- the canonical source digest and identity faces are equal
+        # while the raw wire fingerprints genuinely differ.
+        self.b1_real()
+        b1_source = self.b1_source()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            roots = []
+            for name in ("root-a", "root-b"):
+                root = base / name / "run"
+                root.parent.mkdir()
+                root.mkdir()
+                roots.append(root)
+            self.run_twin(roots[0])
+            self.run_twin(roots[1])
+            manifests = [self.companion_manifest(root) for root in roots]
+            # The canonical source digest is path independent (R3.3 row
+            # one): same fixture/config/seed across roots means equal.
+            self.assertEqual(
+                manifests[0]["scanner_payload_sha256"],
+                manifests[1]["scanner_payload_sha256"],
+            )
+            for field in (
+                "fixture_key",
+                "workload",
+                "analyzer_name",
+                "analyzer_fingerprint",
+                "scanner_config_sha256",
+                "snapshot_tree_sha256",
+                "seed",
+            ):
+                self.assertEqual(manifests[0][field], manifests[1][field], field)
+            # The raw wire fingerprints genuinely differ across the two
+            # materialization paths, and the artifact digest is not the raw
+            # one (RED while the three wiring points store raw results).
+            raw_digests = [
+                b1_source._wire_fingerprint(
+                    self.direct_scan(root / "_materialized" / "snapshot")
+                )
+                for root in roots
+            ]
+            self.assertNotEqual(raw_digests[0], raw_digests[1])
+            self.assertNotEqual(
+                raw_digests[0], manifests[0]["scanner_payload_sha256"]
+            )
+            # The per-run execution/context identity samples stay
+            # independently carried (R3.3 rows two and three -- not
+            # required equal, never merged or weakened by canonicalization).
+            for manifest in manifests:
+                self.assertRegex(manifest["run_spec_digest"], _HEX64_PATTERN)
+                self.assertRegex(manifest["approval_sha256"], _HEX64_PATTERN)
+            for root in roots:
+                for receipt in self.companion_receipts(root):
+                    self.assertRegex(receipt["run_spec_digest"], _HEX64_PATTERN)
+                    self.assertRegex(receipt["ledger_sha256"], _HEX64_PATTERN)
+
+    def test_b1_real_canonical_cross_process_and_hash_seeds(self):
+        # N-A2 (Packet 8.3): the same canonical equality holds in fresh
+        # subprocesses under two different PYTHONHASHSEED values (the
+        # encoding is sorted-key JSON, so no hash-order dependence may
+        # survive).
+        self.b1_real()
+        driver = (
+            "import json, pathlib, sys\n"
+            "repo, root = sys.argv[1], sys.argv[2]\n"
+            "sys.path.insert(0, repo)\n"
+            "from tests.test_v4_baseline_b1_real import TestB1RealCanonicalWiring\n"
+            "case = TestB1RealCanonicalWiring(\n"
+            "    'test_b1_real_canonical_two_root_equivalence')\n"
+            "case.run_twin(pathlib.Path(root))\n"
+            "manifest = json.loads(\n"
+            "    (pathlib.Path(root) / 'b1-real-manifest.json')\n"
+            "    .read_text(encoding='utf-8'))\n"
+            "print(manifest['scanner_payload_sha256'])\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            parent_root = base / "parent" / "run"
+            parent_root.parent.mkdir()
+            parent_root.mkdir()
+            self.run_twin(parent_root)
+            parent_digest = self.companion_manifest(parent_root)[
+                "scanner_payload_sha256"
+            ]
+            digests = [parent_digest]
+            for seed in ("1", "424242"):
+                child_root = base / f"child-{seed}" / "run"
+                child_root.parent.mkdir()
+                child_root.mkdir()
+                completed = subprocess.run(  # noqa: S603 - frozen in-repo interpreter and driver string
+                    [sys.executable, "-c", driver, str(_REPO_ROOT), str(child_root)],
+                    env={"PYTHONHASHSEED": seed},
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    check=True,
+                )
+                digests.append(completed.stdout.strip().splitlines()[-1])
+            self.assertEqual(digests[0], digests[1])
+            self.assertEqual(digests[1], digests[2])
+
+    def test_b1_real_canonical_independent_transcription_cross_check(self):
+        # N-A3 (Packet 8.3 / 7.4): the test-side transcription reproduces
+        # the product canonical rule over the same scan and label, differs
+        # from the raw fingerprint, and equals the whole artifact chain.
+        self.b1_real()
+        b1_source = self.b1_source()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            result = self.run_twin(output)
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            transcribed = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            raw_digest = b1_source._wire_fingerprint(scan)
+            # The transcription is genuinely canonical, not an alias that
+            # happens to reproduce the raw bytes, and it agrees with the
+            # product's frozen rule over the same inputs.
+            self.assertNotEqual(transcribed, raw_digest)
+            self.assertEqual(
+                transcribed,
+                b1_source._wire_fingerprint(
+                    b1_source._canonical_payload(scan, _B1_REAL_FIXTURE_KEY)
+                ),
+            )
+            report = self.report_of(result)
+            self.assertEqual(report["sources"][0]["payload_sha256"], transcribed)
+            manifest = self.companion_manifest(output)
+            self.assertEqual(manifest["scanner_payload_sha256"], transcribed)
+            for receipt in self.companion_receipts(output):
+                self.assertEqual(receipt["scanner_payload_sha256"], transcribed)
+
+    def test_b1_real_cross_entry_canonical_equivalence_anchor(self):
+        # N-A4 (Packet 8.3, realized per DR-IP-0042-C2 option A): the two
+        # entries materialize the same fixture under different frozen
+        # layouts (the offline suite materializes directly; the real chain
+        # nests the fixture under the "lima-synth-real-pilot/signal-storm"
+        # tarball top of the frozen _materialize derivation), so the
+        # canonical anchor is the same-rule equality on each entry's own
+        # layout plus an independently rebuilt same-layout tree
+        # reproducing the real entry's canonical digest -- the achievable
+        # form of "same fixture + same scan configuration + same layout
+        # => same canonical wire" (machine-independent replay of the real
+        # entry's source identity from the fixture alone).
+        b1_source = self.b1_source()
+        self.b1_real()
+        real_run = self.real_run()
+        from benchmarks.v4.baseline.fixtures import materialize_fixture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            offline_root = base / "offline"
+            offline_root.mkdir()
+            b1_source.run_b1_source_baseline_suite(
+                output_dir=offline_root,
+                machine_profile=dict(_NOMINAL_MACHINE_PROFILE),
+                fixture_key=_B1_REAL_FIXTURE_KEY,
+                seed=0,
+                cold_count=1,
+                warm_count=1,
+            )
+            offline_digest = self.read_json(offline_root / "b1-manifest.json")[
+                "scanner_payload_sha256"
+            ]
+            # Zero-change anchor: the offline entry already carries the
+            # canonical digest, and the independent transcription over an
+            # independently materialized signal-storm tree reproduces it
+            # (b1_source is untouched by this slice).
+            direct_root = base / "direct"
+            direct_root.mkdir()
+            materialize_fixture(_B1_REAL_FIXTURE_KEY, direct_root)
+            self.assertEqual(
+                offline_digest,
+                self.canonical_wire_digest(
+                    self.direct_scan(direct_root), _B1_REAL_FIXTURE_KEY
+                ),
+            )
+            descriptor = real_run.REAL_RUN_ARTIFACT_FAMILY[_B1_REAL_KEY]
+            self.assertEqual(
+                descriptor["scanner_config_sha256"],
+                self.content_digest(self.expected_scanner_config_document()),
+            )
+            # The cross-entry anchor (RED while the real entry stores raw):
+            # the real entry's canonical artifact digest equals the
+            # canonical transcription over an independently rebuilt
+            # same-layout tree -- the frozen _materialize top naming over
+            # the same fixture bytes, no real chain involved.
+            run_root = base / "run"
+            run_root.mkdir()
+            self.run_twin(run_root)
+            manifest = self.companion_manifest(run_root)
+            nested_root = base / "nested"
+            nested_top = nested_root / ("lima-synth-" + _B1_REAL_KEY)
+            nested_top.mkdir(parents=True)
+            materialize_fixture(_B1_REAL_FIXTURE_KEY, nested_top)
+            self.assertEqual(
+                manifest["scanner_payload_sha256"],
+                self.canonical_wire_digest(
+                    self.direct_scan(nested_root), _B1_REAL_FIXTURE_KEY
+                ),
+            )
+
+    # -- N-B: the artifact version families ----------------------------------
+
+    def test_b1_real_v1_family_verified_under_legacy_raw_rules(self):
+        # N-B1 (Packet 8.3): the synthesized V1 legacy family (the closed
+        # 30/23 key sets with the raw-path digest chain -- the round-8
+        # sealed shape) verifies under the legacy raw rules, and a raw tree
+        # mislabeled with the V2 key shape is refused on the digest face:
+        # the new rules are never silently applied to a raw-chain tree.
+        module = self.b1_real()
+        b1_source = self.b1_source()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            self.run_twin(output)
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            raw_digest = b1_source._wire_fingerprint(scan)
+            manifest = self.rewrite_family_tree(
+                output, version=None, scanner_digest=raw_digest
+            )
+            self.assertNotIn("canonical_source_contract_version", manifest)
+            self.assertEqual(len(manifest), 30)
+            receipts = self.companion_receipts(output)
+            for receipt in receipts:
+                self.assertNotIn("canonical_source_contract_version", receipt)
+                self.assertEqual(len(receipt), 23)
+            # The legacy family verifies under the legacy raw rules.
+            module.verify_b1_real_evidence(output)
+            # The mislabel probe: the V2 key shape over the raw digest
+            # chain must fail closed on the digest face with the typed
+            # digest-mismatch code (never a silent pass, never a
+            # family-branch fallback that "tries the other algorithm").
+            self.rewrite_family_tree(
+                output,
+                version=_B1_CANONICAL_SOURCE_CONTRACT_VERSION,
+                scanner_digest=raw_digest,
+            )
+            with self.assertRaises(module.B1RealError) as caught:
+                module.verify_b1_real_evidence(output)
+            self.assertEqual(
+                caught.exception.code,
+                module.B1RealErrorCode.B1_REAL_SCANNER_DIGEST_MISMATCH,
+            )
+            self.assertTrue(
+                "scanner_payload_sha256" in caught.exception.field_path
+                or "sources" in caught.exception.field_path
+            )
+
+    def test_b1_real_v2_version_mismatch_unknown_fail_closed(self):
+        # N-B2 (Packet 8.3): a V2-shaped tree whose canonical version value
+        # is wrong or unknown fails closed at the version field, not at the
+        # manifest closed set.
+        module = self.b1_real()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            self.run_twin(output)
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            canonical = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            for wrong in ("b1-canonical-source-v0", "b1-canonical-source-v2", "v1"):
+                with self.subTest(version=wrong):
+                    manifest = self.rewrite_family_tree(
+                        output, version=wrong, scanner_digest=canonical
+                    )
+                    self.assertEqual(
+                        manifest["canonical_source_contract_version"], wrong
+                    )
+                    with self.assertRaises(module.B1RealError) as caught:
+                        module.verify_b1_real_evidence(output)
+                    self.assertEqual(
+                        caught.exception.code,
+                        module.B1RealErrorCode.B1_REAL_RECEIPT_INVALID,
+                    )
+                    self.assertIn(
+                        "canonical_source_contract_version",
+                        caught.exception.field_path,
+                    )
+
+    def test_b1_real_version_inconsistency_and_mixed_keyset_fail_closed(self):
+        # N-B3 (Packet 8.3): receipts-vs-manifest version inconsistency and
+        # mixed key sets fail closed with the typed family at the precise
+        # face (Packet 7.2.4 mapping).
+        module = self.b1_real()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            self.run_twin(output)
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            canonical = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            manifest_path = output / "b1-real-manifest.json"
+            # (a) One receipt carries a different version value than the
+            # manifest: the receipt-level version face is refused.
+            manifest = self.rewrite_family_tree(
+                output,
+                version=_B1_CANONICAL_SOURCE_CONTRACT_VERSION,
+                scanner_digest=canonical,
+            )
+            receipt_path = output / "b1-real-attempts" / "b1-real-attempt-02.json"
+            receipt = self.read_json(receipt_path)
+            receipt["canonical_source_contract_version"] = "b1-canonical-source-v2"
+            self.write_json(receipt_path, receipt)
+            manifest["source_receipts"][2]["canonical_source_contract_version"] = (
+                "b1-canonical-source-v2"
+            )
+            manifest["source_receipts_digest"] = self.content_digest(
+                manifest["source_receipts"]
+            )
+            self.write_json(manifest_path, manifest)
+            with self.assertRaises(module.B1RealError) as caught:
+                module.verify_b1_real_evidence(output)
+            self.assertEqual(
+                caught.exception.code,
+                module.B1RealErrorCode.B1_REAL_RECEIPT_INVALID,
+            )
+            self.assertIn(
+                "canonical_source_contract_version", caught.exception.field_path
+            )
+            # (b) A mixed key set: one receipt drops the version key under a
+            # V2 manifest -- the receipt closed set is violated.
+            manifest = self.rewrite_family_tree(
+                output,
+                version=_B1_CANONICAL_SOURCE_CONTRACT_VERSION,
+                scanner_digest=canonical,
+            )
+            receipt_path = output / "b1-real-attempts" / "b1-real-attempt-01.json"
+            receipt = self.read_json(receipt_path)
+            receipt.pop("canonical_source_contract_version")
+            self.write_json(receipt_path, receipt)
+            manifest["source_receipts"][1].pop("canonical_source_contract_version")
+            manifest["source_receipts_digest"] = self.content_digest(
+                manifest["source_receipts"]
+            )
+            self.write_json(manifest_path, manifest)
+            with self.assertRaises(module.B1RealError) as caught:
+                module.verify_b1_real_evidence(output)
+            self.assertEqual(
+                caught.exception.code,
+                module.B1RealErrorCode.B1_REAL_RECEIPT_INVALID,
+            )
+            # The receipt's closed-set face (the frozen _validate_receipt
+            # path convention for one receipt's key set).
+            self.assertTrue(
+                caught.exception.field_path.startswith("$.source_receipts")
+            )
+
+    # -- N-C: the tamper and label faces --------------------------------------
+
+    def test_b1_real_canonical_digest_tamper_fail_closed(self):
+        # N-C1 (Packet 8.3): a consistent V2 tree verifies; a tampered
+        # canonical digest in one receipt fails closed with the digest
+        # mismatch code at the tampered face.
+        module = self.b1_real()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            self.run_twin(output)
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            canonical = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            self.rewrite_family_tree(
+                output,
+                version=_B1_CANONICAL_SOURCE_CONTRACT_VERSION,
+                scanner_digest=canonical,
+            )
+            try:
+                module.verify_b1_real_evidence(output)
+            except module.B1RealError as refusal:
+                # RED while the product carries no V2 family branch: the
+                # refusal names the face (the closed set / the version
+                # check), never an arrange defect.
+                self.fail(
+                    "the synthesized V2 family tree was refused before the "
+                    f"tamper face: {refusal.code} {refusal.field_path}"
+                )
+            receipt_path = output / "b1-real-attempts" / "b1-real-attempt-01.json"
+            receipt = self.read_json(receipt_path)
+            receipt["scanner_payload_sha256"] = "f" * 64
+            self.write_json(receipt_path, receipt)
+            manifest = self.companion_manifest(output)
+            manifest["source_receipts"][1]["scanner_payload_sha256"] = "f" * 64
+            manifest["source_receipts_digest"] = self.content_digest(
+                manifest["source_receipts"]
+            )
+            self.write_json(output / "b1-real-manifest.json", manifest)
+            with self.assertRaises(module.B1RealError) as caught:
+                module.verify_b1_real_evidence(output)
+            self.assertEqual(
+                caught.exception.code,
+                module.B1RealErrorCode.B1_REAL_SCANNER_DIGEST_MISMATCH,
+            )
+            self.assertIn(
+                "scanner_payload_sha256", caught.exception.field_path
+            )
+
+    def test_b1_real_label_replacement_no_collision(self):
+        # N-C2 (Packet 8.3 / R3.4, artifact face per DR-IP-0042-C2 option
+        # A): the real entry's artifact digest equals the label-derived
+        # canonical transcription over its own persisted snapshot, and
+        # label replacement never collides as a rule property -- same
+        # content with a different label, or the same label over different
+        # content, are different digests.
+        self.b1_real()
+        from benchmarks.v4.baseline.fixtures import materialize_fixture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            storm_root = base / "signal-storm"
+            storm_root.mkdir()
+            materialize_fixture(_B1_REAL_FIXTURE_KEY, storm_root)
+            scan = self.direct_scan(storm_root)
+            label_digest = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            other_label_digest = self.canonical_wire_digest(
+                scan, "archetype/malicious-layout"
+            )
+            self.assertNotEqual(label_digest, other_label_digest)
+            other_root = base / "minimal"
+            other_root.mkdir()
+            materialize_fixture("archetype/minimal-python-repository", other_root)
+            other_content_digest = self.canonical_wire_digest(
+                self.direct_scan(other_root), _B1_REAL_FIXTURE_KEY
+            )
+            self.assertNotEqual(label_digest, other_content_digest)
+            run_root = base / "run"
+            run_root.mkdir()
+            self.run_twin(run_root)
+            manifest = self.companion_manifest(run_root)
+            snapshot_digest = self.canonical_wire_digest(
+                self.direct_scan(run_root / "_materialized" / "snapshot"),
+                _B1_REAL_FIXTURE_KEY,
+            )
+            self.assertEqual(manifest["scanner_payload_sha256"], snapshot_digest)
+
+    def test_b1_real_report_payload_label_and_no_absolute_path(self):
+        # N-C3 (Packet 8.3): the report's scanner source digest is the
+        # label-derived canonical projection (repository and workspace.root
+        # carry the fixture key inside the hashed wire -- the persisted
+        # report document carries no repository field of its own, so the
+        # digest equality is the observable face of repository == label),
+        # no absolute materialization path leaks into the report bytes, and
+        # the old key's payload stays the frozen real-world v2 dict.
+        self.b1_real()
+        real_run = self.real_run()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            result = self.run_twin(output)
+            report_text = pathlib.Path(result.report_path).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(str(temporary), report_text)
+            self.assertNotIn(str(output), report_text)
+            report = self.report_of(result)
+            self.assertEqual(
+                [source["kind"] for source in report["sources"]], ["scanner"]
+            )
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            canonical = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            self.assertEqual(report["sources"][0]["payload_sha256"], canonical)
+            # The old-key guard face: the eleventh key keeps the frozen
+            # real-world payload and writes no companion artifacts.
+            pilot_output = pathlib.Path(temporary) / "pilot"
+            pilot_output.mkdir()
+            pilot = real_run.REAL_RUN_ARTIFACT_FAMILY[_REAL_PILOT_KEY]
+
+            def pilot_bound(document):
+                self.apply_synthetic_upstream(document, _REAL_PILOT_FIXTURE_KEY)
+                document["approval_type"] = pilot["approval_type"]
+                document["run_name"] = pilot["run_name"]
+                document["date"] = pilot["date_pin"]
+                document["pricing"]["retrieval_date"] = pilot["retrieval_date_pin"]
+
+            artifact = self.write_b1_real_artifact(
+                pilot_output, mutate=pilot_bound
+            )
+            pilot_result = real_run.run_real_baseline_suite(
+                artifact,
+                _FAKE_KEY,
+                output_root=pilot_output,
+                spec_mapping=self.spec_mapping(),
+                transport=_FakeTransport(),
+                sources=self.fixed_sources(),
+                artifact_key=_REAL_PILOT_KEY,
+            )
+            pilot_report = self.report_of(pilot_result)
+            self.assertEqual(
+                [source["kind"] for source in pilot_report["sources"]],
+                ["real-world"],
+            )
+            self.assertFalse((pilot_output / "b1-real-manifest.json").is_file())
+
+    # -- N-D: the E3 single-storage anchor ------------------------------------
+
+    def test_b1_real_e3_single_storage_canonical_face(self):
+        # N-D1 (Packet 8.3): on top of the frozen scanner-once face the
+        # single stored scan result is the canonical projection, carried by
+        # one closed V2 key set with one digest value across the report,
+        # the manifest and every receipt.
+        self.b1_real()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            result = self.run_twin(output)
+            manifest = self.companion_manifest(output)
+            receipts = self.companion_receipts(output)
+            self.assertEqual(manifest["scanner_executions"], 1)
+            self.assertTrue(receipts[0]["scanner_reexecuted"])
+            self.assertFalse(receipts[0]["scanner_result_reused"])
+            for receipt in receipts[1:]:
+                self.assertFalse(receipt["scanner_reexecuted"])
+                self.assertTrue(receipt["scanner_result_reused"])
+            self.assertEqual(set(manifest), _B1_REAL_MANIFEST_KEYS)
+            for receipt in receipts:
+                self.assertEqual(set(receipt), _B1_REAL_RECEIPT_KEYS)
+            scan = self.direct_scan(output / "_materialized" / "snapshot")
+            canonical = self.canonical_wire_digest(scan, _B1_REAL_FIXTURE_KEY)
+            report = self.report_of(result)
+            self.assertEqual(len(report["sources"]), 1)
+            self.assertEqual(report["sources"][0]["payload_sha256"], canonical)
+            self.assertEqual(manifest["scanner_payload_sha256"], canonical)
+            for receipt in receipts:
+                self.assertEqual(receipt["scanner_payload_sha256"], canonical)
 
 
 class TestB1RealNegatives(_B1RealTestCase):

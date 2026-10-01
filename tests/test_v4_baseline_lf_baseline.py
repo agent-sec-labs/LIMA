@@ -999,5 +999,303 @@ class TestLFFullChain(_LFBaselineTestCase):
             self.assertEqual(report["run_spec_digest"], result.run_spec_digest)
 
 
+class TestLFLinkMemberSkip(_LFBaselineTestCase):
+    """DR-IP-0043-CFINAL Option A: link members skip, everything else not.
+
+    The sealed archive carries a symbolic link member, so the amended
+    materialization rule (2026-10-01 ruling) deterministically skips link
+    members (symbolic and hard links): they never enter the materialized
+    tree or its fingerprint, mirroring the ``real_world_evaluation`` omit
+    precedent and the authoritative 09-28 sealed inventory.  Every other
+    abnormal member type keeps the whole-archive rejection, and the skip
+    must not disturb the canonical projection, the aggregation or the
+    per-attempt receipt faces of a minimal chain.
+    """
+
+    def test_lf_link_members_skipped_deterministically(self):
+        module = self.lf()
+        tree = dict(_SYNTHETIC_TREE)
+        tree[".ai/CLAUDE.md"] = "# SYNTHETIC inert agent notes\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary)
+            authority = _write_tree(parent / "authority", tree)
+            expected = _tree_sha256(authority)
+
+            def member(name, **attributes):
+                info = tarfile.TarInfo(f"{_ARCHIVE_TOP}/{name}")
+                info.mtime = 0
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                for field, value in attributes.items():
+                    setattr(info, field, value)
+                return info
+
+            def link_archive(directory):
+                archive = pathlib.Path(directory) / "lf-source.tar.gz"
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(archive, "w:gz") as bundle:
+                    for name in (".ai", "src", "src/llamafactory"):
+                        bundle.addfile(
+                            member(name, type=tarfile.DIRTYPE, mode=0o755)
+                        )
+                    for name in sorted(tree):
+                        payload = tree[name].encode("utf-8")
+                        bundle.addfile(
+                            member(name, size=len(payload), mode=0o644),
+                            io.BytesIO(payload),
+                        )
+                    bundle.addfile(
+                        member(
+                            "CLAUDE.md",
+                            type=tarfile.SYMTYPE,
+                            mode=0o644,
+                            linkname=".ai/CLAUDE.md",
+                        )
+                    )
+                    bundle.addfile(
+                        member(
+                            "NOTES.md",
+                            type=tarfile.LNKTYPE,
+                            mode=0o644,
+                            linkname=f"{_ARCHIVE_TOP}/README.md",
+                        )
+                    )
+                return archive
+
+            archive = link_archive(parent / "with-links")
+            # Arrange guard: the synthetic sealed archive truly carries one
+            # symbolic and one hard link member (the DR-IP-0043-CFINAL
+            # failure faces), so a skip cannot pass vacuously.
+            with tarfile.open(archive, "r:gz") as bundle:
+                members = {item.name: item for item in bundle}
+            self.assertTrue(members[f"{_ARCHIVE_TOP}/CLAUDE.md"].issym())
+            self.assertTrue(members[f"{_ARCHIVE_TOP}/NOTES.md"].islnk())
+            # Two fresh materializations deterministically skip both link
+            # members: the link names never enter the tree under any shape.
+            fingerprints = []
+            for index in range(2):
+                target = parent / f"materialized-{index}"
+                self.assertIs(
+                    module._materialize_snapshot(archive, target), target
+                )
+                self.assertFalse((target / "CLAUDE.md").exists())
+                self.assertFalse((target / "NOTES.md").exists())
+                self.assertFalse(
+                    any(item.is_symlink() for item in target.rglob("*"))
+                )
+                self.assertEqual(
+                    {
+                        item.relative_to(target).as_posix()
+                        for item in target.rglob("*")
+                        if item.is_file()
+                    },
+                    set(tree),
+                )
+                fingerprints.append(_tree_sha256(target))
+            self.assertEqual(fingerprints[0], fingerprints[1])
+            # ... so the tree is exactly the one from the same-content
+            # archive sealed without any link or directory member.
+            (parent / "plain").mkdir()
+            plain = _build_archive(parent / "plain", tree)
+            plain_target = parent / "plain-materialized"
+            module._materialize_snapshot(plain, plain_target)
+            self.assertEqual(fingerprints[0], _tree_sha256(plain_target))
+            self.assertEqual(fingerprints[0], expected)
+
+    def test_lf_other_abnormal_member_types_still_rejected(self):
+        module = self.lf()
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary)
+            for label, member_type in sorted(
+                {
+                    "fifo": tarfile.FIFOTYPE,
+                    "character-device": tarfile.CHRTYPE,
+                    "block-device": tarfile.BLKTYPE,
+                }.items()
+            ):
+                with self.subTest(face=label):
+                    archive = parent / f"abnormal-{label}" / "lf-source.tar.gz"
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    with tarfile.open(archive, "w:gz") as bundle:
+                        for name in sorted(_SYNTHETIC_TREE):
+                            payload = _SYNTHETIC_TREE[name].encode("utf-8")
+                            info = tarfile.TarInfo(f"{_ARCHIVE_TOP}/{name}")
+                            info.size = len(payload)
+                            info.mtime = 0
+                            info.mode = 0o644
+                            info.uid = 0
+                            info.gid = 0
+                            info.uname = ""
+                            info.gname = ""
+                            bundle.addfile(info, io.BytesIO(payload))
+                        oddity = tarfile.TarInfo(f"{_ARCHIVE_TOP}/dev-{label}")
+                        oddity.type = member_type
+                        oddity.size = 0
+                        oddity.mtime = 0
+                        oddity.mode = 0o600
+                        oddity.uid = 0
+                        oddity.gid = 0
+                        oddity.uname = ""
+                        oddity.gname = ""
+                        if member_type in (tarfile.CHRTYPE, tarfile.BLKTYPE):
+                            oddity.devmajor = 1
+                            oddity.devminor = 3
+                        bundle.addfile(oddity)
+                    # Arrange guard: the abnormal member is really in the
+                    # archive and is really of the abnormal type.
+                    with tarfile.open(archive, "r:gz") as bundle:
+                        members = {item.name: item for item in bundle}
+                    odd_member = members[f"{_ARCHIVE_TOP}/dev-{label}"]
+                    self.assertFalse(odd_member.isfile())
+                    self.assertFalse(odd_member.isdir())
+                    self.assertFalse(odd_member.issym())
+                    self.assertFalse(odd_member.islnk())
+                    # Option A boundary: only link members are skipped; any
+                    # other abnormal type still rejects the whole archive.
+                    target = parent / f"materialized-{label}"
+                    with self.assertRaises(ValueError) as caught:
+                        module._materialize_snapshot(archive, target)
+                    self.assertIn(
+                        "neither a regular file nor a directory",
+                        str(caught.exception),
+                    )
+
+    def test_lf_link_skip_preserves_aggregation_and_canonical_faces(self):
+        module = self.lf()
+        tree = dict(_SYNTHETIC_TREE)
+        tree[".ai/CLAUDE.md"] = "# SYNTHETIC inert agent notes\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary)
+            authority = _write_tree(parent / "authority", tree)
+
+            def link_archive(directory):
+                archive = pathlib.Path(directory) / "lf-source.tar.gz"
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(archive, "w:gz") as bundle:
+                    for name in sorted(tree):
+                        payload = tree[name].encode("utf-8")
+                        info = tarfile.TarInfo(f"{_ARCHIVE_TOP}/{name}")
+                        info.size = len(payload)
+                        info.mtime = 0
+                        info.mode = 0o644
+                        info.uid = 0
+                        info.gid = 0
+                        info.uname = ""
+                        info.gname = ""
+                        bundle.addfile(info, io.BytesIO(payload))
+                    for name, link_type, linkname in (
+                        ("CLAUDE.md", tarfile.SYMTYPE, ".ai/CLAUDE.md"),
+                        (
+                            "NOTES.md",
+                            tarfile.LNKTYPE,
+                            f"{_ARCHIVE_TOP}/README.md",
+                        ),
+                    ):
+                        info = tarfile.TarInfo(f"{_ARCHIVE_TOP}/{name}")
+                        info.type = link_type
+                        info.linkname = linkname
+                        info.mtime = 0
+                        info.mode = 0o644
+                        info.uid = 0
+                        info.gid = 0
+                        info.uname = ""
+                        info.gname = ""
+                        bundle.addfile(info)
+                return archive
+
+            faces = {}
+            (parent / "without-links").mkdir()
+            for label, archive in (
+                ("with-links", link_archive(parent / "with-links")),
+                ("without-links", _build_archive(parent / "without-links", tree)),
+            ):
+                output = parent / f"out-{label}"
+                output.mkdir()
+                faces[label] = (
+                    self.run_suite(
+                        output,
+                        archive,
+                        self.binding_for(archive, authority),
+                        cold_count=1,
+                        warm_count=1,
+                    ),
+                    output,
+                )
+            linked, linked_output = faces["with-links"]
+            plain, plain_output = faces["without-links"]
+            # The skip never disturbs the tree or the canonical projection:
+            # both stay pure functions of the no-link tree content, and the
+            # dual-source direct scan agrees with the suite's digest.
+            expected_digest = self.scanner_wire_digest(
+                self.direct_scan(authority), module.LF_CANONICAL_LABEL
+            )
+            self.assertEqual(
+                linked.snapshot_tree_sha256, plain.snapshot_tree_sha256
+            )
+            self.assertEqual(linked.snapshot_tree_sha256, _tree_sha256(authority))
+            self.assertEqual(
+                linked.scanner_payload_sha256, plain.scanner_payload_sha256
+            )
+            self.assertEqual(linked.scanner_payload_sha256, expected_digest)
+            # Aggregation: identical samples, status and percentile faces
+            # (1 cold + 1 warm honestly stays below the 3/5 floors).
+            self.assertEqual(linked.attempt_count, plain.attempt_count)
+            self.assertEqual(linked.attempt_count, 2)
+            self.assertEqual(linked.model_calls, plain.model_calls)
+            self.assertEqual(linked.status, plain.status)
+            self.assertEqual(linked.status, "insufficient_sample")
+            linked_aggregate = self.result_documents(linked_output)[-1][1]
+            plain_aggregate = self.result_documents(plain_output)[-1][1]
+            self.assertNotEqual(
+                linked_aggregate["run_spec_digest"],
+                plain_aggregate["run_spec_digest"],
+            )
+            for document in (linked_aggregate, plain_aggregate):
+                document.pop("run_spec_digest")
+            self.assertEqual(linked_aggregate, plain_aggregate)
+            # Receipts: every face except the two archive-byte identity
+            # faces is identical, and the cold/warm reuse semantics hold.
+            linked_receipts = self.receipts_of(linked_output)
+            plain_receipts = self.receipts_of(plain_output)
+            self.assertEqual(len(linked_receipts), len(plain_receipts))
+            for index in range(len(linked_receipts)):
+                linked_receipt = dict(linked_receipts[index])
+                plain_receipt = dict(plain_receipts[index])
+                self.assertEqual(set(linked_receipt), _LF_RECEIPT_KEYS)
+                for key in ("run_spec_digest", "archive_sha256"):
+                    self.assertNotEqual(
+                        linked_receipt.pop(key), plain_receipt.pop(key)
+                    )
+                self.assertEqual(linked_receipt, plain_receipt)
+            self.assertTrue(linked_receipts[0]["scanner_reexecuted"])
+            self.assertFalse(linked_receipts[0]["snapshot_reused"])
+            self.assertEqual(linked_receipts[0]["materializations"], 1)
+            self.assertFalse(linked_receipts[1]["scanner_reexecuted"])
+            self.assertTrue(linked_receipts[1]["scanner_result_reused"])
+            self.assertTrue(linked_receipts[1]["snapshot_reused"])
+            self.assertEqual(linked_receipts[1]["materializations"], 1)
+            # The identity faces carrying the archive bytes are the only
+            # differing faces; both reports project the same scanner payload
+            # digest under the stable external label.
+            self.assertNotEqual(linked.run_spec_digest, plain.run_spec_digest)
+            self.assertNotEqual(linked.archive_sha256, plain.archive_sha256)
+            for label, result in (
+                ("with-links", linked),
+                ("without-links", plain),
+            ):
+                with self.subTest(face=label):
+                    report = self.read_json(result.report_path)
+                    self.assertEqual(
+                        [source["kind"] for source in report["sources"]],
+                        ["scanner"],
+                    )
+                    self.assertEqual(
+                        report["sources"][0]["payload_sha256"],
+                        linked.scanner_payload_sha256,
+                    )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

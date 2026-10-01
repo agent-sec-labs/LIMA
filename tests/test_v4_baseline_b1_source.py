@@ -227,6 +227,9 @@ _ARTIFACT_FAMILY_KEYS = frozenset(
         "archetype/dependency-blocked",
         "external/llamafactory-replay",
         "real-pilot/large-repo",
+        # IP-0041 v11 (R2/S7): the twelfth key -- the B1 real-entry
+        # descriptor (closed catalog, addition only).
+        "real-pilot/signal-storm",
     }
 )
 _OFFLINE_FLOW_ALL = (

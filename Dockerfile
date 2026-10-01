@@ -71,12 +71,16 @@ COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0039_Real_Pilot_Descri
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0040_B1_Source_Wiring.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0041_B1_Real_Entry.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0042_B1_Canonical_Wiring.md ./docs/
+COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0043_LF_Local_Baseline.md ./docs/
+COPY --chown=lima:lima docs/LIMA_IP0043_Coverage_Account_and_Dependency_Correction.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0020_Vault_Audit.md ./docs/
 COPY --chown=lima:lima docs/adr ./docs/adr
 COPY --chown=lima:lima schemas ./schemas
 COPY --chown=lima:lima docs/assets ./docs/assets
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
 COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
+COPY --chown=lima:lima scripts/run_lf_baseline.py ./scripts/run_lf_baseline.py
+COPY --chown=lima:lima scripts/run_expert_review.py ./scripts/run_expert_review.py
 COPY --chown=lima:lima scripts/audit_sensitive_artifacts.py ./scripts/audit_sensitive_artifacts.py
 # C/C++ 分析器包与评估契约随单测进镜像（纯 Python、无额外依赖）。
 COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer

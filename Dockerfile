@@ -69,6 +69,7 @@ COPY --chown=lima:lima docs/LIMA_PR3e_V5_Field_Source_Table.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0038_Preflight_Calibration.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0039_Real_Pilot_Descriptor.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0040_B1_Source_Wiring.md ./docs/
+COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0041_B1_Real_Entry.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0020_Vault_Audit.md ./docs/
 COPY --chown=lima:lima docs/adr ./docs/adr
 COPY --chown=lima:lima schemas ./schemas

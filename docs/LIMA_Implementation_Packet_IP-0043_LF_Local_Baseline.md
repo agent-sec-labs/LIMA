@@ -58,9 +58,10 @@ run_lf_local_baseline_suite(
 | `LF_BINDING_INVALID` | 绑定/spec 形状或交叉校验失败 | 否 |
 | `LF_PARAM_INVALID` | cold/warm 非正整数 | 否 |
 
-### 3.1 物化与树指纹约定（7.5）
+### 3.1 物化与树指纹约定（7.5；DR-IP-0043-CFINAL Option A 订正）
 
-- 解包规则：仅常规文件成员；剥离唯一顶层目录段；拒绝绝对路径/dot 段/异常成员类型；产物写入采用**平台文本行约定**（每个 `b"\n"` 写为 `os.linesep`；POSIX 恒等、Windows 为 CRLF），与任意文本写出的同内容字节一致。
+- 解包规则：仅常规文件成员；剥离唯一顶层目录段；拒绝绝对路径/dot 段；**链接类成员（symlink/hardlink）确定性跳过，不物化、不计入物化树与树指纹**；其余异常成员类型（设备/FIFO 等）仍整包拒绝。产物写入采用**平台文本行约定**（每个 `b"\n"` 写为 `os.linesep`；POSIX 恒等、Windows 为 CRLF），与任意文本写出的同内容字节一致。
+- 链接跳过的权威依据：① 09-28 权威物化事实——sealed tarball 760 成员恰 1 符号链接（`LlamaFactory-7fcf…/CLAUDE.md` → `.ai/CLAUDE.md`），权威 596 文件物化清单唯含常规文件（链接不入树）；② 生产先例——`lima/real_world_evaluation.py` L424-429 对链接成员既有处理即 omit（"The analysis workspace never follows symlinks, so omit them instead of materializing attacker-controlled link targets"），全仓既定安全语义一致。树指纹本身钉扎链接缺席；不新增 receipt/binding 键，materializations 计数沿用既有面。
 - 树指纹规则（`SnapshotStore._tree_identity` 独立转录）：相对 POSIX 路径排序（排除 `.lima-snapshot.json` 标记），`len(path):path:size:\0` 帧+原始字节，SHA-256。
 - 绑定声明的 fingerprint 必须等于下列两个规范面**之一**（二者都钉死物化字节，其余一律 fail-closed）：（A）纯快照树=物化工作副本本身；（B）sealed 源目录树=工作副本+复用归档以其自身文件名入帧。
 

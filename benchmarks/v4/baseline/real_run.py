@@ -1885,7 +1885,9 @@ class _GuardedRealEvaluator:
             ) from exc
         if self._past_deadline(record.wall_anchor, deadline_ms):
             raise self._timeout_failure(record, "$.scanner")
-        self._b1_scan_result = result
+        label = REAL_RUN_ARTIFACT_FAMILY[self._approval.artifact_key]["fixture_key"]
+        payload = b1_source._canonical_payload(result, label)
+        self._b1_scan_result = payload
 
     def _cold_reset_observation(self, *, performed: bool) -> dict[str, object]:
         """The frozen four-key cold-reset observation (IP-0037 Packet 7.5.2).

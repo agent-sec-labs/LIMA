@@ -34,8 +34,11 @@ scanner source, checks the projection faces (the report counts equal the
 independent direct scan, never a summation across the five samples, and the
 real POST count equals the ledger call count), then writes the independent
 companion artifacts -- ``b1-real-attempts/b1-real-attempt-{i:02d}.json``
-with the closed twenty-three-key receipt set plus the closed-key
-``b1-real-manifest.json`` -- which bind the approval bytes, the actual
+with the closed twenty-four-key receipt set plus the closed-key
+``b1-real-manifest.json`` (IP-0042: the scanner digest chain is the
+canonical projection under the self-describing
+``canonical_source_contract_version`` both faces carry) -- which bind the
+approval bytes, the actual
 request-body digest, every RunResult, every attempt document, the ledger
 and the suite identity by canonical SHA-256 digests.  Any mismatch is the
 typed fail-closed refusal of the frozen five-code family and no companion
@@ -89,6 +92,15 @@ _SCANNER_CONFIG_REF: typing.Final[str] = "b1-source-offline-scan-v1"
 _SOURCE_CONTRACT: typing.Final[str] = "b1-real-source-binding"
 _SOURCE_CONTRACT_VERSION: typing.Final[int] = 1
 
+#: The canonical source contract version (IP-0042 Packet 7.2.1): the
+#: self-describing digest-rule version every V2-family companion artifact
+#: carries as ``canonical_source_contract_version`` on the manifest and on
+#: each receipt, so a single artifact decides its own family.  It versions
+#: the canonical projection rule (the fixture-key label replacement plus the
+#: frozen wire fingerprint), never the twelfth descriptor's separate
+#: ``b1-real-source-binding``/v1 binding-contract pair above.
+_CANONICAL_SOURCE_CONTRACT_VERSION: typing.Final[str] = "b1-canonical-source-v1"
+
 #: The one-time pilot authorization shape (Packet 7.1 (0a) / 7.6.4): the
 #: entry pins the shape before anything runs; it is an authorization face,
 #: never a tunable, and never a numeric budget constant.
@@ -110,9 +122,10 @@ _WORKSPACE_MAX_FILES: typing.Final[int] = 5000
 _WORKSPACE_MAX_FILE_BYTES: typing.Final[int] = 512 * 1024
 _WORKSPACE_MAX_TOTAL_BYTES: typing.Final[int] = 20 * 1024 * 1024
 
-#: The companion source_receipt key set (Packet 7.5.3; twenty-three keys:
-#: the b1_source sixteen with their semantics preserved plus the seven
-#: real-binding additions, order frozen).
+#: The companion source_receipt key set (Packet 7.5.3; twenty-four keys
+#: after IP-0042 Packet 7.2.2: the b1_source sixteen with their semantics
+#: preserved plus the seven real-binding additions plus the V2 family
+#: canonical version key appended at the tail, order frozen).
 _RECEIPT_KEYS: typing.Final[tuple[str, ...]] = (
     "snapshot_tree_sha256",
     "fixture_key",
@@ -137,11 +150,13 @@ _RECEIPT_KEYS: typing.Final[tuple[str, ...]] = (
     "attempt_document_name",
     "suite_run_name",
     "ledger_sha256",
+    "canonical_source_contract_version",
 )
 _RECEIPT_KEY_SET: typing.Final[frozenset[str]] = frozenset(_RECEIPT_KEYS)
 
 #: The companion manifest key set (Packet 7.5.4; closed).  No ``model_calls``
-#: key and no offline-proof declaration ever join this face.
+#: key and no offline-proof declaration ever join this face.  IP-0042
+#: (Packet 7.2.2) appends the V2 family canonical version key at the tail.
 _MANIFEST_KEYS: typing.Final[tuple[str, ...]] = (
     "schema_version",
     "workload",
@@ -173,8 +188,80 @@ _MANIFEST_KEYS: typing.Final[tuple[str, ...]] = (
     "companion_bytes_total",
     "transport_face",
     "declarations",
+    "canonical_source_contract_version",
 )
 _MANIFEST_KEY_SET: typing.Final[frozenset[str]] = frozenset(_MANIFEST_KEYS)
+
+#: The V1 legacy family key sets (IP-0042 Packet 7.2.2): the frozen
+#: pre-canonical twenty-three-key receipt and thirty-key manifest tuples,
+#: preserved verbatim -- key membership and order -- so the read-back
+#: verifier can select the legacy raw-rule family by closed key shape plus
+#: the frozen binding-contract version alone.  The running entry always
+#: writes the V2 family above; these constants exist for verification of
+#: sealed round-8-shape artifacts only and never join a written artifact.
+_LEGACY_RECEIPT_KEYS: typing.Final[tuple[str, ...]] = (
+    "snapshot_tree_sha256",
+    "fixture_key",
+    "fixture_manifest_sha256",
+    "analyzer_name",
+    "analyzer_fingerprint",
+    "scanner_config_sha256",
+    "seed",
+    "workload",
+    "run_spec_digest",
+    "attempt_index",
+    "mode",
+    "scanner_payload_sha256",
+    "scanner_reexecuted",
+    "scanner_result_reused",
+    "snapshot_reused",
+    "request_body_rebuilt",
+    "approval_sha256",
+    "request_body_sha256",
+    "run_result_name",
+    "run_result_sha256",
+    "attempt_document_name",
+    "suite_run_name",
+    "ledger_sha256",
+)
+_LEGACY_RECEIPT_KEY_SET: typing.Final[frozenset[str]] = frozenset(
+    _LEGACY_RECEIPT_KEYS
+)
+_LEGACY_MANIFEST_KEYS: typing.Final[tuple[str, ...]] = (
+    "schema_version",
+    "workload",
+    "run_name",
+    "artifact_key",
+    "approval_sha256",
+    "run_spec_digest",
+    "attempt_count",
+    "cold_count",
+    "warm_count",
+    "fixture_key",
+    "fixture_manifest_sha256",
+    "snapshot_tree_sha256",
+    "analyzer_name",
+    "analyzer_fingerprint",
+    "scanner_config",
+    "scanner_config_sha256",
+    "seed",
+    "source_contract",
+    "source_contract_version",
+    "scanner_payload_sha256",
+    "scanner_executions",
+    "scanner_phase",
+    "source_receipts",
+    "source_receipts_digest",
+    "failures",
+    "real_post_count",
+    "ledger_calls",
+    "companion_bytes_total",
+    "transport_face",
+    "declarations",
+)
+_LEGACY_MANIFEST_KEY_SET: typing.Final[frozenset[str]] = frozenset(
+    _LEGACY_MANIFEST_KEYS
+)
 
 #: The estimate-registration face (Packet 7.6.3): the scanner wall belongs
 #: to the attempt-0 wall reservation -- an explicit registration, never a
@@ -475,10 +562,20 @@ def _projection_matches(report_document: object, faces: dict[str, object]) -> bo
     return report_document.get("coverage_gap_reasons") == faces["coverage_gap_reasons"]
 
 
-def _validate_receipt(receipt: object, index: int) -> None:
-    """Validate one companion receipt's closed key set and field types."""
+def _validate_receipt(
+    receipt: object,
+    index: int,
+    key_set: frozenset[str] = _RECEIPT_KEY_SET,
+) -> None:
+    """Validate one companion receipt's closed key set and field types.
+
+    ``key_set`` carries the artifact family's closed receipt shape: the V2
+    production default (twenty-four keys) or, for the read-back verifier's
+    legacy branch, the V1 twenty-three-key set.  Every field-type rule is
+    family-neutral and identical for both shapes.
+    """
     prefix = f"$.source_receipts[{index}]"
-    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_KEY_SET:
+    if not isinstance(receipt, dict) or set(receipt) != key_set:
         raise B1RealError(B1RealErrorCode.B1_REAL_RECEIPT_INVALID, prefix)
     for field in (
         "snapshot_tree_sha256",
@@ -679,9 +776,14 @@ def run_b1_real_baseline_suite(
         )
     request_body_sha256 = cold_reset["request_body_sha256"]
     # The independent re-scan of the persisted snapshot (read-only, zero
-    # model calls) crosses the scanner digest chain.
+    # model calls) crosses the scanner digest chain: the scan is projected
+    # onto the canonical payload first -- the fixture-key label replaces the
+    # materialization-path repository and workspace root -- and only then
+    # fingerprinted (IP-0042 Packet 7.1.3, the same single rule the E3 hook
+    # stores and the report projection digests).
     scan = b1_source._scan_snapshot(snapshot_dir)
-    wire_digest = b1_source._wire_fingerprint(scan)
+    payload = b1_source._canonical_payload(scan, _FIXTURE_KEY)
+    wire_digest = b1_source._wire_fingerprint(payload)
     if report_sources[0].get("payload_sha256") != wire_digest:
         raise B1RealError(
             B1RealErrorCode.B1_REAL_SCANNER_DIGEST_MISMATCH,
@@ -752,6 +854,9 @@ def run_b1_real_baseline_suite(
                 "attempt_document_name": f"attempts/attempt-{index:02d}.json",
                 "suite_run_name": _RUN_NAME_PIN,
                 "ledger_sha256": ledger_sha256,
+                "canonical_source_contract_version": (
+                    _CANONICAL_SOURCE_CONTRACT_VERSION
+                ),
             }
         )
     # -- (11) the companion artifacts ------------------------------------
@@ -807,6 +912,7 @@ def run_b1_real_baseline_suite(
             else _TRANSPORT_FACE_DEFAULT
         ),
         "declarations": list(_DECLARATIONS),
+        "canonical_source_contract_version": _CANONICAL_SOURCE_CONTRACT_VERSION,
     }
     # The companion byte registration converges on the exact on-disk total
     # (the receipts plus the manifest's own encoded length).
@@ -863,25 +969,63 @@ def verify_b1_real_evidence(
     """Re-read one B1 real output root and cross-check every binding.
 
     Checks (Packet 7.2.3 / 7.5, all fail-closed with the typed family,
-    never a downgrade): the companion manifest parses and carries exactly
-    its closed key set; every receipt file carries exactly the
-    twenty-three-key set with well-formed digests, modes and reuse
+    never a downgrade): the companion manifest parses and its closed key
+    set selects the artifact family before any digest comparison -- the V2
+    canonical family (thirty-one manifest keys, twenty-four receipt keys)
+    whose ``canonical_source_contract_version`` must equal the frozen
+    constant on the manifest and on every receipt, or the V1 legacy family
+    (thirty / twenty-three keys under the frozen binding-contract version)
+    which verifies under the legacy raw wire rule; every other key shape
+    (mixed, partial, unknown) is refused, and a later mismatch never falls
+    back to the other family's rule; every receipt file carries exactly
+    its family's closed key set with well-formed digests, modes and reuse
     booleans; the persisted snapshot tree still matches the bound tree
-    digest; the independent re-scan of the persisted snapshot recomputes
-    the scanner wire digest that the report's scanner source and every
-    receipt carry; the receipt files equal their manifest slots and the
-    aggregate receipts digest; every RunResult pointer's content digest,
-    every attempt-document pointer, the approval and ledger byte digests,
-    the request-body digest and the analyzer identity hold; and the
-    report's projection plus the real-POST and ledger call counts agree.
-    On success a summary mapping with the verified identity faces is
-    returned.
+    digest; the independent re-scan of the persisted snapshot under the
+    selected family's rule recomputes the scanner wire digest that the
+    report's scanner source and every receipt carry; the receipt files
+    equal their manifest slots and the aggregate receipts digest; every
+    RunResult pointer's content digest, every attempt-document pointer,
+    the approval and ledger byte digests, the request-body digest and the
+    analyzer identity hold; and the report's projection plus the real-POST
+    and ledger call counts agree.  On success a summary mapping with the
+    verified identity faces is returned.
     """
     root = pathlib.Path(output_root)
     manifest = _read_json(root / "b1-real-manifest.json", "$.b1_real_manifest")
-    if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEY_SET:
+    if not isinstance(manifest, dict):
         raise B1RealError(
             B1RealErrorCode.B1_REAL_RECEIPT_INVALID, "$.b1_real_manifest"
+        )
+    # The artifact-family branch (IP-0042 Packet 7.2.3): the family is
+    # selected by verifiable metadata alone -- the closed manifest key
+    # shape plus, on the legacy shape, the frozen binding-contract version
+    # -- before any digest comparison runs, and the selected family alone
+    # fixes the digest rule below.  A V1-shape manifest whose version
+    # drifted, and every mixed, partial or unknown key shape, fails closed
+    # right here; a mismatch later in the chain never falls back to "the
+    # other algorithm".
+    if set(manifest) == _LEGACY_MANIFEST_KEY_SET:
+        if manifest.get("source_contract_version") != _SOURCE_CONTRACT_VERSION:
+            raise B1RealError(
+                B1RealErrorCode.B1_REAL_RECEIPT_INVALID, "$.b1_real_manifest"
+            )
+        legacy_family = True
+    elif set(manifest) == _MANIFEST_KEY_SET:
+        legacy_family = False
+    else:
+        raise B1RealError(
+            B1RealErrorCode.B1_REAL_RECEIPT_INVALID, "$.b1_real_manifest"
+        )
+    # The V2 family's version face on the manifest: the value must be
+    # exactly the current canonical contract version (an unknown, drifted
+    # or malformed value fails closed at the version field, before every
+    # digest comparison; the V1 family carries no such key by design).
+    if not legacy_family and manifest["canonical_source_contract_version"] != (
+        _CANONICAL_SOURCE_CONTRACT_VERSION
+    ):
+        raise B1RealError(
+            B1RealErrorCode.B1_REAL_RECEIPT_INVALID,
+            "$.b1_real_manifest.canonical_source_contract_version",
         )
     if manifest["schema_version"] != 1:
         raise B1RealError(
@@ -954,8 +1098,26 @@ def verify_b1_real_evidence(
         _read_json(path, f"$.b1_real_attempts[{index}]")
         for index, path in enumerate(file_paths)
     ]
+    receipt_key_set = (
+        _LEGACY_RECEIPT_KEY_SET if legacy_family else _RECEIPT_KEY_SET
+    )
     for index, receipt in enumerate(file_receipts):
-        _validate_receipt(receipt, index)
+        _validate_receipt(receipt, index, receipt_key_set)
+    if not legacy_family:
+        # The V2 family's per-receipt version face: every receipt is
+        # self-describing, so each must carry exactly the current canonical
+        # contract version -- an unknown or drifted value fails closed at
+        # the receipt's version field before any digest comparison (a
+        # receipts-versus-manifest slot drift is additionally caught by the
+        # aggregate equality binding below).
+        for index, receipt in enumerate(file_receipts):
+            if receipt["canonical_source_contract_version"] != (
+                _CANONICAL_SOURCE_CONTRACT_VERSION
+            ):
+                raise B1RealError(
+                    B1RealErrorCode.B1_REAL_RECEIPT_INVALID,
+                    f"$.source_receipts[{index}].canonical_source_contract_version",
+                )
     # The persisted snapshot binding first: the receipts bind the exact
     # materialized tree, so any content change is the typed binding
     # refusal before the re-scan chain runs.
@@ -978,8 +1140,18 @@ def verify_b1_real_evidence(
             )
     # The scanner digest chain: the independent re-scan recomputes the
     # wire digest the report source, the manifest and every receipt carry.
+    # The family selected above alone fixes the rule (IP-0042 Packet
+    # 7.1.4): the V2 family projects the re-scan onto the canonical
+    # payload -- the fixture-key label replaces the materialization-path
+    # repository and workspace root -- before the wire fingerprint; the V1
+    # legacy family keeps the frozen raw wire fingerprint.  One rule per
+    # family, chosen by metadata, never retried under the other.
     scan = b1_source._scan_snapshot(snapshot_dir)
-    wire_digest = b1_source._wire_fingerprint(scan)
+    if legacy_family:
+        wire_digest = b1_source._wire_fingerprint(scan)
+    else:
+        canonical_payload = b1_source._canonical_payload(scan, _FIXTURE_KEY)
+        wire_digest = b1_source._wire_fingerprint(canonical_payload)
     report = _read_json(
         root / f"{manifest['run_spec_digest'][:16]}-report-1.json", "$.report"
     )

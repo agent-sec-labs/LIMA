@@ -585,14 +585,23 @@ _ARTIFACT_FAMILY_KEYS = (
     # IP-0039 v9 (R2/R4.2-5): the eleventh key -- the real-pilot
     # descriptor (closed catalog, addition only).
     "real-pilot/large-repo",
+    # IP-0041 v11 (R2/S1): the twelfth key -- the B1 real-entry descriptor
+    # (closed catalog, addition only).
+    "real-pilot/signal-storm",
 )
 _SYNTHETIC_ARTIFACT_KEYS = tuple(
     # IP-0039 v9 (R6/K6): the derivation filter excludes both non-synthetic
     # keys (the external default and the real-pilot descriptor) so the nine
-    # synthetic keys stay exactly the v6 set.
+    # synthetic keys stay exactly the v6 set.  IP-0041 v11 (R2/S2) adds the
+    # twelfth key to the same exclusion (its provenance is the signal-storm
+    # derivation, not a registry key of its own).
     key
     for key in _ARTIFACT_FAMILY_KEYS
-    if key not in ("external/llamafactory-replay", "real-pilot/large-repo")
+    if key not in (
+        "external/llamafactory-replay",
+        "real-pilot/large-repo",
+        "real-pilot/signal-storm",
+    )
 )
 _DEFAULT_ARTIFACT_KEY = "external/llamafactory-replay"
 _ZERO_BUDGET_FAMILY_VALUE = "PR3E-OFFLINE-PROOF-ZERO-BUDGET"
@@ -3947,13 +3956,30 @@ class TestArtifactFamilyAndColdReset(_RealRunTestCase):
         # template).  IP-0039 v9 (R4.2-5): the catalog grows to the closed
         # eleven-key set -- the ten v6 keys keep exactly the seven-field
         # descriptor and the real-pilot key carries the seven fields plus
-        # the four R2 additions (closed set, additions only).
+        # the four R2 additions (closed set, additions only).  IP-0041 v11
+        # (R2/S3): the catalog grows to the closed twelve-key set -- the
+        # twelfth key (the B1 real-entry descriptor) carries the seven
+        # fields plus the four R2 additions plus the five B1 binding
+        # fields (closed set, additions only).
         catalog = self.artifact_catalog()
         self.assertEqual(set(catalog), set(_ARTIFACT_FAMILY_KEYS))
-        self.assertEqual(len(catalog), 11)
+        self.assertEqual(len(catalog), 12)
         for key in _ARTIFACT_FAMILY_KEYS:
             with self.subTest(key=key):
-                if key == _REAL_PILOT_KEY:
+                if key == "real-pilot/signal-storm":
+                    self.assertEqual(
+                        set(catalog[key]),
+                        _DESCRIPTOR_FIELDS
+                        | _REAL_PILOT_EXTRA_FIELDS
+                        | {
+                            "workload",
+                            "scanner_config_ref",
+                            "scanner_config_sha256",
+                            "source_contract",
+                            "source_contract_version",
+                        },
+                    )
+                elif key == _REAL_PILOT_KEY:
                     self.assertEqual(
                         set(catalog[key]),
                         _DESCRIPTOR_FIELDS | _REAL_PILOT_EXTRA_FIELDS,
@@ -5511,9 +5537,11 @@ class TestRealPilotDescriptorAndStopGate(_RealRunTestCase):
         # with every value pinned verbatim, and its five provenance fields
         # equal the large-repo synthetic derivation (same registry
         # fingerprint, same formula, independently recomputed -- PC3).
+        # IP-0041 v11 (R2/S4): the closed set grows to twelve keys (the
+        # B1 real-entry descriptor joins as an independent block).
         catalog = self.artifact_catalog()
         self.assertEqual(set(catalog), set(_ARTIFACT_FAMILY_KEYS))
-        self.assertEqual(len(catalog), 11)
+        self.assertEqual(len(catalog), 12)
         for key in _SYNTHETIC_ARTIFACT_KEYS:
             with self.subTest(synthetic=key):
                 self.assertEqual(set(catalog[key]), _DESCRIPTOR_FIELDS)

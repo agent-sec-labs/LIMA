@@ -49,6 +49,7 @@
 - **real-world payload 面（旧 09-28 报告口径）**：`49de84cec230e26f-report-1.json` counts.scanned_files=**596**，是真实世界评测载荷面的另一计数口径。snapshot 全量 = 596 文件 / 13,746,820 B（<20MiB 不触总量界；9 文件>512KiB，其中 7 个以 file-size-limit 计入 coverage gap、2 个先命中 unsupported-extension）。
 - **声明**：447（scanner 面）与 596（payload 面）是**不同计数口径**，不可直接对比（compar）、不得强行对齐、不得互相冒充；任何报告/矩阵引用时必须并注口径。此声明同时写入 Packet（R7 口径声明节）。
 - C-final 期望可观测值（Coordinator 亲测预置，供核对、非硬断言）：scanned_files=447、coverage_gap=7（file-size-limit×7）。
+- **平台物化面注（DR-IP-0043-CFINAL §6 预告，随链接跳过修复登记）**：LF 套件按 Packet §3.1 平台文本行约定物化（每个 `\n` 写为 `os.linesep`），故 Windows 物化面 `total_bytes`=**2,657,168**（CRLF 平台面）vs 上述 R7 raw 面 2,588,042（LF 字节面）——这是**平台物化面差异，非缺陷**；文件计数、跳过分类与两口径结论均不受行尾约定影响，scanned_files=**447**/coverage_gap=**7** 在 raw 诊断面与平台物化面上预期**同成立**。
 
 ## 5. 账目状态（三态）
 

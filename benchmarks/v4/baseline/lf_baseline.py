@@ -514,17 +514,29 @@ def _materialize_snapshot(
 
     Only regular file members are extracted; the single top-level directory
     segment is stripped; absolute paths, dot segments and unexpected member
-    types are rejected.  Member content is written under the platform
-    text-line convention (Packet 7.5), so the materialized tree is
-    byte-identical to the same content written by any text-mode tool on
-    the same platform.  An unreadable or corrupt archive raises the
-    underlying ``tarfile`` error (the caller retains it as an honest
-    attempt-body failure under the frozen taxonomy).
+    types are rejected.  Link members (symbolic and hard links) are
+    deterministically skipped, mirroring the frozen production precedent
+    (``real_world_evaluation.py``: the analysis workspace never follows
+    links, so omit them instead of materializing attacker-controlled link
+    targets) and the authoritative 09-28 sealed materialization; they never
+    enter the materialized tree or its fingerprint.  Member content is
+    written under the platform text-line convention (Packet 7.5), so the
+    materialized tree is byte-identical to the same content written by any
+    text-mode tool on the same platform.  An unreadable or corrupt archive
+    raises the underlying ``tarfile`` error (the caller retains it as an
+    honest attempt-body failure under the frozen taxonomy).
     """
     target.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive_path, "r:gz") as bundle:
         for member in bundle:
             if member.isdir():
+                continue
+            if member.issym() or member.islnk():
+                # The sealed archive carries at most link members as
+                # repository links (the 09-28 authoritative snapshot has
+                # exactly one).  The analysis workspace never follows links,
+                # so omit them instead of materializing attacker-controlled
+                # link targets -- the frozen real_world_evaluation precedent.
                 continue
             if not member.isfile():
                 raise ValueError(

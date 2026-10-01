@@ -412,9 +412,16 @@ class TestTimingSequences(_ExpertReviewTestCase):
                 self.assertEqual(
                     str(caught.exception.code), "TIMING_SEQUENCE_INVALID"
                 )
-        # Guard group (passes by design): the same faces are rejected by the
-        # frozen engine itself -- the new validator never loosens them.
+        # Guard group (passes by design): the illegal-transition, repeated,
+        # non-monotonic and after-finish faces are rejected by the frozen
+        # engine itself -- the new validator never loosens them.  The
+        # "unterminated" and "empty" faces are legal at apply time on the
+        # frozen engine (sequence completeness is the new validator's own
+        # face, asserted by the first group above), so they are excluded
+        # here (IP-0043 v13' mechanical correction D2).
         for label, events in sorted(faces.items()):
+            if label in ("unterminated", "empty"):
+                continue
             with self.subTest(face=f"frozen-{label}"):
                 session = ExpertTimingSession(_REVIEWER_ID)
                 with self.assertRaises(BaselineCollectionError):

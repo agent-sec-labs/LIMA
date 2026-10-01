@@ -866,7 +866,7 @@ class TestLFFullChain(_LFBaselineTestCase):
             # must consume): failure samples stay in the denominator and flip
             # the status honestly instead of being dropped.
             retained = [dict(sample) for sample in ordered]
-            retained[0]["outcome"] = "execution-error"
+            retained[0]["outcome"] = "failure"
             retained[0]["failure_code"] = "EXECUTION_ERROR"
             retained[0]["wall_time_ms"] = None
             failure_aggregate = from_mapping(

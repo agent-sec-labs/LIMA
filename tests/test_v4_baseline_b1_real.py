@@ -1033,11 +1033,25 @@ class TestB1RealDescriptor(_B1RealTestCase):
                 _B1_REAL_FIXTURE_KEY, self.registry_fingerprint(_B1_REAL_FIXTURE_KEY)
             ),
         )
-        # The new pins are unique across the whole catalog.
+        # The new pins against the whole catalog (DR-IP-0041-C3 D1): run
+        # names stay pairwise distinct (twelve keys, twelve names), while
+        # approval types are exactly the four closed family values -- the
+        # nine synthetic keys share the zero-budget family value by the
+        # frozen derivation, so the new pin proves zero conflict with the
+        # family set (and the three old family values unchanged), never
+        # pairwise distinctness (Packet 7.3 / DR-PV-2).
         run_names = {entry["run_name"] for entry in catalog.values()}
         approval_types = {entry["approval_type"] for entry in catalog.values()}
         self.assertEqual(len(run_names), len(catalog))
-        self.assertEqual(len(approval_types), len(catalog))
+        self.assertEqual(
+            approval_types,
+            {
+                "PR3E-OFFLINE-PROOF-ZERO-BUDGET",
+                "PR3D-REAL-RUN-LIMITED",
+                "PR3D-REAL-PILOT-ONE-SHOT",
+                _B1_REAL_APPROVAL_TYPE,
+            },
+        )
         self.assertIn(_B1_REAL_RUN_NAME, run_names)
         self.assertIn(_B1_REAL_APPROVAL_TYPE, approval_types)
 
@@ -1536,26 +1550,36 @@ class TestB1RealNegatives(_B1RealTestCase):
 
     def test_b1_real_warm_side_canary_and_response_failures(self):
         self.b1_real()
-        # (a) The index-1 canary face: an unknown served form at attempt-0
-        # fails the checklist's identity item and latches the batch.
+        # (a) The index-1 canary checklist face (DR-IP-0041-C3 D2):
+        # attempt-0 succeeds cleanly (a contract-valid response, no
+        # failure code) but its usage exceeds the frozen reservation
+        # (double the attempt-0 prompt estimate of 100000 tokens), so the
+        # checklist's usage_within_reservation item fails at the first
+        # warm entry and latches the batch -- zero POSTs after the first,
+        # every remaining attempt typed REAL_RUN_CANARY_FAILED (the frozen
+        # test_shaped_canary_failure_latches_zero_follow_on_posts pattern,
+        # re-proven through the B1 entry; the first-failure stop-gate face
+        # is M17's, never this one's).
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "run"
             output.mkdir()
-            transport = _FakeTransport(
-                responses=[_chat_response(model=_UNKNOWN_MODEL_FORM)]
-            )
+            transport = _FakeTransport(responses=[_chat_response(prompt_tokens=200_000)])
             result = self.run_twin(output, transport=transport)
             self.assertEqual(transport.chat_calls, 1)
             self.assertEqual(result.canary_status, "failed")
-            self.assertEqual(
-                self.read_attempt(output, 0)["error_code"],
-                "REAL_RUN_RESPONSE_INVALID",
-            )
+            attempt0 = self.read_attempt(output, 0)
+            self.assertEqual(attempt0["outcome"], "success")
+            self.assertIsNone(attempt0["failure_code"])
+            manifest = self.read_json(output / "manifest.json")
+            self.assertIs(manifest["canary"]["checks"]["usage_within_reservation"], False)
+            self.assertEqual(result.status, "insufficient_sample")
+            self.assertEqual(result.real_post_count, 1)
             for index in range(1, 5):
-                self.assertEqual(
-                    self.read_attempt(output, index)["error_code"],
-                    "REAL_RUN_CANARY_FAILED",
-                )
+                with self.subTest(attempt=index):
+                    self.assertEqual(
+                        self.read_attempt(output, index)["error_code"],
+                        "REAL_RUN_CANARY_FAILED",
+                    )
         # (b) A warm response-contract failure after a passing canary: the
         # first failure keeps its code, the stop gate refuses the rest.
         with tempfile.TemporaryDirectory() as temporary:

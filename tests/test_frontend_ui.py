@@ -12,9 +12,8 @@ legacy 时代本文件逐行锚定 web/index.html + web/app.js 的行为，是�
 
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -126,20 +125,35 @@ class CxxAgentWebContractTests(unittest.TestCase):
 
     def test_react_has_no_per_finding_repair_control(self) -> None:
         detail = _read("frontend", "src", "features", "tasks", "TaskDetailPage.tsx")
-        # 两个任务级修复入口及其门禁：与单个 finding 的 source/language 无关。
+        # 两个任务级修复入口：预览按钮按 #246/方案 §4.7 门禁（本地导入
+        # 报告 + 后端预览器支持的 Python finding，C++ finding 恒
+        # automatic_repair=false 不触发）；修复分支按 PR 任务。均为任务级，
+        # 不出现任何 finding 级修复操作。
+        self.assertIn("REPAIR_PREVIEW_CWES", detail)
         self.assertIn(
-            "const showPreview = repositoryScan && findings.length > 0;", detail,
+            "const showPreview = Boolean(localImportScan) && previewableCount > 0;",
+            detail,
         )
         self.assertIn("const showFix = Boolean(task.pull_request);", detail)
         self.assertEqual(1, detail.count("api.createRepairPreview("))
         self.assertEqual(1, detail.count("api.createFix("))
         # finding 展开区只渲染解释/证据/建议文案，不含任何操作按钮。
-        expanded = detail.split("expandedRowRender:", 1)[1].split("</Space>", 1)[0]
+        expanded = detail.split(
+            "expandedRowRender: (record: FindingItem)", 1,
+        )[1].split("</Space>", 1)[0]
         self.assertIn("为什么是问题：", expanded)
         self.assertIn("关键证据：", expanded)
         self.assertIn("建议修复：", expanded)
         self.assertNotIn("Button", expanded)
         self.assertNotIn("onClick", expanded)
+        # 平台链目标展开区（#246）是纯审计展示：脱敏 PoC 只作文本渲染，
+        # 同样不含任何操作按钮或点击处理。
+        platform_expanded = detail.split(
+            "function PlatformTargetDetails", 1,
+        )[1].split("\nfunction ", 1)[0]
+        self.assertIn("poc-driver-code", platform_expanded)
+        self.assertNotIn("Button", platform_expanded)
+        self.assertNotIn("onClick", platform_expanded)
 
     def test_react_verification_badge_semantics_fail_closed(self) -> None:
         model = _read("frontend", "src", "features", "tasks", "model.ts")

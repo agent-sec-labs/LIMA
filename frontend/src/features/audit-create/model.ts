@@ -1,4 +1,5 @@
 import type { FieldErrors, Resolver } from "react-hook-form";
+import type { CxxAgentCapabilities, RepositoryScanRequest } from "@/shared/api/types";
 import { z } from "zod";
 
 /**
@@ -13,6 +14,11 @@ export const SOURCE_MODES = ["local", "github"] as const;
 export type AuditMode = (typeof AUDIT_MODES)[number];
 export type SourceMode = (typeof SOURCE_MODES)[number];
 
+/**
+ * agentDetection 三态：null = 用户尚未选择（等 capabilities 初始化开关）；
+ * 一旦落为 true/false 即为用户可见的明确选择，异步响应不得再覆盖
+ * （方案 §4.2；null 随草稿缓存持久，导航往返不丢）。
+ */
 export interface AuditDraft {
   mode: AuditMode;
   sourceMode: SourceMode;
@@ -20,6 +26,7 @@ export interface AuditDraft {
   githubRef: string;
   diff: string;
   pullRequest: string;
+  agentDetection: boolean | null;
 }
 
 export const EMPTY_DRAFT: AuditDraft = {
@@ -29,6 +36,7 @@ export const EMPTY_DRAFT: AuditDraft = {
   githubRef: "",
   diff: "",
   pullRequest: "",
+  agentDetection: null,
 };
 
 // SPA 内模块级草稿缓存：路由卸载/返回不丢数据；202 后显式清空。
@@ -93,6 +101,7 @@ export const auditDraftSchema = z
     githubRef: z.string(),
     diff: z.string(),
     pullRequest: z.string(),
+    agentDetection: z.boolean().nullable(),
   })
   .superRefine((value, ctx) => {
     try {
@@ -174,12 +183,75 @@ export interface ScanCapabilitiesPayload {
     local_import?: boolean;
     github?: boolean;
   };
+  /** #243 新增：按任务开启智能体检测的门禁字段（方案 §4.6）。 */
+  cxx_agent?: CxxAgentCapabilities;
 }
 
-/** 载荷与 legacy 行为一致：目标原样透传（服务端归一化），浏览器零 api.github.com。 */
+/** 智能体检测开关门禁（方案 §4.2 三态矩阵的前端只读投影）。 */
+export interface AgentDetectionGate {
+  /** #243 新字段齐备：可初始化开关并按状态提交。 */
+  ready: boolean;
+  /** 服务端策略锁定开启（required / per_request_switch=false）。 */
+  lockedOn: boolean;
+  /** 配置完整（模型 + 分析器），允许从关闭切到开启。 */
+  canEnable: boolean;
+  /** 服务端默认开启但配置不完整：必须暂停提交并提示管理员修复。 */
+  defaultOnBlocked: boolean;
+  /** 本次提交的有效开关值。 */
+  effective: boolean;
+  /** 模型调用次数上限（不是货币费用）。 */
+  maxAgentCalls: number;
+}
+
+/**
+ * 从 capabilities 推导开关门禁。旧服务端缺少 #243 新字段时 ready=false，
+ * 不得按旧 configured 值猜测可用性（方案 §4.6）。
+ */
+export function agentDetectionGate(
+  caps: CxxAgentCapabilities | null | undefined,
+  agentDetection: boolean | null,
+): AgentDetectionGate {
+  const ready = Boolean(
+    caps &&
+      (caps.mode === "off" || caps.mode === "auto" || caps.mode === "required") &&
+      typeof caps.per_request_switch === "boolean" &&
+      typeof caps.llm_configured === "boolean" &&
+      typeof caps.analyzer_configured === "boolean" &&
+      typeof caps.max_agent_calls === "number",
+  );
+  if (!ready || !caps) {
+    return {
+      ready: false,
+      lockedOn: false,
+      canEnable: false,
+      defaultOnBlocked: false,
+      effective: agentDetection === true,
+      maxAgentCalls: 0,
+    };
+  }
+  const configured = caps.llm_configured === true && caps.analyzer_configured === true;
+  const defaultOn = caps.mode !== "off";
+  const lockedOn = caps.mode === "required" || caps.per_request_switch === false;
+  return {
+    ready: true,
+    lockedOn,
+    canEnable: configured,
+    defaultOnBlocked: defaultOn && !configured,
+    effective: lockedOn || (agentDetection ?? defaultOn),
+    maxAgentCalls: Math.max(0, Math.floor(caps.max_agent_calls ?? 0)),
+  };
+}
+
+/** 载荷与 legacy 行为一致：目标原样透传（服务端归一化），浏览器零 api.github.com。
+ * 仓库模式两种来源都显式提交 agent_detection（新前端不依赖服务端默认）；
+ * PR/diff 分支不带该字段（方案 §4.1）。
+ * `agentDetection` 是有效策略值（required 锁定开启时为 true，见
+ * agentDetectionGate）；缺省回退草稿值仅供纯模型层单测使用，页面提交
+ * 必须显式传入 gate.effective（审计问题 3）。 */
 export function buildSubmitPayload(
   draft: AuditDraft,
-): { path: string; body: Record<string, unknown> } {
+  agentDetection: boolean = draft.agentDetection === true,
+): { path: string; body: RepositoryScanRequest | Record<string, unknown> } {
   const repository = draft.repository.trim();
   if (draft.mode === "diff") {
     const pr = Number(draft.pullRequest.trim());
@@ -202,11 +274,12 @@ export function buildSubmitPayload(
           url: repository,
           ...(ref !== "" ? { ref } : {}),
         },
+        agent_detection: agentDetection,
       },
     };
   }
   return {
     path: "/v1/repository-scans",
-    body: { repository_key: repository },
+    body: { repository_key: repository, agent_detection: agentDetection },
   };
 }

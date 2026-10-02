@@ -5,7 +5,13 @@ import { App as AntApp, ConfigProvider } from "antd";
 import { RouterProvider } from "react-router-dom";
 import { createAppRouter, type AppRouterInstance } from "@/router";
 import type { TaskDetail } from "@/shared/api/types";
-import { confidenceLabel, reportAdjudication, reportRisk, verificationLabel } from "./model";
+import {
+  confidenceLabel,
+  reportAdjudication,
+  reportRisk,
+  stageLabel,
+  verificationLabel,
+} from "./model";
 
 /**
  * T10 对等规格（issue #43）：证据处置推导（fail-closed）、修复预览 / 修复分支、
@@ -161,6 +167,105 @@ const UAF_REPORT: TaskDetail["report"] = {
   collaboration: { uaf_v2: UAF_V2_PAYLOAD },
 };
 
+/** 混合报告（§4.7）：一个可预览的 Python finding + 一个 C++ finding
+ *（automatic_repair=false，永不进入修复预览）。 */
+const MIXED_REPORT: TaskDetail["report"] = {
+  repository: "org/report",
+  reviewer: "repository-hybrid",
+  summary: "混合发现。",
+  files_reviewed: ["app.py", "src/a.cpp"],
+  findings: [
+    {
+      severity: "high",
+      rule_id: "SEC-SQLI",
+      cwe: "CWE-89",
+      path: "app.py",
+      line: 12,
+      title: "SQL 拼接进入执行",
+      verification_state: "dataflow-verified",
+      confidence: 0.9,
+    },
+    {
+      severity: "high",
+      rule_id: "cxx.platform.cwe-416",
+      cwe: "CWE-416",
+      path: "src/a.cpp",
+      line: 30,
+      title: "Use-after-free suspected by agent analysis",
+      verification_state: "runtime-confirmed",
+      confidence: 0.95,
+      automatic_repair: false,
+    },
+  ],
+};
+
+/** 只有 C++ finding 的报告：修复预览入口必须隐藏（§4.7 回归）。 */
+const CXX_ONLY_REPORT: TaskDetail["report"] = {
+  repository: "org/report",
+  reviewer: "repository-hybrid",
+  summary: "只有 C++ 候选。",
+  files_reviewed: ["src/a.cpp"],
+  findings: [MIXED_REPORT!.findings![1]],
+};
+
+/** 平台链载荷（方案 §3.4 扩展后的形态：可选详情 + 省略原因）。 */
+const PLATFORM_PAYLOAD = {
+  mode: "auto",
+  status: "completed",
+  translation_units: ["src/a.cpp"],
+  stats: {
+    leads: 5,
+    targets: 2,
+    findings: 1,
+    experiments: 3,
+    scout_calls: 2,
+    specialist_calls: 4,
+    critic_calls: 1,
+  },
+  states: { "runtime-confirmed": 1, rejected: 1 },
+  broker: { support: 1, contradict: 0 },
+  diagnostics: [],
+  targets: [
+    {
+      target_id: "target-1",
+      path: "src/a.cpp",
+      line: 42,
+      state: "runtime-confirmed",
+      cwe: "CWE-416",
+      proof: "PASS",
+      experiments: 1,
+      rejected_reason: "",
+      hypothesis_reason: "释放后再次使用对象",
+      poc_driver_code: "int main() { int *p = new int(1); delete p; return *p; }",
+      experiment_log: [
+        {
+          round: 1,
+          stage: "run",
+          exit_code: 1,
+          error_type: "heap-use-after-free",
+          faulting_line: 42,
+          hit: true,
+        },
+      ],
+      detail_omissions: [],
+    },
+    {
+      target_id: "target-2",
+      path: "src/b.cpp",
+      line: 7,
+      state: "rejected",
+      cwe: "CWE-416",
+      proof: "REFUTED",
+      experiments: 2,
+      rejected_reason: "实验未命中",
+      detail_omissions: [
+        "poc_driver_code:too-large",
+        "experiment_log:older-rounds-omitted",
+      ],
+    },
+  ],
+};
+
 describe("report domain derivation (model)", () => {
   it("derives fail-closed dispositions when adjudication is absent", () => {
     const findings = DERIVED_REPORT!.findings!;
@@ -240,7 +345,7 @@ describe("task detail report surface", () => {
   it("runs a repair preview and renders the operation result panel", async () => {
     const calls: string[] = [];
     stubFetch([
-      { url: "/v1/tasks/task-report", body: successTask({ report: DERIVED_REPORT }) },
+      { url: "/v1/tasks/task-report", body: successTask({ report: MIXED_REPORT }) },
       { url: "/v1/tasks/task-report/feedback", body: { cases: [] } },
       {
         url: "/v1/tasks/task-report/repair-preview",
@@ -477,6 +582,191 @@ describe("task detail report surface", () => {
     renderAt("/tasks/task-legacy");
     expect(await screen.findByText("证据处置：确认告警")).toBeVisible();
     expect(screen.queryByText(/C\/C\+\+ UAF v2/)).toBeNull();
+  });
+
+  it("hides the repair preview button when no previewable Python finding exists", async () => {
+    stubFetch([
+      {
+        url: "/v1/tasks/task-cxx",
+        body: successTask({ id: "task-cxx", report: CXX_ONLY_REPORT }),
+      },
+      { url: "/v1/tasks/task-cxx/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-cxx");
+    // runtime-confirmed 未命中前端已验证子串规则 → fail-closed 需要复核横幅。
+    expect(await screen.findByText("证据处置：需要复核")).toBeVisible();
+    // 只有 automatic_repair=false 的 C++ finding：不显示修复预览入口。
+    expect(screen.queryByRole("button", { name: "生成修复预览" })).toBeNull();
+  });
+
+  it("shows the platform audit card with stats and per-target drill-down details", async () => {
+    const report: TaskDetail["report"] = {
+      ...MIXED_REPORT,
+      collaboration: { platform: PLATFORM_PAYLOAD },
+    };
+    stubFetch([
+      { url: "/v1/tasks/task-platform", body: successTask({ id: "task-platform", report }) },
+      { url: "/v1/tasks/task-platform/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-platform");
+    const title = await screen.findByText("C++ 智能体检测（平台链）");
+    expect(title).toBeVisible();
+    const card = title.closest(".ant-card") as HTMLElement;
+
+    // 基本统计与状态标签（§4.3）。
+    expect(within(card).getByText("检测完成")).toBeVisible();
+    expect(within(card).getByText("运行时确认 × 1")).toBeVisible();
+    expect(within(card).getByText("已否决 × 1")).toBeVisible();
+    const stats = within(card).getByLabelText("平台链统计");
+    expect(stats.textContent).toContain("线索 5");
+    expect(stats.textContent).toContain("目标 2");
+    expect(stats.textContent).toContain("模型调用 7");
+
+    // 目标摘要行（前 32 个）：target_id、位置、状态、证明结论。
+    expect(within(card).getByText("target-1")).toBeVisible();
+    expect(within(card).getByText("src/a.cpp:42")).toBeVisible();
+    expect(within(card).getByText("运行时确认")).toBeVisible();
+
+    // 下钻（§4.4）：假设 / PoC 展示副本 / 实验日志 / 证明结论。
+    const expandButtons = card.querySelectorAll(".ant-table-row-expand-icon");
+    expect(expandButtons.length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(expandButtons[0]);
+    expect(await within(card).findByText("释放后再次使用对象")).toBeVisible();
+    const poc = within(card).getByLabelText("poc-driver-code");
+    expect(poc.textContent).toContain("delete p");
+    expect(await within(card).findByText("heap-use-after-free")).toBeVisible();
+
+    // 省略原因如实展示，不把缺失误读成“无实验”。
+    fireEvent.click(expandButtons[1]);
+    expect(await within(card).findByText(/PoC driver 超出单条预算/)).toBeVisible();
+    expect(within(card).getByText(/较早轮次已省略/)).toBeVisible();
+    expect(within(card).getByText(/实验未命中/)).toBeVisible();
+  });
+
+  it("does not render the platform card for disabled runs or legacy reports", async () => {
+    const disabledReport: TaskDetail["report"] = {
+      ...MIXED_REPORT,
+      collaboration: { platform: { mode: "off", status: "disabled" } },
+    };
+    stubFetch([
+      {
+        url: "/v1/tasks/task-off",
+        body: successTask({ id: "task-off", report: disabledReport }),
+      },
+      { url: "/v1/tasks/task-off/feedback", body: { cases: [] } },
+      {
+        url: "/v1/tasks/task-old",
+        body: successTask({
+          id: "task-old",
+          report: { ...MIXED_REPORT, collaboration: { scanned_files: 2 } },
+        }),
+      },
+      { url: "/v1/tasks/task-old/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-off");
+    await screen.findByText("证据处置：确认告警");
+    expect(screen.queryByText("C++ 智能体检测（平台链）")).toBeNull();
+
+    renderAt("/tasks/task-old");
+    await screen.findAllByText("证据处置：确认告警");
+    expect(screen.queryByText("C++ 智能体检测（平台链）")).toBeNull();
+  });
+
+  it("shows the real platform status instead of a fake zero-finding conclusion", async () => {
+    const report: TaskDetail["report"] = {
+      ...MIXED_REPORT,
+      collaboration: { platform: { mode: "auto", status: "no-cxx-sources" } },
+    };
+    stubFetch([
+      { url: "/v1/tasks/task-nocxx", body: successTask({ id: "task-nocxx", report }) },
+      { url: "/v1/tasks/task-nocxx/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-nocxx");
+    const title = await screen.findByText("C++ 智能体检测（平台链）");
+    const card = title.closest(".ant-card") as HTMLElement;
+    expect(within(card).getByText("仓库没有 C++ 来源")).toBeVisible();
+    expect(
+      within(card).getByText(/这是运行状态，不代表仓库没有 C\+\+ 风险/),
+    ).toBeVisible();
+  });
+
+  it("labels PLATFORM_ANALYSIS in the running stage timeline", async () => {
+    expect(stageLabel("PLATFORM_ANALYSIS")).toBe("C++ 智能体检测");
+    const now = new Date().toISOString();
+    const running: TaskDetail = {
+      id: "task-run",
+      state: "EXECUTING",
+      repository: "org/run",
+      created_at: now,
+      updated_at: now,
+      input: { task_type: "repository_scan", repository_key: "team/run" },
+      progress: {
+        stage: "PLATFORM_ANALYSIS",
+        stage_index: 11,
+        stage_total: 14,
+        message: "正在进行 C++ 智能体检测",
+        started_at: now,
+        stage_started_at: now,
+        updated_at: now,
+        attempt: 1,
+        max_attempts: 3,
+        current: null,
+        total: null,
+        unit: "",
+        detail: {},
+      },
+      failure: null,
+      report: null,
+      error: null,
+    };
+    stubFetch([
+      { url: "/v1/tasks/task-run", body: running },
+    ]);
+    renderAt("/tasks/task-run");
+    expect(await screen.findByText("C++ 智能体检测")).toBeVisible();
+    expect(screen.getByText("正在进行 C++ 智能体检测")).toBeVisible();
+  });
+
+  it("locates the running stage by name when old task indexes shift after the new stage", async () => {
+    // 审计问题 4 复现：旧任务的编号（SEMANTIC_TRIAGE=10/13）比前端列表
+    // （插入 PLATFORM_ANALYSIS 后 14 阶段）少一格；按名称定位才不会把
+    // 语义复核错标成"C++ 智能体检测"、把完成错标成"生成报告"。
+    const now = new Date().toISOString();
+    const running: TaskDetail = {
+      id: "task-old-run",
+      state: "EXECUTING",
+      repository: "org/old",
+      created_at: now,
+      updated_at: now,
+      input: { task_type: "repository_scan", repository_key: "team/old" },
+      progress: {
+        stage: "SEMANTIC_TRIAGE",
+        stage_index: 10,
+        stage_total: 13,
+        message: "正在语义复核候选发现",
+        started_at: now,
+        stage_started_at: now,
+        updated_at: now,
+        attempt: 1,
+        max_attempts: 3,
+        current: null,
+        total: null,
+        unit: "",
+        detail: {},
+      },
+      failure: null,
+      report: null,
+      error: null,
+    };
+    stubFetch([
+      { url: "/v1/tasks/task-old-run", body: running },
+    ]);
+    renderAt("/tasks/task-old-run");
+    await screen.findByText("正在语义复核候选发现");
+    const processStep = document.querySelector(".ant-steps-item-process");
+    expect(processStep).not.toBeNull();
+    expect(processStep!.textContent).toContain("语义复核");
+    expect(processStep!.textContent).not.toContain("C++ 智能体检测");
   });
 
   it("shows the clean risk label when nothing crosses the threshold", async () => {

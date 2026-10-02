@@ -10,12 +10,17 @@ import type {
 
 /** 集中式 API 客户端：组件不得散落直接 fetch。 */
 export class ApiError extends Error {
+  /** 后端具名错误的稳定代码（如 agent-detection-unavailable）；旧响应无此字段为空串。 */
+  readonly code: string;
+
   constructor(
     readonly status: number,
     message: string,
+    code = "",
   ) {
     super(message);
     this.name = "ApiError";
+    this.code = code;
   }
 }
 
@@ -76,11 +81,17 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     ? await response.json()
     : await response.text();
   if (!response.ok) {
+    const record =
+      typeof payload === "object" && payload !== null
+        ? (payload as { error?: unknown; code?: unknown })
+        : {};
     const message =
-      typeof payload === "object" && payload !== null && "error" in payload
-        ? String((payload as { error: unknown }).error)
+      "error" in record && record.error !== undefined
+        ? String(record.error)
         : `请求失败 (${response.status})`;
-    throw new ApiError(response.status, message);
+    // 具名 400 的 code 与旧 error 文本并存（方案 §3.1）：旧客户端读 error，新逻辑读 code。
+    const code = "code" in record && record.code !== undefined ? String(record.code) : "";
+    throw new ApiError(response.status, message, code);
   }
   return payload as T;
 }

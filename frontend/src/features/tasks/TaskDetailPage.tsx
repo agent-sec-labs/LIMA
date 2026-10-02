@@ -26,6 +26,8 @@ import type {
   FeedbackPayload,
   FindingItem,
   FixResult,
+  PlatformSummary,
+  PlatformTarget,
   RepairPreviewResult,
   TaskCompletion,
   TaskDetail,
@@ -65,7 +67,11 @@ import {
  */
 
 function StageTimeline({ progress }: { progress: TaskProgress }): React.JSX.Element {
-  const currentIndex = Math.max(0, progress.stage_index - 1);
+  // 优先按阶段名称定位（审计问题 4）：阶段列表插入新阶段后，后端数字
+  // 索引与前端列表会错位；旧任务、未来任务的 stage 字符串才是稳定键。
+  // 仅当 stage 未知（比前端更新的后端）时回退数字索引。
+  const byName = ALL_STAGES.indexOf(progress.stage);
+  const currentIndex = byName >= 0 ? byName : Math.max(0, progress.stage_index - 1);
   return (
     <Card size="small" title="执行进度" extra={<Typography.Text type="secondary">{progress.stage_index}/{progress.stage_total} 阶段</Typography.Text>}>
       <Steps
@@ -354,6 +360,9 @@ const OPERATION_LABELS: Record<string, string> = {
   source_sha: "源提交",
   task_id: "任务",
 };
+
+/** 后端修复预览器支持的 CWE（repair_preview.PREVIEW_CWES 的前端镜像）。 */
+const REPAIR_PREVIEW_CWES = new Set(["CWE-22", "CWE-78", "CWE-89"]);
 
 function operationLabel(key: string): string {
   return OPERATION_LABELS[key] || key.replaceAll("_", " ");
@@ -695,6 +704,258 @@ function UafV2Card({ summary }: { summary: UafV2Summary }): React.JSX.Element {
   );
 }
 
+/** 平台链运行状态（repository_scanner._run_platform_branch 的 status 全集）。
+ * disabled 不入表：整个卡片不渲染（方案 §4.3）。 */
+const PLATFORM_STATUS_META: Record<string, { label: string; color: string }> = {
+  completed: { label: "检测完成", color: "green" },
+  "no-cxx-sources": { label: "仓库没有 C++ 来源", color: "default" },
+  "analyzer-not-configured": { label: "事实分析器未配置", color: "default" },
+  "analyzer-unavailable": { label: "事实分析器不可用", color: "orange" },
+  "llm-not-configured": { label: "模型未配置", color: "default" },
+  "review-failed": { label: "检测失败", color: "red" },
+};
+
+/** 目标终态标签（冻结状态机：runtime-confirmed 最强，rejected/abstain 仅审计）。 */
+const PLATFORM_STATE_LABELS: Record<string, string> = {
+  "runtime-confirmed": "运行时确认",
+  "fact-verified": "事实已验证",
+  "tool-corroborated": "工具证据印证",
+  "semantic-supported": "语义支持 · 需复核",
+  "needs-human-review": "需人工复核",
+  rejected: "已否决",
+  abstain: "弃权",
+};
+
+/** detail_omissions 原因代码 → 用户可读说明（方案 §3.4）。 */
+const DETAIL_OMISSION_LABELS: Record<string, string> = {
+  "hypothesis_reason:too-large": "假设描述超出单条预算，已省略",
+  "hypothesis_reason:budget-exhausted": "详情总预算已耗尽，假设描述未保存",
+  "poc_driver_code:too-large": "PoC driver 超出单条预算，已省略",
+  "poc_driver_code:budget-exhausted": "详情总预算已耗尽，PoC driver 未保存",
+  "experiment_log:too-large": "实验日志超出预算，已省略",
+  "experiment_log:budget-exhausted": "详情总预算已耗尽，实验日志未保存",
+  "experiment_log:older-rounds-omitted": "仅保留最后几轮实验日志，较早轮次已省略",
+};
+
+function platformStateLabel(state: string | undefined): string {
+  return PLATFORM_STATE_LABELS[String(state ?? "")] ?? String(state ?? "—");
+}
+
+function platformOmissionLabel(code: string): string {
+  return DETAIL_OMISSION_LABELS[code] ?? `详情因预算省略（${code}）`;
+}
+
+/** 单条目标下钻：按报告实际可用的字段展示，缺失详情显示省略原因，
+ * 不把缺失误读成“无实验”或“无假设”（方案 §4.4）。 */
+function PlatformTargetDetails({ target }: { target: PlatformTarget }): React.JSX.Element {
+  return (
+    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+      {target.hypothesis_reason !== undefined ? (
+        <span>
+          <strong>假设描述：</strong>
+          {target.hypothesis_reason}
+        </span>
+      ) : null}
+      {target.poc_driver_code !== undefined ? (
+        <div>
+          <Typography.Text strong>PoC driver（脱敏展示副本，仅审计参考，不保证可直接编译复现）：</Typography.Text>
+          <pre
+            aria-label="poc-driver-code"
+            style={{
+              margin: "4px 0",
+              padding: 8,
+              background: "#f5f5f5",
+              borderRadius: 4,
+              maxWidth: "100%",
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              fontSize: 12,
+            }}
+          >
+            {target.poc_driver_code}
+          </pre>
+        </div>
+      ) : null}
+      {target.experiment_log !== undefined && target.experiment_log.length > 0 ? (
+        <div>
+          <Typography.Text strong>实验日志：</Typography.Text>
+          <Table
+            size="small"
+            pagination={false}
+            rowKey={(record, index) => String(record.round ?? index)}
+            dataSource={target.experiment_log}
+            columns={[
+              { title: "轮次", dataIndex: "round", key: "round", width: 64, render: (v: number | undefined) => v ?? "—" },
+              { title: "阶段", dataIndex: "stage", key: "stage", width: 96, render: (v: string | undefined) => v ?? "—" },
+              {
+                title: "退出码",
+                dataIndex: "exit_code",
+                key: "exit_code",
+                width: 80,
+                render: (v: number | null | undefined) => (v === null || v === undefined ? "—" : String(v)),
+              },
+              { title: "错误类型", dataIndex: "error_type", key: "error_type", render: (v: string | undefined) => v || "—" },
+              {
+                title: "出错行",
+                dataIndex: "faulting_line",
+                key: "faulting_line",
+                width: 80,
+                render: (v: number | null | undefined) => (v === null || v === undefined ? "—" : String(v)),
+              },
+              {
+                title: "命中",
+                dataIndex: "hit",
+                key: "hit",
+                width: 72,
+                render: (v: boolean | undefined) => (v === true ? "是" : v === false ? "否" : "—"),
+              },
+            ]}
+          />
+        </div>
+      ) : null}
+      <span>
+        <strong>证明结论：</strong>
+        {target.proof ? target.proof : "—（无证明结论）"}
+      </span>
+      {target.rejected_reason ? (
+        <span>
+          <strong>拒绝理由：</strong>
+          {target.rejected_reason}
+        </span>
+      ) : null}
+      {target.detail_omissions && target.detail_omissions.length > 0 ? (
+        <Typography.Text type="secondary">
+          详情省略说明：
+          {target.detail_omissions.map((code) => (
+            <span key={code} style={{ display: "block" }}>
+              · {platformOmissionLabel(code)}
+            </span>
+          ))}
+        </Typography.Text>
+      ) : null}
+    </Space>
+  );
+}
+
+/** C++ 智能体检测（平台链）审计卡（#246，方案 §4.3/§4.4）。
+ * 旧报告无 platform、或 status=disabled（本次关闭）时不渲染空卡片；
+ * 其余状态如实展示，不把不可用虚构成零发现。 */
+function PlatformCard({ summary }: { summary: PlatformSummary }): React.JSX.Element | null {
+  const status = String(summary.status || "");
+  if (!status || status === "disabled") return null;
+  const meta = PLATFORM_STATUS_META[status] ?? { label: status, color: "default" };
+  const stats = summary.stats ?? {};
+  const targets = summary.targets ?? [];
+  const agentCalls =
+    Number(stats.scout_calls || 0) +
+    Number(stats.specialist_calls || 0) +
+    Number(stats.critic_calls || 0);
+  const completed = status === "completed";
+  return (
+    <Card size="small" title="C++ 智能体检测（平台链）" aria-label="C++ 智能体检测（平台链）">
+      <Space direction="vertical" size="small" style={{ width: "100%" }}>
+        <Space wrap>
+          <Tag color={meta.color}>{meta.label}</Tag>
+          <Tag>模式 {String(summary.mode || "—")}</Tag>
+          {completed ? (
+            <Typography.Text type="secondary">
+              智能体链已完成假设、沙箱实验与证明复核；结论以逐目标审计为准。
+            </Typography.Text>
+          ) : (
+            <Typography.Text type="secondary">
+              本次任务未产出检测结果；这是运行状态，不代表仓库没有 C++ 风险。
+            </Typography.Text>
+          )}
+        </Space>
+        <Space size="large" wrap aria-label="平台链统计">
+          <span>线索 <strong>{Number(stats.leads || 0)}</strong></span>
+          <span>目标 <strong>{Number(stats.targets || 0)}</strong></span>
+          <span>finding <strong>{Number(stats.findings || 0)}</strong></span>
+          <span>实验 <strong>{Number(stats.experiments || 0)}</strong></span>
+          <span>模型调用 <strong>{agentCalls}</strong></span>
+        </Space>
+        {summary.states && Object.keys(summary.states).length > 0 ? (
+          <Space wrap size={4}>
+            {Object.entries(summary.states).map(([state, count]) => (
+              <Tag key={state}>
+                {platformStateLabel(state)} × {count}
+              </Tag>
+            ))}
+          </Space>
+        ) : null}
+        {summary.diagnostics && summary.diagnostics.length > 0 ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            诊断：
+            {summary.diagnostics.slice(0, 8).map((item, index) => (
+              <span key={index} style={{ display: "block" }}>{item}</span>
+            ))}
+          </Typography.Paragraph>
+        ) : null}
+        {targets.length > 0 ? (
+          <Table
+            size="small"
+            rowKey={(record) => String(record.target_id ?? record.path ?? "")}
+            dataSource={targets.slice(0, 32)}
+            pagination={false}
+            columns={[
+              { title: "目标", dataIndex: "target_id", key: "target_id", width: 96 },
+              {
+                title: "位置",
+                key: "location",
+                render: (_: unknown, record: PlatformTarget) => (
+                  <Typography.Text code>
+                    {`${record.path || "未知文件"}:${record.line ?? "?"}`}
+                  </Typography.Text>
+                ),
+              },
+              {
+                title: "状态",
+                dataIndex: "state",
+                key: "state",
+                width: 140,
+                render: (value: string | undefined) => platformStateLabel(value),
+              },
+              { title: "CWE", dataIndex: "cwe", key: "cwe", width: 100 },
+              {
+                title: "实验",
+                dataIndex: "experiments",
+                key: "experiments",
+                width: 64,
+                render: (value: number | undefined) => Number(value || 0),
+              },
+              {
+                title: "证明结论",
+                dataIndex: "proof",
+                key: "proof",
+                width: 96,
+                render: (value: string | undefined) => value || "—",
+              },
+            ]}
+            expandable={{
+              expandedRowRender: (record: PlatformTarget) => (
+                <PlatformTargetDetails target={record} />
+              ),
+              rowExpandable: (record: PlatformTarget) =>
+                record.hypothesis_reason !== undefined ||
+                record.poc_driver_code !== undefined ||
+                (record.experiment_log?.length ?? 0) > 0 ||
+                Boolean(record.rejected_reason) ||
+                (record.detail_omissions?.length ?? 0) > 0,
+            }}
+          />
+        ) : completed ? (
+          <Typography.Text type="secondary">没有进入目标审计的候选。</Typography.Text>
+        ) : null}
+        <Typography.Text type="secondary">
+          目标详情来自报告内的有界、脱敏副本；PoC 仅作文本展示，不会被前端执行。
+          C++ finding 不支持自动修复（automatic_repair=false）。
+        </Typography.Text>
+      </Space>
+    </Card>
+  );
+}
+
 function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
   const { message, modal } = AntApp.useApp();
   const report = task.report;
@@ -722,6 +983,10 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
   const uafSummary =
     report.collaboration?.uaf_v2 && typeof report.collaboration.uaf_v2 === "object"
       ? report.collaboration.uaf_v2
+      : null;
+  const platformSummary =
+    report.collaboration?.platform && typeof report.collaboration.platform === "object"
+      ? report.collaboration.platform
       : null;
   const [previewBusy, setPreviewBusy] = useState(false);
   const [fixBusy, setFixBusy] = useState(false);
@@ -768,7 +1033,19 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
     });
   };
 
-  const showPreview = repositoryScan && findings.length > 0;
+  /** §4.7：仅本地导入报告存在预览器支持的 Python finding（CWE-22/78/89
+   * 且未标记 automatic_repair=false）时显示入口；混合报告仍可对合格
+   * finding 预览。后端修复预览校验保持原样，仍是最终门禁。 */
+  const localImportScan =
+    repositoryScan &&
+    Boolean((task.input as { repository_key?: string } | undefined)?.repository_key);
+  const previewableCount = findings.filter(
+    (finding) =>
+      String(finding.path ?? "").toLowerCase().endsWith(".py") &&
+      REPAIR_PREVIEW_CWES.has(String(finding.cwe ?? "").toUpperCase()) &&
+      finding.automatic_repair !== false,
+  ).length;
+  const showPreview = Boolean(localImportScan) && previewableCount > 0;
   const showFix = Boolean(task.pull_request);
 
   return (
@@ -816,6 +1093,7 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
         <DispositionBanner adjudication={adjudication} />
         <SemanticTriageCard report={report} />
         {uafSummary && <UafV2Card summary={uafSummary} />}
+        {platformSummary && <PlatformCard summary={platformSummary} />}
         <Space size="large" wrap aria-label="报告摘要">
           <span>问题总数 <strong>{findings.length}</strong></span>
           <span>严重 / 高危 <strong>{highPriority}</strong></span>

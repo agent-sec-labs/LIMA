@@ -51,8 +51,10 @@ __all__ = [
     "ExpertReviewError",
     "ExpertReviewErrorCode",
     "build_review_receipt",
+    "load_review_receipts",
     "load_review_set",
     "summarize_review_receipts",
+    "validate_review_receipt",
     "validate_timing_events",
     "write_review_receipt",
 ]
@@ -387,6 +389,18 @@ def _validate_receipt(receipt: object) -> dict[str, object]:
     return receipt
 
 
+def validate_review_receipt(receipt: object) -> dict[str, object]:
+    """Validate one receipt mapping, fail-closed with ``RECEIPT_INVALID``.
+
+    Public read-only accessor for the pairing/verification layer (the
+    evidence-pair follow-up of 2026-10-02): the closed key set, the verdict
+    vocabulary, the digest shapes, the active-time shape and the coverage
+    faces are exactly the frozen writer-side validation -- nothing is
+    loosened and no file is touched.
+    """
+    return _validate_receipt(receipt)
+
+
 def _load_receipt_documents(
     directory: pathlib.Path,
 ) -> list[tuple[pathlib.Path, dict[str, object]]]:
@@ -407,6 +421,18 @@ def _load_receipt_documents(
             ) from exc
         loaded.append((path, _validate_receipt(document)))
     return loaded
+
+
+def load_review_receipts(
+    directory: str | pathlib.Path,
+) -> list[tuple[pathlib.Path, dict[str, object]]]:
+    """Load and validate every receipt document in one output directory.
+
+    Public read-only accessor for the pairing/verification layer: the
+    frozen receipt name family, the fail-closed parse and the frozen
+    receipt validation are exactly the writer-side discovery behavior.
+    """
+    return _load_receipt_documents(pathlib.Path(directory))
 
 
 def write_review_receipt(

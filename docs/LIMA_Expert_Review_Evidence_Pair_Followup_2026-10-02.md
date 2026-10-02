@@ -80,15 +80,22 @@ start/finish 全部完成后才报保存失败。本修复交付证据对（evid
 - **两个非 LF 小样本**（`tests/test_v4_baseline_nonlf_scanner_generality.py`）：
   - `pylib-mini`（Python 库型）：正例 eval/shell=True/硬编码密钥 + 安全近邻
     json.loads/shell=False/仅名称引用；走生产 `RepositoryScanner` 显式离线配置
-    （不拷贝 scanner、不改规则、不伪装 LF、源字节直写不套 LF 行尾转换）；语义
-    面恰为三正例（CWE-95/78/798），analyzer 身份串
+    （不拷贝 scanner、不改规则、不伪装 LF、源字节直写不套 LF 行尾转换）。
+    **勘误（2026-10-02 #57 收口轮）**：原文"语义面恰为三正例"有误——原始观测为
+    **4 条候选**：3 正例（CWE-95/78/798）+ **1 条已知误报**（通用密钥规则对仅
+    名称引用的安全邻例 `SERVICE_PASSWORD_ENV = "SERVICE_PASSWORD"`〔config.py:2〕
+    同样告警）。初版测试以 `(path, rule_id)` 集合断言折叠了同文件同规则的两条，
+    构成假绿；已改为逐 finding（path/rule/line）断言并显式分列正例与已知误报。
+    **检测质量要求如实未满足**（通用规则存在已知误报）；scanner 产品逻辑未改，
+    该问题按已知基线结论保留（详见 #57 收口报告）。analyzer 身份串
     `repository-hybrid:python-ast+python-dataflow` 钉扎。
   - `docs-tests-mini`（文档/测试型）：盘点面 4 文件（json/conf/py；`.md` 如实
     落在 `unsupported-extension` skip 面，非 coverage-affecting），findings=0 为
     **measured 0**（与扫描失败区分：扫描完成、reviewer 面、零丢弃）。
-  - **身份无关**：改名/搬目录后语义面（findings/scanned_files）恒等、provenance
-    面（repository/root 标签）如实不同、树摘要跨物化稳定且字节敏感；
-    **内容跟随**：正例→安全近邻恰使该 finding 消失、其余不动。
+  - **身份无关**：改名/搬目录后语义面（逐 finding/scanned_files）恒等、provenance
+    面（repository/root 标签）如实不同、树摘要移动前保存移动后比较（跨物化稳定
+    且字节敏感）；**内容跟随**：正例→安全近邻恰使该 finding 消失、其余不动
+    （已知误报保持可见）。
   - **边界**：小样本仅证共同扫描路径可复用与身份无关；不宣称跨真实仓库
     release pass、统计泛化、VEP/RVR 或完整 V5 生产能力。四模式注入证明按已证
     范围保留；旧 `870fdee5…` 不被新结果覆盖。

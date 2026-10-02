@@ -1,9 +1,10 @@
 """Limited non-LF generality validation for the production scanner path.
 
-Scope (the 2026-10-02 Maintainer-authorized handoff, section 4): two small
-offline fixtures that are NOT LlamaFactory, both walking the same existing
-production ``RepositoryScanner`` path under the explicit offline scanner
-configuration -- no scanner copy, no LF disguise, no rule modification:
+Scope (the 2026-10-02 Maintainer-authorized #57 close-out handoff,
+section 2): two small offline fixtures that are NOT LlamaFactory, both
+walking the same existing production ``RepositoryScanner`` path under the
+explicit offline scanner configuration -- no scanner copy, no LF
+disguise, no rule modification:
 
 - ``pylib-mini``: a Python-library-shaped sample with explicit positives
   (dynamic code execution, shell=True, a hardcoded secret) and their safe
@@ -12,18 +13,32 @@ configuration -- no scanner copy, no LF disguise, no rule modification:
 - ``docs-tests-mini``: a docs/test-heavy sample with no positives -- a
   measured zero, explicitly distinct from a scan failure.
 
+**Honest detection-quality face (the 2026-10-02 fake-green correction).**
+The raw observation on pylib-mini is **4 candidates, not 3**: the rule
+also fires on the safe-neighbor line ``SERVICE_PASSWORD_ENV =
+"SERVICE_PASSWORD"`` (``pylib/config.py:2``, SEC-HARDCODED-SECRET).  The
+original projection to ``frozenset((path, rule_id))`` collapsed the two
+same-file/same-rule findings and let the test claim "safe neighbors are
+absent" while the scanner had flagged one -- a proven fake green.  The
+assertions here therefore compare **per finding** (path, rule_id, line),
+list the positives and the known false positive separately, and keep the
+detection-quality requirement explicitly **unmet**: the false positive is
+recorded as a known baseline conclusion of the current generic rules
+(the scanner product logic is deliberately unchanged in this fix; no
+sample deletion, no rule dodging, no whitelist, no coarse dedup).
+
 Inputs are pinned: deterministic file bytes written without any LF-style
-line-ending conversion (the source bytes are kept verbatim), a tree digest
-computed by an independent transcription and required stable across
-materializations, the frozen explicit scanner configuration, and the
-config-derived analyzer identity string.  Proven here, within
+line-ending conversion (the source bytes are kept verbatim), a tree
+digest computed by an independent transcription, saved before the move
+and compared after it, the frozen explicit scanner configuration, and
+the config-derived analyzer identity string.  Proven here, within
 small-sample scope only:
 
-- the shared scan path is reusable and repository-identity-independent: a
-  rename/move keeps the semantic result (same findings face) while the
-  provenance faces change honestly (the root labels differ);
+- the shared scan path is reusable and repository-identity-independent:
+  a rename/move keeps the semantic result (same per-finding face) while
+  the provenance faces change honestly (the root labels differ);
 - the result follows the content: replacing a positive with its safe
-  neighbor removes exactly that finding;
+  neighbor removes exactly that finding (the known false positive stays);
 - a docs/test-heavy sample can produce an honest measured zero with files
   actually scanned (not a failure, not an empty scan);
 - the fixed LF identity values live in the LF benchmark adapter layer
@@ -32,8 +47,9 @@ small-sample scope only:
   provenance, never a security-decision input).
 
 NOT proven here (explicitly out of scope): cross-repository release pass,
-statistical generalization, VEP/RVR, or any complete V5 production
-capability.  Everything runs offline in temp directories with zero
+statistical generalization, VEP/RVR, any complete V5 production
+capability, or detection precision/recall beyond the four observed
+candidates.  Everything runs offline in temp directories with zero
 network, zero credentials and zero model calls.
 """
 
@@ -98,18 +114,35 @@ _PYLIB_FILES = {
     ),
 }
 
-#: The expected semantic findings face of pylib-mini (path, rule_id), and
-#: the exact finding that disappears when the eval positive is replaced by
-#: its safe neighbor.
-_PYLIB_EXPECTED_RULES = frozenset(
+#: The expected per-finding semantic face of pylib-mini, compared as
+#: (path, rule_id, line) triples so that same-file/same-rule extra alerts
+#: can never be collapsed away again.  The three positives:
+_PYLIB_POSITIVE_FINDINGS = frozenset(
     {
-        ("pylib/runner.py", "SEC-EVAL"),
-        ("pylib/shellout.py", "SEC-SUBPROCESS-SHELL"),
-        ("pylib/config.py", "SEC-HARDCODED-SECRET"),
+        ("pylib/runner.py", "SEC-EVAL", 6),
+        ("pylib/shellout.py", "SEC-SUBPROCESS-SHELL", 6),
+        ("pylib/config.py", "SEC-HARDCODED-SECRET", 1),
     }
 )
-_PYLIB_SAFE_NEIGHBOR_RULES = _PYLIB_EXPECTED_RULES - {
-    ("pylib/runner.py", "SEC-EVAL")
+#: The fourth observed candidate: the generic secret rule also fires on
+#: the safe-neighbor name-only reference ``SERVICE_PASSWORD_ENV =
+#: "SERVICE_PASSWORD"``.  Recorded as a KNOWN FALSE POSITIVE (detection
+#: quality honestly unmet); the scanner product logic is unchanged here.
+_PYLIB_KNOWN_FALSE_POSITIVE = ("pylib/config.py", "SEC-HARDCODED-SECRET", 2)
+
+#: The full raw observation: 4 candidates, not 3.
+_PYLIB_ALL_FINDINGS = _PYLIB_POSITIVE_FINDINGS | {_PYLIB_KNOWN_FALSE_POSITIVE}
+
+#: Safe-neighbor lines that must stay unflagged by their own rule faces
+#: (the known false positive above is the honest exception, kept visible).
+_PYLIB_CLEAN_NEIGHBOR_LINES = frozenset(
+    {("pylib/runner.py", 11), ("pylib/shellout.py", 11)}
+)
+
+#: After the eval positive is replaced by its safe neighbor, exactly the
+#: SEC-EVAL finding disappears; the known false positive stays.
+_PYLIB_AFTER_SAFE_SWAP = _PYLIB_ALL_FINDINGS - {
+    ("pylib/runner.py", "SEC-EVAL", 6)
 }
 
 _DOCS_FILES = {
@@ -181,9 +214,17 @@ def _scan(root: pathlib.Path):
     return scanner.scan(workspace)
 
 
-def _semantic_face(result) -> frozenset[tuple[str, str]]:
+def _semantic_face(result) -> frozenset[tuple[str, str, int]]:
+    """The per-finding face: (path, rule_id, line), no set-collapsed rules.
+
+    Line numbers are part of the stable identity: two findings in one file
+    under one rule stay two findings (the 2026-10-02 fake-green
+    correction -- the old ``(path, rule_id)`` projection hid a real alert
+    on a safe-neighbor line).
+    """
     return frozenset(
-        (finding.path, finding.rule_id) for finding in result.report.findings
+        (finding.path, finding.rule_id, finding.line)
+        for finding in result.report.findings
     )
 
 
@@ -216,8 +257,25 @@ class TestNonLfScannerGenerality(unittest.TestCase):
             _write_files(root, _PYLIB_FILES)
             result = _scan(root)
             self.assertEqual(result.report.reviewer, _ANALYZER_NAME)
-            self.assertEqual(_semantic_face(result), _PYLIB_EXPECTED_RULES)
-            # Every positive carries its CWE face; safe neighbors are absent.
+            face = _semantic_face(result)
+            # The raw observation is 4 candidates: every positive present,
+            # plus the known false positive on the name-only safe neighbor.
+            self.assertEqual(face, _PYLIB_ALL_FINDINGS)
+            for positive in _PYLIB_POSITIVE_FINDINGS:
+                self.assertIn(positive, face)
+            self.assertIn(_PYLIB_KNOWN_FALSE_POSITIVE, face)
+            # The other safe neighbors stay unflagged on their own lines.
+            flagged_lines = {(path, line) for path, _, line in face}
+            self.assertEqual(
+                flagged_lines & _PYLIB_CLEAN_NEIGHBOR_LINES, set()
+            )
+            # Detection quality is honestly UNMET: the false positive is a
+            # known baseline conclusion of the current generic rules; this
+            # test records it, it does not bless it and it does not fix it.
+            positives = face - {_PYLIB_KNOWN_FALSE_POSITIVE}
+            self.assertEqual(len(result.report.findings), 4)
+            self.assertEqual(len(positives), 3)
+            # Every positive carries its CWE face.
             cwes = {
                 (finding.path, finding.rule_id): finding.cwe
                 for finding in result.report.findings
@@ -241,14 +299,19 @@ class TestNonLfScannerGenerality(unittest.TestCase):
             original = parent / "pylib-mini"
             _write_files(original, _PYLIB_FILES)
             before = _scan(original)
+            # Save the tree digest BEFORE the move; compare with the value
+            # measured AFTER it (the old test compared the moved tree with
+            # itself, which proved nothing about rename stability).
+            digest_before_move = _tree_digest(original)
             # Identity change: rename and move the whole sample.
             moved = parent / "renamed-deeper" / "totally-other-name"
             moved.parent.mkdir(parents=True)
             original.rename(moved)
             after = _scan(moved)
-            # The semantic result is identical ...
+            # The semantic result is identical (all four candidates,
+            # including the known false positive) ...
             self.assertEqual(_semantic_face(before), _semantic_face(after))
-            self.assertEqual(_semantic_face(after), _PYLIB_EXPECTED_RULES)
+            self.assertEqual(_semantic_face(after), _PYLIB_ALL_FINDINGS)
             self.assertEqual(
                 before.report.collaboration["scanned_files"],
                 after.report.collaboration["scanned_files"],
@@ -258,7 +321,7 @@ class TestNonLfScannerGenerality(unittest.TestCase):
             self.assertNotEqual(before.report.repository, after.report.repository)
             self.assertNotEqual(before.inventory.root, after.inventory.root)
             # The tree digest is rename-stable (identity is not content).
-            self.assertEqual(_tree_digest(moved), _tree_digest(moved))
+            self.assertEqual(_tree_digest(moved), digest_before_move)
 
     def test_content_change_positive_to_safe_neighbor_changes_result(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -276,13 +339,15 @@ class TestNonLfScannerGenerality(unittest.TestCase):
                 (root / pathlib.PurePosixPath(relative)).unlink()
             _write_files(root, swapped)
             after = _scan(root)
-            self.assertEqual(_semantic_face(before), _PYLIB_EXPECTED_RULES)
-            self.assertEqual(_semantic_face(after), _PYLIB_SAFE_NEIGHBOR_RULES)
-            # Exactly the SEC-EVAL finding disappeared; nothing else moved.
+            self.assertEqual(_semantic_face(before), _PYLIB_ALL_FINDINGS)
+            self.assertEqual(_semantic_face(after), _PYLIB_AFTER_SAFE_SWAP)
+            # Exactly the SEC-EVAL finding disappeared; nothing else moved,
+            # and the known false positive stays visible through the swap.
             self.assertEqual(
                 _semantic_face(before) - _semantic_face(after),
-                {("pylib/runner.py", "SEC-EVAL")},
+                {("pylib/runner.py", "SEC-EVAL", 6)},
             )
+            self.assertIn(_PYLIB_KNOWN_FALSE_POSITIVE, _semantic_face(after))
 
     def test_docs_tests_mini_measured_zero_is_not_failure(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -38,6 +38,7 @@ from .task_progress import (
     AST_ANALYSIS,
     DATAFLOW_ANALYSIS,
     INVENTORY,
+    PLATFORM_ANALYSIS,
     SAST_ANALYSIS,
 )
 from .uaf_orchestrator import UAF_STATE_CONFIDENCE
@@ -366,6 +367,14 @@ class RepositoryScanner:
                 # rejection reasons) passes the #94 privacy mask.
                 "rejected_reason": privacy_text(item.rejected_reason),
             })
+        # #244（方案 §3.4）：在摘要上叠加有界、脱敏的展示字段；缺失的
+        # 可选字段不代表实验未发生——省略一律记录在 detail_omissions。
+        positive_ids = frozenset(item.target_id for item in outcome.findings)
+        details = self._platform_target_details(
+            outcome.targets[:32], positive_ids
+        )
+        for summary, detail in zip(audit, details, strict=True):
+            summary.update(detail)
         payload = {
             "mode": mode,
             "status": status,
@@ -390,6 +399,154 @@ class RepositoryScanner:
         return payload
 
     _V4_PAYLOAD_BUDGET_BYTES: Final = 512 * 1024
+
+    # #244（方案 §3.4）详情预算：单目标假设/PoC 上限、日志保留轮数、
+    # 新增详情总预算。详情是"整项包含或整项省略"，永不把 PoC 截断成
+    # 不可运行的代码；摘要与 v4 载荷预算不受这些详情影响。
+    _PLATFORM_DETAIL_TOTAL_BUDGET_BYTES: Final = 256 * 1024
+    _PLATFORM_DETAIL_HYPOTHESIS_BYTES: Final = 2 * 1024
+    _PLATFORM_DETAIL_POC_BYTES: Final = 32 * 1024
+    _PLATFORM_DETAIL_LOG_ROUNDS: Final = 8
+    _PLATFORM_DETAIL_LOG_FIELDS: Final = (
+        "round", "stage", "exit_code", "error_type", "faulting_line", "hit",
+    )
+
+    # 预留口径：每个目标最多 4 条省略说明（假设/PoC/日志各一条
+    # budget-exhausted，加日志的轮数省略）。若投影新增省略代码路径，
+    # 必须同步扩充该集合，否则总预算的预留会低于实际开销。
+    _PLATFORM_DETAIL_WORST_OMISSIONS: Final = (
+        "hypothesis_reason:budget-exhausted",
+        "poc_driver_code:budget-exhausted",
+        "experiment_log:older-rounds-omitted",
+        "experiment_log:budget-exhausted",
+    )
+
+    def _platform_target_details(
+        self, targets, positive_ids: frozenset[str],
+    ) -> list[dict[str, object]]:
+        """Bounded, redacted drill-down fields for the audit summary.
+
+        自由文本（假设、PoC driver）先过 ``privacy_text``；预算按**完整
+        JSON 编码字节**计量——字段值、字段名、容器结构与省略说明全部
+        计入，使"详情总计最多 256 KiB"成为对最终载荷可断言的物理事实。
+        分配前先为**全部目标**预留最坏情况的容器与省略说明开销（预算
+        耗尽后省略说明仍会进报告，这笔字节必须有出处）；字段预算在余量
+        内按"正向 finding 优先、再按 target_id"确定性分配（与摘要顺序
+        无关）。实验日志只保留最后 8 轮且仅投影白名单字段。返回列表与
+        ``targets`` 一一对应。
+        """
+
+        order = sorted(
+            range(len(targets)),
+            key=lambda index: (
+                0 if targets[index].target_id in positive_ids else 1,
+                targets[index].target_id,
+            ),
+        )
+        details: list[dict[str, object]] = [{} for _ in targets]
+        # 先扣全量预留：Σ(实际容器+省略开销) ≤ N × 最坏单目标开销，
+        # 因此 字段预算 + 预留 ≥ 实际总量 ⇒ 实际总量 ≤ 总预算。
+        worst_entry = {"detail_omissions": list(
+            self._PLATFORM_DETAIL_WORST_OMISSIONS
+        )}
+        reserve_each = len(
+            json.dumps(worst_entry, ensure_ascii=False).encode("utf-8")
+        )
+        remaining = (
+            self._PLATFORM_DETAIL_TOTAL_BUDGET_BYTES
+            - reserve_each * len(targets)
+        )
+        for index in order:
+            entry, consumed = self._project_one_target_details(
+                targets[index], remaining
+            )
+            remaining -= consumed
+            details[index] = entry
+        return details
+
+    def _project_one_target_details(
+        self, item, remaining: int,
+    ) -> tuple[dict[str, object], int]:
+        """Project one target's bounded details within ``remaining`` bytes.
+
+        ``remaining`` 只覆盖字段预算（容器与省略说明开销已由调用方按
+        全量预留）；返回 (entry, 字段占用的 JSON 编码字节)。字段放行的
+        边际成本含字段名与结构。预算耗尽时本目标其余字段一律记
+        ``budget-exhausted``——省略说明的字节由全局预留兜底。
+        """
+
+        def encoded_size(value: object) -> int:
+            return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+        entry: dict[str, object] = {}
+        omissions: list[str] = []
+        spent = 0
+
+        def entry_size(with_entry: dict[str, object]) -> int:
+            probe = dict(with_entry)
+            probe["detail_omissions"] = omissions
+            return encoded_size(probe)
+
+        def admit(name: str, value: object, cap: int) -> None:
+            nonlocal remaining, spent
+            if remaining < 0:
+                omissions.append(f"{name}:budget-exhausted")
+                return
+            # 单项上限含键名（{name: value} 的编码字节）。
+            if encoded_size({name: value}) > cap:
+                omissions.append(f"{name}:too-large")
+                return
+            before = entry_size(entry)
+            entry[name] = value
+            cost = entry_size(entry) - before
+            if cost <= remaining:
+                remaining -= cost
+                spent += cost
+            else:
+                del entry[name]
+                omissions.append(f"{name}:budget-exhausted")
+
+        hypothesis = privacy_text(item.hypothesis_reason or "")
+        if hypothesis:
+            admit(
+                "hypothesis_reason", hypothesis,
+                self._PLATFORM_DETAIL_HYPOTHESIS_BYTES,
+            )
+
+        poc = privacy_text(item.poc_driver_code or "")
+        if poc:
+            admit(
+                "poc_driver_code", poc,
+                self._PLATFORM_DETAIL_POC_BYTES,
+            )
+
+        log = list(item.experiment_log or [])
+        if log:
+            if len(log) > self._PLATFORM_DETAIL_LOG_ROUNDS:
+                omissions.append("experiment_log:older-rounds-omitted")
+            kept = []
+            for log_entry in log[-self._PLATFORM_DETAIL_LOG_ROUNDS:]:
+                projected = {}
+                for field in self._PLATFORM_DETAIL_LOG_FIELDS:
+                    if field not in log_entry:
+                        continue
+                    value = log_entry[field]
+                    # 白名单只筛字段名；字符串值（如 error_type 可能
+                    # 带自由文本）仍须过 #94 mask，金丝雀不得经日志
+                    # 投影泄入报告。
+                    projected[field] = (
+                        privacy_text(value)
+                        if isinstance(value, str)
+                        else value
+                    )
+                kept.append(projected)
+            admit(
+                "experiment_log", kept,
+                self._PLATFORM_DETAIL_TOTAL_BUDGET_BYTES,
+            )
+
+        entry["detail_omissions"] = omissions
+        return entry, spent
 
     @staticmethod
     def _platform_required_error(prefix: str, exc: Exception) -> RuntimeError:
@@ -502,6 +659,8 @@ class RepositoryScanner:
         cxx_finding_index: dict[tuple[str, str, str, int], Finding],
         repository_key: str,
         cancel_probe: Callable[[], bool] | None,
+        mode_override: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict:
         """Run the single agent platform chain for the facts domain.
 
@@ -510,9 +669,13 @@ class RepositoryScanner:
         升级目标，Specialist 假设 → 沙箱 ASan 实验 → Critic 修正循环，
         事实/证明作为可咨询仪器进入冻结 Arbiter。legacy 分支域
         （CWE-787/125/415）不受影响；analyzer client 缺失时如实跳过。
+
+        ``mode_override`` 是任务级快照模式（方案 §3.2）：service 在入队时
+        解析一次并随任务传递，本实例的共享 ``cxx_agent_mode`` 不被改写，
+        并发任务互不串扰；None 时沿用实例默认（兼容直接调用方）。
         """
 
-        mode = self.cxx_agent_mode
+        mode = mode_override if mode_override is not None else self.cxx_agent_mode
         if mode == "off":
             return {"mode": "off", "status": "disabled"}
         adapter = self.cxx_memory_adapter
@@ -552,6 +715,9 @@ class RepositoryScanner:
             if callable(getattr(adapter, "repro_compile_run", None))
             else None
         )
+        # 真正进入平台链前才发出阶段事件（§3.3）：off、无 C++ 来源、
+        # 分析器/模型未配置的跳过路径不点亮该阶段，避免虚假进度。
+        _report(progress_callback, PLATFORM_ANALYSIS, "正在进行 C++ 智能体检测")
         try:
             outcome = run_platform_review(
                 adapter,
@@ -611,7 +777,21 @@ class RepositoryScanner:
         progress_callback: ProgressCallback | None = None,
         task_id: str = "",
         should_cancel: Callable[[], bool] | None = None,
+        cxx_agent_mode: str | None = None,
     ) -> RepositoryScanResult:
+        """Scan a materialized workspace.
+
+        ``cxx_agent_mode`` 是任务级平台链模式快照（方案 §3.2）：仅作用于
+        本次调用，None 表示沿用构造时的实例默认。模型、提示词与预算仍
+        只由服务端配置决定，调用方不能借该参数覆盖它们。
+        """
+
+        if cxx_agent_mode is not None and cxx_agent_mode not in {
+            "auto", "off", "required",
+        }:
+            raise ValueError(
+                "cxx_agent_mode must be auto, off or required"
+            )
         _report(progress_callback, INVENTORY, "正在盘点工作区文件")
         inventory = workspace.inventory()
         _report(
@@ -783,6 +963,8 @@ class RepositoryScanner:
             cxx_finding_index,
             repository_key,
             cancel_probe,
+            mode_override=cxx_agent_mode,
+            progress_callback=progress_callback,
         )
 
         findings.sort(

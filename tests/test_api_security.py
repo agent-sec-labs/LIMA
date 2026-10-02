@@ -14,7 +14,9 @@ import os
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 from lima.api import ApiHandler
 from lima.auth import hash_password
@@ -275,6 +277,118 @@ class RepositoryGrantPolicyTests(unittest.TestCase):
             self.store.list_repository_grants("t2"),
         )
         self.assertEqual([], self.store.list_repository_grants("t3"))
+
+
+class AgentDetectionApiTests(unittest.TestCase):
+    """POST /v1/repository-scans 的 agent_detection 契约（方案 §3.1）。
+
+    非 bool 一律 400 且不带 code；false 撞上 required 部署返回稳定
+    ``code=agent-detection-required``，同时保留旧 ``error`` 文本。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        handle, cls.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        cls.temporary = tempfile.TemporaryDirectory()
+        repository = Path(cls.temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app.py").write_text("safe = True\n", encoding="utf-8")
+        # required 部署需要模型与事实分析器（config 既有约束）。
+        cls.settings = replace(
+            make_settings(cls.db_path),
+            cxx_agent_mode="required",
+            cxx_agent_model="unit-test-model",
+            cxx_memory_mode="auto",
+            repository_import_root=cls.temporary.name,
+            repository_scan_sast_mode="off",
+        )
+        cls.service = ReviewService(cls.settings)
+        handler = type("AgentDetectionApiHandler", (ApiHandler,), {
+            "service": cls.service, "settings": cls.settings,
+        })
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.service.close()
+        cls.temporary.cleanup()
+        os.unlink(cls.db_path)
+
+    def request(self, method, path, token="", body=None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        payload = None
+        if body is not None:
+            payload = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        try:
+            connection.request(method, path, body=payload, headers=headers)
+            response = connection.getresponse()
+            raw = response.read().decode("utf-8")
+            status = response.status
+        finally:
+            connection.close()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = raw
+        return status, parsed
+
+    def admin_token(self):
+        status, body = self.request(
+            "POST", "/v1/auth/login",
+            body={
+                "username": self.settings.bootstrap_admin_username,
+                "password": BOOTSTRAP_CREDENTIAL,
+            },
+        )
+        self.assertEqual(200, status, body)
+        return body["access_token"]
+
+    def test_non_boolean_agent_detection_is_rejected(self):
+        token = self.admin_token()
+        for value in ("yes", 1, None):
+            with self.subTest(value=value):
+                status, body = self.request(
+                    "POST", "/v1/repository-scans", token=token,
+                    body={
+                        "repository_key": "team/project",
+                        "agent_detection": value,
+                    },
+                )
+                self.assertEqual(400, status, body)
+                self.assertIn("boolean", body["error"])
+                self.assertNotIn("code", body)
+
+    def test_false_under_required_policy_returns_named_code(self):
+        token = self.admin_token()
+        status, body = self.request(
+            "POST", "/v1/repository-scans", token=token,
+            body={
+                "repository_key": "team/project",
+                "agent_detection": False,
+            },
+        )
+        self.assertEqual(400, status, body)
+        self.assertEqual("agent-detection-required", body["code"])
+        self.assertTrue(body["error"])
+
+    def test_absent_field_still_creates_a_task_on_a_required_server(self):
+        # 旧客户端不传字段：沿用服务端默认（required 也照常入队），行为不变。
+        token = self.admin_token()
+        status, body = self.request(
+            "POST", "/v1/repository-scans", token=token,
+            body={"repository_key": "team/project"},
+        )
+        self.assertEqual(202, status, body)
+        self.assertTrue(body["task_id"])
 
 
 if __name__ == "__main__":

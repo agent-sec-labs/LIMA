@@ -11,8 +11,11 @@ from lima.task_failure import GITHUB_NOT_FOUND, TaskFailure
 from lima.task_progress import (
     COMPLETED,
     DOWNLOADING_ARCHIVE,
+    PLATFORM_ANALYSIS,
     QUEUED,
     RESOLVING_REVISION,
+    SAST_ANALYSIS,
+    SEMANTIC_TRIAGE,
     STAGE_INDEX,
     STAGE_ORDER,
     TERMINAL_STAGES,
@@ -24,18 +27,39 @@ from lima.task_progress import (
 
 class TaskProgressContractTests(unittest.TestCase):
     def test_stage_constants_are_ordered_and_indexed(self):
-        self.assertEqual(13, len(STAGE_ORDER))
+        self.assertEqual(14, len(STAGE_ORDER))
         self.assertEqual(len(set(STAGE_ORDER)), len(STAGE_ORDER))
         self.assertEqual(1, STAGE_INDEX[QUEUED])
-        self.assertEqual(13, STAGE_INDEX[COMPLETED])
+        self.assertEqual(14, STAGE_INDEX[COMPLETED])
+        # 方案 §3.3：平台链阶段位于 SAST 与语义复核之间。
+        self.assertLess(STAGE_INDEX[SAST_ANALYSIS], STAGE_INDEX[PLATFORM_ANALYSIS])
+        self.assertLess(STAGE_INDEX[PLATFORM_ANALYSIS], STAGE_INDEX[SEMANTIC_TRIAGE])
         self.assertEqual(STAGE_ORDER, tuple(STAGE_INDEX))
         self.assertEqual(frozenset({COMPLETED}), TERMINAL_STAGES)
+
+    def test_from_dict_normalizes_restored_stage_bookkeeping(self):
+        # 阶段表从 13 期扩到 14 期（插入 PLATFORM_ANALYSIS）后恢复旧任务：
+        # stage_index 由 __post_init__ 按当前表重算，stage_total 也不得
+        # 保留旧值——否则任务列表/详情会出现 14/13 的错位计数（#261 评审）。
+        progress = TaskProgress.from_dict({
+            "stage": "SEMANTIC_TRIAGE",
+            "stage_index": 10,
+            "stage_total": 13,
+            "message": "old task",
+        })
+        self.assertEqual(
+            (12, 14), (progress.stage_index, progress.stage_total)
+        )
+        progress.advance(COMPLETED)
+        self.assertEqual(
+            (14, 14), (progress.stage_index, progress.stage_total)
+        )
 
     def test_begin_initializes_timestamps_once(self):
         progress = TaskProgress.begin(QUEUED, "任务已进入队列")
         self.assertEqual(QUEUED, progress.stage)
         self.assertEqual(1, progress.stage_index)
-        self.assertEqual(13, progress.stage_total)
+        self.assertEqual(14, progress.stage_total)
         self.assertEqual(progress.started_at, progress.stage_started_at)
         self.assertEqual(progress.started_at, progress.updated_at)
 
@@ -154,7 +178,7 @@ class TaskProgressPersistenceTests(unittest.TestCase):
         summary = listed["progress"]
         self.assertEqual(DOWNLOADING_ARCHIVE, summary["stage"])
         self.assertEqual(4, summary["stage_index"])
-        self.assertEqual(13, summary["stage_total"])
+        self.assertEqual(14, summary["stage_total"])
         self.assertEqual("正在下载仓库快照", summary["message"])
         self.assertEqual(4, summary["current"])
         self.assertNotIn("detail", summary)

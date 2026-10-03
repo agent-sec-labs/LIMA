@@ -48,7 +48,7 @@ class TaskProgressContractTests(unittest.TestCase):
             "message": "old task",
         })
         self.assertEqual(
-            (11, 14), (progress.stage_index, progress.stage_total)
+            (12, 14), (progress.stage_index, progress.stage_total)
         )
         progress.advance(COMPLETED)
         self.assertEqual(

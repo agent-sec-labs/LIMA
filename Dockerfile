@@ -75,6 +75,7 @@ COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0043_LF_Local_Baseline
 COPY --chown=lima:lima docs/LIMA_IP0043_Coverage_Account_and_Dependency_Correction.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Expert_Review_Evidence_Pair_Followup_2026-10-02.md ./docs/
 COPY --chown=lima:lima docs/LIMA_57_Baseline_Product_Report_2026-10-02.md ./docs/
+COPY --chown=lima:lima docs/LIMA_Agent_Investigation_Report_2026-10-03.md ./docs/
 COPY --chown=lima:lima docs/LIMA_Implementation_Packet_IP-0020_Vault_Audit.md ./docs/
 COPY --chown=lima:lima docs/adr ./docs/adr
 COPY --chown=lima:lima schemas ./schemas

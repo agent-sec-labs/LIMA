@@ -68,6 +68,16 @@ from .repository_triage import (
     RepositorySemanticTriage,
     RepositorySemanticTriageError,
 )
+from .repository_investigation import (
+    FindingInvestigator,
+    InvestigationBudget,
+    InvestigationError,
+    InvestigationLLMClient,
+    InvestigationSnapshot,
+    build_investigation_targets,
+    build_module_targets,
+    merge_investigation_into_report,
+)
 from .experiments import ExperimentRunner, LLM_MODES
 from .real_world_evaluation import (
     LLMSecurityTriageClient,
@@ -309,6 +319,7 @@ class ReviewService:
             cxx_uaf_llm_factory=cxx_uaf_llm_factory,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
+        self.repository_investigation = self._build_repository_investigation()
         self.experiment_runner = ExperimentRunner(
             self.store,
             settings.experiment_dataset_root,
@@ -380,6 +391,37 @@ class ReviewService:
             client,
             mode=mode,
             max_candidates=self.settings.repository_scan_llm_max_candidates,
+        )
+
+    def _build_repository_investigation(self):
+        mode = self.settings.repository_investigation_mode
+        if mode == "off":
+            return None
+        if not self.llm_config:
+            if mode == "required":
+                raise ValueError(
+                    "required repository investigation needs an LLM provider"
+                )
+            return None
+        client = InvestigationLLMClient(
+            base_url=str(self.llm_config["base_url"]),
+            api_key=str(self.llm_config["api_key"]),
+            model=str(self.llm_config["model"]),
+            provider=str(self.llm_config["provider"]),
+            extra_headers=dict(self.llm_config.get("headers") or {}),
+            timeout_seconds=self.settings.repository_investigation_timeout_seconds,
+            max_completion_tokens=(
+                self.settings.repository_investigation_max_completion_tokens
+            ),
+            budget=InvestigationBudget(
+                max_requests=self.settings.repository_investigation_max_requests,
+            ),
+        )
+        return FindingInvestigator(
+            client,
+            batch_size=self.settings.repository_investigation_batch_size,
+            max_steps=self.settings.repository_investigation_max_steps,
+            timeout_seconds=self.settings.repository_investigation_timeout_seconds,
         )
 
     def _build_experiment_evaluator(self, mode: str) -> RealWorldSecurityEvaluator:
@@ -861,12 +903,14 @@ class ReviewService:
         }
 
     def enqueue_repository_scan(
-        self, repository_key: str, tenant_id: str = "default"
+        self, repository_key: str, tenant_id: str = "default",
+        investigate_paths: list[str] | None = None,
     ) -> Dict[str, Any]:
         key = self.repository_import.normalize_key(repository_key)
         self.repository_import.resolve(key)
         return self._enqueue_scan_task(
-            RepositorySource.local_import(key), tenant_id, label=key
+            RepositorySource.local_import(key), tenant_id, label=key,
+            investigate_paths=investigate_paths,
         )
 
     def _ensure_repository_cache(self) -> RepositoryCache:
@@ -945,12 +989,17 @@ class ReviewService:
         return self._enqueue_scan_task(normalized, tenant_id)
 
     def _enqueue_scan_task(
-        self, normalized: RepositorySource, tenant_id: str, label: str = ""
+        self, normalized: RepositorySource, tenant_id: str, label: str = "",
+        investigate_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         label = label or normalized.canonical_name or normalized.repository_key
         is_local = normalized.type == LOCAL_IMPORT_SOURCE_TYPE
         task_id = str(uuid.uuid4())
         scan_source = normalized.to_dict()
+        investigate_paths = [
+            str(item).strip().strip("/\\") for item in (investigate_paths or [])
+            if str(item).strip()
+        ]
         task_input: dict[str, Any] = {
             "source": "repository-import" if is_local else "github-materializer",
             "task_type": "repository_scan",
@@ -958,12 +1007,15 @@ class ReviewService:
             "sast_mode": self.settings.repository_scan_sast_mode,
             "semantic_triage_mode": self.settings.repository_scan_llm_mode,
             "cxx_memory_mode": self.settings.cxx_memory_mode,
+            "investigation_mode": self.settings.repository_investigation_mode,
+            "investigate_paths": investigate_paths,
         }
         message: dict[str, Any] = {
             "task_id": task_id,
             "task_type": "repository_scan",
             "scan_source": scan_source,
             "tenant_id": tenant_id,
+            "investigate_paths": investigate_paths,
         }
         if is_local:
             task_input["repository_key"] = normalized.repository_key
@@ -1020,6 +1072,7 @@ class ReviewService:
     def _process_repository_scan(
         self, task_id: str, repository_key: str, tenant_id: str,
         scan_source: dict[str, Any] | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> None:
         tracker = self._scan_progress_tracker(task_id)
         try:
@@ -1041,6 +1094,7 @@ class ReviewService:
             self._execute_repository_scan(
                 task_id, root, tenant_id, repository_key,
                 {"repository_key": repository_key}, tracker,
+                investigate_paths=investigate_paths,
             )
         except Exception as exc:
             self._record_task_failure(task_id, exc, tracker)
@@ -1049,6 +1103,7 @@ class ReviewService:
     def _process_github_repository_scan(
         self, task_id: str, scan_source: dict[str, Any], tenant_id: str,
         tracker: ScanProgressTracker,
+        investigate_paths: list[str] | None = None,
     ) -> None:
         # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
         source = parse_repository_source(scan_source)
@@ -1081,6 +1136,7 @@ class ReviewService:
                 },
                 tracker,
                 materializer_warnings=materialized.get("warnings") or [],
+                investigate_paths=investigate_paths,
             )
 
     def _execute_repository_scan(
@@ -1088,6 +1144,7 @@ class ReviewService:
         repository_label: str, import_policy_extra: dict[str, Any],
         progress: ScanProgressTracker | None = None,
         materializer_warnings: list[dict[str, Any]] | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> None:
         workspace = RepositoryWorkspace(
             root,
@@ -1175,6 +1232,54 @@ class ReviewService:
                 ),
                 "secret_persisted": False,
             }
+        # Model-driven investigation (the 2026-10-03 mainline): every
+        # scanner finding plus any requested module scopes goes through the
+        # bounded tool loop; verdicts re-bind to the original fingerprints
+        # and fold back into the adjudication/summary the user sees.
+        if self.repository_investigation is not None:
+            if progress is not None:
+                progress.pipeline_event(
+                    SEMANTIC_TRIAGE, "正在模型调查全部候选与指定模块"
+                )
+            try:
+                with metrics.timer("repository_investigation_duration"):
+                    snapshot = InvestigationSnapshot(
+                        root,
+                        max_files=self.settings.repository_scan_max_files,
+                        max_file_bytes=self.settings.repository_scan_max_file_bytes,
+                        max_total_bytes=self.settings.repository_scan_max_total_bytes,
+                    )
+                    targets = build_investigation_targets(
+                        result.report.findings, snapshot
+                    )
+                    module_targets = build_module_targets(
+                        snapshot, investigate_paths or []
+                    )
+                    investigation_outcome = self.repository_investigation.investigate(
+                        [*targets, *module_targets], snapshot,
+                    )
+            except InvestigationError as exc:
+                metrics.inc("repository_investigation_failed_total")
+                if self.settings.repository_investigation_mode == "required":
+                    raise PermanentTaskError(str(exc)) from exc
+                result.report.collaboration["investigation"] = {
+                    "mode": self.settings.repository_investigation_mode,
+                    "status": "failed-open",
+                    "detail": str(exc)[:300],
+                    "secret_persisted": False,
+                }
+            else:
+                merge_investigation_into_report(
+                    result.report, investigation_outcome,
+                    result.report.findings,
+                )
+                metrics.inc("repository_investigation_completed_total")
+        elif self.settings.repository_investigation_mode != "off":
+            result.report.collaboration["investigation"] = {
+                "mode": self.settings.repository_investigation_mode,
+                "status": "llm-not-configured",
+                "secret_persisted": False,
+            }
         # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
         warnings_by_reason = coverage_warning_counts(result.inventory)
         for warning in materializer_warnings or []:
@@ -1240,6 +1345,9 @@ class ReviewService:
             scan_source = payload.get("scan_source") or (
                 task.get("input") or {}
             ).get("scan_source")
+            investigate_paths = payload.get("investigate_paths") or (
+                task.get("input") or {}
+            ).get("investigate_paths") or []
             if scan_source and scan_source.get("type") == "github":
                 self._process_repository_scan(
                     task_id,
@@ -1247,6 +1355,7 @@ class ReviewService:
                     or (task.get("input") or {}).get("repository_key", ""),
                     tenant_id,
                     scan_source,
+                    investigate_paths=investigate_paths,
                 )
             else:
                 self._process_repository_scan(
@@ -1254,6 +1363,7 @@ class ReviewService:
                     payload.get("repository_key")
                     or (task.get("input") or {}).get("repository_key", ""),
                     tenant_id,
+                    investigate_paths=investigate_paths,
                 )
             return
         diff = self.store.get_task_payload(task_id)

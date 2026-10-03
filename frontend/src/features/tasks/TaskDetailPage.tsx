@@ -844,29 +844,47 @@ function PlatformTargetDetails({ target }: { target: PlatformTarget }): React.JS
 function PlatformCard({ summary }: { summary: PlatformSummary }): React.JSX.Element | null {
   const status = String(summary.status || "");
   if (!status || status === "disabled") return null;
-  const meta = PLATFORM_STATUS_META[status] ?? { label: status, color: "default" };
+  // 封存执行状态（v4.workflow_summary.execution_status）才是成败口径：
+  // status=completed 只表示平台链走完并产出审计载荷——scout-unavailable
+  // 等降级路径同样返回 completed，必须区分，否则检测失败会被展示为
+  // 绿色"检测完成"（#262 评审 P2）。旧报告缺 v4 时按 completed 判定。
+  const workflowStatus = String(
+    summary.v4?.workflow_summary?.execution_status ?? "",
+  );
+  const failed = workflowStatus === "failed";
+  const cancelled = workflowStatus === "cancelled";
+  const meta = failed
+    ? { label: "检测链失败", color: "red" }
+    : cancelled
+      ? { label: "检测已取消", color: "orange" }
+      : PLATFORM_STATUS_META[status] ?? { label: status, color: "default" };
   const stats = summary.stats ?? {};
-  const targets = summary.targets ?? [];
+  const experiments = Number(stats.experiments || 0);
+  const targetsAudited = Number(stats.targets || 0);
   const agentCalls =
     Number(stats.scout_calls || 0) +
     Number(stats.specialist_calls || 0) +
     Number(stats.critic_calls || 0);
-  const completed = status === "completed";
+  const workflowNote = failed
+    ? "平台链在降级路径结束（例如模型不可用或超时）；以下只是降级前产生的审计记录，不能视为完成了检测，也不代表仓库安全。"
+    : cancelled
+      ? "平台链在开始前被取消；没有产出检测结果，这不代表仓库没有 C++ 风险。"
+      : status === "completed"
+        ? experiments > 0
+          ? `智能体链完成目标审计并执行了 ${experiments} 次沙箱实验；结论以逐目标的证据与证明为准。`
+          : targetsAudited > 0
+            ? "智能体链完成了目标审计，但本轮没有执行沙箱实验（无实验台或无候选）；结论以逐目标证据为准。"
+            : "智能体链本轮没有升级任何目标；这不代表仓库没有 C++ 风险。"
+        : "本次任务未产出检测结果；这是运行状态，不代表仓库没有 C++ 风险。";
+  const completed = status === "completed" && !failed && !cancelled;
+  const targets = summary.targets ?? [];
   return (
     <Card size="small" title="C++ 智能体检测（平台链）" aria-label="C++ 智能体检测（平台链）">
       <Space direction="vertical" size="small" style={{ width: "100%" }}>
         <Space wrap>
           <Tag color={meta.color}>{meta.label}</Tag>
           <Tag>模式 {String(summary.mode || "—")}</Tag>
-          {completed ? (
-            <Typography.Text type="secondary">
-              智能体链已完成假设、沙箱实验与证明复核；结论以逐目标审计为准。
-            </Typography.Text>
-          ) : (
-            <Typography.Text type="secondary">
-              本次任务未产出检测结果；这是运行状态，不代表仓库没有 C++ 风险。
-            </Typography.Text>
-          )}
+          <Typography.Text type="secondary">{workflowNote}</Typography.Text>
         </Space>
         <Space size="large" wrap aria-label="平台链统计">
           <span>线索 <strong>{Number(stats.leads || 0)}</strong></span>

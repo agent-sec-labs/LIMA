@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -136,6 +136,12 @@ export function AuditCreatePage(): React.JSX.Element {
   const agentSwitchDisabled =
     !gate.ready || gate.lockedOn || (!agentSwitchChecked && !gate.canEnable);
 
+  // 提交路径读的最新门禁快照（#262 评审 P2）：modal.confirm 的 onOk 捕获
+  // 的是打开弹窗那次渲染的闭包，弹窗停留期间 capabilities 可能被回焦
+  // 重取或服务端切换——校验和载荷都必须取当前值，不能用旧闭包。
+  const gateRef = useRef({ blocked: repositoryBlocked, ready: gate.ready, effective: gate.effective });
+  gateRef.current = { blocked: repositoryBlocked, ready: gate.ready, effective: gate.effective };
+
   // 能力加载后门禁：GitHub 关闭时回退本地导入（与 legacy 语义一致）。
   useEffect(() => {
     if (githubGated && draft.sourceMode === "github") {
@@ -145,9 +151,9 @@ export function AuditCreatePage(): React.JSX.Element {
 
   const createAudit = useMutation({
     mutationFn: async (values: AuditDraft) => {
-      // 载荷用有效策略值（gate.effective）：required/锁定开启时即使草稿
-      // 残留 false 也必须提交 true，否则后端会一直 400（审计问题 3）。
-      const { path, body } = buildSubmitPayload(values, gate.effective);
+      // 载荷用有效策略值（最新快照）：required/锁定开启时即使草稿残留
+      // false 也必须提交 true，否则后端会一直 400（审计问题 3）。
+      const { path, body } = buildSubmitPayload(values, gateRef.current.effective);
       return api.post<ScanCreatedResponse>(path, body);
     },
     onSuccess: (created) => {
@@ -179,6 +185,16 @@ export function AuditCreatePage(): React.JSX.Element {
   });
 
   const doSubmit = (): void => {
+    // 最终防线（读 ref 最新值）：弹窗打开期间能力变化（回焦重取、服务端
+    // 切换）后，旧弹窗的"确认开启并提交"不得发出请求（#262 评审 P2）。
+    // PR / Diff 提交不受智能体检测门禁影响。
+    if (draft.mode === "repository" && (gateRef.current.blocked || !gateRef.current.ready)) {
+      setSubmitError(
+        "智能体检测配置已变化，本次提交已拦下；请确认状态后重试，或改用 PR / Diff 审查。",
+      );
+      setPhase("editing");
+      return;
+    }
     setSubmitError("");
     setPhase("submitting");
     createAudit.mutate(getValues());

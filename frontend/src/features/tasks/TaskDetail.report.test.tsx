@@ -672,6 +672,66 @@ describe("task detail report surface", () => {
     expect(screen.queryByText("C++ 智能体检测（平台链）")).toBeNull();
   });
 
+  it("shows a failed workflow as failed instead of a green completed card", async () => {
+    // 复审 P2 复现：scout 失败的 auto 降级路径返回 status=completed +
+    // v4.workflow_summary.execution_status=failed + diagnostics——前端
+    // 不得展示绿色"检测完成"或宣称已完成实验/证明。
+    const degraded: TaskDetail["report"] = {
+      ...MIXED_REPORT,
+      findings: [],
+      collaboration: {
+        platform: {
+          mode: "auto",
+          status: "completed",
+          diagnostics: ["scout-unavailable: synthetic model unavailable"],
+          stats: { leads: 3, targets: 0, findings: 0, experiments: 0 },
+          v4: { workflow_summary: { execution_status: "failed" } },
+        },
+      },
+    };
+    stubFetch([
+      { url: "/v1/tasks/task-degraded", body: successTask({ id: "task-degraded", report: degraded }) },
+      { url: "/v1/tasks/task-degraded/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-degraded");
+    const title = await screen.findByText("C++ 智能体检测（平台链）");
+    const card = title.closest(".ant-card") as HTMLElement;
+    expect(within(card).getByText("检测链失败")).toBeVisible();
+    expect(screen.queryByText("检测完成")).toBeNull();
+    expect(
+      within(card).getByText(/降级路径结束/),
+    ).toBeVisible();
+    expect(within(card).getByText(/scout-unavailable/)).toBeVisible();
+  });
+
+  it("does not claim completed experiments when the workflow ran none", async () => {
+    // 全零统计的成功链路：不声明"已完成实验/证明"，如实说明没有升级目标。
+    const empty: TaskDetail["report"] = {
+      ...MIXED_REPORT,
+      findings: [],
+      collaboration: {
+        platform: {
+          mode: "auto",
+          status: "completed",
+          stats: { leads: 0, targets: 0, findings: 0, experiments: 0 },
+          v4: { workflow_summary: { execution_status: "succeeded" } },
+        },
+      },
+    };
+    stubFetch([
+      { url: "/v1/tasks/task-empty", body: successTask({ id: "task-empty", report: empty }) },
+      { url: "/v1/tasks/task-empty/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-empty");
+    const title = await screen.findByText("C++ 智能体检测（平台链）");
+    const card = title.closest(".ant-card") as HTMLElement;
+    expect(within(card).getByText("检测完成")).toBeVisible();
+    expect(within(card).getByText(/没有升级任何目标/)).toBeVisible();
+    expect(
+      within(card).queryByText(/沙箱实验与证明复核/),
+    ).toBeNull();
+  });
+
   it("shows the real platform status instead of a fake zero-finding conclusion", async () => {
     const report: TaskDetail["report"] = {
       ...MIXED_REPORT,

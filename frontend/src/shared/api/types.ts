@@ -231,6 +231,17 @@ export interface PlatformSummary {
   broker?: Record<string, number>;
   diagnostics?: string[];
   targets?: PlatformTarget[];
+  /** 报告内封存的 V4 预览：workflow_summary.execution_status 是封存执行
+   * 状态（succeeded/failed/cancelled）。status=completed 只表示平台链走完
+   * 并产出审计载荷；scout-unavailable 等降级路径也会是 completed，须以
+   * 此字段区分（#262 评审 P2）。 */
+  v4?: {
+    workflow_summary?: {
+      execution_status?: "succeeded" | "failed" | "cancelled" | string;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 

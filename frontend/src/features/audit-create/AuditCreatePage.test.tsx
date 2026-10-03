@@ -84,6 +84,27 @@ function renderAt(path: string): AppRouterInstance {
   return router;
 }
 
+/** 带QueryClient 引用的渲染（评审复现需要在弹窗打开期间改写缓存）。 */
+function renderAtWithClient(path: string): {
+  router: AppRouterInstance;
+  client: QueryClient;
+} {
+  const router = createAppRouter("memory", path);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  render(
+    <ConfigProvider>
+      <AntApp>
+        <QueryClientProvider client={client}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>
+      </AntApp>
+    </ConfigProvider>,
+  );
+  return { router, client };
+}
+
 async function fillTarget(value: string): Promise<void> {
   fireEvent.change(await screen.findByLabelText("仓库目标"), {
     target: { value },
@@ -591,6 +612,45 @@ describe("AuditCreatePage agent detection switch (#245)", () => {
         agent_detection: true,
       });
     });
+  });
+
+  it("blocks the stale confirm dialog when capabilities change underneath", async () => {
+    // 复审 P2 复现：加载有效 capabilities → 打开确认框 → 缓存被更新为
+    // 缺 cxx_agent 的旧服务端形态 → 开始按钮禁用后，旧弹窗的"确认开启
+    // 并提交"仍被点击——最终提交函数必须读最新门禁：零请求、回编辑态、
+    // 保留草稿并给出提示。
+    const { requests } = stubTrackedFetch([
+      {
+        url: "/api/repository-scans/capabilities",
+        body: { ...CAPABILITIES.body, cxx_agent: cxxAgentCaps({ mode: "auto" }) },
+      },
+    ]);
+    const { client } = renderAtWithClient("/audit/new");
+    await fillTarget("team/project");
+    const sw = await agentSwitch();
+    await waitFor(() => expect(sw.getAttribute("aria-checked")).toBe("true"));
+    clickNext();
+    fireEvent.click(await screen.findByRole("button", { name: /开始安全审计/ }));
+    await screen.findAllByText("确认启用智能体检测？");
+
+    // 弹窗打开期间 capabilities 变为旧服务端形态（回焦重取/服务端切换）。
+    client.setQueryData(["repository-scan-capabilities"], {
+      enabled: true,
+      scan_sources: { configured: "both", local_import: true, github: true },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /开始安全审计/ })).toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认开启并提交" }));
+
+    expect(
+      requests.filter((r) => r.url === "/v1/repository-scans"),
+    ).toHaveLength(0);
+    expect(
+      await screen.findByText(/智能体检测配置已变化，本次提交已拦下/),
+    ).toBeInTheDocument();
+    const input = (await screen.findByLabelText("仓库目标")) as HTMLInputElement;
+    expect(input.value).toBe("team/project");
   });
 
   it("keeps the draft and refreshes capabilities on a named agent-detection 400", async () => {

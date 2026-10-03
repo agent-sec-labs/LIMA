@@ -138,9 +138,20 @@ export function AuditCreatePage(): React.JSX.Element {
 
   // 提交路径读的最新门禁快照（#262 评审 P2）：modal.confirm 的 onOk 捕获
   // 的是打开弹窗那次渲染的闭包，弹窗停留期间 capabilities 可能被回焦
-  // 重取或服务端切换——校验和载荷都必须取当前值，不能用旧闭包。
-  const gateRef = useRef({ blocked: repositoryBlocked, ready: gate.ready, effective: gate.effective });
-  gateRef.current = { blocked: repositoryBlocked, ready: gate.ready, effective: gate.effective };
+  // 重取或服务端切换——校验（含调用上限比较）和载荷都必须取当前值，
+  // 不能用旧闭包。
+  const gateRef = useRef({
+    blocked: repositoryBlocked,
+    ready: gate.ready,
+    effective: gate.effective,
+    maxAgentCalls: gate.maxAgentCalls,
+  });
+  gateRef.current = {
+    blocked: repositoryBlocked,
+    ready: gate.ready,
+    effective: gate.effective,
+    maxAgentCalls: gate.maxAgentCalls,
+  };
 
   // 能力加载后门禁：GitHub 关闭时回退本地导入（与 legacy 语义一致）。
   useEffect(() => {
@@ -215,14 +226,28 @@ export function AuditCreatePage(): React.JSX.Element {
       doSubmit();
       return;
     }
+    // 记录用户确认时的调用上限：弹窗停留期间上限被上调（配置仍有效，
+    // 具名 400 不兜底）时，旧确认不得按更高预算直接提交——必须按新
+    // 上限重新确认（#262 评审 P2）。下调不拦截：用户确认的额度高于
+    // 实际受理额度，不产生未经确认的费用。
+    const confirmedMaxCalls = gateRef.current.maxAgentCalls;
     modal.confirm({
       title: "确认启用智能体检测？",
       content:
         `开启后，配置的模型会接收本次仓库的代码上下文，并可能产生模型调用费用` +
-        `（最多 ${gate.maxAgentCalls} 次模型调用）。实际调用次数以服务端执行为准。`,
+        `（最多 ${confirmedMaxCalls} 次模型调用）。实际调用次数以服务端执行为准。`,
       okText: "确认开启并提交",
       cancelText: "取消",
       onOk: () => {
+        const latest = gateRef.current;
+        if (latest.maxAgentCalls > confirmedMaxCalls) {
+          setSubmitError(
+            `模型调用上限已上调（确认时 ${confirmedMaxCalls} 次，当前 ${latest.maxAgentCalls} 次），` +
+              `本次提交已拦下；请按新上限重新确认。`,
+          );
+          setPhase("review");
+          return;
+        }
         doSubmit();
       },
     });
@@ -441,6 +466,14 @@ export function AuditCreatePage(): React.JSX.Element {
 
       {phase === "review" && (
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          {submitError !== "" && (
+            <Alert
+              type="error"
+              showIcon
+              message="本次提交已拦下"
+              description={submitError}
+            />
+          )}
           {githubScan && isMovingRef(draft.githubRef) && (
             <Alert
               type="warning"

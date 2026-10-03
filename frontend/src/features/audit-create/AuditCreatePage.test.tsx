@@ -653,6 +653,67 @@ describe("AuditCreatePage agent detection switch (#245)", () => {
     expect(input.value).toBe("team/project");
   });
 
+  it("invalidates the stale confirm when the call cap increases", async () => {
+    // 复审 P2 复现：40 次确认框打开 → capabilities 刷为仍有效的 100 次
+    // 配置（模式/模型/分析器齐全，具名 400 不兜底）→ 旧弹窗仍显示 40，
+    // 点击后必须零请求并要求按新上限重新确认；重新确认的弹窗显示
+    // 100 次并可正常提交。
+    const { requests } = stubTrackedFetch([
+      {
+        url: "/api/repository-scans/capabilities",
+        body: {
+          ...CAPABILITIES.body,
+          cxx_agent: cxxAgentCaps({ mode: "auto", max_agent_calls: 40 }),
+        },
+      },
+      {
+        url: "/v1/repository-scans",
+        method: "POST",
+        status: 202,
+        body: { task_id: "task-cap", state: "PENDING" },
+      },
+      { url: "/v1/tasks/task-cap", body: pendingTask("task-cap") },
+    ]);
+    const { client } = renderAtWithClient("/audit/new");
+    await fillTarget("team/project");
+    const sw = await agentSwitch();
+    await waitFor(() => expect(sw.getAttribute("aria-checked")).toBe("true"));
+    clickNext();
+    fireEvent.click(await screen.findByRole("button", { name: /开始安全审计/ }));
+    expect(await screen.findByText(/最多 40 次模型调用/)).toBeInTheDocument();
+
+    // 弹窗打开期间：仍有效、仅上限上调到 100 的 capabilities。
+    client.setQueryData(["repository-scan-capabilities"], {
+      ...CAPABILITIES.body,
+      cxx_agent: cxxAgentCaps({ mode: "auto", max_agent_calls: 100 }),
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/最多 100 次/)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /开始安全审计/ })).toBeEnabled();
+
+    // 旧弹窗（显示 40）的确认必须被拦下：零请求 + 重新确认提示。
+    fireEvent.click(screen.getByRole("button", { name: "确认开启并提交" }));
+    expect(
+      requests.filter((r) => r.url === "/v1/repository-scans"),
+    ).toHaveLength(0);
+    expect(
+      await screen.findByText(/上限已上调（确认时 40 次，当前 100 次）/),
+    ).toBeInTheDocument();
+
+    // 按新上限重新确认：新弹窗显示 100 次，确认后正常提交。
+    fireEvent.click(screen.getByRole("button", { name: /开始安全审计/ }));
+    expect(await screen.findByText(/最多 100 次模型调用/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认开启并提交" }));
+    await waitFor(() => {
+      const post = requests.find((r) => r.url === "/v1/repository-scans");
+      expect(post?.body).toMatchObject({
+        repository_key: "team/project",
+        agent_detection: true,
+      });
+    });
+  });
+
   it("keeps the draft and refreshes capabilities on a named agent-detection 400", async () => {
     const { requests } = stubTrackedFetch([
       { url: "/api/repository-scans/capabilities", body: CAPABILITIES.body },

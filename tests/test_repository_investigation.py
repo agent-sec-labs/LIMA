@@ -527,6 +527,26 @@ class TestReportMerge(InvestigationTestCase):
 
 
 class TestServiceWiring(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+
+        # Read-only container roots: point every writable path at a temp
+        # directory so service construction works under `--read-only`.
+        self._svc_tmp = tempfile.mkdtemp(suffix="-inv-svc")
+        os.environ["LIMA_DB_PATH"] = str(
+            pathlib.Path(self._svc_tmp) / "state.db"
+        )
+        os.environ["LIMA_REPOSITORY_CACHE_ROOT"] = str(
+            pathlib.Path(self._svc_tmp) / "cache"
+        )
+        self.addCleanup(self._cleanup_tmp)
+
+    def _cleanup_tmp(self):
+        import shutil
+
+        shutil.rmtree(self._svc_tmp, ignore_errors=True)
+
     def test_builder_modes(self):
         import os
         from lima.config import Settings
@@ -649,6 +669,8 @@ class TestServiceWiring(unittest.TestCase):
                 "LIMA_REPOSITORY_SCAN_LLM_MODE",
                 "LIMA_REPOSITORY_SCAN_SOURCES",
                 "LIMA_REPOSITORY_IMPORT_ROOT",
+                "LIMA_LLM_PROVIDER",
+                "LIMA_DEEPSEEK_API_KEY",
             ):
                 os.environ.pop(key, None)
         self.assertEqual(task.get("state"), "SUCCESS", task.get("failure"))

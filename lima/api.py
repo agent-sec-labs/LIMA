@@ -15,7 +15,7 @@ from .auth import Principal
 from .github import verify_signature
 from .metrics import metrics
 from .report import to_markdown
-from .service import ReviewService
+from .service import AgentDetectionRequestError, ReviewService
 
 
 TASK = re.compile(r"^/v1/tasks/([0-9a-f-]+)$")
@@ -481,13 +481,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/v1/repository-scans":
                 principal = self._principal("manage")
                 payload = self._read_json(body)
+                # agent_detection 三态（方案 §3.1）：不传=沿用服务端默认；
+                # 显式 true/false 按任务生效。非 bool（含字符串、数字、
+                # null）直接 400，不把 1 当作 true。
+                agent_detection = payload.get("agent_detection")
+                if "agent_detection" in payload and not isinstance(
+                    agent_detection, bool
+                ):
+                    raise ValueError("agent_detection must be a boolean")
                 if "source" in payload:
                     result = self.service.enqueue_repository_scan_source(
-                        payload["source"], principal.tenant_id
+                        payload["source"], principal.tenant_id,
+                        agent_detection,
                     )
                 else:
                     result = self.service.enqueue_repository_scan(
-                        str(payload.get("repository_key", "")), principal.tenant_id
+                        str(payload.get("repository_key", "")),
+                        principal.tenant_id,
+                        agent_detection,
                     )
                 self.service.store.audit(
                     principal.tenant_id, principal.username,
@@ -738,7 +749,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(404, {"error": "not found"})
         except ValueError as exc:
-            self._send_json(400, {"error": str(exc)})
+            # 具名 400（方案 §3.1）：稳定 code 与旧 error 文本并存，
+            # 新客户端按 code 分支，旧客户端继续读 error。
+            if isinstance(exc, AgentDetectionRequestError):
+                self._send_json(
+                    400, {"error": str(exc), "code": exc.code}
+                )
+            else:
+                self._send_json(400, {"error": str(exc)})
         except PermissionError as exc:
             self._send_json(403, {"error": str(exc)})
         except Exception:

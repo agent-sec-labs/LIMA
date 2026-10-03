@@ -208,6 +208,10 @@ class TaskProgress:
         known = {field_name for field_name in cls.__dataclass_fields__}
         payload = {key: item for key, item in value.items() if key in known}
         payload["stage"] = str(payload.get("stage", QUEUED))
+        # 阶段表演进（如插入 PLATFORM_ANALYSIS）后恢复旧进度：stage_index
+        # 已由 __post_init__ 按当前表重算，stage_total 也要归一化到当前
+        # 表——否则旧任务的 13 会与新索引 14 同时出现在列表和详情页。
+        payload["stage_total"] = len(STAGE_ORDER)
         return cls(**payload)
 
     def summary(self) -> dict[str, Any]:

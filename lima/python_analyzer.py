@@ -49,6 +49,163 @@ def _dotted_name(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
+def _default_values(args: ast.arguments) -> list[ast.expr]:
+    """A signature's default-value expressions (evaluated at def site)."""
+    values: list[ast.expr] = list(args.defaults)
+    values.extend(item for item in args.kw_defaults if item is not None)
+    return values
+
+
+class _ScopeBindings:
+    """Per-scope lexical binding sets for scope-correct built-in shadowing.
+
+    The 2026-10-03 regression flattened every binding file-wide, so a
+    same-name method, parameter or import alias anywhere suppressed a
+    genuine bare ``eval``/``exec`` call everywhere else.  This collector
+    restores actual lexical visibility:
+
+    - module-level bindings own the name for the whole module;
+    - a parameter (including ``*args``/``**kwargs``/keyword-only), a local
+      ``def``/``class`` name, an assignment target, an import alias, a
+      loop/``with``/``except`` target or a named expression binds only
+      inside its function/lambda/comprehension scope (a named expression
+      inside a comprehension binds in the containing non-comprehension
+      scope, per PEP 572);
+    - a class body binds only code directly inside that body, so a method
+      named ``eval`` never shadows the built-in for any other scope.
+
+    ``global``/``nonlocal`` declarations are not resolved across scopes;
+    their assignments stay local to the declaring function, which can only
+    make the analyzer louder than Python, never silently quieter.  No name
+    lists, repository paths, class names or sample allowlists are involved.
+    """
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.kinds: dict[int, str] = {id(tree): "module"}
+        self.bindings: dict[int, set[str]] = {id(tree): set()}
+        self._collect_children(tree, self.bindings[id(tree)],
+                               self.bindings[id(tree)])
+
+    def _new_scope(self, node: ast.AST, kind: str,
+                   names: set[str] | None = None) -> set[str]:
+        own = set(names or ())
+        self.kinds[id(node)] = kind
+        self.bindings[id(node)] = own
+        return own
+
+    @staticmethod
+    def _arg_names(args: ast.arguments) -> set[str]:
+        names = {
+            item.arg
+            for item in (
+                list(args.posonlyargs) + list(args.args)
+                + list(args.kwonlyargs)
+            )
+        }
+        for extra in (args.vararg, args.kwarg):
+            if extra is not None:
+                names.add(extra.arg)
+        return names
+
+    def _bind_target(self, target: ast.AST, bound: set[str]) -> None:
+        if isinstance(target, ast.Name):
+            bound.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self._bind_target(item, bound)
+        elif isinstance(target, ast.Starred):
+            self._bind_target(target.value, bound)
+
+    def _collect_children(self, node: ast.AST, bound: set[str],
+                          container: set[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            self._collect_node(child, bound, container)
+
+    def _collect_node(self, node: ast.AST, bound: set[str],
+                      container: set[str]) -> None:
+        """Collect the names ``node`` binds at actual lexical visibility.
+
+        ``bound`` is the current scope's set; ``container`` is the nearest
+        non-comprehension scope, where named expressions bind.
+        """
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bound.add(node.name)
+            own = self._new_scope(
+                node, "function", self._arg_names(node.args)
+            )
+            for part in node.decorator_list:
+                self._collect_node(part, bound, container)
+            for part in _default_values(node.args):
+                self._collect_node(part, bound, container)
+            for stmt in node.body:
+                self._collect_node(stmt, own, own)
+        elif isinstance(node, ast.Lambda):
+            own = self._new_scope(
+                node, "function", self._arg_names(node.args)
+            )
+            for part in _default_values(node.args):
+                self._collect_node(part, bound, container)
+            self._collect_node(node.body, own, own)
+        elif isinstance(node, ast.ClassDef):
+            bound.add(node.name)
+            own = self._new_scope(node, "class")
+            for part in node.decorator_list + node.bases + node.keywords:
+                self._collect_node(part, bound, container)
+            for stmt in node.body:
+                self._collect_node(stmt, own, own)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp,
+                               ast.DictComp)):
+            own = self._new_scope(node, "comprehension")
+            for generator in node.generators:
+                self._bind_target(generator.target, own)
+                self._collect_node(generator.iter, own, container)
+                for condition in generator.ifs:
+                    self._collect_node(condition, own, container)
+            if isinstance(node, ast.DictComp):
+                self._collect_node(node.key, own, container)
+                self._collect_node(node.value, own, container)
+            else:
+                self._collect_node(node.elt, own, container)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if isinstance(node, ast.Import):
+                    bound.add(alias.asname or alias.name.split(".")[0])
+                else:
+                    bound.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                self._bind_target(target, bound)
+            self._collect_node(node.value, bound, container)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            # An annotation without a value declares but does not bind.
+            if not isinstance(node, ast.AnnAssign) or node.value is not None:
+                self._bind_target(node.target, bound)
+            if node.value is not None:
+                self._collect_node(node.value, bound, container)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            self._bind_target(node.target, bound)
+            self._collect_node(node.iter, bound, container)
+            for stmt in node.body + node.orelse:
+                self._collect_node(stmt, bound, container)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                self._collect_node(item.context_expr, bound, container)
+                if item.optional_vars is not None:
+                    self._bind_target(item.optional_vars, bound)
+            for stmt in node.body:
+                self._collect_node(stmt, bound, container)
+        elif isinstance(node, ast.NamedExpr):
+            container.add(node.target.id)
+            self._collect_node(node.value, bound, container)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                bound.add(node.name)
+            for stmt in node.body:
+                self._collect_node(stmt, bound, container)
+        else:
+            self._collect_children(node, bound, container)
+
+
 #: Values that are pure identifiers cannot be distinguished from
 #: enum/mode/name references by lexical shape alone.
 _IDENTIFIER_LIKE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -99,54 +256,10 @@ class PythonAstSecurityAnalyzer(ast.NodeVisitor):
             return PythonAnalysisResult(
                 parse_error="%s:%s: %s" % (path, exc.lineno or 0, exc.msg)
             )
-        self._bound_names = self._collect_bound_names(tree)
+        self._bindings = _ScopeBindings(tree)
+        self._scopes: list[ast.AST] = []
         self.visit(tree)
         return PythonAnalysisResult(findings=self.findings)
-
-    @staticmethod
-    def _collect_bound_names(tree: ast.Module) -> set[str]:
-        """Every name the file binds (defs, classes, assignments, imports).
-
-        Used to discriminate a locally shadowed ``eval``/``exec`` from the
-        built-in: a file that defines, assigns or imports a name owns that
-        binding, and a bare call to it is not a call to the built-in.
-        File-scope approximation; deeper binding precision stays explicitly
-        unresolved (reported by the investigation layer, never guessed).
-        """
-        bound: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
-                bound.add(node.name)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        bound.add(target.id)
-                    elif isinstance(target, (ast.Tuple, ast.List)):
-                        bound.update(
-                            item.id for item in target.elts
-                            if isinstance(item, ast.Name)
-                        )
-            elif isinstance(node, ast.AnnAssign) and isinstance(
-                node.target, ast.Name
-            ):
-                bound.add(node.target.id)
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    bound.add(alias.asname or alias.name.split(".")[0])
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    bound.add(alias.asname or alias.name)
-            elif isinstance(node, (ast.For, ast.comprehension)):
-                if isinstance(node.target, ast.Name):
-                    bound.add(node.target.id)
-            elif isinstance(node, ast.withitem) and isinstance(
-                node.optional_vars, ast.Name
-            ):
-                bound.add(node.optional_vars.id)
-            elif isinstance(node, ast.ExceptHandler) and node.name:
-                bound.add(node.name)
-        return bound
 
     def _add(
         self,
@@ -186,23 +299,100 @@ class PythonAstSecurityAnalyzer(ast.NodeVisitor):
             )
         )
 
+    def _push_scope(self, node: ast.AST) -> None:
+        self._scopes.append(node)
+
+    def _pop_scope(self) -> None:
+        self._scopes.pop()
+
+    def _name_bound_at(self, name: str) -> bool:
+        """Whether ``name`` is lexically bound at the current position.
+
+        Module bindings apply module-wide; function/lambda/comprehension
+        bindings at their own scope; a class body's bindings only to code
+        directly inside that body -- never across a function boundary.
+        """
+        direct = True
+        for scope in reversed(self._scopes):
+            if self._bindings.kinds[id(scope)] == "class" and not direct:
+                continue
+            if name in self._bindings.bindings[id(scope)]:
+                return True
+            direct = False
+        return False
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._push_scope(node)
+        self.generic_visit(node)
+        self._pop_scope()
+
+    def _visit_function(self, node) -> None:
+        # Decorators and default values evaluate in the enclosing scope.
+        for part in node.decorator_list:
+            self.visit(part)
+        for part in _default_values(node.args):
+            self.visit(part)
+        self._push_scope(node)
+        for stmt in node.body:
+            self.visit(stmt)
+        self._pop_scope()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for part in _default_values(node.args):
+            self.visit(part)
+        self._push_scope(node)
+        self.visit(node.body)
+        self._pop_scope()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for part in node.decorator_list + node.bases + node.keywords:
+            self.visit(part)
+        self._push_scope(node)
+        for stmt in node.body:
+            self.visit(stmt)
+        self._pop_scope()
+
+    def _visit_comprehension(self, node) -> None:
+        self._push_scope(node)
+        self.generic_visit(node)
+        self._pop_scope()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         name = _call_name(node.func)
         dotted = _dotted_name(node.func)
-        # Dynamic-execution rule (2026-10-03 binding fix): the built-in is
-        # only claimed for a bare, unshadowed ``eval``/``exec`` Name or an
-        # explicit ``builtins.eval``/``builtins.exec`` dotted reference.
-        # Ordinary object methods (``Metrics().eval``, ``self.session.eval``)
-        # and locally shadowed names no longer collide with the built-in.
-        is_builtin_dynamic = (
-            dotted in {"builtins.eval", "builtins.exec"}
-            or (
-                isinstance(node.func, ast.Name)
-                and node.func.id in {"eval", "exec"}
-                and node.func.id not in self._bound_names
-            )
-        )
-        if is_builtin_dynamic:
+        # Dynamic-execution rule (2026-10-03 scope-correct binding fix):
+        # the built-in is asserted only for a bare ``eval``/``exec`` Name
+        # that no lexically visible binding shadows -- checked at the call
+        # site's actual scope, never file-wide -- or an explicit
+        # ``builtins.eval``/``builtins.exec`` dotted reference.  Ordinary
+        # methods on resolvable receivers (``m.eval()``,
+        # ``self.session.eval``) are not claims; a receiver this layer
+        # cannot uniquely resolve (``objects[0].eval(...)``,
+        # ``Gauge().eval(...)``) stays visible as a candidate-level finding
+        # with a distinct face instead of silently disappearing.
+        if dotted in {"builtins.eval", "builtins.exec"} or (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"eval", "exec"}
+            and not self._name_bound_at(node.func.id)
+        ):
             self._add(
                 node, "SEC-EVAL", Severity.CRITICAL,
                 "动态代码执行可能导致注入",
@@ -210,6 +400,23 @@ class PythonAstSecurityAnalyzer(ast.NodeVisitor):
                 "改用显式解析器、命令映射或严格白名单，不执行输入文本。",
                 "使用恶意表达式和边界输入验证输入不会作为 Python 代码执行。",
                 0.98,
+                cwe="CWE-95",
+            )
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"eval", "exec"}
+            and not dotted
+        ):
+            self._add(
+                node, "SEC-EVAL", Severity.LOW,
+                "接收者无法唯一解析的动态执行样式调用（候选）",
+                "调用形如 <不可唯一解析的接收者>.eval/.exec：词法层无法确定该"
+                "绑定是内置动态执行还是普通对象方法，按候选保留供调查层复核，"
+                "不冒充已证实的内置调用。",
+                "解析接收者的实际类型后再定性；若确为内置 eval/exec，改用显式"
+                "解析器、命令映射或严格白名单，不执行输入文本。",
+                "为接收者补充类型或运行时证据后复查该调用的定性结论。",
+                0.4,
                 cwe="CWE-95",
             )
         if name in {

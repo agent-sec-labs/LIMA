@@ -855,6 +855,14 @@ class FindingInvestigator:
             return {
                 "fingerprint": target.fingerprint,
                 "verdict": "insufficient",
+                # Structured marker (not reasoning-text matching): this
+                # insufficient verdict is a REJECTED refutation -- the
+                # model claimed clean without any actually-observed
+                # evidence, so the merge layer keeps the alert and records
+                # why the refutation was refused.
+                "insufficient_reason": (
+                    "refutation-rejected-no-observed-evidence"
+                ),
                 "reasoning": (
                     "model refuted without citing any actually-observed "
                     "evidence; a bare clean can never clear the candidate"
@@ -1099,20 +1107,44 @@ def merge_investigation_into_report(
     report: Any, outcome: InvestigationOutcome,
     findings: Sequence[Finding],
 ) -> None:
-    """Fold verdicts into the production report, conclusion-first.
+    """Fold verdicts into the production report, fail-closed.
 
-    Supported risks stay alerts with explicit model-evidence reasons.
-    Evidence-backed refutations move the candidate out of the active alert
-    set (needs_review with the recorded refutation; the original finding
-    stays in history).  Everything else is an explicit unknown -- never a
-    disguised clean.
+    Frozen transition contract (Assignment 265A, A2): a supported risk is
+    an active alert whatever came before; a refutation backed by actually
+    observed evidence moves the candidate out of the active alert set
+    (needs_review + excluded-from-active-alerts; the refutation scope and
+    evidence stay recorded and the original finding stays in history).
+    Everything else -- an insufficient verdict (including refutations
+    rejected for lacking observed evidence), a failed, unprocessed or
+    never-scheduled investigation -- KEEPS the pre-investigation effective
+    disposition: the decision already in ``report.adjudication`` for that
+    fingerprint at merge time, falling back to the active-alert candidate
+    (a finding that entered investigation is an active alert by
+    construction).  An investigation failure can therefore never downgrade
+    or clear an existing alert, and every unknown stays an explicit
+    unknown -- never a disguised clean.
     """
-    from .adjudication import finalize_adjudication
+    from .adjudication import DISPOSITIONS, finalize_adjudication
+
+    # Pre-investigation effective dispositions, by fingerprint.  Only the
+    # decisions that already exist at merge time count; anything missing
+    # falls back to the active-alert candidate (row-6 two-fingerprint
+    # differential).
+    prior_dispositions: dict[str, str] = {}
+    existing = getattr(report, "adjudication", None)
+    if isinstance(existing, dict):
+        for item in existing.get("decisions") or []:
+            if not isinstance(item, dict) or not item.get("fingerprint"):
+                continue
+            disposition = str(item.get("disposition", "")).strip().lower()
+            if disposition in DISPOSITIONS:
+                prior_dispositions[str(item["fingerprint"])] = disposition
 
     decisions = []
     for finding in findings:
         record = outcome.results.get(finding.fingerprint)
         status = outcome.statuses.get(finding.fingerprint, {})
+        prior = prior_dispositions.get(finding.fingerprint, "alert")
         decision = {
             "fingerprint": finding.fingerprint,
             "path": finding.path,
@@ -1120,10 +1152,8 @@ def merge_investigation_into_report(
             "rule_id": finding.rule_id,
             "cwe": finding.cwe,
             "verification_state": finding.verification_state,
-            "disposition": "needs_review",
-            "reason": "investigation-not-scheduled",
             "investigation_verdict": "insufficient",
-            "investigation_status": status.get("status", "unprocessed"),
+            "investigation_status": "unprocessed",
         }
         if record is not None:
             verdict = record["verdict"]
@@ -1132,6 +1162,7 @@ def merge_investigation_into_report(
                 decision.update({
                     "disposition": "alert",
                     "reason": "model-supported-risk-evidence",
+                    "investigation_status": "supported",
                     "investigation_reasoning": record["reasoning"],
                     "investigation_evidence_refs": record["evidence_refs"],
                     "investigation_evidence_basis": record["evidence_basis"],
@@ -1140,20 +1171,45 @@ def merge_investigation_into_report(
                 decision.update({
                     "disposition": "needs_review",
                     "reason": "scope-limited-refutation-recorded",
+                    "investigation_status": "refuted",
                     "investigation_reasoning": record["reasoning"],
                     "investigation_evidence_refs": record["evidence_refs"],
                     "investigation_evidence_basis": record["evidence_basis"],
                     "effective_state": "excluded-from-active-alerts",
                 })
             else:
+                # Insufficient (including refutations rejected for lacking
+                # observed evidence): keep the pre-investigation
+                # disposition -- insufficient is never a downgrade.
                 decision.update({
-                    "reason": "investigation-insufficient-evidence",
+                    "disposition": prior,
+                    "reason": record.get(
+                        "insufficient_reason",
+                        "investigation-insufficient-evidence",
+                    ),
+                    "investigation_status": "insufficient",
                     "investigation_reasoning": record["reasoning"],
                 })
-        if record is None and status:
-            decision["reason"] = "investigation-%s" % status.get(
-                "status", "not-scheduled"
-            )
+        else:
+            # Failed / unprocessed / never scheduled: keep the
+            # pre-investigation disposition, speak the contract status
+            # vocabulary (never the internal batch statuses) and record
+            # the verbatim failure reason from the outcome statuses.
+            internal = str(status.get("status", "") or "")
+            decision.update({
+                "disposition": prior,
+                "reason": {
+                    "failed": "investigation-failed",
+                    "unprocessed": "investigation-unprocessed",
+                }.get(internal, "investigation-not-scheduled"),
+                "investigation_status": (
+                    "failed" if internal == "failed" else "unprocessed"
+                ),
+            })
+            if status.get("reason"):
+                decision["investigation_failure_reason"] = str(
+                    status["reason"]
+                )
         decisions.append(decision)
 
     discovered: list[Finding] = []
@@ -1188,9 +1244,11 @@ def merge_investigation_into_report(
     adjudication = finalize_adjudication(
         decisions, policy="investigation-merge-v1"
     )
-    # finalize_adjudication derives overall disposition from the counts;
-    # recompute the alert face from the investigation verdicts so a
-    # refuted-only set is not reported as an active alert run.
+    # Defensive re-assertion of the supported rows only (supported -> alert
+    # whatever the prior disposition): the preservation rows -- insufficient
+    # and every failure/unknown state keeping the pre-investigation
+    # disposition -- are deliberately NOT touched here, so this second pass
+    # can never break the keep semantics.
     for decision in adjudication["decisions"]:
         if decision.get("investigation_verdict") == "supported":
             decision["disposition"] = "alert"

@@ -12,15 +12,14 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+from lima.adjudication import finalize_adjudication
 from lima.models import Finding, ReviewReport, Severity
 from lima.repository_investigation import (
     FindingInvestigator,
     InvestigationBudget,
-    InvestigationError,
     InvestigationLLMClient,
     InvestigationSnapshot,
     build_investigation_targets,
@@ -204,7 +203,7 @@ class TestScheduling(InvestigationTestCase):
             ]),
         ]
         outcome = self.investigator(script).investigate(targets, self.snapshot)
-        for line, target in by_line.items():
+        for _line, target in by_line.items():
             record = outcome.results[target.fingerprint]
             self.assertEqual(record["verdict"], "refuted")
             self.assertIn(":svc/secrets.py", record["evidence_refs"][0])
@@ -404,7 +403,6 @@ class TestModuleEntry(InvestigationTestCase):
     def test_module_target_with_zero_findings_discovers_risk(self):
         targets = build_module_targets(self.snapshot, ["svc/unclear.py"])
         self.assertEqual(len(targets), 1)
-        target = targets[0]
         script = [
             tool_action("read_source", path="svc/unclear.py",
                         start_line=1, end_line=5),
@@ -490,13 +488,29 @@ class TestReportMerge(InvestigationTestCase):
             decisions[insufficient_fp]["reason"],
             "investigation-insufficient-evidence",
         )
+        # Transition table row 4 (alert + insufficient): the insufficient
+        # verdict keeps the pre-investigation active alert; the merged
+        # status must speak the contract vocabulary ("insufficient"), and
+        # the candidate must not leave the active alert set.
+        self.assertEqual(decisions[insufficient_fp]["disposition"], "alert")
+        self.assertEqual(
+            decisions[insufficient_fp]["investigation_status"], "insufficient"
+        )
+        self.assertNotEqual(
+            decisions[insufficient_fp].get("effective_state"),
+            "excluded-from-active-alerts",
+        )
         # Original findings remain in history untouched.
         self.assertEqual(len(report.findings), len(findings))
         summary_faces = report.adjudication["investigation_summary"]
         self.assertEqual(summary_faces["supported"], 1)
         self.assertEqual(summary_faces["refuted"], 2)
         self.assertEqual(summary_faces["insufficient"], 1)
-        self.assertEqual(summary_faces["active_alerts"], 1)
+        # Supported + insufficient-kept are both active alerts now.
+        self.assertEqual(summary_faces["active_alerts"], 2)
+        self.assertEqual(report.adjudication["counts"]["alert"], 2)
+        self.assertEqual(report.adjudication["counts"]["needs_review"], 2)
+        self.assertEqual(report.adjudication["overall_disposition"], "alert")
         self.assertIn("refuted with scope-limited evidence", report.summary)
         self.assertIn("2 refuted", report.summary)
         # The user-facing collaboration block is conclusion-first.
@@ -508,22 +522,290 @@ class TestReportMerge(InvestigationTestCase):
         findings = self.findings()[:2]
         targets = build_investigation_targets(findings, self.snapshot)
         outcome = self.investigator(
-            [RuntimeError("timeout")]
+            [RuntimeError("provider down")]
         ).investigate(targets, self.snapshot)
         report = ReviewReport(
             repository="repo", pull_request=None, summary="old", risk="high",
             findings=list(findings),
         )
         merge_investigation_into_report(report, outcome, findings)
+        # Transition table row 5 (alert + failed): a failed investigation
+        # never downgrades or clears the pre-investigation active alert
+        # (these findings have no prior adjudication decision, so the
+        # frozen fallback applies: findings that entered investigation are
+        # active-alert candidates).  The failure state and its specific
+        # reason stay recorded on the decision.
         for decision in report.adjudication["decisions"]:
-            self.assertNotEqual(decision["disposition"], "alert")
-            self.assertEqual(
-                decision["investigation_status"], "failed"
+            self.assertEqual(decision["disposition"], "alert")
+            self.assertNotEqual(
+                decision.get("effective_state"), "excluded-from-active-alerts"
             )
+            self.assertEqual(decision["investigation_status"], "failed")
             self.assertEqual(decision["reason"], "investigation-failed")
+            self.assertEqual(
+                decision.get("investigation_failure_reason"),
+                "batch-error:RuntimeError",
+            )
+        self.assertEqual(report.adjudication["overall_disposition"], "alert")
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 2
+        )
         # The failure detail lives in the failures list, sanitized.
         self.assertEqual(len(outcome.failures), 1)
         self.assertEqual(outcome.failures[0]["failure"], "RuntimeError")
+
+
+class TestMergeTransitionTable(InvestigationTestCase):
+    """Frozen A2 merge contract: one test per transition-table row.
+
+    Frozen pre-investigation disposition source: the decisions already in
+    ``report.adjudication`` at merge time, looked up by fingerprint; a
+    finding with no prior decision falls back to the active-alert
+    candidate (findings that entered investigation are active alerts by
+    construction).  Frozen implementation-state mapping: timeout ->
+    failed with a timeout-specific reason, budget exhaustion ->
+    unprocessed with a budget-specific reason; no new ambiguous states.
+    """
+
+    def prior_adjudication(self, pairs):
+        decisions = [
+            {
+                "fingerprint": item.fingerprint,
+                "path": item.path,
+                "line": item.line,
+                "rule_id": item.rule_id,
+                "disposition": disposition,
+                "reason": "semantic-triage-pre-state",
+            }
+            for item, disposition in pairs
+        ]
+        return finalize_adjudication(decisions)
+
+    def merge_with(self, findings, script, *, prior=None, budget=100,
+                   batch_size=6):
+        targets = build_investigation_targets(findings, self.snapshot)
+        outcome = self.investigator(
+            script, batch_size=batch_size, budget=budget
+        ).investigate(targets, self.snapshot)
+        report = ReviewReport(
+            repository="repo", pull_request=None, summary="old", risk="high",
+            findings=list(findings),
+        )
+        if prior is not None:
+            report.adjudication = prior
+        merge_investigation_into_report(report, outcome, findings)
+        decisions = {
+            d["fingerprint"]: d for d in report.adjudication["decisions"]
+        }
+        return report, decisions
+
+    def observed_refuted_script(self, target, verdict):
+        return [
+            tool_action("read_source", path="svc/secrets.py",
+                        start_line=1, end_line=3),
+            final([result(
+                target.fingerprint, target.path, target.line, verdict,
+                refs=["read_source:svc/secrets.py:1-3"],
+            )]),
+        ]
+
+    def test_row1_prior_alert_supported_keeps_active_alert(self):
+        secret = self.findings()[2]
+        script = self.observed_refuted_script(secret, "supported")
+        report, decisions = self.merge_with([secret], script)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "alert")
+        self.assertEqual(decision["investigation_verdict"], "supported")
+        self.assertEqual(decision["reason"], "model-supported-risk-evidence")
+        # Row 1 evidence level: valid evidence refs and basis recorded.
+        self.assertTrue(decision["investigation_evidence_refs"])
+        self.assertTrue(decision["investigation_evidence_basis"])
+        self.assertNotEqual(
+            decision.get("effective_state"), "excluded-from-active-alerts"
+        )
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row2_prior_alert_refuted_with_observed_refs_excluded(self):
+        secret = self.findings()[2]
+        script = self.observed_refuted_script(secret, "refuted")
+        report, decisions = self.merge_with([secret], script)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "needs_review")
+        self.assertEqual(decision["investigation_verdict"], "refuted")
+        self.assertEqual(
+            decision["effective_state"], "excluded-from-active-alerts"
+        )
+        # Refutation scope and evidence stay recorded; the original
+        # finding stays in history.
+        self.assertTrue(decision["investigation_evidence_refs"])
+        self.assertEqual(len(report.findings), 1)
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 0
+        )
+
+    def test_row3_refuted_without_observed_refs_keeps_alert(self):
+        secret = self.findings()[2]
+        # No tool call happens, so the cited ref was never actually
+        # observed: the validation layer downgrades the refutation to
+        # insufficient (existing behavior kept); the merge must keep the
+        # active alert and record that the refutation was rejected.
+        script = [final([result(
+            secret.fingerprint, secret.path, secret.line, "refuted",
+            refs=["read_source:svc/secrets.py"],
+        )])]
+        report, decisions = self.merge_with([secret], script)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "alert")
+        self.assertEqual(decision["investigation_verdict"], "insufficient")
+        self.assertEqual(decision["investigation_status"], "insufficient")
+        self.assertEqual(
+            decision["reason"], "refutation-rejected-no-observed-evidence"
+        )
+        self.assertIn("bare clean", decision["investigation_reasoning"])
+        self.assertNotEqual(
+            decision.get("effective_state"), "excluded-from-active-alerts"
+        )
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row4_insufficient_verdict_keeps_alert(self):
+        secret = self.findings()[2]
+        script = [final([result(
+            secret.fingerprint, secret.path, secret.line, "insufficient",
+            reasoning="no observation supporting either direction",
+        )])]
+        report, decisions = self.merge_with([secret], script)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "alert")
+        self.assertEqual(decision["investigation_verdict"], "insufficient")
+        self.assertEqual(decision["investigation_status"], "insufficient")
+        self.assertEqual(
+            decision["reason"], "investigation-insufficient-evidence"
+        )
+        self.assertIn(
+            "no observation", decision["investigation_reasoning"]
+        )
+        self.assertNotEqual(
+            decision.get("effective_state"), "excluded-from-active-alerts"
+        )
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row5_timeout_maps_to_failed_with_reason(self):
+        secret = self.findings()[2]
+        report, decisions = self.merge_with(
+            [secret], [TimeoutError("model timeout")]
+        )
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "alert")
+        self.assertEqual(decision["investigation_status"], "failed")
+        self.assertEqual(decision["reason"], "investigation-failed")
+        # Frozen implementation-state mapping: timeout -> failed with the
+        # timeout-specific reason preserved verbatim.
+        self.assertEqual(
+            decision.get("investigation_failure_reason"),
+            "batch-error:TimeoutError",
+        )
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row5_budget_exhausted_maps_to_unprocessed_with_reason(self):
+        secret = self.findings()[2]
+        report, decisions = self.merge_with([secret], [], budget=0)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "alert")
+        self.assertEqual(decision["investigation_status"], "unprocessed")
+        self.assertEqual(decision["reason"], "investigation-unprocessed")
+        self.assertEqual(
+            decision.get("investigation_failure_reason"),
+            "request-budget-exhausted",
+        )
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row6_prior_needs_review_failure_stays_non_active(self):
+        first, second = self.findings()[:2]
+        prior = self.prior_adjudication([(first, "needs_review")])
+        report, decisions = self.merge_with(
+            [first, second], [RuntimeError("provider down")], prior=prior,
+        )
+        kept = decisions[first.fingerprint]
+        # Row 6: a non-active pre-investigation disposition is kept on
+        # failure -- neither escalated to alert nor excluded.
+        self.assertEqual(kept["disposition"], "needs_review")
+        self.assertNotEqual(
+            kept.get("effective_state"), "excluded-from-active-alerts"
+        )
+        self.assertEqual(kept["investigation_status"], "failed")
+        self.assertEqual(
+            kept.get("investigation_failure_reason"),
+            "batch-error:RuntimeError",
+        )
+        # Frozen pre-investigation source rule: only the first finding has
+        # a prior decision; the second falls back to the active-alert
+        # candidate (row 5 applies to it).
+        fallback = decisions[second.fingerprint]
+        self.assertEqual(fallback["disposition"], "alert")
+        self.assertEqual(fallback["investigation_status"], "failed")
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row7_prior_needs_review_supported_promotes_to_alert(self):
+        secret = self.findings()[2]
+        prior = self.prior_adjudication([(secret, "needs_review")])
+        script = self.observed_refuted_script(secret, "supported")
+        report, decisions = self.merge_with([secret], script, prior=prior)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "alert")
+        self.assertEqual(decision["investigation_verdict"], "supported")
+        self.assertEqual(decision["reason"], "model-supported-risk-evidence")
+        self.assertNotEqual(
+            decision.get("effective_state"), "excluded-from-active-alerts"
+        )
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 1
+        )
+
+    def test_row8_prior_needs_review_refuted_with_refs_excluded(self):
+        secret = self.findings()[2]
+        prior = self.prior_adjudication([(secret, "needs_review")])
+        script = self.observed_refuted_script(secret, "refuted")
+        report, decisions = self.merge_with([secret], script, prior=prior)
+        decision = decisions[secret.fingerprint]
+        self.assertEqual(decision["disposition"], "needs_review")
+        self.assertEqual(
+            decision["effective_state"], "excluded-from-active-alerts"
+        )
+        self.assertTrue(decision["investigation_evidence_refs"])
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 0
+        )
+
+    def test_all_failed_active_candidates_stay_alert_overall(self):
+        findings = self.findings()[:3]
+        report, decisions = self.merge_with(
+            findings, [RuntimeError("provider down")], batch_size=3,
+        )
+        # Derived surface: counts, overall disposition and active_alerts
+        # are derived from the preserved dispositions -- a fully failed
+        # prior-alert set must present as an alert run, never as
+        # needs_review.
+        self.assertEqual(
+            [d["disposition"] for d in decisions.values()], ["alert"] * 3
+        )
+        self.assertEqual(report.adjudication["counts"]["alert"], 3)
+        self.assertEqual(report.adjudication["counts"]["needs_review"], 0)
+        self.assertEqual(report.adjudication["overall_disposition"], "alert")
+        self.assertEqual(
+            report.adjudication["investigation_summary"]["active_alerts"], 3
+        )
 
 
 class TestServiceWiring(unittest.TestCase):
@@ -549,6 +831,7 @@ class TestServiceWiring(unittest.TestCase):
 
     def test_builder_modes(self):
         import os
+
         from lima.config import Settings
         from lima.service import ReviewService
 

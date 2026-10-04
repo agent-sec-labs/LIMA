@@ -56,10 +56,11 @@ HIT_LOG = (
         "round": 1,
         "driver_sha256": "0123456789abcdef",
         "stage": "run",
-        "ok": True,
+        "ok": False,
         "exit_code": 1,
         "error_type": "heap-use-after-free",
         "faulting_line": 42,
+        "faulting_file": "third_party/sample-lib/src/db.cpp",
         "hit": True,
     },
 )
@@ -247,6 +248,28 @@ class DossierStructureTests(unittest.TestCase):
         self.assertNotIn("已通过 ASAN 物理验证", unbacked)
         self.assertIn("待复核", unbacked)
         self.assertNotIn("高危", unbacked)
+
+    def test_runtime_hit_gate_uses_real_protocol_semantics(self):
+        # A real ASan hit arrives as ok=False (the tested binary did not
+        # exit cleanly); the run stage plus the parsed report prove
+        # execution, so the physical-verification wording must survive.
+        report = generate_dossier(_finding(), _context())
+        self.assertIn("已通过 ASAN 物理验证", report)
+        # Boolean-only forged records never upgrade a report.
+        forged = generate_dossier(
+            _finding(experiment_log=({"round": 1, "hit": True},)),
+            _context(),
+        )
+        self.assertNotIn("已通过 ASAN 物理验证", forged)
+        self.assertIn("待复核", forged)
+        # The retired ok=True+hit=True fake shape (no stage, no error
+        # type) no longer counts as a hit either.
+        retired = generate_dossier(
+            _finding(experiment_log=({"round": 1, "ok": True, "hit": True},)),
+            _context(),
+        )
+        self.assertNotIn("已通过 ASAN 物理验证", retired)
+        self.assertIn("待复核", retired)
 
     def test_poc_driver_included_with_compile_command(self):
         report = generate_dossier(_finding(), _context())

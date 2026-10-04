@@ -67,6 +67,14 @@ try:  # platform module under test (RED until implemented)
 except ImportError:  # pragma: no cover - RED phase
     run_platform_review = None
 
+try:  # public hit truth shared with pilot replay (RED until Task 1 lands)
+    from lima.agent_orchestrator import (
+        experiment_matches_target,
+        repro_driver_relative_path,
+    )
+except ImportError:  # pragma: no cover - RED phase
+    experiment_matches_target = None
+
 REPO_KEY = "team/project"
 SNAPSHOT = "a" * 64
 CONTEXT = "c" * 64
@@ -847,6 +855,60 @@ class RealChainHitContractTests(unittest.TestCase):
             record.kind == "runtime" and record.source == "asan"
             for record in target.evidence_records
         ))
+
+
+class PublicHitTruthContractTests(unittest.TestCase):
+    """The public hit truth the platform loop and pilot replay share."""
+
+    def _match(self, observation, cwe="CWE-416", target_path=UNIT):
+        return experiment_matches_target(
+            observation, cwe,
+            target_path=target_path,
+            driver_paths=(repro_driver_relative_path(_DEFAULT_DRIVER),),
+        )
+
+    def test_real_uaf_report_matches_target(self):
+        observation = observation_from(repro_response())
+        # The protocol shape: a parsed ASan report forces ok=False, and the
+        # match must survive that.
+        self.assertIs(False, observation.ok)
+        self.assertEqual("run", observation.stage)
+        self.assertTrue(self._match(observation))
+
+    def test_driver_self_crash_never_matches(self):
+        self.assertFalse(
+            self._match(driver_self_crash()),
+            "a crash inside the PoC driver must not match the target",
+        )
+
+    def test_unknown_file_never_matches(self):
+        self.assertFalse(self._match(unknown_file_crash()))
+
+    def test_cwe_mismatch_never_matches(self):
+        observation = observation_from(repro_response())
+        self.assertFalse(self._match(observation, cwe="CWE-120"))
+
+    def test_compile_stage_never_matches(self):
+        observation = observation_from(
+            repro_response(
+                stage="compile",
+                asan_report=None,
+                diagnostics=("driver.cpp:1:1: error: unknown type name 'x'",),
+            )
+        )
+        self.assertEqual("compile", observation.stage)
+        self.assertFalse(self._match(observation))
+
+    def test_repro_driver_relative_path_is_public(self):
+        self.assertEqual(
+            repro_driver_relative_path(_DEFAULT_DRIVER),
+            _repro_driver_relative_path(_DEFAULT_DRIVER),
+        )
+        self.assertTrue(
+            repro_driver_relative_path(_DEFAULT_DRIVER).startswith(
+                "build/repro_driver_"
+            )
+        )
 
 
 class NoProofGateTests(unittest.TestCase):

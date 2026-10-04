@@ -764,11 +764,12 @@ def _runtime_subject_id(
     return hashlib.sha256(material).hexdigest()
 
 
-def _experiment_hit(
+def experiment_matches_target(
     observation: Any,
     cwe: str,
-    target_path: str | None = None,
-    driver_paths: Any = None,
+    *,
+    target_path: str,
+    driver_paths: Sequence[str] = (),
 ) -> bool:
     """A hit is an executed run-stage ASan crash bound to the Scout target.
 
@@ -803,12 +804,27 @@ def _experiment_hit(
     return _paths_bind(faulting_file, target_path)
 
 
+def _experiment_hit(
+    observation: Any,
+    cwe: str,
+    target_path: str | None = None,
+    driver_paths: Any = None,
+) -> bool:
+    """Backward-compatible alias of :func:`experiment_matches_target`."""
+    if not isinstance(target_path, str) or not target_path:
+        return False
+    return experiment_matches_target(
+        observation, cwe,
+        target_path=target_path, driver_paths=driver_paths,
+    )
+
+
 _DRIVER_STAGE_DIRECTORY: Final = "build"
 _DRIVER_STAGE_PREFIX: Final = "repro_driver_"
 _DRIVER_STAGE_SUFFIX: Final = ".cpp"
 
 
-def _repro_driver_relative_path(driver_code: str) -> str:
+def repro_driver_relative_path(driver_code: str) -> str:
     """The Sidecar's content-derived staging path for one repro driver.
 
     ``cxx_analyzer.repro.run_repro`` stages every driver into the
@@ -823,6 +839,10 @@ def _repro_driver_relative_path(driver_code: str) -> str:
         f"{_DRIVER_STAGE_DIRECTORY}/{_DRIVER_STAGE_PREFIX}{tag}"
         f"{_DRIVER_STAGE_SUFFIX}"
     )
+
+
+# Historic private name kept for internal and test callers.
+_repro_driver_relative_path = repro_driver_relative_path
 
 
 def _normalized_source_path(text: Any) -> str:
@@ -1071,11 +1091,11 @@ def _process_target(
                 repository_key, snapshot_hash, sources, driver,
                 **experiment_bound,
             )
-            hit = _experiment_hit(
+            hit = experiment_matches_target(
                 observation,
                 hypothesis.cwe,
                 target_path=target.path,
-                driver_paths=(_repro_driver_relative_path(driver),),
+                driver_paths=(repro_driver_relative_path(driver),),
             )
             experiment_log.append(
                 _experiment_entry(round_index, driver, observation, hit)

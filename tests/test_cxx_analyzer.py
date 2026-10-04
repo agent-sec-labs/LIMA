@@ -5721,6 +5721,150 @@ class ReproTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     repro.build_compile_argv(sources, "build/d.cpp", "build/out")
 
+    def test_compile_argv_c_sources_use_c_language_mode(self):
+        argv = repro.build_compile_argv(
+            ("lib/xmlparse.c",), "build/d.cpp", "build/out"
+        )
+        self.assertEqual(
+            [
+                "clang++-14",
+                "-fsanitize=address",
+                "-g",
+                "-O1",
+                "-x", "c", "lib/xmlparse.c",
+                "-x", "c++", "build/d.cpp",
+                "-o",
+                "build/out",
+            ],
+            argv,
+        )
+        # Mixed extensions keep the caller order; the language mode is
+        # re-pinned whenever it changes (a .cpp after a .c must switch
+        # back explicitly, -x stays in force until overridden).
+        mixed = repro.build_compile_argv(
+            ("a.c", "b.cpp", "c.c"), "build/d.cpp", "build/out"
+        )
+        self.assertEqual(
+            [
+                "clang++-14", "-fsanitize=address", "-g", "-O1",
+                "-x", "c", "a.c",
+                "-x", "c++", "b.cpp",
+                "-x", "c", "c.c",
+                "-x", "c++", "build/d.cpp",
+                "-o", "build/out",
+            ],
+            mixed,
+        )
+
+    def test_compile_argv_context_flags_after_asan_flags(self):
+        argv = repro.build_compile_argv(
+            ("lib/xmlparse.c",), "build/d.cpp", "build/out",
+            context_flags=("-DXML_POOR_ENTROPY", "-Ilib"),
+        )
+        self.assertEqual(
+            [
+                "clang++-14", "-fsanitize=address", "-g", "-O1",
+                "-DXML_POOR_ENTROPY", "-Ilib",
+                "-x", "c", "lib/xmlparse.c",
+                "-x", "c++", "build/d.cpp",
+                "-o", "build/out",
+            ],
+            argv,
+        )
+
+    def test_compile_argv_rejects_non_semantic_context_flags(self):
+        for bad in (
+            ("-o", "evil"),
+            ("-include", "x.h"),
+            ("-fsyntax-only",),
+            ("src/x.c",),
+            ("-D", "OK", "-Werror"),
+            ("-std=c99",),
+            ("-std", "c99"),
+        ):
+            with self.subTest(flags=bad):
+                with self.assertRaises(ValueError):
+                    repro.build_compile_argv(
+                        ("v.cpp",), "build/d.cpp", "build/out",
+                        context_flags=bad,
+                    )
+
+    def test_run_repro_c_source_gets_compdb_context_flags(self):
+        # feature.c only defines pilot_magic under -DPILOT_FLAG, which is
+        # declared by the snapshot's compile_commands.json: the recorded
+        # compile argv proves the semantic context reached the experiment
+        # compile, and the .c source is guarded by -x c.
+        driver_code = (
+            'extern "C" int pilot_magic(void);\n'
+            "int main() { return pilot_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        driver_relative = f"build/repro_driver_{tag}.cpp"
+        binary_relative = f"build/repro_bin_{tag}"
+        feature_c = (
+            "#ifdef PILOT_FLAG\n"
+            "int pilot_magic(void) { return 42; }\n"
+            "#else\n"
+            "#error pilot context flags did not reach the compile\n"
+            "#endif\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": ".",
+                    "file": "src/feature.c",
+                    "arguments": [
+                        "clang-14", "-c", "-DPILOT_FLAG", "-std=c99",
+                        "src/feature.c", "-o", "build/obj.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/feature.c": feature_c,
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/feature.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertIs(True, result.ok)
+        self.assertEqual(
+            [
+                "clang++-14", "-fsanitize=address", "-g", "-O1",
+                "-DPILOT_FLAG",
+                "-x", "c", "src/feature.c",
+                "-x", "c++", driver_relative,
+                "-o", binary_relative,
+            ],
+            calls[0]["argv"],
+        )
+
     # ------------------------------------------------------- run_repro flow
 
     def test_run_repro_compiles_runs_and_parses_report(self):

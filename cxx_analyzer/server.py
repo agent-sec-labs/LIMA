@@ -689,6 +689,7 @@ def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, obje
             request["driver_code"],  # type: ignore[arg-type]
             deadline=deadline,
             timeout_seconds=settings.step_timeout_seconds,
+            settings=settings,
         )
         snapshot.verify_inventory(deadline)
     except AnalysisDeadlineExceeded as exc:

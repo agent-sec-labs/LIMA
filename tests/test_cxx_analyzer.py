@@ -1327,6 +1327,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             "LIMA_CXX_MAX_MEMORY_MB",
             "LIMA_CXX_MAX_PROCESSES",
             "LIMA_CXX_MAX_OUTPUT_BYTES",
+            "LIMA_CXX_MAX_AST_JSON_BYTES",
         }
         self.assertTrue(main_configuration <= set(lima["environment"]))
         snapshot_limits = {

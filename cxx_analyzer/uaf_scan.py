@@ -919,6 +919,7 @@ def extract_ast_json(
     deadline: Any,
     *,
     timeout_seconds: int,
+    max_output_bytes: int = MAX_AST_JSON_BYTES,
 ) -> tuple[dict | None, list[str] | None]:
     """Run the audited clang driver and parse one bounded ``-ast-dump=json``.
 
@@ -926,8 +927,12 @@ def extract_ast_json(
     from the source language (never the repository's own ``arguments[0]``);
     only the resolver's semantic arguments are forwarded.  Returns
     ``(ast, None)`` or ``(None, [gap])`` with ``ast-unavailable``,
-    ``ast-output-limit`` or ``ast-json-invalid``.
+    ``ast-output-limit`` or ``ast-json-invalid``.  ``max_output_bytes``
+    defaults to the frozen 16 MiB product budget; deployments raise it via
+    ``LIMA_CXX_MAX_AST_JSON_BYTES`` for header-heavy units.
     """
+    if type(max_output_bytes) is not int or max_output_bytes < 1:
+        raise ValueError("ast dump output budget must be a positive integer")
 
     driver = _driver_for(source_path, arguments)
     argv = [
@@ -945,7 +950,7 @@ def extract_ast_json(
         snapshot,
         working_directory or ".",
         timeout_seconds,
-        MAX_AST_JSON_BYTES,
+        max_output_bytes,
         None,
         deadline=deadline,
     )

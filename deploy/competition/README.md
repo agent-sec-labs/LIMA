@@ -27,6 +27,7 @@
 | `LIMA_CXX_MAX_RESPONSE_BYTES` | 2097152 | 16777216 |
 | `LIMA_CXX_MAX_MEMORY_MB`（Sidecar 容器 `mem_limit`） | 2048 | 8192 |
 | `LIMA_CXX_MAX_PROCESSES`（Sidecar 容器 `pids_limit`） | 128 | 512 |
+| `LIMA_CXX_MAX_AST_JSON_BYTES`（单 TU `-ast-dump=json` 输出预算；libexpat `xmlparse.c` 实测约 78MB） | 16777216 | 134217728 (128MB) |
 | `LIMA_CXX_STEP_TIMEOUT_SECONDS` / `LIMA_CXX_TOTAL_TIMEOUT_SECONDS`（受信构建步骤） | 120 / 300 | 600 / 1800 |
 
 智能体侧（按核数与预算调整，逐项含义见 `.env.competition.example`）：

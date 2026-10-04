@@ -487,6 +487,7 @@ def _extract_uaf_unit(
         context.relative_directory,
         deadline,
         timeout_seconds=settings.step_timeout_seconds,
+        max_output_bytes=settings.max_ast_json_bytes,
     )
     if ast_json is None:
         gaps = diagnostics if diagnostics else [uaf_scan.GAP_AST_UNAVAILABLE]

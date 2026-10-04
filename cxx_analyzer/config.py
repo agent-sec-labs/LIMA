@@ -83,6 +83,10 @@ class AnalyzerSettings:
     repository_scan_max_files: int
     repository_scan_max_file_bytes: int
     repository_scan_max_total_bytes: int
+    # Output budget for one TU's -ast-dump=json, in bytes.  The 16 MiB
+    # default is the frozen product budget; competition deployments raise
+    # it for header-heavy real-world units via LIMA_CXX_MAX_AST_JSON_BYTES.
+    max_ast_json_bytes: int = 16 * 1024 * 1024
     # Admin-level master gate for executing CMake configure on untrusted
     # snapshots. Deployment environment only: analysis requests, repository
     # content and model output can never set or influence it. Default False,
@@ -114,6 +118,9 @@ class AnalyzerSettings:
             ),
             repository_scan_max_total_bytes=_positive_int(
                 "LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES", 20 * 1024 * 1024
+            ),
+            max_ast_json_bytes=_positive_int(
+                "LIMA_CXX_MAX_AST_JSON_BYTES", 16 * 1024 * 1024
             ),
             trusted_build_context_generation=_strict_bool(
                 "LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION", False

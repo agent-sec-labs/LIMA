@@ -1123,6 +1123,20 @@ def merge_investigation_into_report(
     construction).  An investigation failure can therefore never downgrade
     or clear an existing alert, and every unknown stays an explicit
     unknown -- never a disguised clean.
+
+    Supplemental report-consistency contract (PACKET-265B, C1-C10): every
+    accepted agent-discovered claim materializes exactly one
+    AGENT-DISCOVERY finding with exactly one traceable needs_review
+    decision; every scheduled module scope yields one traceable
+    needs_review decision that is never alert, clear or excluded; the
+    overall disposition/reason and counts derive exclusively from the
+    shared ``finalize_adjudication`` guard over the complete merged
+    decision set (empty set -> needs_review / no-positive-safety-evidence);
+    the report risk only rises, carried by alert findings and unexcluded
+    candidates; execution state is reported as its own
+    ``execution_counts`` dimension while ``verdict_counts`` keeps its
+    static-population meaning; and re-merging the same outcome stays
+    idempotent through stable fingerprint identity.
     """
     from .adjudication import DISPOSITIONS, finalize_adjudication
 
@@ -1130,7 +1144,7 @@ def merge_investigation_into_report(
     # decisions that already exist at merge time count; anything missing
     # falls back to the active-alert candidate (row-6 two-fingerprint
     # differential).
-    prior_dispositions: dict[str, str] = {}
+    prior_decisions: dict[str, dict[str, Any]] = {}
     existing = getattr(report, "adjudication", None)
     if isinstance(existing, dict):
         for item in existing.get("decisions") or []:
@@ -1138,13 +1152,36 @@ def merge_investigation_into_report(
                 continue
             disposition = str(item.get("disposition", "")).strip().lower()
             if disposition in DISPOSITIONS:
-                prior_dispositions[str(item["fingerprint"])] = disposition
+                prior_decisions[str(item["fingerprint"])] = item
+
+    def _kept_disposition(fingerprint: str) -> str:
+        record = prior_decisions.get(fingerprint)
+        if record is None:
+            return "alert"
+        return str(record.get("disposition", "")).strip().lower()
+
+    def _preserve_prior_clear(decision: dict[str, Any], fingerprint: str,
+                              fallback_reason: str) -> None:
+        # A legitimate prior clear survives an insufficient or failed
+        # investigation only with its agreeing safety evidence intact, so
+        # the shared guard still recognizes it and the counts conserve it
+        # instead of swallowing it (C5).
+        record = prior_decisions.get(fingerprint)
+        if record is None:
+            decision["reason"] = fallback_reason
+            return
+        decision["reason"] = str(record.get("reason", fallback_reason))
+        for key in ("invariant_statuses", "llm_is_vulnerable"):
+            if key in record:
+                decision[key] = record[key]
+
+    static_fingerprints = {finding.fingerprint for finding in findings}
 
     decisions = []
     for finding in findings:
         record = outcome.results.get(finding.fingerprint)
         status = outcome.statuses.get(finding.fingerprint, {})
-        prior = prior_dispositions.get(finding.fingerprint, "alert")
+        prior = _kept_disposition(finding.fingerprint)
         decision = {
             "fingerprint": finding.fingerprint,
             "path": finding.path,
@@ -1181,27 +1218,33 @@ def merge_investigation_into_report(
                 # Insufficient (including refutations rejected for lacking
                 # observed evidence): keep the pre-investigation
                 # disposition -- insufficient is never a downgrade.
+                reason = record.get(
+                    "insufficient_reason",
+                    "investigation-insufficient-evidence",
+                )
                 decision.update({
                     "disposition": prior,
-                    "reason": record.get(
-                        "insufficient_reason",
-                        "investigation-insufficient-evidence",
-                    ),
+                    "reason": reason,
                     "investigation_status": "insufficient",
                     "investigation_reasoning": record["reasoning"],
                 })
+                if prior == "clear":
+                    _preserve_prior_clear(
+                        decision, finding.fingerprint, reason
+                    )
         else:
             # Failed / unprocessed / never scheduled: keep the
             # pre-investigation disposition, speak the contract status
             # vocabulary (never the internal batch statuses) and record
             # the verbatim failure reason from the outcome statuses.
             internal = str(status.get("status", "") or "")
+            reason = {
+                "failed": "investigation-failed",
+                "unprocessed": "investigation-unprocessed",
+            }.get(internal, "investigation-not-scheduled")
             decision.update({
                 "disposition": prior,
-                "reason": {
-                    "failed": "investigation-failed",
-                    "unprocessed": "investigation-unprocessed",
-                }.get(internal, "investigation-not-scheduled"),
+                "reason": reason,
                 "investigation_status": (
                     "failed" if internal == "failed" else "unprocessed"
                 ),
@@ -1210,13 +1253,88 @@ def merge_investigation_into_report(
                 decision["investigation_failure_reason"] = str(
                     status["reason"]
                 )
+            if prior == "clear":
+                _preserve_prior_clear(decision, finding.fingerprint, reason)
         decisions.append(decision)
 
-    discovered: list[Finding] = []
+    # Scheduled module scopes (different population from static findings):
+    # no vulnerability Finding is ever fabricated for them, but each one
+    # becomes a traceable needs_review decision so the unknown is visible
+    # on the report face (C3).
+    module_fingerprints = sorted(
+        fingerprint
+        for fingerprint in set(outcome.statuses) | set(outcome.results)
+        if fingerprint.startswith("module-scope:")
+        and fingerprint not in static_fingerprints
+    )
+    module_unknown = 0
+    for fingerprint in module_fingerprints:
+        status = outcome.statuses.get(fingerprint, {})
+        internal = str(status.get("status", "") or "")
+        decision: dict[str, Any] = {
+            "fingerprint": fingerprint,
+            "path": fingerprint[len("module-scope:"):],
+            "line": 0,
+            "rule_id": "",
+            "cwe": "",
+            "disposition": "needs_review",
+        }
+        if internal in {"failed", "unprocessed"}:
+            # Execution failure: the verbatim cause stays readable and the
+            # scope is presented as an explicit unknown -- never a
+            # completed review, never a fabricated verdict (C3/C7).
+            decision["investigation_status"] = internal
+            decision["reason"] = (
+                "investigation-failed" if internal == "failed"
+                else "investigation-unprocessed"
+            )
+            if status.get("reason"):
+                decision["investigation_failure_reason"] = str(
+                    status["reason"]
+                )
+            module_unknown += 1
+        else:
+            record = outcome.results.get(fingerprint)
+            if record is None:
+                # Scheduled but the model final never carried this
+                # fingerprint: the product's own wording for that miss is
+                # recorded verbatim as the reasoning (C3 missing-result).
+                decision["investigation_status"] = "insufficient"
+                decision["reason"] = "investigation-insufficient-evidence"
+                decision["investigation_reasoning"] = (
+                    "model final did not include this fingerprint"
+                )
+                module_unknown += 1
+            else:
+                verdict = str(record.get("verdict", "")).strip().lower()
+                if verdict in {"supported", "refuted"}:
+                    decision["investigation_verdict"] = verdict
+                    decision["reason"] = "module-scope-verdict-recorded"
+                    if record.get("reasoning"):
+                        decision["investigation_reasoning"] = str(
+                            record["reasoning"]
+                        )
+                else:
+                    decision["investigation_status"] = "insufficient"
+                    decision["reason"] = "investigation-insufficient-evidence"
+                    decision["investigation_reasoning"] = str(
+                        record.get("reasoning", "")
+                    )
+                    module_unknown += 1
+        decisions.append(decision)
+
+    # Accepted agent-discovered claims: identity is the existing Finding
+    # fingerprint formula, so a repeated identical claim materializes once
+    # and re-merging the same outcome never duplicates a finding (C9).
+    existing_fingerprints = {
+        finding.fingerprint for finding in report.findings
+    }
+    accepted: list[tuple[Finding, list[str]]] = []
     for target in outcome.new_targets:
         if not str(target.get("binding", "")).startswith("observed"):
             continue
-        discovered.append(Finding(
+        refs = [str(ref) for ref in (target.get("evidence_refs") or [])]
+        candidate = Finding(
             rule_id="AGENT-DISCOVERY",
             severity=Severity.HIGH,
             title="Agent-discovered security risk",
@@ -1226,72 +1344,131 @@ def merge_investigation_into_report(
             ),
             path=str(target.get("path", "")),
             line=max(1, int(target.get("line") or 1)),
-            evidence=" | ".join(
-                str(r) for r in target.get("evidence_refs", [])
-            )[:2000] or "agent tool observations (see collaboration.investigation)",
+            evidence=" | ".join(refs)[:2000] or (
+                "agent tool observations (see collaboration.investigation)"
+            ),
             fix="Investigate the referenced code and apply the appropriate "
-                "security control.",
+            "security control.",
             test="Add a regression case for the discovered risk shape.",
             confidence=0.6,
             cwe="",
-            source="agent-investigation:%s" % outcome.usage.get(
-                "provider", "unknown"
+            source=(
+                f"agent-investigation:"
+                f"{outcome.usage.get('provider', 'unknown')}"
             ),
             evidence_kind="agent-tool-observation",
             verification_state="candidate",
-        ))
+        )
+        if (candidate.fingerprint in static_fingerprints
+                or any(candidate.fingerprint == fp for fp, _ in accepted)):
+            continue
+        accepted.append((candidate, refs))
+    candidate_fingerprints = {candidate.fingerprint for candidate, _ in accepted}
+    for candidate, _refs in accepted:
+        # One traceable needs_review decision per materialized candidate;
+        # a candidate is an unverified finding, never a model verdict and
+        # never a fabricated supported/clear (C1).
+        decisions.append({
+            "fingerprint": candidate.fingerprint,
+            "path": candidate.path,
+            "line": candidate.line,
+            "rule_id": "AGENT-DISCOVERY",
+            "cwe": "",
+            "disposition": "needs_review",
+            "reason": "unverified-finding-requires-human-review",
+            "verification_state": "candidate",
+            "investigation_evidence_refs": _refs,
+        })
+        if candidate.fingerprint not in existing_fingerprints:
+            report.findings.append(candidate)
+            existing_fingerprints.add(candidate.fingerprint)
 
     adjudication = finalize_adjudication(
         decisions, policy="investigation-merge-v1"
     )
     # Defensive re-assertion of the supported rows only (supported -> alert
-    # whatever the prior disposition): the preservation rows -- insufficient
-    # and every failure/unknown state keeping the pre-investigation
-    # disposition -- are deliberately NOT touched here, so this second pass
-    # can never break the keep semantics.
+    # whatever the prior disposition) for the static population: the
+    # preservation rows -- insufficient and every failure/unknown state
+    # keeping the pre-investigation disposition -- are deliberately NOT
+    # touched here, and module decisions never carry alert semantics, so
+    # this second pass can never break the keep semantics.
     for decision in adjudication["decisions"]:
-        if decision.get("investigation_verdict") == "supported":
+        if (decision.get("fingerprint") in static_fingerprints
+                and decision.get("investigation_verdict") == "supported"):
             decision["disposition"] = "alert"
+    # Verdict counts keep their frozen static-population basis (C7): only
+    # decisions for the ``findings`` parameter count here, exactly as
+    # before -- module and candidate populations are excluded.
     counts = {
         verdict: sum(
             1 for d in adjudication["decisions"]
-            if d.get("investigation_verdict") == verdict
+            if d.get("fingerprint") in static_fingerprints
+            and d.get("investigation_verdict") == verdict
         )
         for verdict in VERDICTS
     }
-    active = sum(
-        1 for d in adjudication["decisions"] if d["disposition"] == "alert"
-    )
-    adjudication["counts"]["alert"] = active
-    adjudication["counts"]["needs_review"] = (
-        len(adjudication["decisions"]) - active
-    )
-    adjudication["overall_disposition"] = (
-        "alert" if active else (
-            "needs_review" if adjudication["decisions"] else "clear"
-        )
-    )
-    adjudication["overall_reason"] = (
-        "one-or-more-actionable-alerts" if active
-        else "no-active-alerts-after-investigation"
-    )
+    # C5/C6: counts come straight from the shared derivation over the
+    # complete merged decision set -- no "total minus alerts" arithmetic --
+    # and active_alerts is exactly the alert count.
+    active = adjudication["counts"]["alert"]
     adjudication["investigation_summary"] = {
         "supported": counts["supported"],
         "refuted": counts["refuted"],
         "insufficient": counts["insufficient"],
         "active_alerts": active,
-        "new_targets": len(discovered),
+        "new_targets": len(accepted),
     }
     report.adjudication = adjudication
-    if discovered:
-        report.findings.extend(discovered)
+    # C2: risk only rises.  Carriers are alert decisions' findings (any
+    # population) and unexcluded AGENT-DISCOVERY candidates; a refuted
+    # excluded finding never re-counts as current risk.
+    risk_ranks = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    finding_by_fingerprint = {
+        finding.fingerprint: finding for finding in findings
+    }
+    for candidate, _refs in accepted:
+        finding_by_fingerprint[candidate.fingerprint] = candidate
+    rank = risk_ranks.get(
+        str(getattr(report, "risk", "") or "").strip().lower(), 0
+    )
+    for decision in adjudication["decisions"]:
+        item = finding_by_fingerprint.get(decision.get("fingerprint"))
+        if item is None:
+            continue
+        carrying = decision["disposition"] == "alert" or (
+            decision.get("fingerprint") in candidate_fingerprints
+            and decision["disposition"] == "needs_review"
+            and decision.get("effective_state")
+            != "excluded-from-active-alerts"
+        )
+        if carrying:
+            severity = str(getattr(item.severity, "value", item.severity))
+            rank = max(rank, risk_ranks.get(severity, 0))
+    report.risk = ("low", "medium", "high", "critical")[rank]
+    # C7: execution state over every scheduled target (static + module) as
+    # its own dimension; "requeued" is a transient state whose destination
+    # is always completed/failed/unprocessed, so it is not counted here.
+    execution_counts = {"completed": 0, "failed": 0, "unprocessed": 0}
+    for status in outcome.statuses.values():
+        state = str(status.get("status", "") or "")
+        if state in execution_counts:
+            execution_counts[state] += 1
+    investigation_results = [
+        outcome.results[finding.fingerprint]
+        for finding in findings if finding.fingerprint in outcome.results
+    ]
+    # C3: the serialized results carry EVERY completed target (static and
+    # module), so module verdicts/reasoning stay visible in the report.
+    investigation_results.extend(
+        outcome.results[fingerprint]
+        for fingerprint in module_fingerprints
+        if fingerprint in outcome.results
+    )
     report.collaboration["investigation"] = {
         "status": "completed" if outcome.results else "no-results",
         "verdict_counts": counts,
-        "results": [
-            outcome.results[f.fingerprint]
-            for f in findings if f.fingerprint in outcome.results
-        ],
+        "execution_counts": execution_counts,
+        "results": investigation_results,
         "statuses": {
             fingerprint: status
             for fingerprint, status in outcome.statuses.items()
@@ -1303,19 +1480,36 @@ def merge_investigation_into_report(
         "dynamic_observations": outcome.dynamic_observations,
         "secret_persisted": False,
     }
+    # C8: every number below is derived from the faces above, and the
+    # frozen markers (pending / unknown-family wording) appear whenever
+    # candidates or module unknowns exist.
     refuted_list = ", ".join(sorted({
         d["path"] + ":" + str(d.get("line", ""))
         for d in adjudication["decisions"]
-        if d.get("investigation_verdict") == "refuted"
+        if d.get("fingerprint") in static_fingerprints
+        and d.get("investigation_verdict") == "refuted"
     }))
-    report.summary = (
-        "Investigation reviewed %d candidates: %d supported (active alerts), "
-        "%d refuted with scope-limited evidence (excluded from active alerts, "
-        "kept in history), %d unresolved. %d new risk target(s) discovered.%s "
-        "Unresolved items keep their original review state; nothing was "
-        "auto-cleared." % (
-            len(findings), counts["supported"], counts["refuted"],
-            counts["insufficient"], len(discovered),
-            (" Refuted locations: " + refuted_list) if refuted_list else "",
+    summary_segments = [
+        f"Investigation reviewed {len(findings)} static candidates: "
+        f"{counts['supported']} supported (active alerts), "
+        f"{counts['refuted']} refuted with scope-limited evidence "
+        "(excluded from active alerts, kept in history), "
+        f"{counts['insufficient']} unresolved."
+    ]
+    if refuted_list:
+        summary_segments.append(f"Refuted locations: {refuted_list}.")
+    if accepted:
+        summary_segments.append(
+            f"{len(accepted)} pending agent-discovered target(s) awaiting "
+            "human review."
         )
+    if module_unknown:
+        summary_segments.append(
+            f"{module_unknown} module scope(s) with unknown investigation "
+            "outcomes (failed, unprocessed or insufficient)."
+        )
+    summary_segments.append(
+        "Unresolved items keep their original review state; nothing was "
+        "auto-cleared."
     )
+    report.summary = " ".join(summary_segments)

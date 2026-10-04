@@ -71,12 +71,20 @@
 - 合同：`openharmony-validation-v1` 已冻结（`schema.json` +
   `lima/openharmony_validation.py`，二者字段/枚举由
   `tests/test_openharmony_validation.py` 强制一致）。
-- **pilot 案例已冻结（2026-10-04）**：上游 libexpat CVE-2022-43680（CWE-416），
-  脆弱 `5ac71407` / 修复 `56967f83`（上游 PR #650），目标 `expat/lib/xmlparse.c`，
-  依赖覆盖层为派生的 `_overlay/expat_config.h`（上游默认选项 EXPAT_DTD=ON）。
-  双版本真实链路验证已过：脆弱版目标绑定 `heap-use-after-free`
-  （faulting `expat/lib/xmlparse.c:7148`），修复版干净退出。前置：repro 实验编译
-  已支持 `.c` 目标 C 语言模式与 compdb 语义参数（`-I`/`-D` 白名单，`-std` 剔除）。
+- **pilot 案例（libexpat CVE-2022-43680）双状态（2026-10-04 实测）**：
+  - **复现/负对照侧已实证**：真实链路（客户端→HTTP→Sidecar→Landlock 沙箱）下，
+    脆弱版 `5ac71407` 目标绑定 `heap-use-after-free`（faulting
+    `expat/lib/xmlparse.c:7148`），修复版 `56967f83` 干净退出。前置两项平台修订：
+    repro 实验编译支持 `.c` 的 C 模式与 compdb 语义参数；单 TU AST 预算改为部署可配
+    （`LIMA_CXX_MAX_AST_JSON_BYTES`，默认 16 MiB 不变）。
+  - **检测发现侧未过关（开放）**：facts 抽取在 128 MiB 预算下产出 1024 条事实
+    （41 alias-copy + 125 dereference + 858 member-access，触及单 TU 事实上限），
+    但 allocation/release 为零——expat 的内存操作全部经
+    `XML_Memory_Handling_Suite` 函数指针间接调用，第一代抽取器只识别直接
+    malloc/free 调用，故 `generate_candidates` 结构性产出 0 候选（与 ResInsight
+    诚实弃权同形态）。计划的 Task 4（`leads` 保持空 tuple、facts 自动发现）在此
+    案例上无法满足验收 #3，等待路线决策：静态扫描线索源 / 抽取器支持间接调用 /
+    重构 pilot 目标叙事。
 - 诚实边界：OH third_party_expat 镜像的 `BUILD.gn` 未启用 `XML_DTD`，此 CVE 在
   OH 实际构建配置下不存在；镜像已于 `d9a7302d` 同步上游修复。pilot 叙事为
   "OH 生态同源上游组件"，报告不得声称 OH 构建受影响。

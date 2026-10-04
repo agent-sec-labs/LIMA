@@ -1,0 +1,40 @@
+{
+  "schema_version": "openharmony-validation-v1",
+  "case_id": "libexpat-cve-2022-43680-001",
+  "repository": "https://github.com/libexpat/libexpat",
+  "component": "libexpat",
+  "cve_id": "CVE-2022-43680",
+  "cwe": "CWE-416",
+  "vulnerable": {
+    "repository_key": "expat-up-vuln",
+    "commit": "5ac714074d2639e0b8bb82aa73ef51c4f7498d29",
+    "version": "2.5.0-pre"
+  },
+  "fixed": {
+    "repository_key": "expat-up-fixed",
+    "commit": "56967f83d68d5fc750f9e66a9a76756c94c7c173",
+    "version": "2.5.0"
+  },
+  "translation_units": ["expat/lib/xmlparse.c"],
+  "target_paths": ["expat/lib/xmlparse.c"],
+  "build_context_mode": "snapshot-compdb",
+  "advisory_urls": [
+    "https://nvd.nist.gov/vuln/detail/CVE-2022-43680",
+    "https://github.com/libexpat/libexpat/issues/649",
+    "https://github.com/libexpat/libexpat/pull/650"
+  ],
+  "patch_paths": ["expat/lib/xmlparse.c", "expat/tests/runtests.c"],
+  "remediation": "升级到 libexpat 2.5.0 或更高版本。修复（上游 PR #650，2022-10-24 合入 56967f83）：parserCreate 在内存分配失败且解析器共享父解析器 DTD 时，先置空 parser->m_dtd 再调用 XML_ParserFree，避免释放仍被外部解析器引用的共享 DTD；同一提交附带回归测试 test_alloc_reset_after_external_entity_parser_create_fail。OpenHarmony third_party_expat 镜像同步了该修复（d9a7302d，2022-10-27）。",
+  "license": "MIT",
+  "dependency_overlay": [
+    {
+      "path": "_overlay/expat_config.h",
+      "sha256": "84f39ebc112c20b457fc3244b5cb917b84a3b4e0610afbc229032d3b20862da6",
+      "role": "dependency-header",
+      "upstream_repo": "https://github.com/libexpat/libexpat",
+      "upstream_commit": "56967f83d68d5fc750f9e66a9a76756c94c7c173",
+      "license": "MIT",
+      "note": "由上游 expat/expat_config.h.cmake 模板按上游默认构建选项（EXPAT_DTD=ON）解析出的静态构建配置，两个 checkout 字节一致；非上游逐字文件，派生关系见 note 与 manifest 出处钉扎"
+    }
+  ]
+}

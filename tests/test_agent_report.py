@@ -193,14 +193,23 @@ class CveMatchTests(unittest.TestCase):
             # schemas, and rejects the first bad entry it meets.
             with self.assertRaises(ValueError):
                 load_cve_index(root)
-        # The shipped sample index loads and stays a two-entry sample.
-        entries = load_cve_index(SAMPLE_INDEX_DIR)
-        self.assertEqual(len(entries), 2)
+        # The shipped sample file stays a two-entry sample.
+        sample_entries = load_cve_index(SAMPLE_INDEX_DIR / "sample_index.json")
+        self.assertEqual(len(sample_entries), 2)
         self.assertEqual(
-            [entry["cve_id"] for entry in entries],
+            [entry["cve_id"] for entry in sample_entries],
             ["CVE-2099-0001", "CVE-2099-0002"],
         )
-        self.assertTrue(all("SAMPLE" in entry["summary"] for entry in entries))
+        self.assertTrue(
+            all("SAMPLE" in entry["summary"] for entry in sample_entries)
+        )
+        # The shipped directory aggregate also carries the real
+        # OpenHarmony pilot entry alongside the samples.
+        entries = load_cve_index(SAMPLE_INDEX_DIR)
+        self.assertEqual(
+            [entry["cve_id"] for entry in entries],
+            ["CVE-2022-43680", "CVE-2099-0001", "CVE-2099-0002"],
+        )
 
 
 class DossierStructureTests(unittest.TestCase):

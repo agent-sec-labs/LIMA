@@ -1,0 +1,10 @@
+[
+  {
+    "cve_id": "CVE-2022-43680",
+    "component": "libexpat",
+    "affected_paths": ["expat/lib/xmlparse.c"],
+    "introduced_commit": "",
+    "fixed_commit": "56967f83d68d5fc750f9e66a9a76756c94c7c173",
+    "summary": "libexpat 2.4.9 及之前版本中 XML_ExternalEntityParserCreate 在分配失败时过度销毁共享 DTD（CWE-416，CVSS 3.1 7.5），上游 PR #650 修复，随 2.5.0 发布"
+  }
+]

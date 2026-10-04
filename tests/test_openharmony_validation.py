@@ -289,5 +289,47 @@ class CaseSchemaParityTests(unittest.TestCase):
         )
 
 
+class PilotCaseConsistencyTests(unittest.TestCase):
+    """The frozen pilot case and its offline CVE index entry agree."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+    CASE = ROOT / "evaluation_data" / "openharmony" / "pilot_case.json"
+    INDEX = ROOT / "evaluation_data" / "cve_index" / "openharmony_pilot.json"
+
+    def test_pilot_case_loads_and_matches_cve_index(self):
+        from lima.agent_report import load_cve_index, match_cve
+
+        case = load_openharmony_case(self.CASE)
+        entries = load_cve_index(self.INDEX)
+        self.assertEqual(1, len(entries))
+        entry = entries[0]
+        # The three shared keys must agree with the frozen manifest.
+        self.assertEqual(case.cve_id, entry["cve_id"])
+        self.assertEqual(case.component, entry["component"])
+        self.assertEqual(case.fixed.commit, entry["fixed_commit"])
+        self.assertTrue(
+            all(
+                path in case.target_paths
+                for path in entry["affected_paths"]
+            ),
+            "index affected_paths must be pinned to the manifest targets",
+        )
+        # Introduced commit stays empty unless publicly evidenced.
+        self.assertEqual("", entry["introduced_commit"])
+        # The exact three-key lookup matches, and any valued-key drift
+        # breaks it.
+        target = case.target_paths[0]
+        self.assertEqual(
+            (case.cve_id,),
+            match_cve(case.component, target, None, entries),
+        )
+        self.assertEqual(
+            (), match_cve("other-component", target, None, entries)
+        )
+        self.assertEqual(
+            (), match_cve(case.component, "other/file.c", None, entries)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

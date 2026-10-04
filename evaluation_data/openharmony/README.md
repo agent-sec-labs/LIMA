@@ -71,5 +71,12 @@
 - 合同：`openharmony-validation-v1` 已冻结（`schema.json` +
   `lima/openharmony_validation.py`，二者字段/枚举由
   `tests/test_openharmony_validation.py` 强制一致）。
-- pilot 案例：自研组件方向已全部淘汰（见 ledger），third_party 自包含组件
-  方向资格审查进行中，冻结后回填本节。
+- **pilot 案例已冻结（2026-10-04）**：上游 libexpat CVE-2022-43680（CWE-416），
+  脆弱 `5ac71407` / 修复 `56967f83`（上游 PR #650），目标 `expat/lib/xmlparse.c`，
+  依赖覆盖层为派生的 `_overlay/expat_config.h`（上游默认选项 EXPAT_DTD=ON）。
+  双版本真实链路验证已过：脆弱版目标绑定 `heap-use-after-free`
+  （faulting `expat/lib/xmlparse.c:7148`），修复版干净退出。前置：repro 实验编译
+  已支持 `.c` 目标 C 语言模式与 compdb 语义参数（`-I`/`-D` 白名单，`-std` 剔除）。
+- 诚实边界：OH third_party_expat 镜像的 `BUILD.gn` 未启用 `XML_DTD`，此 CVE 在
+  OH 实际构建配置下不存在；镜像已于 `d9a7302d` 同步上游修复。pilot 叙事为
+  "OH 生态同源上游组件"，报告不得声称 OH 构建受影响。

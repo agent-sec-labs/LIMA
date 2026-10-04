@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenHarmony pilot case manifest (openharmony-validation-v1)",
+  "description": "Closed schema pinned by lima.openharmony_validation.load_openharmony_case; the Python parser is the enforcement authority, this document mirrors it for humans and tooling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "repository",
+    "component",
+    "cve_id",
+    "cwe",
+    "vulnerable",
+    "fixed",
+    "translation_units",
+    "target_paths",
+    "build_context_mode",
+    "advisory_urls",
+    "patch_paths",
+    "remediation",
+    "license"
+  ],
+  "properties": {
+    "schema_version": { "const": "openharmony-validation-v1" },
+    "case_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^https://[^\\s\"']+$"
+    },
+    "component": { "type": "string", "minLength": 1 },
+    "cve_id": {
+      "type": "string",
+      "pattern": "^CVE-\\d{4}-\\d{4,}$"
+    },
+    "cwe": { "const": "CWE-416" },
+    "vulnerable": { "$ref": "#/definitions/revision" },
+    "fixed": { "$ref": "#/definitions/revision" },
+    "translation_units": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "allOf": [
+          { "$ref": "#/definitions/relativePosixPath" },
+          {
+            "type": "string",
+            "pattern": "\\.(c|cc|cpp|cxx)$"
+          }
+        ]
+      }
+    },
+    "target_paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/definitions/relativePosixPath" }
+    },
+    "build_context_mode": { "const": "snapshot-compdb" },
+    "advisory_urls": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "pattern": "^https://[^\\s\"']+$"
+      }
+    },
+    "patch_paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/definitions/relativePosixPath" }
+    },
+    "remediation": { "type": "string", "minLength": 1 },
+    "license": { "type": "string", "minLength": 1 },
+    "dependency_overlay": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "role",
+          "upstream_repo",
+          "upstream_commit",
+          "license",
+          "note"
+        ],
+        "properties": {
+          "path": {
+            "allOf": [
+              { "$ref": "#/definitions/relativePosixPath" },
+              { "pattern": "^_overlay/.+" }
+            ]
+          },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "role": { "enum": ["dependency-header"] },
+          "upstream_repo": {
+            "type": "string",
+            "pattern": "^https://[^\\s\"']+$"
+          },
+          "upstream_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "license": { "type": "string", "minLength": 1 },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_key", "commit", "version"],
+      "properties": {
+        "repository_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "relativePosixPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!.*(^|/)\\.{1,2}(/|$)).+$"
+    }
+  }
+}

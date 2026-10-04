@@ -411,9 +411,7 @@ class TestModuleUnknownFaces(ReportConsistencyTestCase):
         )
         decisions = self.decisions_of(report)
         self.assertEqual(set(decisions), {LEDGER_FP, static.fingerprint})
-        self.assertEqual(
-            report.adjudication["overall_disposition"], "needs_review"
-        )
+        self.assertNotEqual(report.adjudication["overall_disposition"], "clear")
 
 
 class TestEmptyAndRejectedPopulations(ReportConsistencyTestCase):

@@ -33,6 +33,8 @@
 | 2026-10-04 | storage_service CVE-2026-28733 | TU 闭包 4 个跨仓头，含 IPC 基类 `iremote_stub.h`（结构性无解） |
 | 2026-10-04 | dsoftbus CVE-2025-23409/20081/20091 | 编译可过（overlay 三件头+`-DENABLE_USER_LOG`），但 `nm -u` 30+ 非 libc 未定义符号（NSTACKX_*/DiscCoap_*/SoftBus_*/cJSON_*/securec），需 20+ 兄弟源文件，链接非自包含 |
 | 2026-10-04 | msdp_device_status CVE-2024-27217 | TU 闭包 25+ 跨仓框架头（iremote_*/refbase/singleton/event_handler/pixel_map 等） |
+| 2026-10-04 | expat CVE-2022-43680 | 编译需 `-x c`+`-DXML_POOR_ENTROPY`（冻结 argv 无此支持）；且 OH `BUILD.gn` 全历史未定义 `XML_DTD`，漏洞路径（共享 DTD/外部实体）在 OH 实际构建配置下编译不存在——加宏触发即伪造配置，违反保真条款 |
+| 2026-10-04 | libxml2 CVE-2021-3518；nghttp2 CVE-2020-11080；sqlite CVE-2024-0232/2025-24880/2020 系；cJSON 全部候选 | 见调研记录：链接闭包爆炸 / 镜像无脆弱窗口 / 无精确 CWE-416 通告 |
 | 2026-10-02 | 内核系 7 个 CVE | 内核目标，门槛 5 |
 | 2026-10-02 | multimedia_*/bluetooth 共 5 个 CVE | 纯崩溃 DoS，无安全价值叙述 |
 | 2026-10-02 | jerryscript CVE-2024-23808/28951 | OH 仓库无可定位修复 commit |

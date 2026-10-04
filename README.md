@@ -131,6 +131,9 @@ Docker 默认把项目的 `repositories` 目录只读挂载为导入根目录。
 
 对应 API：
 
+管理台使用的接口、C++ 智能体检测的前后端配套状态及联调契约见
+[前端接口与文档索引](docs/FRONTEND_API.md)。
+
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:18080/v1/repository-scans `
   -Headers $headers -ContentType 'application/json' `

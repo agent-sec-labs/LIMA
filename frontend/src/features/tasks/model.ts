@@ -27,6 +27,7 @@ export const STAGE_LABELS: Record<TaskStage, string> = {
   DATAFLOW_ANALYSIS: "数据流分析",
   AST_ANALYSIS: "AST 分析",
   SAST_ANALYSIS: "SAST 分析",
+  PLATFORM_ANALYSIS: "C++ 智能体检测",
   SEMANTIC_TRIAGE: "语义复核",
   FINALIZING: "生成报告",
   COMPLETED: "完成",

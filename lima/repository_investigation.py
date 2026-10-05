@@ -1137,6 +1137,16 @@ def merge_investigation_into_report(
     ``execution_counts`` dimension while ``verdict_counts`` keeps its
     static-population meaning; and re-merging the same outcome stays
     idempotent through stable fingerprint identity.
+
+    Closure contract (PACKET-265C-CLOSURE-ADDENDUM, CA-1..CA-8): the
+    static population is fixed at merge entry and never includes the
+    agent-discovered candidates this product materializes (nor the
+    module-scope namespace), so the production alias call shape --
+    ``findings=report.findings`` -- reports the same three populations as
+    a fixed-list call and a re-merge of the same outcome preserves every
+    candidate face; and a repeated identical legal claim (same
+    fingerprint) materializes exactly one candidate finding with exactly
+    one decision, whatever batch it arrived in.
     """
     from .adjudication import DISPOSITIONS, finalize_adjudication
 
@@ -1175,10 +1185,25 @@ def merge_investigation_into_report(
             if key in record:
                 decision[key] = record[key]
 
-    static_fingerprints = {finding.fingerprint for finding in findings}
+    # CA-4 (R-02): the static population is FIXED at merge entry.  The
+    # production call shape passes ``report.findings`` itself as the
+    # ``findings`` argument (service.py), and this merge appends the
+    # candidates it materializes to that same list -- so on a re-merge
+    # the argument can carry findings this product already materialized
+    # as agent-discovered candidates.  Those belong to the
+    # AGENT-DISCOVERY population (this module is the only producer of
+    # that rule id), never to the static population; module scopes live
+    # in their own "module-scope:" namespace.  The entry snapshot also
+    # freezes the population against the in-merge candidate appends, so
+    # every static face below counts one fixed set in both call shapes.
+    static_findings = [
+        finding for finding in findings
+        if finding.rule_id != "AGENT-DISCOVERY"
+    ]
+    static_fingerprints = {finding.fingerprint for finding in static_findings}
 
     decisions = []
-    for finding in findings:
+    for finding in static_findings:
         record = outcome.results.get(finding.fingerprint)
         status = outcome.statuses.get(finding.fingerprint, {})
         prior = _kept_disposition(finding.fingerprint)
@@ -1359,8 +1384,12 @@ def merge_investigation_into_report(
             evidence_kind="agent-tool-observation",
             verification_state="candidate",
         )
+        # CA-1/CA-9 (R-01): one identity materializes once -- compare
+        # against the accepted Finding's fingerprint (a prior accepted
+        # tuple carries the Finding itself, not its fingerprint string).
         if (candidate.fingerprint in static_fingerprints
-                or any(candidate.fingerprint == fp for fp, _ in accepted)):
+                or any(candidate.fingerprint == prior.fingerprint
+                       for prior, _refs in accepted)):
             continue
         accepted.append((candidate, refs))
     candidate_fingerprints = {candidate.fingerprint for candidate, _ in accepted}
@@ -1397,8 +1426,8 @@ def merge_investigation_into_report(
                 and decision.get("investigation_verdict") == "supported"):
             decision["disposition"] = "alert"
     # Verdict counts keep their frozen static-population basis (C7): only
-    # decisions for the ``findings`` parameter count here, exactly as
-    # before -- module and candidate populations are excluded.
+    # decisions for the entry-fixed static population count here, exactly
+    # as before -- module and candidate populations are excluded.
     counts = {
         verdict: sum(
             1 for d in adjudication["decisions"]
@@ -1424,7 +1453,7 @@ def merge_investigation_into_report(
     # excluded finding never re-counts as current risk.
     risk_ranks = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     finding_by_fingerprint = {
-        finding.fingerprint: finding for finding in findings
+        finding.fingerprint: finding for finding in static_findings
     }
     for candidate, _refs in accepted:
         finding_by_fingerprint[candidate.fingerprint] = candidate
@@ -1455,7 +1484,8 @@ def merge_investigation_into_report(
             execution_counts[state] += 1
     investigation_results = [
         outcome.results[finding.fingerprint]
-        for finding in findings if finding.fingerprint in outcome.results
+        for finding in static_findings
+        if finding.fingerprint in outcome.results
     ]
     # C3: the serialized results carry EVERY completed target (static and
     # module), so module verdicts/reasoning stay visible in the report.
@@ -1490,7 +1520,7 @@ def merge_investigation_into_report(
         and d.get("investigation_verdict") == "refuted"
     }))
     summary_segments = [
-        f"Investigation reviewed {len(findings)} static candidates: "
+        f"Investigation reviewed {len(static_findings)} static candidates: "
         f"{counts['supported']} supported (active alerts), "
         f"{counts['refuted']} refuted with scope-limited evidence "
         "(excluded from active alerts, kept in history), "

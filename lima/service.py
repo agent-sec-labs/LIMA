@@ -132,6 +132,19 @@ def _warn_unmanaged_repository_cache_root(root: str) -> None:
         )
 
 
+class AgentDetectionRequestError(ValueError):
+    """Named 400 for per-task agent detection switches (方案 §3.1).
+
+    ``code`` 是稳定错误码（agent-detection-required / -unavailable /
+    -analyzer-unavailable）；消息文本继续走既有 ``error`` 字段，旧客户端
+    不依赖 code 也能读到原因。API 层据此在 400 载荷中同时输出两者。
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class ScanProgressTracker:
     """Bridge pipeline stage events into the durable TaskProgress record.
 
@@ -271,6 +284,8 @@ class ReviewService:
         # C/C++ Agent 装配：单次调用方不能覆盖模型、提示词或预算（设计第 11
         # 节），budget 工厂只来自 Settings。retirement Task 1：legacy client
         # 工厂已随七角色链退役，平台链消费 budget 与 uaf llm 工厂。
+        # 方案 §3.2：两个工厂按服务端配置常装配，不再因启动时全局模式为
+        # off 而缺席——否则"全局 off、本次任务 true"的按次开启无法运行。
         def _cxx_agent_budget_factory() -> CxxAgentBudget:
             return CxxAgentBudget(
                 max_calls=settings.cxx_agent_max_calls,
@@ -279,23 +294,24 @@ class ReviewService:
                 max_output_bytes=settings.cxx_agent_max_output_bytes,
             )
 
-        cxx_agent_budget_factory = (
-            _cxx_agent_budget_factory
-            if settings.cxx_agent_mode != "off"
-            else None
-        )
+        cxx_agent_budget_factory = _cxx_agent_budget_factory
         # UAF v2 语义分支装配：与 legacy client 工厂同源（同一 resolved
-        # provider、同一 effective_cxx_agent_model 覆盖），单次调用方同样
-        # 不能覆盖模型或端点。resolved_llm() 为空时不提供——orchestrator
-        # 按 §12.2 模式矩阵处理（auto 降级 / required 失败）。
+        # provider、同一 cxx 模型覆盖），单次调用方同样不能覆盖模型或
+        # 端点。resolved_llm() 为空时不提供——orchestrator 按 §12.2 模式
+        # 矩阵处理（auto 降级 / required 失败）。
         cxx_uaf_llm_factory = None
 
         def _cxx_uaf_llm_factory():
             resolved = dict(self.llm_config)
-            resolved["model"] = settings.effective_cxx_agent_model()
+            # 显式 LIMA_CXX_AGENT_MODEL 覆盖优先；未配置时保留 provider
+            # 已解析的默认模型（如 deepseek-v4-flash），不得用空串覆盖
+            # （复审问题 1：全局 off + 按任务开启会把有效模型清空）。
+            override = str(getattr(settings, "cxx_agent_model", "") or "").strip()
+            if override:
+                resolved["model"] = override
             return resolved
 
-        if settings.cxx_agent_mode != "off" and self.llm_config:
+        if self.llm_config:
             cxx_uaf_llm_factory = _cxx_uaf_llm_factory
         # 报告身份（设计第 12 节）：provider/model 只在真的装配了 provider
         # 时非空；未配置即留空，绝不宣称。
@@ -878,10 +894,14 @@ class ReviewService:
         )
         model = ""
         if configured:
-            effective_model = getattr(
-                self.settings, "effective_cxx_agent_model", None
+            # 与平台 LLM 工厂同源：显式 LIMA_CXX_AGENT_MODEL 覆盖优先，
+            # 否则如实显示 provider 已解析的默认模型，不显示空串。
+            override = str(
+                getattr(self.settings, "cxx_agent_model", "") or ""
+            ).strip()
+            model = override or str(
+                (self.llm_config or {}).get("model", "") or ""
             )
-            model = str(effective_model()) if callable(effective_model) else ""
         return {
             "mode": mode,
             "provider": str(getattr(self, "cxx_agent_provider", "") or "")
@@ -895,6 +915,24 @@ class ReviewService:
             # platform diff-only PR review is follow-up work and stays off
             # until its end-to-end tests land.
             "pull_request_scan": False,
+            # #243（方案 §3.2）：按任务开关契约字段。llm/analyzer_configured
+            # 只表示"已配置"，不是健康探测；per_request_switch=false 即
+            # required（前端锁定开启）；max_agent_calls 是调用次数上限，
+            # 不是货币费用。
+            "per_request_switch": mode != "required",
+            "llm_configured": bool(self.llm_config),
+            "analyzer_configured": callable(
+                getattr(
+                    getattr(
+                        self.repository_scanner, "cxx_memory_adapter", None
+                    ),
+                    "analyze_uaf_facts",
+                    None,
+                )
+            ),
+            "max_agent_calls": int(
+                getattr(self.settings, "cxx_agent_max_calls", 40)
+            ),
             "external_source_context": github_source_available,
             "automatic_repair": False,
             "configured": configured,
@@ -904,12 +942,14 @@ class ReviewService:
 
     def enqueue_repository_scan(
         self, repository_key: str, tenant_id: str = "default",
+        agent_detection: bool | None = None,
         investigate_paths: list[str] | None = None,
     ) -> Dict[str, Any]:
         key = self.repository_import.normalize_key(repository_key)
         self.repository_import.resolve(key)
         return self._enqueue_scan_task(
             RepositorySource.local_import(key), tenant_id, label=key,
+            agent_detection=agent_detection,
             investigate_paths=investigate_paths,
         )
 
@@ -961,7 +1001,8 @@ class ReviewService:
         )
 
     def enqueue_repository_scan_source(
-        self, source: RepositorySource | dict[str, str], tenant_id: str = "default"
+        self, source: RepositorySource | dict[str, str], tenant_id: str = "default",
+        agent_detection: bool | None = None,
     ) -> dict[str, Any]:
         """Queue a repository scan from a normalized source description.
 
@@ -978,7 +1019,9 @@ class ReviewService:
                     "github repository scans are disabled by "
                     "LIMA_REPOSITORY_SCAN_SOURCES"
                 )
-            return self._enqueue_scan_task(normalized, tenant_id)
+            return self._enqueue_scan_task(
+                normalized, tenant_id, agent_detection=agent_detection
+            )
         if allowed not in {"local-import", "both"}:
             metrics.inc("repository_scan_source_local_import_rejected_total")
             raise ValueError(
@@ -986,10 +1029,53 @@ class ReviewService:
                 "LIMA_REPOSITORY_SCAN_SOURCES"
             )
         self.repository_import.resolve(normalized.repository_key)
-        return self._enqueue_scan_task(normalized, tenant_id)
+        return self._enqueue_scan_task(
+            normalized, tenant_id, agent_detection=agent_detection
+        )
+
+    def _resolve_cxx_agent_mode(self, agent_detection: bool | None) -> str:
+        """Resolve the per-task platform mode from the three-state matrix.
+
+        方案 §3.1：不传沿用服务端默认（旧客户端行为不变）；true 把 off
+        升为 auto（auto/required 保持）；false 关闭本次，但全局 required
+        拒绝。显式 true 的配置前置检查只验证"已配置"，不宣称远端健康。
+        """
+
+        mode = str(getattr(self.settings, "cxx_agent_mode", "off") or "off")
+        if agent_detection is None:
+            return mode
+        if not isinstance(agent_detection, bool):
+            raise ValueError("agent_detection must be a boolean")
+        if agent_detection:
+            if not self.llm_config:
+                raise AgentDetectionRequestError(
+                    "agent-detection-unavailable",
+                    "agent detection is requested but no LLM provider "
+                    "is configured on the server",
+                )
+            adapter = getattr(
+                self.repository_scanner, "cxx_memory_adapter", None
+            )
+            if str(getattr(self.settings, "cxx_memory_mode", "off")) == "off" or (
+                not callable(getattr(adapter, "analyze_uaf_facts", None))
+            ):
+                raise AgentDetectionRequestError(
+                    "agent-detection-analyzer-unavailable",
+                    "agent detection is requested but the C/C++ facts "
+                    "analyzer is not configured on the server",
+                )
+            return "auto" if mode == "off" else mode
+        if mode == "required":
+            raise AgentDetectionRequestError(
+                "agent-detection-required",
+                "agent detection is required by server policy and cannot "
+                "be disabled for a single scan",
+            )
+        return "off"
 
     def _enqueue_scan_task(
         self, normalized: RepositorySource, tenant_id: str, label: str = "",
+        agent_detection: bool | None = None,
         investigate_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         label = label or normalized.canonical_name or normalized.repository_key
@@ -1000,6 +1086,9 @@ class ReviewService:
             str(item).strip().strip("/\\") for item in (investigate_paths or [])
             if str(item).strip()
         ]
+        # 模式在入队时解析一次并快照：队列重试与 worker 都用这份快照，
+        # 不重新套用入队之后变更的全局设置（方案 §3.2）。
+        effective_cxx_agent_mode = self._resolve_cxx_agent_mode(agent_detection)
         task_input: dict[str, Any] = {
             "source": "repository-import" if is_local else "github-materializer",
             "task_type": "repository_scan",
@@ -1007,6 +1096,8 @@ class ReviewService:
             "sast_mode": self.settings.repository_scan_sast_mode,
             "semantic_triage_mode": self.settings.repository_scan_llm_mode,
             "cxx_memory_mode": self.settings.cxx_memory_mode,
+            "agent_detection": agent_detection,
+            "effective_cxx_agent_mode": effective_cxx_agent_mode,
             "investigation_mode": self.settings.repository_investigation_mode,
             "investigate_paths": investigate_paths,
         }
@@ -1015,6 +1106,7 @@ class ReviewService:
             "task_type": "repository_scan",
             "scan_source": scan_source,
             "tenant_id": tenant_id,
+            "effective_cxx_agent_mode": effective_cxx_agent_mode,
             "investigate_paths": investigate_paths,
         }
         if is_local:
@@ -1072,13 +1164,15 @@ class ReviewService:
     def _process_repository_scan(
         self, task_id: str, repository_key: str, tenant_id: str,
         scan_source: dict[str, Any] | None = None,
+        cxx_agent_mode: str | None = None,
         investigate_paths: list[str] | None = None,
     ) -> None:
         tracker = self._scan_progress_tracker(task_id)
         try:
             if scan_source:
                 self._process_github_repository_scan(
-                    task_id, scan_source, tenant_id, tracker
+                    task_id, scan_source, tenant_id, tracker,
+                    cxx_agent_mode=cxx_agent_mode,
                 )
                 return
             tracker.pipeline_event(PREPARING_WORKSPACE, "正在准备本地导入工作区")
@@ -1094,6 +1188,7 @@ class ReviewService:
             self._execute_repository_scan(
                 task_id, root, tenant_id, repository_key,
                 {"repository_key": repository_key}, tracker,
+                cxx_agent_mode=cxx_agent_mode,
                 investigate_paths=investigate_paths,
             )
         except Exception as exc:
@@ -1103,6 +1198,7 @@ class ReviewService:
     def _process_github_repository_scan(
         self, task_id: str, scan_source: dict[str, Any], tenant_id: str,
         tracker: ScanProgressTracker,
+        cxx_agent_mode: str | None = None,
         investigate_paths: list[str] | None = None,
     ) -> None:
         # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
@@ -1136,6 +1232,7 @@ class ReviewService:
                 },
                 tracker,
                 materializer_warnings=materialized.get("warnings") or [],
+                cxx_agent_mode=cxx_agent_mode,
                 investigate_paths=investigate_paths,
             )
 
@@ -1144,6 +1241,7 @@ class ReviewService:
         repository_label: str, import_policy_extra: dict[str, Any],
         progress: ScanProgressTracker | None = None,
         materializer_warnings: list[dict[str, Any]] | None = None,
+        cxx_agent_mode: str | None = None,
         investigate_paths: list[str] | None = None,
     ) -> None:
         workspace = RepositoryWorkspace(
@@ -1173,6 +1271,9 @@ class ReviewService:
                 # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
                 # 权威取消信号。
                 should_cancel=lambda: self.store.is_cancelled(task_id),
+                # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
+                # 并发任务各自隔离。
+                cxx_agent_mode=cxx_agent_mode,
             )
         result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {
@@ -1348,6 +1449,11 @@ class ReviewService:
             investigate_paths = payload.get("investigate_paths") or (
                 task.get("input") or {}
             ).get("investigate_paths") or []
+            # 任务级模式快照优先取队列消息（重试沿用同一份），缺失时回退
+            # 持久化 task input；两者都没有（旧任务）则用 scanner 默认。
+            effective_mode = payload.get("effective_cxx_agent_mode") or (
+                task.get("input") or {}
+            ).get("effective_cxx_agent_mode")
             if scan_source and scan_source.get("type") == "github":
                 self._process_repository_scan(
                     task_id,
@@ -1355,6 +1461,7 @@ class ReviewService:
                     or (task.get("input") or {}).get("repository_key", ""),
                     tenant_id,
                     scan_source,
+                    cxx_agent_mode=effective_mode,
                     investigate_paths=investigate_paths,
                 )
             else:
@@ -1363,6 +1470,7 @@ class ReviewService:
                     payload.get("repository_key")
                     or (task.get("input") or {}).get("repository_key", ""),
                     tenant_id,
+                    cxx_agent_mode=effective_mode,
                     investigate_paths=investigate_paths,
                 )
             return

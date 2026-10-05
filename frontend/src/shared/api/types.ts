@@ -14,6 +14,7 @@ export const TASK_STAGES = [
   "DATAFLOW_ANALYSIS",
   "AST_ANALYSIS",
   "SAST_ANALYSIS",
+  "PLATFORM_ANALYSIS",
   "SEMANTIC_TRIAGE",
   "FINALIZING",
   "COMPLETED",
@@ -111,6 +112,8 @@ export interface FindingItem {
   explanation?: string;
   fix?: string;
   fingerprint?: string;
+  /** 后端标记不可自动修复的 finding（如 C++ 平台链恒为 false）。 */
+  automatic_repair?: boolean;
 }
 
 /** 仲裁决策：后端给出或由客户端按 verification_state 推导（与 legacy 语义一致）。 */
@@ -178,6 +181,97 @@ export interface UafV2Summary {
   }[];
 }
 
+/** 平台链目标审计摘要（report.collaboration.platform.targets，#244 契约）。
+ * 前四组为基础字段；hypothesis_reason / poc_driver_code / experiment_log /
+ * detail_omissions 为可选展示字段——缺失不代表实验未发生，可能是字节预算省略。 */
+export interface PlatformExperimentLogEntry {
+  round?: number;
+  stage?: string;
+  exit_code?: number | null;
+  error_type?: string;
+  faulting_line?: number | null;
+  hit?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PlatformTarget {
+  target_id?: string;
+  path?: string;
+  line?: number;
+  state?: string;
+  cwe?: string;
+  /** 证明结论（PASS / REFUTED / 空）。 */
+  proof?: string;
+  experiments?: number;
+  rejected_reason?: string;
+  hypothesis_reason?: string;
+  /** 脱敏后的展示副本：只作文本渲染，不执行、不承诺可直接复现。 */
+  poc_driver_code?: string;
+  experiment_log?: PlatformExperimentLogEntry[];
+  /** 省略原因代码（如 "poc_driver_code:too-large"）。 */
+  detail_omissions?: string[];
+  [key: string]: unknown;
+}
+
+/** report.collaboration.platform（平台设计 §6 + 方案 §3.4）。 */
+export interface PlatformSummary {
+  mode?: string;
+  status?: string;
+  translation_units?: string[];
+  stats?: {
+    leads?: number;
+    targets?: number;
+    findings?: number;
+    experiments?: number;
+    scout_calls?: number;
+    specialist_calls?: number;
+    critic_calls?: number;
+  };
+  states?: Record<string, number>;
+  broker?: Record<string, number>;
+  diagnostics?: string[];
+  targets?: PlatformTarget[];
+  /** 报告内封存的 V4 预览：workflow_summary.execution_status 是封存执行
+   * 状态（succeeded/failed/cancelled）。status=completed 只表示平台链走完
+   * 并产出审计载荷；scout-unavailable 等降级路径也会是 completed，须以
+   * 此字段区分（#262 评审 P2）。 */
+  v4?: {
+    workflow_summary?: {
+      execution_status?: "succeeded" | "failed" | "cancelled" | string;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+/** capabilities.cxx_agent（方案 §4.6）。
+ * per_request_switch / llm_configured / analyzer_configured / max_agent_calls
+ * 为 #243 新增字段；旧服务端缺失时不得按旧 configured 值猜测可用性。 */
+export interface CxxAgentCapabilities {
+  mode?: "off" | "auto" | "required";
+  repository_scan?: boolean;
+  pull_request_scan?: boolean;
+  per_request_switch?: boolean;
+  llm_configured?: boolean;
+  analyzer_configured?: boolean;
+  /** 调用次数上限，不是货币费用。 */
+  max_agent_calls?: number;
+  configured?: boolean;
+  automatic_repair?: boolean;
+  [key: string]: unknown;
+}
+
+/** POST /v1/repository-scans 请求体（方案 §4.1）。
+ * agent_detection 由新前端显式提交 true/false；可选性仅为兼容旧客户端。 */
+export type RepositoryScanRequest =
+  | { repository_key: string; source?: never; agent_detection: boolean }
+  | {
+      source: { type: "github"; url: string; ref?: string };
+      repository_key?: never;
+      agent_detection: boolean;
+    };
+
 export interface ScanReport {
   repository?: string;
   risk?: string;
@@ -194,6 +288,7 @@ export interface ScanReport {
     skipped?: Record<string, number>;
     semantic_triage?: SemanticTriage;
     uaf_v2?: UafV2Summary;
+    platform?: PlatformSummary;
     import_policy?: {
       resolved_revision?: string;
       cache_hit?: boolean;

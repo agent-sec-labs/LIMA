@@ -1410,6 +1410,244 @@ class ScannerSingleChainTests(unittest.TestCase):
         )
         self.assertNotIn("cxx_agent", disabled)
 
+    # --- #244（方案 §3.4）：目标审计详情投影 -------------------------------
+
+    @staticmethod
+    def _detail_finding(
+        target_id="lead-0001", state="runtime-confirmed", hypothesis="释放后再次使用对象",
+        poc="int main() { int *p = new int(1); delete p; return *p; }",
+        log=({
+            "round": 1, "stage": "run", "exit_code": 1,
+            "error_type": "heap-use-after-free", "faulting_line": 42,
+            "hit": True, "raw_object": {"untrusted": True},
+        },),
+        **overrides,
+    ):
+        from lima.agent_orchestrator import PlatformFinding
+
+        fields = {
+            "target_id": target_id, "path": "src/a.c", "line": 42,
+            "symbol": "parse_input", "cwe": "CWE-416", "state": state,
+            "hypothesis_reason": hypothesis, "poc_driver_code": poc,
+            "experiment_log": log, "identity": None, "evidence_records": (),
+        }
+        fields.update(overrides)
+        return PlatformFinding(**fields)
+
+    def _detail_collaboration(self, findings, targets):
+        from lima.agent_orchestrator import PlatformReviewOutcome, PlatformReviewStats
+
+        outcome = PlatformReviewOutcome(
+            findings=findings, targets=targets,
+            stats=PlatformReviewStats(
+                len(targets), len(targets), len(findings), 0, 0, 0, 0,
+            ),
+            diagnostics=(), leads_considered=len(targets),
+            translation_units=("src/a.c",),
+        )
+        scanner = RepositoryScanner(sast_mode="off", dataflow_enabled=False)
+        return scanner._platform_collaboration("auto", "completed", outcome)
+
+    def test_platform_collaboration_projects_bounded_target_details(self):
+        from lima.platform_contracts import privacy_text
+
+        # 10 轮日志 → 只保留最后 8 轮并记录省略；自由文本先脱敏再入报告
+        # （含 secret 形态的整体遮盖）；日志仅投影白名单字段。
+        log = tuple(
+            {"round": round, "stage": "run", "exit_code": 1,
+             "error_type": "heap-use-after-free", "faulting_line": 42,
+             "hit": True, "raw_object": {"untrusted": True}}
+            for round in range(1, 11)
+        ) + ({
+            # 金丝雀轮：error_type 携带 secret 形态，必须整体遮盖后入报告。
+            "round": 11, "stage": "run", "exit_code": 1,
+            "error_type": "password = synthetic-secret-canary",
+            "faulting_line": 42, "hit": False,
+        },)
+        raw_hypothesis = "api_key=AKIAIOSFODNN7EXAMPLE 释放后再次读取句柄"
+        positive = self._detail_finding(hypothesis=raw_hypothesis, log=log)
+        rejected = self._detail_finding(
+            target_id="lead-0002", state="rejected", hypothesis="", poc="",
+            log=(), rejected_reason="实验未命中",
+        )
+        payload = self._detail_collaboration(
+            (positive,), (positive, rejected),
+        )
+        first, second = payload["targets"]
+        # 摘要顺序与关键字段保持原序原样。
+        self.assertEqual("lead-0001", first["target_id"])
+        self.assertEqual(11, first["experiments"])
+        self.assertEqual("实验未命中", second["rejected_reason"])
+        # 假设先过 #94 mask：输出必须等于脱敏结果，secret 原文不得出现。
+        self.assertIn("hypothesis_reason", first)
+        self.assertEqual(
+            privacy_text(raw_hypothesis), first["hypothesis_reason"],
+        )
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", first["hypothesis_reason"])
+        # PoC 是脱敏后的展示副本。
+        self.assertIn("delete p", first["poc_driver_code"])
+        # 日志：最后 8 轮、白名单字段；金丝雀轮的 error_type 被遮盖。
+        entries = first["experiment_log"]
+        self.assertEqual(
+            [4, 5, 6, 7, 8, 9, 10, 11], [item["round"] for item in entries],
+        )
+        self.assertEqual(
+            {"round", "stage", "exit_code", "error_type",
+             "faulting_line", "hit"},
+            set(entries[0]),
+        )
+        self.assertNotIn(
+            "synthetic-secret-canary", json.dumps(payload, ensure_ascii=False),
+        )
+        self.assertEqual(
+            ["experiment_log:older-rounds-omitted"], first["detail_omissions"],
+        )
+        # 无详情目标也输出空省略数组：缺失≠未发生。
+        self.assertEqual([], second["detail_omissions"])
+
+    def test_platform_details_omit_oversized_items_whole(self):
+        # 单项超限：整项省略（不截断成不可运行的 PoC），原因可读。
+        # 两条都是 #94 放行的自然文本，脱敏后仍超限。
+        hypothesis = "释放后再次读取该指针指向的对象，需要人工确认调用链。" * 120
+        poc = "The object is released and then read again in the same function. " * 520
+        finding = self._detail_finding(hypothesis=hypothesis, poc=poc)
+        payload = self._detail_collaboration((finding,), (finding,))
+        target = payload["targets"][0]
+        self.assertNotIn("hypothesis_reason", target)
+        self.assertNotIn("poc_driver_code", target)
+        self.assertEqual(
+            ["hypothesis_reason:too-large", "poc_driver_code:too-large"],
+            target["detail_omissions"],
+        )
+
+    def test_platform_details_allocate_positive_findings_first(self):
+        # 8 × 32 KiB PoC 恰好耗尽 256 KiB；分配与摘要顺序无关：正向
+        # finding 优先、再按 target_id——非正向（即使排最前）与超额的
+        # 后续正向目标都整项省略并记录 budget-exhausted。
+        base = "The object is released and then read again in the same function. "
+        # 9 份 ~30 KiB 的 PoC：含键名/容器的完整编码让 8 份接近预算上限，
+        # 第 9 份与非正向目标（即使排最前）都整项省略。
+        poc = (base * 600)[:30000]
+        positive = tuple(
+            self._detail_finding(
+                target_id=f"lead-{index:04d}", poc=poc,
+                hypothesis="", log=(),
+            )
+            for index in range(1, 10)  # lead-0001..0009
+        )
+        rejected = self._detail_finding(
+            target_id="lead-0000", state="rejected", poc=poc,
+            hypothesis="", log=(),
+        )
+        payload = self._detail_collaboration(
+            positive, (rejected,) + positive,
+        )
+        targets = {item["target_id"]: item for item in payload["targets"]}
+        for index in range(1, 9):
+            self.assertIn("poc_driver_code", targets[f"lead-{index:04d}"])
+        self.assertNotIn("poc_driver_code", targets["lead-0009"])
+        self.assertNotIn("poc_driver_code", targets["lead-0000"])
+        self.assertIn(
+            "poc_driver_code:budget-exhausted",
+            targets["lead-0009"]["detail_omissions"],
+        )
+        self.assertIn(
+            "poc_driver_code:budget-exhausted",
+            targets["lead-0000"]["detail_omissions"],
+        )
+
+    def test_platform_details_budget_counts_json_escaping(self):
+        # 复审问题复现：JSON 转义（\n → \\n、引号、反斜杠）会膨胀实际
+        # 报告字节。9 份多行 C 源码——按原始 UTF-8 计量时 9 份全收、
+        # 序列化 ~295KiB 无省略提示；按 JSON 编码计量后第 9 份省略。
+        # 断言口径是完整 entry 序列化（字段名 + 容器 + 省略说明全部
+        # 计入）：详情总计不超 256 KiB 是对物理载荷的事实。
+        poc = "int x = 0;\n" * 2500
+        positive = tuple(
+            self._detail_finding(
+                target_id=f"lead-{index:04d}", poc=poc,
+                hypothesis="", log=(),
+            )
+            for index in range(1, 10)
+        )
+        payload = self._detail_collaboration(positive, positive)
+        targets = {item["target_id"]: item for item in payload["targets"]}
+        accepted = [
+            item for item in payload["targets"] if "poc_driver_code" in item
+        ]
+        self.assertEqual(8, len(accepted))
+        self.assertIn(
+            "poc_driver_code:budget-exhausted",
+            targets["lead-0009"]["detail_omissions"],
+        )
+        detail_bytes = sum(
+            len(json.dumps(
+                {
+                    field: item[field]
+                    for field in (
+                        "hypothesis_reason", "poc_driver_code",
+                        "experiment_log", "detail_omissions",
+                    )
+                    if field in item
+                },
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            for item in payload["targets"]
+        )
+        self.assertLessEqual(detail_bytes, 256 * 1024)
+
+    def test_platform_details_budget_covers_all_omission_overhead(self):
+        # 审计复现（P3 续）：前 8 个目标恰好耗尽字段预算后，后 24 个
+        # 仍会追加容器与 budget-exhausted 省略说明——这些字节必须由
+        # 全量预留兜底，完整详情序列化不得超 256 KiB。
+        base = "The object is released and then read again in the same function. "
+        poc = (base * 600)[:30000]
+        positive = tuple(
+            self._detail_finding(
+                target_id=f"lead-{index:04d}", poc=poc,
+                hypothesis="", log=(),
+            )
+            for index in range(1, 33)  # 32 个目标（摘要截断上限）
+        )
+        payload = self._detail_collaboration(positive, positive)
+        accepted = [
+            item for item in payload["targets"] if "poc_driver_code" in item
+        ]
+        self.assertEqual(8, len(accepted))
+        exhausted = [
+            item for item in payload["targets"]
+            if "poc_driver_code:budget-exhausted" in item["detail_omissions"]
+        ]
+        self.assertEqual(24, len(exhausted))
+        detail_bytes = sum(
+            len(json.dumps(
+                {
+                    field: item[field]
+                    for field in (
+                        "hypothesis_reason", "poc_driver_code",
+                        "experiment_log", "detail_omissions",
+                    )
+                    if field in item
+                },
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            for item in payload["targets"]
+        )
+        self.assertLessEqual(detail_bytes, 256 * 1024)
+
+    def test_platform_details_single_item_cap_counts_json_escaping(self):
+        # 单项上限同样按编码后字节：原始 22,000B 的密集换行 PoC 编码后
+        # 33,002B > 32 KiB，必须整项省略，不得按原始字节放行。
+        finding = self._detail_finding(
+            poc="a\n" * 11000, hypothesis="", log=(),
+        )
+        payload = self._detail_collaboration((finding,), (finding,))
+        target = payload["targets"][0]
+        self.assertNotIn("poc_driver_code", target)
+        self.assertEqual(
+            ["poc_driver_code:too-large"], target["detail_omissions"],
+        )
+
     def test_uaf_proof_first_entrypoint_retired(self):
         # The semantic branch is directly usable: proof is optional and the
         # UNKNOWN-only gate (SemanticBranchOutcome.skipped) is gone.

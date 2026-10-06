@@ -1106,6 +1106,51 @@ class DiscoveryFallbackTests(unittest.TestCase):
         finally:
             _rmtree(root)
 
+    def test_compile_failures_grant_extra_repair_rounds(self):
+        # dialogue_rounds=1 buys two experiments; two compile failures
+        # each grant one bounded repair round, so the third (hitting)
+        # driver still runs and the target reaches runtime-confirmed.
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json(driver="int first() { return 0; }")],
+            critic=[
+                critic_json(
+                    assessment="revise-experiment",
+                    revised_driver="int v1() { FREE_THEN_USE; }",
+                ),
+                critic_json(
+                    assessment="revise-experiment",
+                    revised_driver="int v2() { FREE_THEN_USE; }",
+                ),
+            ],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            workbench=FakeWorkbench([
+                compile_failure(), compile_failure(), uaf_hit(),
+            ]),
+        )
+        self.assertEqual("runtime-confirmed", outcome.targets[0].state)
+        self.assertEqual(3, len(outcome.targets[0].experiment_log))
+        self.assertEqual(2, transport.critic_calls)
+
+    def test_clean_runs_never_grant_extra_rounds(self):
+        # A clean run is information-poor: the dialogue budget stays put,
+        # so the second clean experiment ends the loop without a critic.
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json(driver="int first() { return 0; }")],
+            critic=[critic_json(
+                assessment="revise-experiment",
+                revised_driver="int v2() { FREE_THEN_USE; }",
+            )],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            workbench=FakeWorkbench([clean_run(), clean_run(), uaf_hit()]),
+        )
+        self.assertEqual(2, len(outcome.targets[0].experiment_log))
+        self.assertNotEqual("runtime-confirmed", outcome.targets[0].state)
+        self.assertEqual(1, transport.critic_calls)
+
     def test_parse_discovery_reply_contract(self):
         from lima.agent_orchestrator import (
             PlatformFormatError,

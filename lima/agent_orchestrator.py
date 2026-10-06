@@ -209,12 +209,32 @@ def _platform_schema() -> str:
     )
 
 
+_SPECIALIST_PLAYBOOK: Final = (
+    "Experiment-design playbook (generic trigger strategies; pick by "
+    "hypothesis class, never assume the answer):\n"
+    "- Error-path defects: under normal use memory allocation never fails, "
+    "so failure and cleanup paths stay cold. If the hypothesis lives on a "
+    "failure or cleanup path, inject the failure: where the library accepts "
+    "a custom memory suite, pass one that succeeds N times then fails, and "
+    "sweep N.\n"
+    "- Use-after-free: free through the public API, keep the handle, then "
+    "call any API touching it; or allocate many objects, free selectively, "
+    "and force reuse.\n"
+    "- Double free: call the public free/destroy twice on one handle.\n"
+    "- Out-of-bounds: feed boundary-exact input lengths (exact, off-by-one, "
+    "huge).\n"
+    "- A clean run means the fault condition was never met; a driver that "
+    "only exercises normal use proves nothing about error paths."
+)
+
+
 def _system_platform_specialist() -> str:
     return (
         f"You are the {SPECIALIST_ROLE} agent in the LIMA vulnerability platform. "
         "Form one concrete vulnerability hypothesis for the target: state what is "
         "wrong, the trigger path, the CWE class, and write the PoC driver for the "
-        f"reproduction workbench. {_UNTRUSTED_DATA_RULE} {_platform_schema()}"
+        f"reproduction workbench. {_SPECIALIST_PLAYBOOK} "
+        f"{_UNTRUSTED_DATA_RULE} {_platform_schema()}"
         + registry_prompt_addenda()
     )
 _CRITIC_SCHEMA: Final = (
@@ -261,6 +281,9 @@ _MAX_DISCOVERY_SUMMARY_CHARS: Final = 512
 _MAX_DISCOVERY_UNIT_BYTES: Final = 1024 * 1024
 _MAX_DISCOVERY_TOTAL_BYTES: Final = 4 * 1024 * 1024
 _DISCOVERY_SEED: Final = "llm-discovery"
+# Extra experiment rounds granted only while the feedback is a compile
+# failure (precise, mechanical); clean runs buy no extra rounds.
+_MAX_COMPILE_REPAIR_ROUNDS: Final = 2
 # Reasoning-happy models hang on whole-file audits; one window per call
 # keeps every discovery round inside a step budget.  Line boundaries are
 # respected so approximate line numbers stay meaningful per window.
@@ -1469,7 +1492,10 @@ def _process_target(
     driver = hypothesis.driver_code
     if experiments_allowed:
         sources = (target.path,)
-        for round_index in range(dialogue_rounds + 1):
+        max_rounds = dialogue_rounds + 1
+        compile_repairs = 0
+        round_index = 0
+        while round_index < max_rounds:
             experiment_timeout = _bounded_step_timeout(timeout, deadline)
             if experiment_timeout is None:
                 return _abstain_finding(target, "deadline-exceeded")
@@ -1492,7 +1518,17 @@ def _process_target(
             if hit:
                 hit_observation = observation
                 break
-            if round_index == dialogue_rounds:
+            # A compile failure is precise mechanical feedback and critic
+            # revisions after it demonstrably converge, so bounded extra
+            # repair rounds are granted beyond the dialogue budget; a clean
+            # run is information-poor and buys nothing extra.
+            if (
+                observation.stage == "compile"
+                and compile_repairs < _MAX_COMPILE_REPAIR_ROUNDS
+            ):
+                compile_repairs += 1
+                max_rounds += 1
+            if round_index + 1 >= max_rounds:
                 break
             critic_timeout = _bounded_step_timeout(timeout, deadline)
             if critic_timeout is None:
@@ -1514,6 +1550,7 @@ def _process_target(
                 and critic.revised_driver_code
             ):
                 driver = critic.revised_driver_code
+                round_index += 1
                 continue
             break
     else:

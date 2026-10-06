@@ -1035,6 +1035,23 @@ class DiscoveryFallbackTests(unittest.TestCase):
         self.assertEqual("runtime-confirmed", outcome.targets[0].state)
         self.assertEqual(2, transport.discovery_calls)
 
+    def test_split_windows_respect_line_boundaries(self):
+        from lima.agent_orchestrator import (
+            _DISCOVERY_WINDOW_BYTES,
+            _split_windows,
+        )
+
+        single = "int f(void) { return 0; }\n" * 5
+        self.assertEqual(((single, 1),), _split_windows(single))
+        line = "x" * 60 + "\n"  # 61 bytes per line
+        big = line * 2000
+        windows = _split_windows(big)
+        # 49152 // 61 = 805 lines per window boundary.
+        self.assertEqual([1, 806, 1611], [start for _, start in windows])
+        for text, start in windows:
+            self.assertLessEqual(len(text.encode("utf-8")), _DISCOVERY_WINDOW_BYTES)
+        self.assertEqual(big, "\n".join(text for text, _ in windows))
+
     def test_parse_discovery_reply_contract(self):
         from lima.agent_orchestrator import (
             PlatformFormatError,

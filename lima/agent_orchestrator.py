@@ -261,6 +261,11 @@ _MAX_DISCOVERY_SUMMARY_CHARS: Final = 512
 _MAX_DISCOVERY_UNIT_BYTES: Final = 1024 * 1024
 _MAX_DISCOVERY_TOTAL_BYTES: Final = 4 * 1024 * 1024
 _DISCOVERY_SEED: Final = "llm-discovery"
+# Reasoning-happy models hang on whole-file audits; one window per call
+# keeps every discovery round inside a step budget.  Line boundaries are
+# respected so approximate line numbers stay meaningful per window.
+_DISCOVERY_WINDOW_BYTES: Final = 48 * 1024
+_MAX_DISCOVERY_WINDOWS: Final = 8
 
 
 class PlatformFormatError(ValueError):
@@ -848,6 +853,32 @@ def _discovery_snippet_lines(
     return min(120, MAX_LEAD_SNIPPET_LINES)
 
 
+def _split_windows(text: str) -> tuple[tuple[str, int], ...]:
+    """Split one unit into byte-bounded windows of whole lines.
+
+    Returns ``(window_text, first_line_number)`` pairs; a unit within the
+    window budget stays a single window starting at line 1.
+    """
+
+    lines = text.split("\n")
+    windows: list[tuple[str, int]] = []
+    current: list[str] = []
+    current_bytes = 0
+    start_line = 1
+    for index, line in enumerate(lines, start=1):
+        encoded = len(line.encode("utf-8")) + 1
+        if current and current_bytes + encoded > _DISCOVERY_WINDOW_BYTES:
+            windows.append(("\n".join(current), start_line))
+            current = []
+            current_bytes = 0
+            start_line = index
+        current.append(line)
+        current_bytes += encoded
+    if current:
+        windows.append(("\n".join(current), start_line))
+    return tuple(windows)
+
+
 def _discover_leads(
     resolved: Mapping[str, object],
     workspace: RepositoryWorkspace,
@@ -869,7 +900,6 @@ def _discover_leads(
 
     if mode == MODE_OFF or not resolved:
         return (), ()
-    sections: list[str] = []
     sources: dict[str, str] = {}
     skipped: list[str] = []
     total_bytes = 0
@@ -888,36 +918,53 @@ def _discover_leads(
             continue
         total_bytes += encoded
         sources[unit] = text
-        sections.append(f"--- {unit} ---\n```c\n{text}\n```")
     notes = [f"llm-discovery-skipped-unit: {unit}" for unit in skipped]
-    if not sections:
+    if not sources:
         return (), tuple(notes)
-    user = (
-        "The memory-fact instrument abstained on these translation units "
-        "(no deterministic candidates). Audit the sources below.\n\n"
-        + "\n\n".join(sections)
-    )
+    windows: list[tuple[str, str, int]] = []
+    for unit, text in sources.items():
+        for window_text, start_line in _split_windows(text):
+            windows.append((unit, window_text, start_line))
+    if len(windows) > _MAX_DISCOVERY_WINDOWS:
+        notes.append(
+            f"llm-discovery-windows-capped: {len(windows)} -> "
+            f"{_MAX_DISCOVERY_WINDOWS}"
+        )
+        windows = windows[:_MAX_DISCOVERY_WINDOWS]
     discovery_timeout = _bounded_step_timeout(timeout, deadline)
     if discovery_timeout is None:
         return (), (*notes, "llm-discovery-skipped: deadline exceeded")
     calls = [0]
-    try:
-        quadruples = _platform_round(
-            resolved, _SYSTEM_PLATFORM_DISCOVERY, user, discovery_timeout,
-            budget, calls, _parse_discovery_reply, frozenset(units),
+    quadruples: list[tuple[str, int, str, str]] = []
+    for unit, window_text, start_line in windows:
+        user = (
+            "The memory-fact instrument abstained on these translation "
+            f"units (no deterministic candidates). This window covers "
+            f"{unit} from line {start_line}; line numbers you report are "
+            "relative to the file, not this window. Audit the code below.\n\n"
+            f"--- {unit} (from line {start_line}) ---\n"
+            f"```c\n{window_text}\n```"
         )
-    except PlatformFormatError as exc:
-        return (), (
-            *notes,
-            f"llm-discovery-format-failed({calls[0]} calls): {exc}"[:256],
-        )
-    except (LLMTransportError, ValueError) as exc:
-        return (), (
-            *notes,
-            f"llm-discovery-transport-failed: {exc}"[:256],
-        )
+        try:
+            quadruples.extend(_platform_round(
+                resolved, _SYSTEM_PLATFORM_DISCOVERY, user, discovery_timeout,
+                budget, calls, _parse_discovery_reply, frozenset(sources),
+            ))
+        except PlatformFormatError as exc:
+            notes.append(
+                f"llm-discovery-window-format-failed"
+                f"({calls[0]} calls): {exc}"[:256]
+            )
+        except (LLMTransportError, ValueError) as exc:
+            return (), (
+                *notes,
+                f"llm-discovery-transport-failed: {exc}"[:256],
+            )
     leads: list[ScoutLead] = []
     for path, approximated, summary, function in quadruples:
+        if len(leads) >= 2 * _MAX_DISCOVERY_LEADS:
+            notes.append("llm-discovery-leads-capped")
+            break
         line = _resolve_discovery_line(
             sources.get(path, ""), function, approximated,
         )
@@ -939,7 +986,8 @@ def _discover_leads(
         ))
     return tuple(leads), (
         *notes,
-        f"leads-from-llm-discovery: {len(leads)} leads, {calls[0]} calls",
+        f"leads-from-llm-discovery: {len(leads)} leads, {calls[0]} calls "
+        f"over {len(windows)} windows",
     )
 
 

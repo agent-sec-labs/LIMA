@@ -54,6 +54,7 @@ from .reviewer import (
     LLMTransportError,
     post_chat_completion_text,
 )
+from .uaf_llm_branch import _bounded_request_params
 
 __all__ = [
     "AGENT_MODES",
@@ -433,7 +434,7 @@ def _build_batch_context(
 
 def _resolved_transport(
     resolved: Mapping[str, object],
-) -> tuple[str, str, str, str, dict[str, str]]:
+) -> tuple[str, str, str, str, dict[str, str], dict[str, object]]:
     if not isinstance(resolved, Mapping) or not resolved:
         raise ValueError(
             "scout LLM provider is not configured: "
@@ -447,12 +448,13 @@ def _resolved_transport(
         str(name): str(value)
         for name, value in dict(resolved.get("headers") or {}).items()
     }
+    request_params = _bounded_request_params(resolved.get("request_params"))
     if not base_url or not model:
         raise ValueError(
             "scout LLM provider is not configured: a base URL and a model are "
             "required"
         )
-    return provider, base_url, api_key, model, headers
+    return provider, base_url, api_key, model, headers, request_params
 
 
 def _check_timeout(timeout: int) -> int:
@@ -491,7 +493,7 @@ def _post_scout_messages(
         raise ScoutDeadlineExceeded(
             "the aggregate review deadline passed before this send"
         )
-    provider, base_url, api_key, model, headers = parts
+    provider, base_url, api_key, model, headers, request_params = parts
     payload = {
         "model": model,
         "temperature": 0,
@@ -499,6 +501,10 @@ def _post_scout_messages(
             {"role": role, "content": content} for role, content in message_pairs
         ],
         "response_format": {"type": "json_object"},
+        # Bounded generation: reasoning-happy models must not think past
+        # every step budget; operators can override via request_params.
+        "max_tokens": 8192,
+        **request_params,
     }
     context_bytes = len(
         "\n".join(content for _, content in message_pairs[1:]).encode("utf-8")

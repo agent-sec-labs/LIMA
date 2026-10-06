@@ -941,7 +941,8 @@ class DiscoveryFallbackTests(unittest.TestCase):
             critic=[critic_json()],
             discovery=[discovery_json([{
                 "path": UNIT,
-                "line": 30,
+                "line": 0,
+                "function": "leak",
                 "summary": "shared object freed on a child error path",
             }])],
         )
@@ -954,6 +955,8 @@ class DiscoveryFallbackTests(unittest.TestCase):
         self.assertEqual(1, len(outcome.findings))
         self.assertEqual("runtime-confirmed", outcome.targets[0].state)
         self.assertEqual(UNIT, outcome.targets[0].path)
+        # The function name resolved mechanically to the definition line.
+        self.assertEqual(7, outcome.targets[0].line)
         self.assertTrue(
             any(
                 "leads-from-llm-discovery: 1 leads" in note
@@ -962,6 +965,19 @@ class DiscoveryFallbackTests(unittest.TestCase):
             outcome.diagnostics,
         )
         self.assertEqual(1, transport.discovery_calls)
+
+    def test_discovery_snippet_lines_cover_the_function(self):
+        from lima.agent_orchestrator import _discovery_snippet_lines
+
+        # leak() spans lines 7..31 in UAF_SOURCE; the evidence (free at 20,
+        # use at 30) is far past the default +-10 snippet window.
+        self.assertEqual(26, _discovery_snippet_lines(UAF_SOURCE, 7, "leak"))
+        self.assertEqual(0, _discovery_snippet_lines(UAF_SOURCE, 7, ""))
+        # No column-0 closing brace within the bound degrades to a wide
+        # fallback rather than a cramped default window.
+        self.assertEqual(
+            120, _discovery_snippet_lines("int f(void) {\n", 1, "f")
+        )
 
     def test_discovery_abstain_keeps_no_leads_outcome(self):
         transport = ScriptedPlatformTransport(

@@ -59,7 +59,13 @@ from dataclasses import asdict, dataclass
 from typing import Any, Final
 
 from .agent_scale import ResultCache, map_bounded
-from .agent_scout import ScoutLead, ScoutReport, ScoutTarget, review_leads
+from .agent_scout import (
+    MAX_LEAD_SNIPPET_LINES,
+    ScoutLead,
+    ScoutReport,
+    ScoutTarget,
+    review_leads,
+)
 from .contracts.evidence import EvidenceLevel, EvidencePolarity
 from .cxx_agent_models import parse_untrusted_json
 from .cxx_agent_tools import AgentBudgetExceeded, CxxAgentBudget
@@ -818,6 +824,30 @@ def _resolve_discovery_line(
     return approximated if approximated >= 1 else None
 
 
+def _discovery_snippet_lines(
+    source: str, definition_line: int, function: str,
+) -> int:
+    """How many extra lines the Scout should read past a function lead.
+
+    The whole function body matters: the suspicious statement often sits
+    far past the opening lines, and a snippet that stops early makes the
+    Scout discard a correct lead with invented facts.  The extent runs to
+    the next column-0 closing brace (the function end in standard C/C++
+    layout), bounded by :data:`MAX_LEAD_SNIPPET_LINES`.
+    """
+
+    if not function:
+        return 0
+    lines = source.split("\n")
+    start = definition_line - 1
+    for offset in range(
+        start, min(len(lines), start + MAX_LEAD_SNIPPET_LINES),
+    ):
+        if lines[offset].startswith("}"):
+            return min(offset - start + 2, MAX_LEAD_SNIPPET_LINES)
+    return min(120, MAX_LEAD_SNIPPET_LINES)
+
+
 def _discover_leads(
     resolved: Mapping[str, object],
     workspace: RepositoryWorkspace,
@@ -903,6 +933,9 @@ def _discover_leads(
             summary=summary[:_MAX_DISCOVERY_SUMMARY_CHARS],
             seed=_DISCOVERY_SEED,
             score=0,
+            snippet_lines=_discovery_snippet_lines(
+                sources.get(path, ""), line, function,
+            ),
         ))
     return tuple(leads), (
         *notes,

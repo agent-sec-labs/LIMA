@@ -282,8 +282,9 @@ _MAX_DISCOVERY_UNIT_BYTES: Final = 1024 * 1024
 _MAX_DISCOVERY_TOTAL_BYTES: Final = 4 * 1024 * 1024
 _DISCOVERY_SEED: Final = "llm-discovery"
 # Extra experiment rounds granted only while the feedback is a compile
-# failure (precise, mechanical); clean runs buy no extra rounds.
-_MAX_COMPILE_REPAIR_ROUNDS: Final = 2
+# failure (precise, mechanical); clean runs buy no extra rounds.  Compile
+# repairs converge fast, so the cap sits above the dialogue budget.
+_MAX_COMPILE_REPAIR_ROUNDS: Final = 4
 # Reasoning-happy models hang on whole-file audits; one window per call
 # keeps every discovery round inside a step budget.  Line boundaries are
 # respected so approximate line numbers stay meaningful per window.

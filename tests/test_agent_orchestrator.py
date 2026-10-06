@@ -1151,6 +1151,30 @@ class DiscoveryFallbackTests(unittest.TestCase):
         self.assertNotEqual("runtime-confirmed", outcome.targets[0].state)
         self.assertEqual(1, transport.critic_calls)
 
+    def test_compile_repairs_stop_at_the_cap(self):
+        # dialogue_rounds=1 buys two experiments; four compile failures each
+        # grant one repair round, further failures grant nothing more, and
+        # the loop ends exactly at base + cap experiments.
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json(driver="int first() { return 0; }")],
+            critic=[
+                critic_json(
+                    assessment="revise-experiment",
+                    revised_driver=f"int v{i}() {{ FREE_THEN_USE; }}",
+                )
+                for i in range(5)
+            ],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            workbench=FakeWorkbench([
+                compile_failure() for _ in range(6)
+            ]),
+        )
+        self.assertEqual(6, len(outcome.targets[0].experiment_log))
+        self.assertNotEqual("runtime-confirmed", outcome.targets[0].state)
+        self.assertEqual(5, transport.critic_calls)
+
     def test_parse_discovery_reply_contract(self):
         from lima.agent_orchestrator import (
             PlatformFormatError,

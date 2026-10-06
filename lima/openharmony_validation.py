@@ -145,7 +145,12 @@ class WorkspaceLimits:
 
 
 def _run_git(path: Path, *args: str) -> subprocess.CompletedProcess:
-    """One read-only git query with system/global config disabled."""
+    """One read-only git query with system/global config disabled.
+
+    ``safe.directory=*`` scopes the ownership relaxation to this single
+    read-only invocation: checkouts are admin-provisioned content and
+    containers routinely see host-owned mounts under a foreign UID.
+    """
 
     environment = {
         name: value
@@ -158,6 +163,7 @@ def _run_git(path: Path, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(  # noqa: S603
             [  # noqa: S607 - pinned argv, the system git
                 "git", "-C", str(path),
+                "-c", "safe.directory=*",
                 "-c", "core.autocrlf=false", "-c", "core.filemode=false",
                 *args,
             ],

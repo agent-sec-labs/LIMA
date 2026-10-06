@@ -300,6 +300,7 @@ class CaseSchemaParityTests(unittest.TestCase):
 
 _GIT_BASE = [
     "-c", "user.name=pilot", "-c", "user.email=pilot@example.invalid",
+    "-c", "safe.directory=*",
     "-c", "core.autocrlf=false", "-c", "core.filemode=false",
 ]
 

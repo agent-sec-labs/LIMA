@@ -528,6 +528,243 @@ class CheckoutValidationTests(unittest.TestCase):
         self.assertEqual("repository-key-unresolvable", caught.exception.reason)
 
 
+# --------------------------------------------------------- paired-run tests
+
+
+def _observation(*, ok=False, stage="run", error_type=None,
+                 faulting_file=None, exit_code=None):
+    from lima.agent_repro_tools import ExperimentObservation
+    return ExperimentObservation(
+        ok=ok, stage=stage, exit_code=exit_code, error_type=error_type,
+        faulting_line=30 if error_type else None,
+        freed_line=20 if error_type else None,
+        allocated_line=10 if error_type else None,
+        diagnostics=(), raw_tail="",
+        faulting_file=faulting_file,
+    )
+
+
+def _finding(path="src/parser.c", cwe="CWE-416", state="runtime-confirmed",
+             driver="int main() { return 0; }"):
+    from lima.agent_orchestrator import PlatformFinding
+    return PlatformFinding(
+        target_id="discovery-1", path=path, line=30, symbol="parse",
+        cwe=cwe, state=state, hypothesis_reason="hypothesis",
+        poc_driver_code=driver, experiment_log=(), identity=None,
+        evidence_records=(),
+    )
+
+
+def _outcome(findings, diagnostics=()):
+    from lima.agent_orchestrator import (
+        PlatformReviewOutcome,
+        PlatformReviewStats,
+    )
+    return PlatformReviewOutcome(
+        findings=tuple(findings), targets=tuple(findings),
+        stats=PlatformReviewStats(1, 1, len(findings), 0, 0, 0, 0),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+class FakeWorkbench:
+    """Scripted run_experiment responses keyed by call order."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def run_experiment(self, repository_key, snapshot_hash, sources, driver,
+                       **kwargs):
+        self.calls.append((repository_key, tuple(sources), driver))
+        if not self.responses:
+            raise AssertionError("workbench exhausted")
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class PairedRunTests(unittest.TestCase):
+    def setUp(self):
+        if load_openharmony_case is None:
+            self.fail("lima.openharmony_validation not implemented yet")
+        from lima import openharmony_validation as module
+        from lima.cxx_agent_tools import CxxAgentBudget
+        from lima.repository_import import RepositoryImportPolicy
+        self.module = module
+        self.budget_factory = lambda: CxxAgentBudget(
+            max_calls=64, max_output_bytes=1 << 20,
+        )
+        self.policy = RepositoryImportPolicy
+        self.fixture = CheckoutFixture(overlay=b"/* overlay */\n")
+        self.entry = self.fixture.stage_case_files()
+        self.case = self.fixture.case(self.entry)
+        self.limits = module.WorkspaceLimits(
+            max_files=500, max_file_bytes=65536, max_total_bytes=1 << 20,
+        )
+
+    def _run(self, *, vulnerable_outcome, fixed_outcome=None,
+             vulnerable_replay=(), fixed_replay=(), review_error=None):
+        """Patch the review boundary and workbench; run the paired case."""
+        from unittest.mock import patch
+
+        module = self.module
+        outcomes = {
+            self.case.vulnerable.repository_key: vulnerable_outcome,
+            self.case.fixed.repository_key: fixed_outcome,
+        }
+        scripted = {"vulnerable": list(vulnerable_replay),
+                    "fixed": list(fixed_replay)}
+        current = {"key": None}
+
+        def fake_review(analyzer, workspace, *, repository_key, **kwargs):
+            current["key"] = repository_key
+            if review_error is not None:
+                raise review_error
+            return outcomes[repository_key]
+
+        workbenches = []
+        construction = {"index": 0}
+
+        def fake_workbench(client, budget, default_timeout=60):
+            # Construction order is deterministic: the vulnerable revision
+            # runs first, so its workbench is built first.
+            side = "vulnerable" if construction["index"] == 0 else "fixed"
+            construction["index"] += 1
+            bench = FakeWorkbench(scripted[side])
+            workbenches.append((side, bench))
+            return bench
+
+        with patch.object(module, "run_platform_review", fake_review), \
+                patch.object(module, "ReproWorkbench", fake_workbench):
+            return module.run_openharmony_case(
+                self.case,
+                import_policy=self.policy(str(self.fixture.import_root)),
+                workspace_limits=self.limits,
+                analyzer_client=object(),
+                llm_config={"provider": "custom", "base_url": "x",
+                            "api_key": "k", "model": "m"},
+                budget_factory=self.budget_factory,
+                timeout=60, deadline_seconds=600.0,
+                parallelism=1, dialogue_rounds=1,
+            ), workbenches
+
+    def test_vulnerable_hits_and_fixed_clean_passes(self):
+        target_hit = _observation(
+            ok=False, stage="run", error_type="'heap-use-after-free'",
+            faulting_file="'src/parser.c'", exit_code=1,
+        )
+        clean = _observation(ok=True, stage="run", exit_code=0)
+        result, workbenches = self._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[target_hit] * 3,
+            fixed_outcome=_outcome([]),
+            fixed_replay=[clean] * 3,
+        )
+        self.assertEqual("passed", result.status.value)
+        self.assertEqual(3, len(result.vulnerable.replay_observations))
+        self.assertEqual(3, len(result.fixed.replay_observations))
+        self.assertEqual((), result.reason_codes)
+        # The vulnerable driver replays on the fixed snapshot unchanged.
+        vulnerable_calls = workbenches[0][1].calls
+        fixed_calls = workbenches[1][1].calls
+        self.assertEqual(3, len(vulnerable_calls))
+        self.assertEqual(3, len(fixed_calls))
+        self.assertEqual(vulnerable_calls[0][2], fixed_calls[0][2])
+
+    def test_unstable_vulnerable_replay_fails(self):
+        target_hit = _observation(
+            ok=False, stage="run", error_type="'heap-use-after-free'",
+            faulting_file="'src/parser.c'", exit_code=1,
+        )
+        clean = _observation(ok=True, stage="run", exit_code=0)
+        result, _ = self._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[target_hit, target_hit, clean],
+            fixed_outcome=_outcome([]),
+            fixed_replay=[clean] * 3,
+        )
+        self.assertEqual("failed", result.status.value)
+        self.assertIn("vulnerable-replay-unstable", result.reason_codes)
+
+    def test_fixed_replay_hit_fails(self):
+        target_hit = _observation(
+            ok=False, stage="run", error_type="'heap-use-after-free'",
+            faulting_file="'src/parser.c'", exit_code=1,
+        )
+        clean = _observation(ok=True, stage="run", exit_code=0)
+        result, _ = self._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[target_hit] * 3,
+            fixed_outcome=_outcome([]),
+            fixed_replay=[clean, clean, target_hit],
+        )
+        self.assertEqual("failed", result.status.value)
+        self.assertIn("fixed-replay-hit", result.reason_codes)
+
+    def test_fixed_compile_failure_is_inconclusive(self):
+        target_hit = _observation(
+            ok=False, stage="run", error_type="'heap-use-after-free'",
+            faulting_file="'src/parser.c'", exit_code=1,
+        )
+        compile_fail = _observation(
+            ok=False, stage="compile", exit_code=1,
+        )
+        result, _ = self._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[target_hit] * 3,
+            fixed_outcome=_outcome([]),
+            fixed_replay=[compile_fail, compile_fail, compile_fail],
+        )
+        self.assertEqual("inconclusive", result.status.value)
+        self.assertIn("fixed-replay-compile-failure", result.reason_codes)
+
+    def test_no_matching_vulnerable_finding_fails(self):
+        clean = _observation(ok=True, stage="run", exit_code=0)
+        result, _ = self._run(
+            vulnerable_outcome=_outcome([]),
+            fixed_outcome=_outcome([]),
+            fixed_replay=[clean] * 3,
+        )
+        self.assertEqual("failed", result.status.value)
+        self.assertIn("vulnerable-no-matching-finding", result.reason_codes)
+
+    def test_provider_failure_is_inconclusive(self):
+        from lima.reviewer import LLMTransportError
+        result, _ = self._run(
+            vulnerable_outcome=None,
+            review_error=LLMTransportError("provider unreachable"),
+        )
+        self.assertEqual("inconclusive", result.status.value)
+        self.assertTrue(
+            any(code.startswith("vulnerable-review-failed")
+                for code in result.reason_codes),
+            result.reason_codes,
+        )
+
+    def test_unrelated_fixed_findings_are_recorded_not_decisive(self):
+        target_hit = _observation(
+            ok=False, stage="run", error_type="'heap-use-after-free'",
+            faulting_file="'src/parser.c'", exit_code=1,
+        )
+        clean = _observation(ok=True, stage="run", exit_code=0)
+        unrelated = _finding(path="src/util.c", cwe="CWE-476",
+                             state="semantic-supported")
+        result, _ = self._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[target_hit] * 3,
+            fixed_outcome=_outcome([unrelated]),
+            fixed_replay=[clean] * 3,
+        )
+        self.assertEqual("passed", result.status.value)
+        self.assertEqual(
+            (unrelated.path, unrelated.cwe),
+            (result.fixed.platform_outcome.findings[0].path,
+             result.fixed.platform_outcome.findings[0].cwe),
+        )
+
+
 class PilotCaseConsistencyTests(unittest.TestCase):
     """The frozen pilot case and its offline CVE index entry agree."""
 

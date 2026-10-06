@@ -15,13 +15,23 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only imports
     from .repository_import import RepositoryImportPolicy
     from .workspace import RepositoryWorkspace
+
+from .agent_orchestrator import (  # noqa: E402 - patch seam for tests
+    experiment_matches_target,
+    repro_driver_relative_path,
+    run_platform_review,
+)
+from .agent_repro_tools import ReproWorkbench  # noqa: E402 - patch seam
 
 SCHEMA_VERSION: Final = "openharmony-validation-v1"
 CASE_CWE: Final = "CWE-416"
@@ -532,3 +542,332 @@ def load_openharmony_case(path: str | Path) -> OpenHarmonyCase:
         license=_bounded_text(payload["license"], "license", _MAX_TEXT_BYTES),
         dependency_overlay=overlay,
     )
+
+
+# ------------------------------------------------------------- paired run
+
+_REPLAY_ROUNDS: Final = 3
+_NON_POSITIVE_FINDING_STATES: Final = frozenset({"abstain", "rejected"})
+
+
+class ValidationStatus(str, Enum):
+    PASSED = "passed"
+    FAILED = "failed"
+    INCONCLUSIVE = "inconclusive"
+
+
+@dataclass(frozen=True)
+class RevisionValidation:
+    """One revision's full-chain outcome plus its 3x replay matrix."""
+
+    revision: OpenHarmonyRevision
+    status: ValidationStatus
+    snapshot_hash: str
+    platform_outcome: Any
+    replay_observations: tuple[Any, ...]
+    replay_elapsed_seconds: tuple[float, ...]
+    elapsed_seconds: float
+    file_coverage: float
+    byte_coverage: float
+    budget_usage: Mapping[str, int]
+    diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OpenHarmonyValidationResult:
+    """The paired verdict of one frozen case over both pinned revisions."""
+
+    case: OpenHarmonyCase
+    workspace_limits: WorkspaceLimits
+    status: ValidationStatus
+    reason_codes: tuple[str, ...]
+    vulnerable: RevisionValidation
+    fixed: RevisionValidation
+    total_elapsed_seconds: float
+
+
+def _budget_usage(budget: Any) -> dict[str, int]:
+    remaining = budget.remaining()
+    return {
+        "calls_used": budget.max_calls - remaining.calls,
+        "bytes_used": budget.max_output_bytes - remaining.bytes_remaining,
+    }
+
+
+def _empty_revision(
+    revision: OpenHarmonyRevision, status: ValidationStatus,
+    reasons: tuple[str, ...],
+) -> RevisionValidation:
+    return RevisionValidation(
+        revision=revision, status=status, snapshot_hash="",
+        platform_outcome=None, replay_observations=(),
+        replay_elapsed_seconds=(), elapsed_seconds=0.0,
+        file_coverage=0.0, byte_coverage=0.0, budget_usage={},
+        diagnostics=reasons,
+    )
+
+
+def run_openharmony_case(
+    case: OpenHarmonyCase,
+    *,
+    import_policy: RepositoryImportPolicy,
+    workspace_limits: WorkspaceLimits,
+    analyzer_client: Any,
+    llm_config: Mapping[str, object],
+    budget_factory: Callable[[], Any],
+    timeout: int,
+    deadline_seconds: float,
+    parallelism: int = 1,
+    dialogue_rounds: int = 1,
+) -> OpenHarmonyValidationResult:
+    """Run both revisions and the fixed three-plus-three replay matrix."""
+    from .cxx_agent_tools import AgentBudgetExceeded
+    from .reviewer import (
+        LLMResponseFormatError,
+        LLMResponseTooLarge,
+        LLMTransportError,
+    )
+
+    started = time.monotonic()
+    reasons: list[str] = []
+
+    def _finish(
+        vulnerable: RevisionValidation, fixed: RevisionValidation,
+    ) -> OpenHarmonyValidationResult:
+        inconclusive = any(
+            item.status == ValidationStatus.INCONCLUSIVE
+            for item in (vulnerable, fixed)
+        )
+        if inconclusive:
+            status = ValidationStatus.INCONCLUSIVE
+        elif any(
+            item.status == ValidationStatus.FAILED
+            for item in (vulnerable, fixed)
+        ):
+            status = ValidationStatus.FAILED
+        else:
+            status = ValidationStatus.PASSED
+        return OpenHarmonyValidationResult(
+            case=case, workspace_limits=workspace_limits, status=status,
+            reason_codes=tuple(dict.fromkeys(
+                (*vulnerable.diagnostics, *fixed.diagnostics)
+            )),
+            vulnerable=vulnerable, fixed=fixed,
+            total_elapsed_seconds=round(time.monotonic() - started, 6),
+        )
+
+    try:
+        vulnerable_workspace, fixed_workspace = validate_case_checkouts(
+            case, import_policy, workspace_limits,
+        )
+    except CheckoutPreflightError as exc:
+        reasons.append(f"checkout-preflight-{exc.reason}")
+        return _finish(
+            _empty_revision(
+                case.vulnerable, ValidationStatus.INCONCLUSIVE,
+                (f"checkout-preflight-{exc.reason}",),
+            ),
+            _empty_revision(
+                case.fixed, ValidationStatus.INCONCLUSIVE,
+                (f"checkout-preflight-{exc.reason}",),
+            ),
+        )
+
+    def _run_revision(revision: OpenHarmonyRevision, workspace: Any):
+        """Full chain for one revision; never raises past this point."""
+        side = "vulnerable" if revision is case.vulnerable else "fixed"
+        revision_started = time.monotonic()
+        inventory = workspace.inventory()
+        snapshot_hash = inventory.fingerprint()
+        budget = budget_factory()
+        workbench = ReproWorkbench(
+            analyzer_client, budget, default_timeout=timeout,
+        )
+        outcome = None
+        local: list[str] = []
+        try:
+            outcome = run_platform_review(
+                analyzer_client,
+                workspace,
+                repository_key=revision.repository_key,
+                snapshot_hash=snapshot_hash,
+                translation_units=case.translation_units,
+                build_context_mode=case.build_context_mode,
+                mode="required",
+                budget=budget,
+                llm_config=dict(llm_config),
+                repro_workbench=workbench,
+                leads=(),
+                dialogue_rounds=dialogue_rounds,
+                timeout=timeout,
+                deadline_seconds=deadline_seconds,
+                parallelism=parallelism,
+            )
+        except (
+            LLMTransportError, LLMResponseFormatError, LLMResponseTooLarge,
+            AgentBudgetExceeded, ValueError, RuntimeError,
+        ) as exc:
+            local.append(f"{side}-review-failed: {str(exc)[:160]}")
+            return RevisionValidation(
+                revision=revision, status=ValidationStatus.INCONCLUSIVE,
+                snapshot_hash=snapshot_hash, platform_outcome=None,
+                replay_observations=(), replay_elapsed_seconds=(),
+                elapsed_seconds=round(time.monotonic() - revision_started, 6),
+                file_coverage=inventory.file_coverage,
+                byte_coverage=inventory.byte_coverage,
+                budget_usage=_budget_usage(budget),
+                diagnostics=tuple(local),
+            ), None, workbench
+
+        return (
+            RevisionValidation(
+                revision=revision, status=ValidationStatus.PASSED,
+                snapshot_hash=snapshot_hash, platform_outcome=outcome,
+                replay_observations=(), replay_elapsed_seconds=(),
+                elapsed_seconds=round(time.monotonic() - revision_started, 6),
+                file_coverage=inventory.file_coverage,
+                byte_coverage=inventory.byte_coverage,
+                budget_usage=_budget_usage(budget),
+                diagnostics=tuple(outcome.diagnostics),
+            ),
+            outcome,
+            workbench,
+        )
+
+    def _replay(workbench, repository_key, snapshot_hash, target_path,
+                driver):
+        observations = []
+        elapsed = []
+        for _ in range(_REPLAY_ROUNDS):
+            started_at = time.monotonic()
+            observation = workbench.run_experiment(
+                repository_key, snapshot_hash, (target_path,), driver,
+                timeout=timeout,
+            )
+            elapsed.append(round(time.monotonic() - started_at, 6))
+            observations.append(observation)
+        return tuple(observations), tuple(elapsed)
+
+    (vulnerable_record, vulnerable_outcome, vulnerable_workbench,
+     ) = _run_revision(case.vulnerable, vulnerable_workspace)
+    if vulnerable_record.status != ValidationStatus.PASSED:
+        return _finish(
+            vulnerable_record,
+            _empty_revision(case.fixed, ValidationStatus.INCONCLUSIVE,
+                            ("fixed-not-run",)),
+        )
+
+    matching = [
+        finding for finding in vulnerable_outcome.findings
+        if finding.state == "runtime-confirmed"
+        and finding.cwe == case.cwe
+        and finding.path in case.target_paths
+    ]
+    if not matching:
+        vulnerable_record = replace(
+            vulnerable_record,
+            status=ValidationStatus.FAILED,
+            diagnostics=(*vulnerable_record.diagnostics,
+                         "vulnerable-no-matching-finding"),
+        )
+        (fixed_record, _, _) = _run_revision(case.fixed, fixed_workspace)
+        return _finish(vulnerable_record, fixed_record)
+    if len(matching) > 1:
+        vulnerable_record = replace(
+            vulnerable_record,
+            status=ValidationStatus.INCONCLUSIVE,
+            diagnostics=(*vulnerable_record.diagnostics,
+                         "ambiguous-matching-finding"),
+        )
+        (fixed_record, _, _) = _run_revision(case.fixed, fixed_workspace)
+        return _finish(vulnerable_record, fixed_record)
+
+    final = matching[0]
+    driver = final.poc_driver_code
+    observations, elapsed = _replay(
+        vulnerable_workbench, case.vulnerable.repository_key,
+        vulnerable_record.snapshot_hash, final.path, driver,
+    )
+    hits = 0
+    replay_problem = None
+    for observation in observations:
+        if observation.stage != "run":
+            replay_problem = "vulnerable-replay-compile-failure"
+            break
+        if experiment_matches_target(
+            observation, case.cwe, target_path=final.path,
+            driver_paths=(repro_driver_relative_path(driver),),
+        ):
+            hits += 1
+    vulnerable_record = replace(
+        vulnerable_record,
+        replay_observations=observations, replay_elapsed_seconds=elapsed,
+    )
+    if replay_problem is not None:
+        vulnerable_record = replace(
+            vulnerable_record, status=ValidationStatus.INCONCLUSIVE,
+            diagnostics=(*vulnerable_record.diagnostics, replay_problem),
+        )
+    elif hits < _REPLAY_ROUNDS:
+        vulnerable_record = replace(
+            vulnerable_record, status=ValidationStatus.FAILED,
+            diagnostics=(*vulnerable_record.diagnostics,
+                         "vulnerable-replay-unstable"),
+        )
+    if vulnerable_record.status != ValidationStatus.PASSED:
+        (fixed_record, _, _) = _run_revision(case.fixed, fixed_workspace)
+        return _finish(vulnerable_record, fixed_record)
+
+    (fixed_record, fixed_outcome, fixed_workbench) = _run_revision(
+        case.fixed, fixed_workspace,
+    )
+    if fixed_record.status != ValidationStatus.PASSED:
+        return _finish(vulnerable_record, fixed_record)
+
+    still_vulnerable = [
+        finding for finding in fixed_outcome.findings
+        if finding.cwe == case.cwe
+        and finding.path in case.target_paths
+        and finding.state not in _NON_POSITIVE_FINDING_STATES
+    ]
+    if still_vulnerable:
+        fixed_record = replace(
+            fixed_record, status=ValidationStatus.FAILED,
+            diagnostics=(*fixed_record.diagnostics,
+                         "fixed-matching-finding"),
+        )
+        return _finish(vulnerable_record, fixed_record)
+
+    observations, elapsed = _replay(
+        fixed_workbench, case.fixed.repository_key,
+        fixed_record.snapshot_hash, final.path, driver,
+    )
+    fixed_record = replace(
+        fixed_record,
+        replay_observations=observations, replay_elapsed_seconds=elapsed,
+    )
+    for observation in observations:
+        if experiment_matches_target(
+            observation, case.cwe, target_path=final.path,
+            driver_paths=(repro_driver_relative_path(driver),),
+        ):
+            fixed_record = replace(
+                fixed_record, status=ValidationStatus.FAILED,
+                diagnostics=(*fixed_record.diagnostics, "fixed-replay-hit"),
+            )
+            break
+        if observation.stage != "run":
+            fixed_record = replace(
+                fixed_record, status=ValidationStatus.INCONCLUSIVE,
+                diagnostics=(*fixed_record.diagnostics,
+                             "fixed-replay-compile-failure"),
+            )
+            break
+        if observation.error_type is not None or not observation.ok:
+            fixed_record = replace(
+                fixed_record, status=ValidationStatus.FAILED,
+                diagnostics=(*fixed_record.diagnostics,
+                             "fixed-replay-unclean"),
+            )
+            break
+    return _finish(vulnerable_record, fixed_record)

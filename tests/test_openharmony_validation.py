@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -395,6 +396,10 @@ class CheckoutFixture:
         return load_openharmony_case(write_case(payload))
 
 
+@unittest.skipUnless(
+    shutil.which("git") is not None,
+    "git is required for the checkout fixtures",
+)
 class CheckoutValidationTests(unittest.TestCase):
     def setUp(self):
         if load_openharmony_case is None:
@@ -607,6 +612,10 @@ class FakeWorkbench:
         return item
 
 
+@unittest.skipUnless(
+    shutil.which("git") is not None,
+    "git is required for the checkout fixtures",
+)
 class PairedRunTests(unittest.TestCase):
     def setUp(self):
         if load_openharmony_case is None:
@@ -790,6 +799,10 @@ class PairedRunTests(unittest.TestCase):
 # --------------------------------------------------------- bundle writer
 
 
+@unittest.skipUnless(
+    shutil.which("git") is not None,
+    "git is required for the checkout fixtures",
+)
 class BundleWriterTests(unittest.TestCase):
     def setUp(self):
         if load_openharmony_case is None:

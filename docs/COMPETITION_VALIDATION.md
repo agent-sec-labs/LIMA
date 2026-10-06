@@ -105,3 +105,64 @@ OPM 系仓库（如 opm-common / opm-simulators）的论文侧运行尚未执行
   （脚本工作台哈希判定下按构造稳定，真实工作台下该指标才有信息量）。
 - 有效性边界（评测报告内逐条携带）：合成与钉死对不等价于生产检测能力；
   真实 Clang 提取与真实容器 ASan 为独立验收；null 指标≠满分。
+
+
+## 3. OpenHarmony pilot 双版本真实运行（2026-10-07）
+
+**首条真实双版本闭环记录。** 案例为上游 libexpat CVE-2022-43680（CWE-416；OH
+third_party_expat 同源，见 `evaluation_data/openharmony/README.md` 的 OH 构建不受
+影响边界）。
+
+- **基线**：LIMA commit `e81f6c09`（分支 `feat/openharmony-pilot-validation`，
+  Task 1-6 全部落地后的工作树）。脆弱 `5ac714074d2639e0b8bb82aa73ef51c4f7498d29`
+  / 修复 `56967f83d68d5fc750f9e66a9a76756c94c7c173`，快照
+  `D:\OpenHarmonyPilot\expat-up-{vuln,fixed}`（完整克隆、LF 工作区、
+  `_overlay/expat_config.h` 与根 compdb 钉扎）。
+- **环境**：真实 Sidecar（`lima-cxx-analyzer:local`，AST 预算 128 MiB、扫描限额
+  5000/512KiB/20MiB 宿主容器同值）；真实 provider glm-5.3（本地网关，
+  `thinking:disabled`）。
+- **命令**：`scripts/run_openharmony_validation.py --case
+  evaluation_data/openharmony/pilot_case.json --repository-import-root
+  <import root> --output output/openharmony/pilot --cxx-analyzer-url
+  http://cxx-analyzer:8090 --timeout 300 --deadline-seconds 5400
+  --parallelism 1 --dialogue-rounds 2`（容器内执行，退出码 2）。
+- **结果**：整体 `failed`（检测侧）。vulnerable 全链 1087.6 s / 85 LLM 调用 /
+  310,967 reply bytes：6 窗口发现 14 条线索、多个 semantic-supported 发现
+  （CWE-125@3240、CWE-190@7309），无 runtime-confirmed 的 CWE-416 目标命中——
+  按合同判 `vulnerable-no-matching-finding`，不修饰。fixed 全链 145.7 s / 9 调用 /
+  178,623 bytes：0 finding（该侧 passed）。双侧快照覆盖 100%。
+- **证据**：bundle `output/openharmony/pilot/`（10 文件，`SHA256SUMS.json` 宿主侧
+  逐文件重算全通过；AEP 双侧、VEP×2、patch.diff、中文报告含 3+3 矩阵与真实性边界）。
+- **状态表更新**：真实模型分类一行——Scout/Specialist/Critic/Discovery 全部在真实
+  provider 上运行并保持诚实降级语义，记**已验证（glm-5.3，2026-10-07）**；真实容器
+  ASan 实证一行——实验编译/运行真实发生于沙箱（多次 clang++-14+ASan 编译与执行），
+  但自动链路未产出 runtime-confirmed 命中，记**已验证（运行）/runtime-confirmed
+  待达成**；另记同环境手工触发驱动实证（脆弱版目标绑定 heap-use-after-free@
+  xmlparse.c:7148、修复版干净退出，2026-10-04 探针）作为 D3 侧旁证。
+- **已知边界**：发现层当前稳定产出"正确文件 + 正确 CWE 族 + 正确邻域"的
+  semantic-supported（4603 一带多次独立命中），分配失败注入手法已由智能体从通用
+  指引自学（v4-v5 实测），自动 runtime-confirmed 的最后一跃待模型迭代（claude
+  限流冷却中，glm 持续可用）。
+
+
+### 全量项目门禁记录（`scripts/lima.ps1 test`，2026-10-07）
+
+容器面 2890 测试：2 失败 + 6 错误 + 37 跳过。**全部 8 个失败/错误均在
+origin/main（`3045910`）同一容器的基线复跑中同样出现**，为既有测试镜像
+（`lima-cxx-analyzer:test`，构建于旧提交）缺依赖所致，非本分支回归：
+
+| 精确 test id | 既有原因 |
+|---|---|
+| `tests.test_cxx_analyzer.AnalyzerComposeSecurityTests.test_compose_passes_only_admin_configuration_and_shared_snapshot_limits` | 镜像缺 `yaml` |
+| `tests.test_cxx_analyzer.AnalyzerComposeSecurityTests.test_cxx_analyzer_is_an_internal_non_root_read_only_sidecar` | 镜像缺 `yaml` |
+| `tests.test_cxx_analyzer.SourceRuleTests.test_rules_tie_three_distinct_oob_shapes_to_known_object_bounds` | 镜像缺 `yaml` |
+| `tests.test_cxx_analyzer.SourceRuleTests.test_release_rules_exclude_same_pointer_rebinding_controls` | 镜像缺 `yaml` |
+| `unittest.loader._FailedTest.test_build_recipe` | 镜像缺 `yaml`（模块导入失败） |
+| `unittest.loader._FailedTest.test_cxx_memory_evaluation` | 镜像缺 `yaml`（模块导入失败） |
+| `tests.test_cxx_analyzer.SourceScanContainerTests.test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates` | 镜像 semgrep fixture 既有失败 |
+
+另两处运行期现象已定位并处置：`test_v4_baseline_manifest` 双数据集指纹失配为
+Windows 工作区 CRLF 检出伪影（提交内容与 main 逐字节一致；LF 重检出后指纹全部
+吻合，非代码回归）；`ReproContainerTests` 偶发 `asan-runtime-segv-retried` 为
+`cxx_analyzer/repro.py` 文档声明的受限容器 ASan 渲染器噪声类（重试机制消化）。
+本分支新增的 18 个 git 夹具测试在容器内因镜像无 git 干净跳过（宿主全绿）。

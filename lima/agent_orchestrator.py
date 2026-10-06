@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -228,6 +229,32 @@ _SYSTEM_PLATFORM_CRITIC: Final = (
     f"from the provided evidence, answer hypothesis-wrong. "
     f"{_UNTRUSTED_DATA_RULE} {_CRITIC_SCHEMA}"
 )
+_DISCOVERY_SCHEMA: Final = (
+    'Reply with exactly one JSON object {"leads": [{"path": <one audited '
+    "translation unit>, \"function\": <exact enclosing function name as "
+    "written in the source>, \"line\": <optional approximate line>, "
+    '"summary": <one sentence naming the object/pointer relationship>}]}; '
+    "0 to 8 leads, most promising first, no other text. Line numbers are "
+    "resolved mechanically from the function name, so the function name "
+    "must be exact; omit it only when the concern is not inside a function."
+)
+_SYSTEM_PLATFORM_DISCOVERY: Final = (
+    "You are the Discovery agent in the LIMA C/C++ vulnerability platform. "
+    "The deterministic memory-fact instrument abstained on the audited "
+    "translation units, so no triage leads exist. Read the sources yourself "
+    "and propose where a genuine memory-safety defect most likely hides, "
+    "focusing on use-after-free (CWE-416): which objects own which "
+    "allocations, which cleanup paths release them, and where a released "
+    "object can still be referenced -- including through pointers shared "
+    "between objects and on error or out-of-memory paths. Never report style "
+    "issues and never guess line numbers. "
+    f"{_UNTRUSTED_DATA_RULE} {_DISCOVERY_SCHEMA}"
+)
+_MAX_DISCOVERY_LEADS: Final = 8
+_MAX_DISCOVERY_SUMMARY_CHARS: Final = 512
+_MAX_DISCOVERY_UNIT_BYTES: Final = 1024 * 1024
+_MAX_DISCOVERY_TOTAL_BYTES: Final = 4 * 1024 * 1024
+_DISCOVERY_SEED: Final = "llm-discovery"
 
 
 class PlatformFormatError(ValueError):
@@ -693,6 +720,193 @@ def _leads_from_candidates(
             score=0,
         )
         for candidate in candidates
+    )
+
+
+def _parse_discovery_reply(
+    raw: object, known_units: frozenset[str],
+) -> tuple[tuple[str, int, str], ...]:
+    """Parse one strict discovery reply into (path, line, summary) triples.
+
+    ``function`` is optional but preferred: when present the caller resolves
+    the line mechanically from the source, because model-provided line
+    numbers are routinely off (the Scout then correctly discards the
+    mislocated lead).  A lead with neither a function nor a positive line
+    is malformed.
+    """
+
+    if not isinstance(raw, str):
+        raise PlatformFormatError("discovery reply must be text")
+    try:
+        parsed = json.loads(unwrap_fenced_json(raw))
+    except ValueError as exc:
+        raise PlatformFormatError(f"discovery reply is not JSON: {exc}") from exc
+    if not isinstance(parsed, dict) or set(parsed) != {"leads"}:
+        raise PlatformFormatError(
+            'discovery reply must hold exactly {"leads": [...]}'
+        )
+    items = parsed["leads"]
+    if not isinstance(items, list) or len(items) > _MAX_DISCOVERY_LEADS:
+        raise PlatformFormatError(
+            f"discovery leads must be a list of at most {_MAX_DISCOVERY_LEADS}"
+        )
+    triples: list[tuple[str, int, str]] = []
+    for item in items:
+        if not isinstance(item, dict) or not {"path", "summary"} <= set(item) <= {
+            "path", "line", "summary", "function",
+        }:
+            raise PlatformFormatError(
+                "each discovery lead may hold path, optional function and "
+                "line, and summary"
+            )
+        path = item["path"]
+        if not isinstance(path, str) or path not in known_units:
+            raise PlatformFormatError(
+                f"discovery lead path is not an audited unit: {path!r}"
+            )
+        line = item.get("line", 0)
+        if isinstance(line, bool) or not isinstance(line, int) or line < 0:
+            raise PlatformFormatError(
+                "discovery lead line must be a non-negative integer"
+            )
+        summary = item["summary"]
+        if not isinstance(summary, str) or not summary:
+            raise PlatformFormatError(
+                "discovery lead summary must be non-empty text"
+            )
+        function = item.get("function", "")
+        if function is None:
+            function = ""
+        if not isinstance(function, str) or len(function) > 256:
+            raise PlatformFormatError(
+                "discovery lead function must be bounded text"
+            )
+        if not function and line < 1:
+            raise PlatformFormatError(
+                "discovery lead needs a function or a positive line"
+            )
+        triples.append((path, line, summary, function))  # type: ignore[arg-type]
+    return tuple(triples)  # type: ignore[return-value]
+
+
+def _resolve_discovery_line(
+    source: str, function: str, approximated: int,
+) -> int | None:
+    """Resolve a discovery lead to the function's *definition* line.
+
+    Model line numbers are unreliable, so a lead naming a function is
+    located mechanically: the first line of the unit whose beginning looks
+    like that function's definition.  A match only counts when a body
+    brace opens before any semicolon -- prototypes (forward declarations)
+    are skipped, otherwise the Scout reviews a declaration snippet and
+    correctly discards the lead.  ``None`` when nothing locates and no
+    usable approximate line exists.
+    """
+
+    if function:
+        pattern = re.compile(
+            r"^[A-Za-z_][A-Za-z0-9_\s\*(,)]*?\b" + re.escape(function)
+            + r"\s*\(",
+            re.MULTILINE,
+        )
+        for match in pattern.finditer(source):
+            window = source[match.start():match.start() + 600]
+            brace = window.find("{")
+            semicolon = window.find(";")
+            if brace != -1 and (semicolon == -1 or brace < semicolon):
+                return source.count("\n", 0, match.start()) + 1
+    return approximated if approximated >= 1 else None
+
+
+def _discover_leads(
+    resolved: Mapping[str, object],
+    workspace: RepositoryWorkspace,
+    units: Sequence[str],
+    timeout: int,
+    deadline: float | None,
+    budget: CxxAgentBudget,
+    mode: str,
+) -> tuple[tuple[ScoutLead, ...], tuple[str, ...]]:
+    """Agent-side discovery when the deterministic facts instrument abstains.
+
+    The Discovery agent receives exactly the audited translation units -- the
+    same scope the facts instrument analyses -- and must return its own
+    suspicious locations; nothing about the sought answer is ever provided.
+    Its leads flow through the ordinary Scout review like any triage lead,
+    and the lead source plus its call count are recorded as diagnostics so
+    reporting can distinguish instrument leads from agent leads.
+    """
+
+    if mode == MODE_OFF or not resolved:
+        return (), ()
+    sections: list[str] = []
+    sources: dict[str, str] = {}
+    skipped: list[str] = []
+    total_bytes = 0
+    for unit in units:
+        try:
+            text = workspace.read_text(unit)
+        except (OSError, ValueError):
+            skipped.append(unit)
+            continue
+        encoded = len(text.encode("utf-8"))
+        if (
+            encoded > _MAX_DISCOVERY_UNIT_BYTES
+            or total_bytes + encoded > _MAX_DISCOVERY_TOTAL_BYTES
+        ):
+            skipped.append(unit)
+            continue
+        total_bytes += encoded
+        sources[unit] = text
+        sections.append(f"--- {unit} ---\n```c\n{text}\n```")
+    notes = [f"llm-discovery-skipped-unit: {unit}" for unit in skipped]
+    if not sections:
+        return (), tuple(notes)
+    user = (
+        "The memory-fact instrument abstained on these translation units "
+        "(no deterministic candidates). Audit the sources below.\n\n"
+        + "\n\n".join(sections)
+    )
+    discovery_timeout = _bounded_step_timeout(timeout, deadline)
+    if discovery_timeout is None:
+        return (), (*notes, "llm-discovery-skipped: deadline exceeded")
+    calls = [0]
+    try:
+        quadruples = _platform_round(
+            resolved, _SYSTEM_PLATFORM_DISCOVERY, user, discovery_timeout,
+            budget, calls, _parse_discovery_reply, frozenset(units),
+        )
+    except PlatformFormatError as exc:
+        return (), (
+            *notes,
+            f"llm-discovery-format-failed({calls[0]} calls): {exc}"[:256],
+        )
+    except (LLMTransportError, ValueError) as exc:
+        return (), (
+            *notes,
+            f"llm-discovery-transport-failed: {exc}"[:256],
+        )
+    leads: list[ScoutLead] = []
+    for path, approximated, summary, function in quadruples:
+        line = _resolve_discovery_line(
+            sources.get(path, ""), function, approximated,
+        )
+        if line is None:
+            notes.append(
+                f"llm-discovery-dropped-unlocatable: {path} {function!r}"
+            )
+            continue
+        leads.append(ScoutLead(
+            lead_id=f"discovery-{len(leads) + 1}",
+            path=path,
+            line=line,
+            summary=summary[:_MAX_DISCOVERY_SUMMARY_CHARS],
+            seed=_DISCOVERY_SEED,
+            score=0,
+        ))
+    return tuple(leads), (
+        *notes,
+        f"leads-from-llm-discovery: {len(leads)} leads, {calls[0]} calls",
     )
 
 
@@ -1388,7 +1602,8 @@ def run_platform_review(
             build_context_mode=build_context_mode,
         )
 
-    # Leads: caller-provided, else release events from the facts instrument.
+    # Leads: caller-provided, else release events from the facts instrument,
+    # else the Discovery agent reading the same audited units itself.
     bundle: UafFactBundle | None = None
     if not given_leads:
         bundle = _fetch_bundle()
@@ -1398,7 +1613,14 @@ def run_platform_review(
             else ()
         )
         if not given_leads:
-            return _empty_outcome(("no-leads-available",), units)
+            discovered, notes = _discover_leads(
+                resolved_llm, workspace, units, timeout, deadline,
+                run_budget, mode,
+            )
+            diagnostics.extend(notes)
+            given_leads = discovered
+        if not given_leads:
+            return _empty_outcome(("no-leads-available", *diagnostics), units)
 
     scout_timeout = _bounded_step_timeout(timeout, deadline)
     if scout_timeout is None:

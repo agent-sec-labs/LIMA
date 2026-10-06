@@ -277,9 +277,10 @@ class ScriptedPlatformTransport:
     reply text or exception instances raised verbatim.
     """
 
-    def __init__(self, specialist=(), critic=()):
+    def __init__(self, specialist=(), critic=(), discovery=()):
         self.specialist = list(specialist)
         self.critic = list(critic)
+        self.discovery = list(discovery)
         self.calls = []
         self.timeouts = []
 
@@ -297,12 +298,21 @@ class ScriptedPlatformTransport:
             if CRITIC_ROLE in payload["messages"][0]["content"]
         ])
 
+    @property
+    def discovery_calls(self):
+        return len([
+            payload for payload in self.calls
+            if "Discovery agent" in payload["messages"][0]["content"]
+        ])
+
     def __call__(self, provider, base_url, api_key, payload, timeout,
                  extra_headers=None, max_bytes=None):
         self.calls.append(payload)
         self.timeouts.append(timeout)
         system = payload["messages"][0]["content"]
-        if SPECIALIST_ROLE in system:
+        if "Discovery agent" in system:
+            queue = self.discovery
+        elif SPECIALIST_ROLE in system:
             queue = self.specialist
         elif CRITIC_ROLE in system:
             queue = self.critic
@@ -354,6 +364,12 @@ def critic_json(
         "rationale": rationale,
         "revised_driver_code": revised_driver,
     })
+
+
+def discovery_json(leads):
+    """One scripted Discovery reply: dicts with path/line/summary/function."""
+
+    return json.dumps({"leads": list(leads)})
 
 
 # ------------------------------------------------------------- experiments
@@ -909,6 +925,164 @@ class PublicHitTruthContractTests(unittest.TestCase):
                 "build/repro_driver_"
             )
         )
+
+
+class DiscoveryFallbackTests(unittest.TestCase):
+    """Facts-instrument abstention hands discovery to the Discovery agent.
+
+    The agent receives exactly the audited translation units (never the
+    sought answer), its leads flow through the ordinary Scout review, and
+    the lead source is recorded in the outcome diagnostics.
+    """
+
+    def test_discovery_lead_runs_the_full_chain(self):
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json()],
+            critic=[critic_json()],
+            discovery=[discovery_json([{
+                "path": UNIT,
+                "line": 30,
+                "summary": "shared object freed on a child error path",
+            }])],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            analyzer=None,
+            leads=(),
+            workbench=FakeWorkbench([uaf_hit()]),
+        )
+        self.assertEqual(1, len(outcome.findings))
+        self.assertEqual("runtime-confirmed", outcome.targets[0].state)
+        self.assertEqual(UNIT, outcome.targets[0].path)
+        self.assertTrue(
+            any(
+                "leads-from-llm-discovery: 1 leads" in note
+                for note in outcome.diagnostics
+            ),
+            outcome.diagnostics,
+        )
+        self.assertEqual(1, transport.discovery_calls)
+
+    def test_discovery_abstain_keeps_no_leads_outcome(self):
+        transport = ScriptedPlatformTransport(
+            discovery=[discovery_json([])],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            analyzer=None,
+            leads=(),
+            workbench=FakeWorkbench([uaf_hit()]),
+        )
+        self.assertEqual((), outcome.targets)
+        self.assertEqual((), outcome.findings)
+        self.assertIn("no-leads-available", outcome.diagnostics)
+        # The attempt itself is recorded: discovery ran and found nothing.
+        self.assertTrue(
+            any(
+                "leads-from-llm-discovery: 0 leads" in note
+                for note in outcome.diagnostics
+            ),
+            outcome.diagnostics,
+        )
+
+    def test_mode_off_never_uses_discovery(self):
+        outcome = _run(
+            mode="off",
+            llm_transport=GuardTransport(),
+            analyzer=None,
+            leads=(),
+        )
+        self.assertEqual((), outcome.targets)
+        self.assertEqual(("mode-off",), outcome.diagnostics)
+
+    def test_discovery_reply_repair_recovers_a_bad_path(self):
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json()],
+            critic=[critic_json()],
+            discovery=[
+                # First reply points outside the audited units: contract
+                # failure, repaired once.
+                discovery_json([{
+                    "path": "src/other.c", "line": 1, "summary": "outside",
+                }]),
+                discovery_json([{
+                    "path": UNIT, "line": 30, "summary": "repaired",
+                }]),
+            ],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            analyzer=None,
+            leads=(),
+            workbench=FakeWorkbench([uaf_hit()]),
+        )
+        self.assertEqual("runtime-confirmed", outcome.targets[0].state)
+        self.assertEqual(2, transport.discovery_calls)
+
+    def test_parse_discovery_reply_contract(self):
+        from lima.agent_orchestrator import (
+            PlatformFormatError,
+            _parse_discovery_reply,
+            _resolve_discovery_line,
+        )
+
+        known = frozenset({UNIT})
+        good = _parse_discovery_reply(
+            json.dumps({"leads": [
+                {"path": UNIT, "line": 0, "summary": "s",
+                 "function": "dtdCopy"},
+            ]}),
+            known,
+        )
+        self.assertEqual(((UNIT, 0, "s", "dtdCopy"),), good)
+        self.assertEqual((), _parse_discovery_reply('{"leads": []}', known))
+        bad_replies = (
+            "not json",
+            "[]",
+            json.dumps({"leads": [], "extra": 1}),
+            json.dumps({"leads": [{"path": "src/other.c", "line": 5,
+                                   "summary": "s"}]}),
+            json.dumps({"leads": [{"path": UNIT, "line": -1,
+                                   "summary": "s"}]}),
+            json.dumps({"leads": [{"path": UNIT, "line": 5}]}),
+            json.dumps({"leads": [{"path": UNIT, "summary": "no location"}]}),
+            json.dumps({"leads": [
+                {"path": UNIT, "line": i + 1, "summary": "s"}
+                for i in range(9)
+            ]}),
+        )
+        for reply in bad_replies:
+            with self.subTest(reply=reply[:60]):
+                with self.assertRaises(PlatformFormatError):
+                    _parse_discovery_reply(reply, known)
+
+        # Function names resolve mechanically to the *definition* line;
+        # prototypes are skipped and hallucinated approximate lines never
+        # win over the function.
+        source = (
+            "static int poolGrow(STRING_POOL *pool);\n"
+            "\n"
+            "static int dtdCopy(XML_Parser old, DTD *n, const DTD *o) {\n"
+            "  return 1;\n"
+            "}\n"
+            "\n"
+            "static int poolGrow(STRING_POOL *pool) {\n"
+            "  return 1;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            3, _resolve_discovery_line(source, "dtdCopy", 9999)
+        )
+        self.assertEqual(
+            7, _resolve_discovery_line(source, "poolGrow", 9999)
+        )
+        # Unknown function falls back to the approximate line, and to
+        # None without one.
+        self.assertEqual(
+            42, _resolve_discovery_line(source, "missing", 42)
+        )
+        self.assertIsNone(_resolve_discovery_line(source, "missing", 0))
+        self.assertIsNone(_resolve_discovery_line(source, "", 0))
 
 
 class NoProofGateTests(unittest.TestCase):

@@ -468,8 +468,10 @@ header-only 且自包含——目标 TU 编译产物除系统库外零未定义�
   `run_openharmony_case(case, import_policy, workspace_limits, analyzer_client, llm_config, budget_factory, timeout, deadline_seconds, parallelism, dialogue_rounds)`。
 - Calls: `run_platform_review` with `build_context_mode="snapshot-compdb"` and `mode="required"`
   并显式传入 timeout、deadline、parallelism、dialogue_rounds 和每 revision 独立 budget；
-  `leads` 保持空 tuple，让生产 facts/candidate 路径自行发现目标，manifest 的目标标签只在
-  评测侧匹配结果。
+  `leads` 保持空 tuple，两级发现自行出线索：facts/candidate 优先（确定性仪器），仪器
+  弃权时由 Discovery 智能体读取**同一批受审翻译单元**自行提出可疑位置（输入范围与
+  facts 链完全一致，不含任何答案信息；线索来源与调用次数进入 diagnostics，报告必须
+  如实区分仪器线索与智能体线索）。manifest 的目标标签只在评测侧匹配结果。
 
 - [ ] **Step 1: 写 paired-run 状态机失败测试**
 

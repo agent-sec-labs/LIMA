@@ -547,11 +547,28 @@ def _observation(*, ok=False, stage="run", error_type=None,
 def _finding(path="src/parser.c", cwe="CWE-416", state="runtime-confirmed",
              driver="int main() { return 0; }"):
     from lima.agent_orchestrator import PlatformFinding
+    from lima.models import EvidenceRecord
+    runtime_evidence = (
+        EvidenceRecord(
+            source="asan", kind="runtime", path=path, line=30,
+            snippet="==1==ERROR: AddressSanitizer: heap-use-after-free",
+            rule_id="asan.repro", cwe=cwe, symbol="parse",
+            tool_run_id="run-uaf-1",
+        ),
+    ) if state == "runtime-confirmed" else ()
+    experiment_log = (
+        {
+            "round": 1, "driver_sha256": "0123456789abcdef", "stage": "run",
+            "ok": False, "exit_code": 1,
+            "error_type": "heap-use-after-free", "faulting_line": 30,
+            "faulting_file": path, "hit": True,
+        },
+    ) if state == "runtime-confirmed" else ()
     return PlatformFinding(
         target_id="discovery-1", path=path, line=30, symbol="parse",
         cwe=cwe, state=state, hypothesis_reason="hypothesis",
-        poc_driver_code=driver, experiment_log=(), identity=None,
-        evidence_records=(),
+        poc_driver_code=driver, experiment_log=experiment_log,
+        identity=None, evidence_records=runtime_evidence,
     )
 
 
@@ -763,6 +780,161 @@ class PairedRunTests(unittest.TestCase):
             (result.fixed.platform_outcome.findings[0].path,
              result.fixed.platform_outcome.findings[0].cwe),
         )
+
+
+# --------------------------------------------------------- bundle writer
+
+
+class BundleWriterTests(unittest.TestCase):
+    def setUp(self):
+        if load_openharmony_case is None:
+            self.fail("lima.openharmony_validation not implemented yet")
+        import shutil
+
+        from lima import openharmony_validation as module
+        self.module = module
+        self.root = Path(tempfile.mkdtemp(suffix="-oh-bundle"))
+        self.addCleanup(shutil.rmtree, str(self.root), True)
+        paired = PairedRunTests("test_vulnerable_hits_and_fixed_clean_passes")
+        paired.setUp()
+        self.addCleanup(shutil.rmtree, str(paired.fixture.root), True)
+        result, _ = paired._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[
+                _observation(
+                    ok=False, stage="run",
+                    error_type="'heap-use-after-free'",
+                    faulting_file="'src/parser.c'", exit_code=1,
+                )] * 3,
+            fixed_outcome=_outcome([]),
+            fixed_replay=[
+                _observation(ok=True, stage="run", exit_code=0)] * 3,
+        )
+        self.result = result
+        self.fixture = paired.fixture
+        self.case = paired.case
+
+    def _write(self, target=None):
+        output = target or (self.root / "bundle")
+        return self.module.write_validation_bundle(
+            self.result, output,
+            git_root=self.fixture.vulnerable_repo,
+        )
+
+    def test_bundle_layout_digests_and_summary(self):
+        output = self._write()
+        names = sorted(
+            str(item.relative_to(output)).replace("\\", "/")
+            for item in output.rglob("*") if item.is_file()
+        )
+        self.assertIn("case.json", names)
+        self.assertIn("summary.json", names)
+        self.assertIn("vulnerable/platform.json", names)
+        self.assertIn("vulnerable/aep.json", names)
+        self.assertIn("vulnerable/poc_driver.cpp", names)
+        self.assertIn("vulnerable/replay-01.json", names)
+        self.assertIn("vulnerable/replay-03.json", names)
+        self.assertIn("fixed/replay-01.json", names)
+        self.assertIn("patch.diff", names)
+        self.assertIn("report.md", names)
+        self.assertIn("SHA256SUMS.json", names)
+        self.assertTrue(
+            any(name.startswith("vulnerable/vep-") for name in names), names,
+        )
+        sums = json.loads(
+            (output / "SHA256SUMS.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            sorted(set(names) - {"SHA256SUMS.json"}),
+            sorted(sums),
+        )
+        self.assertEqual(list(sums), sorted(sums))
+        for relative, digest in sums.items():
+            data = (output / relative).read_bytes()
+            self.assertEqual(
+                digest, hashlib.sha256(data).hexdigest(), relative,
+            )
+        summary = json.loads(
+            (output / "summary.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "competition-validation", summary["artifact_scope"],
+        )
+        self.assertEqual("passed", summary["status"])
+        self.assertEqual(self.case.case_id, summary["case_id"])
+        case = json.loads(
+            (output / "case.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(self.case.cve_id, case["cve_id"])
+        patch = (output / "patch.diff").read_text(encoding="utf-8")
+        self.assertIn("src/parser.c", patch)
+        report = (output / "report.md").read_text(encoding="utf-8")
+        self.assertIn(self.case.remediation[:30], report)
+        self.assertIn("3+3", report)
+        self.assertIn(self.case.vulnerable.commit[:12], report)
+        self.assertIn(self.case.advisory_urls[0], report)
+
+    def test_existing_output_rejected_and_atomic_publish(self):
+        existing = self.root / "bundle"
+        existing.mkdir()
+        with self.assertRaises(ValueError):
+            self._write()
+        existing.rmdir()
+        from unittest.mock import patch
+        with patch(
+            "os.rename", side_effect=OSError("disk vanished"),
+        ) as fake:
+            with self.assertRaises(OSError):
+                self._write()
+            fake.assert_called_once()
+        self.assertFalse((self.root / "bundle").exists())
+        leftovers = [
+            item for item in self.root.iterdir()
+            if item.name != "bundle"
+        ]
+        self.assertEqual([], leftovers, leftovers)
+
+    def test_secrets_never_reach_the_bundle(self):
+        import shutil
+
+        from lima.reviewer import LLMTransportError
+        paired = PairedRunTests("test_provider_failure_is_inconclusive")
+        paired.setUp()
+        self.addCleanup(shutil.rmtree, str(paired.fixture.root), True)
+        marker = "sk-SECRETMARKER123"
+        result, _ = paired._run(
+            vulnerable_outcome=None,
+            review_error=LLMTransportError(f"key {marker} rejected"),
+        )
+        output = self.root / "secret-bundle"
+        self.module.write_validation_bundle(
+            result, output, git_root=paired.fixture.vulnerable_repo,
+        )
+        for item in output.rglob("*"):
+            if item.is_file():
+                self.assertNotIn(
+                    marker, item.read_text(encoding="utf-8", errors="replace"),
+                    item.name,
+                )
+
+    def test_oversized_diagnostics_are_omitted_not_corrupt(self):
+        record = self.result.vulnerable
+        from dataclasses import replace as _replace
+        inflated = _replace(
+            self.result,
+            vulnerable=_replace(
+                record,
+                diagnostics=record.diagnostics + ("x" * 100_000,),
+            ),
+        )
+        output = self.root / "big-bundle"
+        self.module.write_validation_bundle(
+            inflated, output, git_root=self.fixture.vulnerable_repo,
+        )
+        summary = json.loads(
+            (output / "summary.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("(omitted", json.dumps(summary))
 
 
 class PilotCaseConsistencyTests(unittest.TestCase):

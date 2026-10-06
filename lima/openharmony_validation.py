@@ -871,3 +871,349 @@ def run_openharmony_case(
             )
             break
     return _finish(vulnerable_record, fixed_record)
+
+
+# ---------------------------------------------------------- bundle writer
+
+_SECRET_RE: Final = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
+_MAX_BUNDLE_TEXT_CHARS: Final = 4096
+_OMISSION_NOTE: Final = "(omitted: {} chars)"
+
+
+def _sanitize_text(value: str) -> str:
+    """Redact key-shaped secrets and bound diagnostic text."""
+
+    redacted = _SECRET_RE.sub("sk-***", value)
+    if len(redacted) > _MAX_BUNDLE_TEXT_CHARS:
+        return (
+            redacted[:_MAX_BUNDLE_TEXT_CHARS]
+            + _OMISSION_NOTE.format(len(redacted))
+        )
+    return redacted
+
+
+def _sanitize(value):
+    """Recursively redact and bound one JSON-serializable value."""
+
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, dict):
+        return {str(key): _sanitize(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_sanitize(item) for item in value]
+    return value
+
+
+def _write_json(path: Path, payload) -> None:
+    path.write_text(
+        json.dumps(
+            _sanitize(payload), ensure_ascii=False, indent=2,
+            sort_keys=True, allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _case_document(case: OpenHarmonyCase) -> dict:
+    return {
+        "schema_version": case.schema_version,
+        "case_id": case.case_id,
+        "repository": case.repository,
+        "component": case.component,
+        "cve_id": case.cve_id,
+        "cwe": case.cwe,
+        "vulnerable": {
+            "repository_key": case.vulnerable.repository_key,
+            "commit": case.vulnerable.commit,
+            "version": case.vulnerable.version,
+        },
+        "fixed": {
+            "repository_key": case.fixed.repository_key,
+            "commit": case.fixed.commit,
+            "version": case.fixed.version,
+        },
+        "translation_units": list(case.translation_units),
+        "target_paths": list(case.target_paths),
+        "build_context_mode": case.build_context_mode,
+        "advisory_urls": list(case.advisory_urls),
+        "patch_paths": list(case.patch_paths),
+        "remediation": case.remediation,
+        "license": case.license,
+        "dependency_overlay": [
+            {
+                "path": entry.path, "sha256": entry.sha256,
+                "role": entry.role, "upstream_repo": entry.upstream_repo,
+                "upstream_commit": entry.upstream_commit,
+                "license": entry.license, "note": entry.note,
+            }
+            for entry in case.dependency_overlay
+        ],
+    }
+
+
+def _platform_document(record) -> dict:
+    outcome = record.platform_outcome
+    findings = []
+    if outcome is not None:
+        for finding in outcome.findings:
+            findings.append({
+                "target_id": finding.target_id,
+                "path": finding.path,
+                "line": finding.line,
+                "symbol": finding.symbol,
+                "cwe": finding.cwe,
+                "state": finding.state,
+                "hypothesis_reason": finding.hypothesis_reason,
+                "poc_driver_code": finding.poc_driver_code,
+                "experiment_log": list(finding.experiment_log),
+            })
+    return {
+        "status": record.status.value,
+        "snapshot_hash": record.snapshot_hash,
+        "findings": findings,
+        "diagnostics": list(record.diagnostics),
+        "file_coverage": record.file_coverage,
+        "byte_coverage": record.byte_coverage,
+        "budget_usage": dict(record.budget_usage),
+        "elapsed_seconds": record.elapsed_seconds,
+    }
+
+
+def _observation_document(observation, index: int) -> dict:
+    return {
+        "round": index,
+        "ok": observation.ok,
+        "stage": observation.stage,
+        "exit_code": observation.exit_code,
+        "error_type": observation.error_type,
+        "faulting_file": observation.faulting_file,
+        "faulting_line": observation.faulting_line,
+        "freed_line": observation.freed_line,
+        "allocated_line": observation.allocated_line,
+        "diagnostics": list(observation.diagnostics),
+        "raw_tail": observation.raw_tail,
+    }
+
+
+def _fixing_diff(git_root: Path, case: OpenHarmonyCase) -> str:
+    result = _run_git(
+        git_root,
+        "diff", "--no-ext-diff", "--unified=3",
+        case.vulnerable.commit, case.fixed.commit,
+        "--", *case.patch_paths,
+    )
+    if result.returncode != 0:
+        raise CheckoutPreflightError(
+            "fixing-diff-failed", result.stderr.strip()[:120],
+        )
+    return result.stdout
+
+
+def _final_driver(result: OpenHarmonyValidationResult) -> tuple[str, str]:
+    """The replayed driver and its target path ('' when absent)."""
+
+    for _record, outcome in (
+        (result.vulnerable, result.vulnerable.platform_outcome),
+    ):
+        if outcome is None:
+            continue
+        for finding in outcome.findings:
+            if (
+                finding.state == "runtime-confirmed"
+                and finding.cwe == result.case.cwe
+                and finding.path in result.case.target_paths
+                and finding.poc_driver_code
+            ):
+                return finding.poc_driver_code, finding.path
+    return "", ""
+
+
+def _report_markdown(
+    result: OpenHarmonyValidationResult, patch_digest: str,
+) -> str:
+    from .agent_report import DossierContext, generate_all_dossiers
+
+    case = result.case
+    driver, target = _final_driver(result)
+    outcome = result.vulnerable.platform_outcome
+    context = DossierContext(
+        repository=case.repository,
+        component=case.component,
+        openharmony_versions=(
+            f"{case.vulnerable.version}@{case.vulnerable.commit[:12]}",
+            f"{case.fixed.version}@{case.fixed.commit[:12]}",
+        ),
+        commit_range=(
+            f"{case.vulnerable.commit[:12]}..{case.fixed.commit[:12]}"
+        ),
+        poc_driver_code=driver,
+        cve_ids=(case.cve_id,),
+        patch_suggestion=case.remediation,
+    )
+    dossiers = generate_all_dossiers(
+        outcome.findings if outcome is not None else (), context, (),
+    )
+    replay_matrix = []
+    for side, record in (
+        ("vulnerable", result.vulnerable), ("fixed", result.fixed),
+    ):
+        for index, observation in enumerate(
+            record.replay_observations, start=1,
+        ):
+            replay_matrix.append(
+                f"| {side} | {index} | {observation.stage} | "
+                f"{observation.ok} | {observation.error_type or '-'} |"
+            )
+    advisory_lines = "\n".join(
+        f"- {url}" for url in case.advisory_urls
+    )
+    appendix = (
+        "\n\n## 7. 双版本验证矩阵（Competition Validation）\n\n"
+        f"- **已验证 commit 对**：脆弱 `{case.vulnerable.commit}` →"
+        f" 修复 `{case.fixed.commit}`\n"
+        f"- **3+3 回放矩阵**（最终 PoC 驱动逐次回放）：\n\n"
+        "| 侧 | 轮次 | 阶段 | ok | ASan 类型 |\n|---|---|---|---|---|\n"
+        + "\n".join(replay_matrix)
+        + f"\n\n- **整体判定**：`{result.status.value}`"
+        + (f"（原因：{', '.join(result.reason_codes)}）"
+           if result.reason_codes else "")
+        + "\n- **fixing diff digest**（见 `patch.diff`）：`" + patch_digest + "`"
+        + "\n\n## 8. 公开通告来源（Advisory Sources）\n\n"
+        + advisory_lines
+        + "\n\n## 9. 真实性边界（Honesty Boundary）\n\n"
+        "- 本报告的本地实证仅覆盖上面两个 commit；公开影响版本以通告为准。\n"
+        "- 本 bundle 的 artifact_scope 是 competition-validation，不是生产"
+        " Artifact store 的条目。\n"
+        "- 案例经过 facts 链可达性筛选（详见 `evaluation_data/openharmony/"
+        "README.md` 的准入台账），本结果不能推导全仓检测率。\n"
+    )
+    return _sanitize_text(
+        "\n\n".join(text for _, text in dossiers) + appendix
+    )
+
+
+def write_validation_bundle(
+    result: OpenHarmonyValidationResult,
+    output_dir: str | Path,
+    *,
+    git_root: Path | None = None,
+) -> Path:
+    """Atomically publish the competition-validation evidence bundle.
+
+    Everything lands in a sibling temporary directory first; the digest
+    manifest is written last (never listing itself) and a single rename
+    publishes the bundle.  An existing output path -- empty directory
+    included -- is refused: history is never overwritten.
+    """
+    import uuid
+
+    from .platform_contracts import seal_platform_review
+
+    output = Path(output_dir)
+    if output.exists():
+        raise ValueError(
+            f"output path already exists, refusing to overwrite: {output}"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = output.parent / f".{output.name}.tmp-{uuid.uuid4().hex[:12]}"
+    staging.mkdir()
+    case = result.case
+    try:
+        _write_json(staging / "case.json", _case_document(case))
+
+        driver, _target = _final_driver(result)
+        seal_diagnostics: list[str] = []
+        for side, record in (
+            ("vulnerable", result.vulnerable), ("fixed", result.fixed),
+        ):
+            side_dir = staging / side
+            side_dir.mkdir()
+            _write_json(side_dir / "platform.json", _platform_document(record))
+            if record.platform_outcome is not None:
+                try:
+                    seal = seal_platform_review(
+                        record.platform_outcome,
+                        snapshot_sha256=record.snapshot_hash,
+                        repository=case.repository,
+                    )
+                    _write_json(
+                        side_dir / "aep.json", seal.aep.to_dict(),
+                    )
+                    for vep in seal.veps:
+                        digest = hashlib.sha256(
+                            json.dumps(
+                                vep.to_dict(), sort_keys=True,
+                            ).encode("utf-8")
+                        ).hexdigest()[:16]
+                        _write_json(
+                            side_dir / f"vep-{digest}.json", vep.to_dict(),
+                        )
+                except ValueError as exc:
+                    seal_diagnostics.append(
+                        f"{side}-seal-skipped: {str(exc)[:120]}"
+                    )
+            for index, observation in enumerate(
+                record.replay_observations, start=1,
+            ):
+                _write_json(
+                    side_dir / f"replay-{index:02d}.json",
+                    _observation_document(observation, index),
+                )
+            if side == "vulnerable" and driver:
+                (side_dir / "poc_driver.cpp").write_text(
+                    driver, encoding="utf-8",
+                )
+
+        patch_text = ""
+        if git_root is not None:
+            patch_text = _fixing_diff(Path(git_root), case)
+            (staging / "patch.diff").write_text(
+                patch_text, encoding="utf-8",
+            )
+        patch_digest = hashlib.sha256(
+            patch_text.encode("utf-8")
+        ).hexdigest()
+
+        (staging / "report.md").write_text(
+            _report_markdown(result, patch_digest), encoding="utf-8",
+        )
+
+        _write_json(staging / "summary.json", {
+            "artifact_scope": "competition-validation",
+            "case_id": case.case_id,
+            "cve_id": case.cve_id,
+            "status": result.status.value,
+            "reason_codes": list(result.reason_codes),
+            "vulnerable": _platform_document(result.vulnerable),
+            "fixed": _platform_document(result.fixed),
+            "workspace_limits": {
+                "max_files": result.workspace_limits.max_files,
+                "max_file_bytes": result.workspace_limits.max_file_bytes,
+                "max_total_bytes": result.workspace_limits.max_total_bytes,
+            },
+            "total_elapsed_seconds": result.total_elapsed_seconds,
+            "seal_diagnostics": seal_diagnostics,
+        })
+
+        entries = {}
+        for item in sorted(staging.rglob("*")):
+            if item.is_file():
+                relative = str(
+                    item.relative_to(staging)
+                ).replace("\\", "/")
+                entries[relative] = hashlib.sha256(
+                    item.read_bytes()
+                ).hexdigest()
+        _write_json(staging / "SHA256SUMS.json", entries)
+
+        os.rename(staging, output)
+    except BaseException:
+        _rmtree_quietly(staging)
+        raise
+    return output
+
+
+def _rmtree_quietly(path: Path) -> None:
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)

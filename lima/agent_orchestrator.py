@@ -462,6 +462,96 @@ def _bounded_snippet(workspace: RepositoryWorkspace, path: str, line: int) -> st
     return _escape_text(numbered, _MAX_SNIPPET_CHARS)
 
 
+_DRIVER_CONTRACT_FLAGS_LIMIT: Final = 16
+_DRIVER_CONTRACT_VALUE_OPTIONS: Final = frozenset({
+    "-I", "-D", "-U", "-isystem", "-target", "--target", "--sysroot",
+})
+
+
+def _semantic_flags_from_compdb(
+    workspace: RepositoryWorkspace, unit_path: str,
+) -> tuple[str, ...]:
+    """The semantic ``-I``/``-D`` flags of the unit's trusted compdb entry.
+
+    Reads the snapshot's own ``compile_commands.json`` (the admin-trusted
+    build context) so the Specialist can be told the exact include and
+    define environment its driver will compile with; no entry means the
+    pinned ASan flags alone apply.
+    """
+
+    for name in ("compile_commands.json", "build/compile_commands.json"):
+        try:
+            raw = workspace.read_text(name)
+        except (OSError, ValueError):
+            continue
+        try:
+            entries = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            candidate_file = str(entry.get("file") or "")
+            if (
+                candidate_file != unit_path
+                and not candidate_file.endswith("/" + unit_path)
+            ):
+                continue
+            arguments = entry.get("arguments")
+            if not isinstance(arguments, list):
+                command = entry.get("command")
+                if not isinstance(command, str):
+                    continue
+                arguments = command.split()
+            flags: list[str] = []
+            expect_value = False
+            for token in arguments[1:]:
+                text = str(token)
+                if expect_value:
+                    flags.append(text)
+                    expect_value = False
+                elif text in _DRIVER_CONTRACT_VALUE_OPTIONS:
+                    flags.append(text)
+                    expect_value = True
+                elif text.startswith(("-I", "-D", "-U", "-isystem", "-target")):
+                    flags.append(text)
+                if len(flags) >= _DRIVER_CONTRACT_FLAGS_LIMIT:
+                    break
+            if flags:
+                return tuple(flags)
+    return ()
+
+
+def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
+    """The exact experiment compile command the driver author must target.
+
+    Models hallucinate headers and include the C target unit itself when
+    the compile environment is unknown; stating the pinned argv (with the
+    snapshot's own include/define flags) removes that guesswork.
+    """
+
+    flags = _semantic_flags_from_compdb(workspace, unit_path)
+    flags_text = " ".join(flags) if flags else "(no extra flags)"
+    if unit_path.endswith(".c"):
+        sources_text = f"-x c {unit_path} -x c++ <your driver>"
+    else:
+        sources_text = f"{unit_path} <your driver>"
+    return (
+        "Driver contract (immutable experiment environment):\n"
+        "- The workbench compiles exactly one command: "
+        f"clang++-14 -fsanitize=address -g -O1 {flags_text} "
+        f"{sources_text} -o <binary>\n"
+        "- Your driver is C++ in that same command; the target unit is "
+        "compiled separately, so never #include any .c file (duplicate "
+        "symbols).\n"
+        "- Only repository headers reachable through the include paths above "
+        "exist in the sandbox; never include a header that is not in the "
+        "snapshot (no invented placeholder headers)."
+    )
+
+
 def build_hypothesis_context(
     *,
     target_id: str,
@@ -469,6 +559,7 @@ def build_hypothesis_context(
     line: int,
     fact_lines: tuple[str, ...],
     snippet: str,
+    driver_contract: str = "",
 ) -> str:
     """Assemble the Specialist user message (trusted envelope, escaped data)."""
 
@@ -477,6 +568,8 @@ def build_hypothesis_context(
         f"- target_id: {target_id}",
         f"- location: {path}:{line}",
     ]
+    if driver_contract:
+        parts.append("\n" + driver_contract)
     if fact_lines:
         parts.append(
             "\nVerified static facts bound to this snapshot "
@@ -1355,6 +1448,7 @@ def _process_target(
         line=target.line,
         fact_lines=fact_lines,
         snippet=snippet,
+        driver_contract=_driver_contract(workspace, target.path),
     )
     step_timeout = _bounded_step_timeout(timeout, deadline)
     if step_timeout is None:

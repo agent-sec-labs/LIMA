@@ -1048,9 +1048,63 @@ class DiscoveryFallbackTests(unittest.TestCase):
         windows = _split_windows(big)
         # 49152 // 61 = 805 lines per window boundary.
         self.assertEqual([1, 806, 1611], [start for _, start in windows])
-        for text, start in windows:
+        for text, _start in windows:
             self.assertLessEqual(len(text.encode("utf-8")), _DISCOVERY_WINDOW_BYTES)
         self.assertEqual(big, "\n".join(text for text, _ in windows))
+
+    def test_driver_contract_uses_the_snapshot_compdb(self):
+        from lima.agent_orchestrator import (
+            _driver_contract,
+            _semantic_flags_from_compdb,
+            build_hypothesis_context,
+        )
+
+        unit = "src/a.c"
+        root = tempfile.mkdtemp(suffix="-driver-contract")
+        try:
+            workspace = _write_cxx_repo(root, name=unit)
+            (Path(root) / "compile_commands.json").write_text(
+                json.dumps([{
+                    "directory": ".",
+                    "file": unit,
+                    "arguments": [
+                        "clang-14", "-c", "-I_overlay", "-Ilib", "-DXML_STATIC",
+                        unit, "-o", "build/o.o",
+                    ],
+                }]),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                ("-I_overlay", "-Ilib", "-DXML_STATIC"),
+                _semantic_flags_from_compdb(workspace, unit),
+            )
+            contract = _driver_contract(workspace, unit)
+            self.assertIn(
+                "clang++-14 -fsanitize=address -g -O1 "
+                "-I_overlay -Ilib -DXML_STATIC -x c " + unit,
+                contract,
+            )
+            self.assertIn("never #include any .c file", contract)
+            context = build_hypothesis_context(
+                target_id="t", path=unit, line=5, fact_lines=(),
+                snippet="(code)", driver_contract=contract,
+            )
+            self.assertIn("Driver contract", context)
+        finally:
+            _rmtree(root)
+
+    def test_driver_contract_without_compdb_falls_back(self):
+        from lima.agent_orchestrator import _driver_contract
+
+        unit = "src/a.c"
+        root = tempfile.mkdtemp(suffix="-driver-contract-empty")
+        try:
+            workspace = _write_cxx_repo(root, name=unit)
+            contract = _driver_contract(workspace, unit)
+            self.assertIn("(no extra flags)", contract)
+            self.assertIn("-x c " + unit, contract)
+        finally:
+            _rmtree(root)
 
     def test_parse_discovery_reply_contract(self):
         from lima.agent_orchestrator import (

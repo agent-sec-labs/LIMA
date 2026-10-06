@@ -1071,10 +1071,16 @@ def _discover_leads(
                 f"llm-discovery-window-format-failed"
                 f"({calls[0]} calls): {exc}"[:256]
             )
-        except (LLMTransportError, ValueError) as exc:
-            return (), (
-                *notes,
-                f"llm-discovery-transport-failed: {exc}"[:256],
+        except (
+            LLMTransportError,
+            LLMResponseFormatError,
+            LLMResponseTooLarge,
+            ValueError,
+        ) as exc:
+            # A provider or gateway hiccup on one window never sinks the
+            # rest: record it and keep auditing the remaining windows.
+            notes.append(
+                f"llm-discovery-window-transport-failed: {exc}"[:256]
             )
     leads: list[ScoutLead] = []
     for path, approximated, summary, function in quadruples:

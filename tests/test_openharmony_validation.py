@@ -1,6 +1,8 @@
 """Contract tests for the frozen OpenHarmony pilot case manifest."""
 
+import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -287,6 +289,243 @@ class CaseSchemaParityTests(unittest.TestCase):
         self.assertEqual(
             set(overlay["properties"]["role"]["enum"]), OVERLAY_ROLES
         )
+
+
+# ------------------------------------------------------------ git fixtures
+
+
+_GIT_BASE = [
+    "-c", "user.name=pilot", "-c", "user.email=pilot@example.invalid",
+    "-c", "core.autocrlf=false", "-c", "core.filemode=false",
+]
+
+
+def _git(path: Path, *args: str) -> str:
+    result = subprocess.run(  # noqa: S603
+        ["git", "-C", str(path), *_GIT_BASE, *args],  # noqa: S607
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
+
+
+class CheckoutFixture:
+    """Two pinned git checkouts below one import root."""
+
+    def __init__(self, overlay: bytes | None = None) -> None:
+        self.root = Path(tempfile.mkdtemp(suffix="-oh-checkout"))
+        self.import_root = self.root / "imports"
+        self.import_root.mkdir()
+        repo = self.import_root / "sample-vuln"
+        repo.mkdir(parents=True)
+        _git(repo, "init", "-q")
+        (repo / "src").mkdir()
+        (repo / "src" / "parser.c").write_text(
+            "int parse(void) { return 1; }\n", encoding="utf-8"
+        )
+        (repo / "src" / "util.c").write_text(
+            "int util(void) { return 2; }\n", encoding="utf-8"
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "vulnerable")
+        self.vulnerable_commit = _git(repo, "rev-parse", "HEAD")
+        (repo / "src" / "parser.c").write_text(
+            "int parse(void) { return 2; }\n", encoding="utf-8"
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fixed")
+        self.fixed_commit = _git(repo, "rev-parse", "HEAD")
+        fixed = self.import_root / "sample-fixed"
+        subprocess.run(  # noqa: S603
+            ["git", "clone", "-q", "--no-hardlinks", str(repo), str(fixed)],  # noqa: S607
+            check=True, capture_output=True,
+        )
+        _git(fixed, "checkout", "-q", "--detach", self.fixed_commit)
+        _git(repo, "checkout", "-q", "--detach", self.vulnerable_commit)
+        self.vulnerable_repo = repo
+        self.fixed_repo = fixed
+        self.overlay_bytes = overlay
+
+    def stage_case_files(self, compdb: dict | None = None) -> dict:
+        """Write compdb and overlay into both checkouts; return overlay entry."""
+        entry = None
+        if self.overlay_bytes is not None:
+            for repo in (self.vulnerable_repo, self.fixed_repo):
+                overlay_dir = repo / "_overlay"
+                overlay_dir.mkdir(exist_ok=True)
+                (overlay_dir / "log.h").write_bytes(self.overlay_bytes)
+            entry = {
+                "path": "_overlay/log.h",
+                "sha256": hashlib.sha256(self.overlay_bytes).hexdigest(),
+                "role": "dependency-header",
+                "upstream_repo": REPO,
+                "upstream_commit": "d" * 40,
+                "license": "Apache-2.0",
+                "note": "reduced no-op logging header",
+            }
+        document = [{
+            "directory": ".",
+            "file": "src/parser.c",
+            "arguments": [
+                "clang-14", "-c", "-I_overlay", "-Isrc", "src/parser.c",
+                "-o", "build/parser.o",
+            ],
+        }] if compdb is None else compdb
+        for repo in (self.vulnerable_repo, self.fixed_repo):
+            (repo / "compile_commands.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+        return entry
+
+    def case(self, entry: dict | None) -> OpenHarmonyCase:
+        payload = json.loads(json.dumps(VALID_CASE))
+        payload["vulnerable"]["commit"] = self.vulnerable_commit
+        payload["fixed"]["commit"] = self.fixed_commit
+        payload["translation_units"] = ["src/parser.c"]
+        payload["target_paths"] = ["src/parser.c"]
+        payload["patch_paths"] = ["src/parser.c", "src/util.c"]
+        if entry is None:
+            payload.pop("dependency_overlay", None)
+        else:
+            payload["dependency_overlay"] = [entry]
+        return load_openharmony_case(write_case(payload))
+
+
+class CheckoutValidationTests(unittest.TestCase):
+    def setUp(self):
+        if load_openharmony_case is None:
+            self.fail("lima.openharmony_validation not implemented yet")
+        from lima.openharmony_validation import (
+            CheckoutPreflightError,
+            WorkspaceLimits,
+            validate_case_checkouts,
+        )
+        from lima.repository_import import RepositoryImportPolicy
+        self.error = CheckoutPreflightError
+        self.limits = WorkspaceLimits
+        self.validate = validate_case_checkouts
+        self.policy = RepositoryImportPolicy
+
+    def test_happy_path_returns_both_workspaces(self):
+        fixture = CheckoutFixture(overlay=b"/* overlay */\n")
+        entry = fixture.stage_case_files()
+        case = fixture.case(entry)
+        vulnerable, fixed = self.validate(
+            case, self.policy(str(fixture.import_root)),
+            self.limits(max_files=500, max_file_bytes=65536, max_total_bytes=1 << 20),
+        )
+        self.assertEqual(
+            {path.path for path in vulnerable.inventory().files},
+            {"src/parser.c", "src/util.c", "compile_commands.json",
+             "_overlay/log.h"},
+        )
+
+    def test_wrong_head_and_dirty_tree_rejected(self):
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        case = fixture.case(entry)
+        policy = self.policy(str(fixture.import_root))
+        limits = self.limits(max_files=500, max_file_bytes=65536,
+                             max_total_bytes=1 << 20)
+        _git(fixture.vulnerable_repo, "checkout", "-q", "--detach",
+             fixture.fixed_commit)
+        with self.assertRaises(self.error) as caught:
+            self.validate(case, policy, limits)
+        self.assertEqual("head-mismatch", caught.exception.reason)
+        _git(fixture.vulnerable_repo, "checkout", "-q", "--detach",
+             fixture.vulnerable_commit)
+        (fixture.vulnerable_repo / "src" / "parser.c").write_text(
+            "dirty\n", encoding="utf-8"
+        )
+        with self.assertRaises(self.error) as caught:
+            self.validate(case, policy, limits)
+        self.assertEqual("tracked-files-dirty", caught.exception.reason)
+
+    def test_missing_files_and_stray_untracked_rejected(self):
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        _git(fixture.vulnerable_repo, "rm", "-q", "src/util.c")
+        _git(fixture.vulnerable_repo, "commit", "-q", "-m", "drop util")
+        fixture.vulnerable_commit = _git(
+            fixture.vulnerable_repo, "rev-parse", "HEAD",
+        )
+        case = fixture.case(entry)
+        policy = self.policy(str(fixture.import_root))
+        limits = self.limits(max_files=500, max_file_bytes=65536,
+                             max_total_bytes=1 << 20)
+        with self.assertRaises(self.error) as caught:
+            self.validate(case, policy, limits)
+        self.assertEqual("missing-manifest-path", caught.exception.reason)
+        fixture2 = CheckoutFixture()
+        entry2 = fixture2.stage_case_files()
+        case2 = fixture2.case(entry2)
+        (fixture2.vulnerable_repo / "generated.h").write_text(
+            "x", encoding="utf-8"
+        )
+        with self.assertRaises(self.error) as caught:
+            self.validate(
+                case2, self.policy(str(fixture2.import_root)), limits,
+            )
+        self.assertEqual("untracked-not-allowed", caught.exception.reason)
+
+    def test_overlay_digest_and_cross_checkout_drift_rejected(self):
+        fixture = CheckoutFixture(overlay=b"/* overlay */\n")
+        entry = fixture.stage_case_files()
+        broken = dict(entry, sha256="e" * 64)
+        case = fixture.case(broken)
+        limits = self.limits(max_files=500, max_file_bytes=65536,
+                             max_total_bytes=1 << 20)
+        with self.assertRaises(self.error) as caught:
+            self.validate(case, self.policy(str(fixture.import_root)), limits)
+        self.assertEqual("overlay-digest-mismatch", caught.exception.reason)
+        case_good = fixture.case(entry)
+        (fixture.fixed_repo / "_overlay" / "log.h").write_bytes(
+            b"/* drifted */\n"
+        )
+        with self.assertRaises(self.error) as caught:
+            self.validate(
+                case_good, self.policy(str(fixture.import_root)), limits,
+            )
+        self.assertEqual("overlay-digest-mismatch", caught.exception.reason)
+
+    def test_limits_validated_before_any_work(self):
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        case = fixture.case(entry)
+        for kwargs in (
+            {"max_files": True, "max_file_bytes": 1, "max_total_bytes": 1},
+            {"max_files": 0, "max_file_bytes": 1, "max_total_bytes": 1},
+            {"max_files": 1, "max_file_bytes": -1, "max_total_bytes": 1},
+            {"max_files": 1, "max_file_bytes": 1, "max_total_bytes": 0},
+        ):
+            with self.subTest(limits=kwargs):
+                with self.assertRaises(ValueError):
+                    self.validate(
+                        case,
+                        self.policy(str(fixture.import_root)),
+                        self.limits(**kwargs),
+                    )
+
+    def test_duplicate_keys_rejected_at_manifest_load(self):
+        # The parser freezes distinct keys, so a duplicate-checkout preflight
+        # can never be reached through a decoded manifest.
+        payload = json.loads(json.dumps(VALID_CASE))
+        payload["fixed"]["repository_key"] = (
+            payload["vulnerable"]["repository_key"]
+        )
+        with self.assertRaises(ValueError):
+            load_openharmony_case(write_case(payload))
+
+    def test_unresolvable_root_rejected(self):
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        case = fixture.case(entry)
+        limits = self.limits(max_files=500, max_file_bytes=65536,
+                             max_total_bytes=1 << 20)
+        with self.assertRaises(self.error) as caught:
+            self.validate(
+                case, self.policy(str(fixture.root / "empty")), limits,
+            )
+        self.assertEqual("repository-key-unresolvable", caught.exception.reason)
 
 
 class PilotCaseConsistencyTests(unittest.TestCase):

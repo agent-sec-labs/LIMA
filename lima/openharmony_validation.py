@@ -10,11 +10,18 @@ evidence bundle writer.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only imports
+    from .repository_import import RepositoryImportPolicy
+    from .workspace import RepositoryWorkspace
 
 SCHEMA_VERSION: Final = "openharmony-validation-v1"
 CASE_CWE: Final = "CWE-416"
@@ -92,6 +99,235 @@ class OpenHarmonyCase:
     remediation: str
     license: str
     dependency_overlay: tuple[DependencyOverlayEntry, ...] = ()
+
+
+# ------------------------------------------------------------ checkout gate
+
+
+class CheckoutPreflightError(ValueError):
+    """One stable-reason preflight failure; nothing ran, nothing was built."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class WorkspaceLimits:
+    """The synchronized scan budgets shared by the host and the Sidecar."""
+
+    max_files: int
+    max_file_bytes: int
+    max_total_bytes: int
+
+    def __post_init__(self) -> None:
+        for name in ("max_files", "max_file_bytes", "max_total_bytes"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                raise ValueError(
+                    f"WorkspaceLimits.{name} must be a positive integer"
+                )
+
+
+def _run_git(path: Path, *args: str) -> subprocess.CompletedProcess:
+    """One read-only git query with system/global config disabled."""
+
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("GIT_")
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    try:
+        return subprocess.run(  # noqa: S603
+            [  # noqa: S607 - pinned argv, the system git
+                "git", "-C", str(path),
+                "-c", "core.autocrlf=false", "-c", "core.filemode=false",
+                *args,
+            ],
+            capture_output=True, text=True, timeout=30, env=environment,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CheckoutPreflightError(
+            "git-unavailable", str(exc)[:120],
+        ) from exc
+
+
+def _preflight_revision(
+    case: OpenHarmonyCase,
+    path: Path,
+    commit: str,
+    limits: WorkspaceLimits,
+    *,
+    resolve_fixed_commit: str = "",
+) -> RepositoryWorkspace:
+    from .workspace import RepositoryWorkspace
+
+    head = _run_git(path, "rev-parse", "HEAD")
+    if head.returncode != 0 or head.stdout.strip() != commit:
+        raise CheckoutPreflightError("head-mismatch", head.stdout.strip()[:40])
+    if resolve_fixed_commit:
+        verify = _run_git(
+            path, "rev-parse", "--verify",
+            f"{resolve_fixed_commit}^{{commit}}",
+        )
+        if verify.returncode != 0:
+            raise CheckoutPreflightError(
+                "fixed-commit-unresolvable", resolve_fixed_commit[:12],
+            )
+    if _run_git(path, "diff", "--quiet", "--no-ext-diff").returncode != 0:
+        raise CheckoutPreflightError("tracked-files-dirty")
+
+    workspace = RepositoryWorkspace(
+        path,
+        max_files=limits.max_files,
+        max_file_bytes=limits.max_file_bytes,
+        max_total_bytes=limits.max_total_bytes,
+    )
+    inventory = workspace.inventory()
+    if inventory.truncated:
+        raise CheckoutPreflightError("inventory-truncated")
+    inventory_paths = {item.path for item in inventory.files}
+
+    listing = _run_git(path, "ls-files", "-z")
+    if listing.returncode != 0:
+        raise CheckoutPreflightError("git-unavailable", "ls-files failed")
+    tracked = {
+        item for item in listing.stdout.split("\0") if item
+    }
+    allowed_untracked = {"compile_commands.json"} | {
+        entry.path for entry in case.dependency_overlay
+    }
+    for item in sorted(inventory_paths):
+        if item not in tracked and item not in allowed_untracked:
+            raise CheckoutPreflightError("untracked-not-allowed", item)
+
+    for item in (
+        *case.translation_units, *case.target_paths, *case.patch_paths,
+    ):
+        if item not in inventory_paths:
+            raise CheckoutPreflightError("missing-manifest-path", item)
+    if "compile_commands.json" not in inventory_paths:
+        raise CheckoutPreflightError("missing-compdb")
+
+    document = json.loads(
+        (path / "compile_commands.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(document, list):
+        raise CheckoutPreflightError("compdb-invalid", "not a list")
+    for unit in case.translation_units:
+        matching = [
+            entry for entry in document
+            if isinstance(entry, dict)
+            and str(entry.get("file") or "") in (unit, f"/{unit}")
+        ]
+        if not matching:
+            raise CheckoutPreflightError("compdb-missing-entry", unit)
+        if len(matching) > 1:
+            raise CheckoutPreflightError("compdb-ambiguous-entry", unit)
+        arguments = matching[0].get("arguments")
+        if not isinstance(arguments, list):
+            arguments = str(matching[0].get("command") or "").split()
+        _validate_compdb_arguments(path, unit, arguments)
+
+    for entry in case.dependency_overlay:
+        target = path / Path(entry.path)
+        try:
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise CheckoutPreflightError(
+                "overlay-digest-mismatch", entry.path,
+            ) from exc
+        if digest != entry.sha256:
+            raise CheckoutPreflightError(
+                "overlay-digest-mismatch", entry.path,
+            )
+    return workspace
+
+
+def _validate_compdb_arguments(
+    path: Path, unit: str, arguments: list,
+) -> None:
+    expect_value = False
+    for argument in arguments[1:]:
+        text = str(argument)
+        if expect_value:
+            _validate_include(path, unit, text)
+            expect_value = False
+            continue
+        if text.startswith("@"):
+            raise CheckoutPreflightError(
+                "compdb-response-file", text[:60],
+            )
+        if text in {"-I", "-isystem"}:
+            expect_value = True
+            continue
+        if text.startswith(("-I", "-isystem")):
+            _validate_include(path, unit, text.split(None, 1)[0][2:] or "/")
+        # -D and friends need no containment check.
+
+
+def _validate_include(path: Path, unit: str, value: str) -> None:
+    if not value or value.startswith(("/", "\\")) or ".." in value.split("/"):
+        raise CheckoutPreflightError(
+            "compdb-include-escape", f"{unit}: {value[:60]}",
+        )
+    if value == "_overlay" or value.startswith("_overlay/"):
+        return
+    if not (path / value).is_dir():
+        raise CheckoutPreflightError(
+            "compdb-include-missing", f"{unit}: {value[:60]}",
+        )
+
+
+def validate_case_checkouts(
+    case: OpenHarmonyCase,
+    import_policy: RepositoryImportPolicy,
+    workspace_limits: WorkspaceLimits,
+):
+    """Resolve and preflight the vulnerable and fixed read-only snapshots.
+
+    Read-only by construction: git is only asked to identify and diff, no
+    checkout, fetch or build ever runs, and every failure raises
+    :class:`CheckoutPreflightError` with a stable reason.
+    """
+    from .repository_import import RepositoryImportPolicy
+
+    if not isinstance(import_policy, RepositoryImportPolicy):
+        raise ValueError("import_policy must be a RepositoryImportPolicy")
+    if not isinstance(workspace_limits, WorkspaceLimits):
+        raise ValueError("workspace_limits must be a WorkspaceLimits")
+    # WorkspaceLimits validates its own fields on construction; the type
+    # check above plus that keeps zero/negative/bool budgets out.
+    try:
+        vulnerable_path = import_policy.resolve(case.vulnerable.repository_key)
+        fixed_path = import_policy.resolve(case.fixed.repository_key)
+    except ValueError as exc:
+        raise CheckoutPreflightError(
+            "repository-key-unresolvable", str(exc)[:120],
+        ) from exc
+    try:
+        duplicate = vulnerable_path.samefile(fixed_path)
+    except OSError:
+        duplicate = vulnerable_path == fixed_path
+    if duplicate:
+        raise CheckoutPreflightError("duplicate-checkout")
+
+    vulnerable = _preflight_revision(
+        case, vulnerable_path, case.vulnerable.commit, workspace_limits,
+        resolve_fixed_commit=case.fixed.commit,
+    )
+    fixed = _preflight_revision(
+        case, fixed_path, case.fixed.commit, workspace_limits,
+    )
+    return vulnerable, fixed
 
 
 def _fail(message: str) -> None:

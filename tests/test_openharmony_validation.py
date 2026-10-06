@@ -1,11 +1,15 @@
 """Contract tests for the frozen OpenHarmony pilot case manifest."""
 
+import contextlib
 import hashlib
+import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 try:  # pilot case contract (RED until Task 2 lands)
     from lima.openharmony_validation import (
@@ -977,6 +981,130 @@ class PilotCaseConsistencyTests(unittest.TestCase):
         self.assertEqual(
             (), match_cve(case.component, "other/file.c", None, entries)
         )
+
+
+# ------------------------------------------------------------- CLI tests
+
+
+class CliTests(unittest.TestCase):
+    """Argument validation, exit codes, secret redaction; no network."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+    CASE = ROOT / "evaluation_data" / "openharmony" / "pilot_case.json"
+
+    ENV = {
+        "LIMA_LLM_BASE_URL": "http://llm.example.invalid/v1",
+        "LIMA_LLM_API_KEY": "sk-CLIKEY123",
+        "LIMA_CXX_AGENT_MODEL": "test-model",
+    }
+
+    def setUp(self):
+        if load_openharmony_case is None:
+            self.fail("lima.openharmony_validation not implemented yet")
+        import importlib
+
+        self.cli = importlib.import_module(
+            "scripts.run_openharmony_validation"
+        )
+
+    def _argv(self, *extra):
+        return [
+            "--case", str(self.CASE),
+            "--repository-import-root", "D:/nowhere",
+            "--output", "unused",
+            *extra,
+        ]
+
+    def _run(self, argv, env=None):
+        stdout = io.StringIO()
+        environment = dict(os.environ)
+        environment.update(self.ENV if env is None else env)
+        with patch.dict(
+            os.environ, environment, clear=False,
+        ), contextlib.redirect_stdout(stdout):
+            code = self.cli.main(argv)
+        return code, stdout.getvalue()
+
+    def test_missing_required_argument_exits_three(self):
+        for argv in (
+            [],
+            ["--case", str(self.CASE)],
+            ["--case", str(self.CASE), "--repository-import-root", "D:/x"],
+            ["--output", "o"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(3, self._run(argv)[0])
+
+    def test_invalid_numbers_exit_three(self):
+        for bad in (
+            ["--timeout", "0"],
+            ["--timeout", "abc"],
+            ["--deadline-seconds", "-1"],
+            ["--parallelism", "0"],
+            ["--dialogue-rounds", "0"],
+            ["--max-files", "-5"],
+        ):
+            with self.subTest(flag=bad):
+                self.assertEqual(3, self._run(self._argv(*bad))[0])
+
+    def test_missing_provider_exits_three(self):
+        code, text = self._run(
+            self._argv(), env={"LIMA_LLM_BASE_URL": ""},
+        )
+        self.assertEqual(3, code)
+        self.assertIn("provider", text.lower())
+
+    def _fixture_result(self, status):
+        from lima.openharmony_validation import (
+            OpenHarmonyValidationResult,
+            RevisionValidation,
+            WorkspaceLimits,
+        )
+
+        case = load_openharmony_case(self.CASE)
+        empty = RevisionValidation(
+            revision=case.vulnerable, status=status, snapshot_hash="",
+            platform_outcome=None, replay_observations=(),
+            replay_elapsed_seconds=(), elapsed_seconds=0.0,
+            file_coverage=0.0, byte_coverage=0.0, budget_usage={},
+            diagnostics=(),
+        )
+        return OpenHarmonyValidationResult(
+            case=case,
+            workspace_limits=WorkspaceLimits(
+                max_files=1, max_file_bytes=1, max_total_bytes=1,
+            ),
+            status=status, reason_codes=(), vulnerable=empty, fixed=empty,
+            total_elapsed_seconds=0.0,
+        )
+
+    def test_business_exit_codes(self):
+        from lima.openharmony_validation import ValidationStatus
+
+        for status, expected in (
+            (ValidationStatus.PASSED, 0),
+            (ValidationStatus.FAILED, 2),
+            (ValidationStatus.INCONCLUSIVE, 3),
+        ):
+            with self.subTest(status=status):
+                with patch.object(
+                    self.cli, "run_openharmony_case",
+                    return_value=self._fixture_result(status),
+                ), patch.object(
+                    self.cli, "write_validation_bundle",
+                    return_value=Path("bundle"),
+                ):
+                    code, _ = self._run(self._argv())
+                self.assertEqual(expected, code)
+
+    def test_output_conflict_and_secret_redaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "bundle"
+            output.mkdir()
+            code, text = self._run(self._argv("--output", str(output)))
+            self.assertEqual(3, code)
+            self.assertIn("already exists", text)
+            self.assertNotIn("sk-CLIKEY123", text)
 
 
 if __name__ == "__main__":

@@ -1084,7 +1084,8 @@ class DiscoveryFallbackTests(unittest.TestCase):
                 "-I_overlay -Ilib -DXML_STATIC -x c " + unit,
                 contract,
             )
-            self.assertIn("never #include any .c file", contract)
+            self.assertIn("never #include the target unit itself", contract)
+            self.assertIn("sibling .c files", contract)
             context = build_hypothesis_context(
                 target_id="t", path=unit, line=5, fact_lines=(),
                 snippet="(code)", driver_contract=contract,

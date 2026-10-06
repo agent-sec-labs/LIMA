@@ -886,15 +886,20 @@ _MAX_BUNDLE_TEXT_CHARS: Final = 4096
 _OMISSION_NOTE: Final = "(omitted: {} chars)"
 
 
-def _sanitize_text(value: str) -> str:
-    """Redact key-shaped secrets and bound diagnostic text."""
+_MAX_REPORT_CHARS: Final = 512 * 1024
+
+
+def _sanitize_text(value: str, limit: int = _MAX_BUNDLE_TEXT_CHARS) -> str:
+    """Redact key-shaped secrets and bound one text field.
+
+    Diagnostics keep the small default bound; the rendered report uses a
+    much larger one so the dossier body never truncates the verification
+    appendix (a real dossier alone runs past the diagnostic budget).
+    """
 
     redacted = _SECRET_RE.sub("sk-***", value)
-    if len(redacted) > _MAX_BUNDLE_TEXT_CHARS:
-        return (
-            redacted[:_MAX_BUNDLE_TEXT_CHARS]
-            + _OMISSION_NOTE.format(len(redacted))
-        )
+    if len(redacted) > limit:
+        return redacted[:limit] + _OMISSION_NOTE.format(len(redacted))
     return redacted
 
 
@@ -1094,7 +1099,8 @@ def _report_markdown(
         "README.md` 的准入台账），本结果不能推导全仓检测率。\n"
     )
     return _sanitize_text(
-        "\n\n".join(text for _, text in dossiers) + appendix
+        "\n\n".join(text for _, text in dossiers) + appendix,
+        limit=_MAX_REPORT_CHARS,
     )
 
 

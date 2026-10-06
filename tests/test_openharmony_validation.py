@@ -922,6 +922,25 @@ class BundleWriterTests(unittest.TestCase):
                     item.name,
                 )
 
+    def test_large_report_keeps_the_verification_appendix(self):
+        # A real dossier body alone runs past the diagnostic text budget;
+        # the report must keep its larger bound so the 3+3 appendix and
+        # honesty sections never truncate away.
+        import dataclasses
+
+        padded_case = dataclasses.replace(
+            self.case, remediation=self.case.remediation + "填充" * 3000,
+        )
+        padded = dataclasses.replace(self.result, case=padded_case)
+        output = self.root / "big-report-bundle"
+        self.module.write_validation_bundle(
+            padded, output, git_root=self.fixture.vulnerable_repo,
+        )
+        report = (output / "report.md").read_text(encoding="utf-8")
+        self.assertGreater(len(report), 4096)
+        for marker in ("3+3", "真实性边界", padded_case.vulnerable.commit[:12]):
+            self.assertIn(marker, report)
+
     def test_oversized_diagnostics_are_omitted_not_corrupt(self):
         record = self.result.vulnerable
         from dataclasses import replace as _replace

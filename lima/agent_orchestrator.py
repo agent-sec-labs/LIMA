@@ -938,8 +938,12 @@ def _resolve_discovery_line(
     """
 
     if function:
+        # The prefix class must accept C++ definition forms the lead may
+        # name unqualified: ``Class::method(``, ``std::string Class::m(``,
+        # reference returns (``const T &m(``).  ':' for scope qualifiers,
+        # '&' for references; '<'/'>' for template return types.
         pattern = re.compile(
-            r"^[A-Za-z_][A-Za-z0-9_\s\*(,)]*?\b" + re.escape(function)
+            r"^[A-Za-z_][A-Za-z0-9_\s\*(,):&<>]*?\b" + re.escape(function)
             + r"\s*\(",
             re.MULTILINE,
         )

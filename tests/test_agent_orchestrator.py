@@ -979,6 +979,31 @@ class DiscoveryFallbackTests(unittest.TestCase):
             120, _discovery_snippet_lines("int f(void) {\n", 1, "f")
         )
 
+    def test_discovery_line_resolves_cpp_qualified_definitions(self):
+        from lima.agent_orchestrator import _resolve_discovery_line
+
+        # Real first-C++-battle failure (avrcp_ct_profile.cpp): every lead
+        # was dropped as unlocatable because the prefix class rejected the
+        # '::' scope qualifier of out-of-class method definitions.
+        source = (
+            "int Foo::Bar(int x);\n"                    # qualified prototype
+            "int Foo::Bar(int x)\n"                     # definition -> line 2
+            "{\n"
+            "    return x;\n"
+            "}\n"
+            "const std::string &Foo::Baz(void)\n"       # ref return -> line 6
+            "{\n"
+            "    static std::string s;\n"
+            "    return s;\n"
+            "}\n"
+            "std::vector<uint8_t> Foo::Qux(void)\n"     # template -> line 11
+            "{ return {}; }\n"
+        )
+        self.assertEqual(2, _resolve_discovery_line(source, "Bar", 0))
+        self.assertEqual(6, _resolve_discovery_line(source, "Baz", 0))
+        self.assertEqual(11, _resolve_discovery_line(source, "Qux", 0))
+        self.assertIsNone(_resolve_discovery_line(source, "Nopes", 0))
+
     def test_discovery_abstain_keeps_no_leads_outcome(self):
         transport = ScriptedPlatformTransport(
             discovery=[discovery_json([])],

@@ -20,6 +20,7 @@ MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_PAGES = 100
 MAX_JOBS = 10_000
+DEFAULT_REQUIRED_JOBS = ("merge-gate",)
 _CONCLUSIONS = frozenset({
     "success", "failure", "neutral", "cancelled", "skipped", "timed_out",
     "action_required", "stale", "startup_failure",
@@ -264,12 +265,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--event", required=True)
     parser.add_argument("--attempt", required=True, type=int)
-    parser.add_argument("--required-job", required=True, action="append")
+    parser.add_argument("--required-job", action="append",
+                        help="Complete required-name list; default: LIMA's aggregate merge-gate")
     parser.add_argument("--output", type=Path)
     try:
         args = parser.parse_args(argv)
         expected = ExpectedRun(args.repository, args.run_id, args.head_sha, args.event,
-                               args.attempt, tuple(args.required_job))
+                               args.attempt, tuple(args.required_job or DEFAULT_REQUIRED_JOBS))
         _validate_expected(expected)
         if len(args.jobs) > MAX_PAGES:
             raise EvidenceError("invalid-page-count", "jobs")

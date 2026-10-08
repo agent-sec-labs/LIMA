@@ -239,6 +239,18 @@ class CliTests(unittest.TestCase):
         self.jobs.write_text(json.dumps(pages[0]), encoding="utf-8")
         self.assertEqual(self.invoke()[0], 3)
 
+    def test_default_aggregate_gate_is_required_even_without_name_arguments(self):
+        args = self.args[:-4]
+        code, stdout, _ = self.invoke(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout)["required_jobs"], ["merge-gate"])
+        run, pages, _ = fixtures(("unit",))
+        self.run.write_text(json.dumps(run), encoding="utf-8")
+        self.jobs.write_text(json.dumps(pages[0]), encoding="utf-8")
+        code, stdout, _ = self.invoke(args)
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(stdout)["missing_required_jobs"], ["merge-gate"])
+
     def test_total_input_budget_is_enforced(self):
         with patch.object(verifier, "MAX_TOTAL_BYTES", self.run.stat().st_size):
             code, stdout, _ = self.invoke()

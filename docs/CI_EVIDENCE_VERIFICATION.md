@@ -1,78 +1,68 @@
-# 离线 CI 证据校验
+# CI 证据采集与离线校验
 
-`scripts/verify_ci_evidence.py` 将 GitHub Actions 的同一 run/attempt 原始 JSON 转为可复核摘要。它核对 repository、run id、head SHA、event、attempt，检查分页与必需任务，再计算成功、失败、未完成数量。工具只读本地输入，使用 Python 3.11+ 标准库，不调用 GitHub、模型或项目服务，也不修改工作流。
+用途：PR 交付或合并后复核时，保存指定 GitHub Actions attempt 的原始记录，自动核对运行身份、完整分页和任务结果，避免漏计或混用证据。来源是 [PR #265](https://github.com/agent-sec-labs/LIMA/pull/265) 的 CI 记录错误；这是开发辅助工具，不是 #264 的真实模型验收或漏洞分析能力。
 
-设计及验收映射见 [AUX-CI-EVIDENCE](implementation/AUX_CI_EVIDENCE_2026-10-08.md)。
+Python 3.11+，仅标准库，无需 GitHub CLI。从仓库根目录执行。
 
-## 准备证据
+## 一条命令采集
 
-使用 GitHub REST 的指定 attempt 端点保存响应为 UTF-8 JSON：
+先从交付提交和 GitHub Actions 页面独立确认 run id、attempt、完整 head SHA 和 event。父目录须已存在，证据目录须为新目录。下面是 PR265 的历史成功记录，可直接执行：
+
+```powershell
+python scripts/collect_ci_evidence.py --run-id 37721994494 --attempt 2 --head-sha a1666f06282ed15847518c2653ddd6fac26dbcb3 --event pull_request --evidence-dir output/ci-pr265-attempt2
+```
+
+新任务替换身份和目录；main 合并后的运行通常使用 `--event push` 和实际 merge SHA，不能沿用 PR head。`--repository` 默认为 `agent-sec-labs/LIMA`，可指定公开 fork。
+
+采集器只向 api.github.com 发出匿名 HTTPS GET，使用指定 attempt 的 run/jobs 端点，自动获取全部页，并核对 `.github/workflows/ci.yml` 路径。它不读取凭据、跟随重定向、重跑 CI 或修改 GitHub。每请求超时最多 15 秒，整体采集期限 120 秒；超时/网络失败返回 invalid，不自动重试。仅支持公开资源，受匿名 API 限流影响。403/404 等返回固定 HTTP 错误码；可稍后换新目录重试，或自行导出后离线检查。
+
+目录包含 `run.json`、`jobs-1.json`（多页为 jobs-2.json 等）和 `report.json`。响应按原始字节保存。已存在目录拒绝执行；中途失败可能留下部分原始文件，但不会生成成功报告，保留它们排查并改用新目录。
+
+## 离线复算
+
+采集后可断网执行同一身份校验：
+
+```powershell
+python scripts/verify_ci_evidence.py --run output/ci-pr265-attempt2/run.json --jobs output/ci-pr265-attempt2/jobs-1.json --repository agent-sec-labs/LIMA --run-id 37721994494 --attempt 2 --head-sha a1666f06282ed15847518c2653ddd6fac26dbcb3 --event pull_request
+```
+
+多页时重复 `--jobs`，必须传齐。可加 `--output output/ci-replay.json`；仅创建新文件，拒绝覆盖输入或旧输出。`source_sha256` 可复算原始输入字节。
+
+也可自行导出 UTF-8 JSON：
 
 ```text
 GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}
 GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs?per_page=100&page=1
 ```
 
-任务超过一页时继续获取同一 attempt 的后续页面，并通过多个 `--jobs` 参数传入。工具要求各页 `total_count` 一致、任务 ID 和名称唯一、合并条数等于总数。不要用默认 latest jobs 端点混合不同 attempt，也不要把 GitHub CLI 的简化 view 字段替代 REST 对象。采集期间状态变化导致总数冲突时，重新采集一个一致快照。
+继续导出后续页；不要以默认 latest jobs 或 CLI 简化字段替代原始 attempt 对象。采集期间变化造成页间总数冲突时重新采集。官方 API：[run attempt](https://docs.github.com/en/rest/actions/workflow-runs#get-a-workflow-run-attempt)、[attempt jobs](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt)。
 
-官方说明：[workflow run attempt](https://docs.github.com/en/rest/actions/workflow-runs#get-a-workflow-run-attempt)、[attempt jobs 与分页](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt)。
-
-Expected head SHA、event、run id、attempt 应由当前交付对象和运行身份独立确定。必需 job 名称应从当前提交的工作流展开矩阵确定，不从待检查的 jobs 列表反向生成，也不能只列出其中已成功的任务。
-
-## 使用
-
-从仓库根目录执行。下面名称对应 main@caed1b6 的 12 项工程任务；将占位符替换为本次明确的运行身份。后续工作流发生变化时要调整必需名称，工具不硬编码这个列表。
-
-```powershell
-python scripts/verify_ci_evidence.py `
-  --run output/ci-run-attempt.json `
-  --jobs output/ci-jobs-page-1.json `
-  --repository agent-sec-labs/LIMA `
-  --run-id <run-id> --head-sha <40位小写SHA> `
-  --event pull_request --attempt <attempt> `
-  --required-job quality-contracts `
-  --required-job unit-ubuntu-latest-py3.11 `
-  --required-job unit-ubuntu-latest-py3.12 `
-  --required-job unit-windows-latest-py3.11 `
-  --required-job unit-windows-latest-py3.12 `
-  --required-job repair-constraints `
-  --required-job container-read-only `
-  --required-job security-baseline `
-  --required-job frontend-tests `
-  --required-job frontend-e2e `
-  --required-job cxx-sidecar-integration `
-  --required-job merge-gate `
-  --output output/ci-snapshot-report.json
-```
-
-标准输出为 JSON；`--output` 可选，仅创建新文件，父目录须已存在。输出与任一输入解析到同一路径、输出已存在（含符号链接）或写入失败时退出 2，保留已有证据。无效输入只在标准输出给出固定类别和结构位置，不把原始值、异常文本、路径或未知字段转抄到诊断。报告中仅展示经过校验的运行/任务元数据；不载入或输出任务日志、steps、凭据或源码。
-
-每文件最大 8 MiB、全部输入共 32 MiB、最多 100 页/10000 任务。JSON 重复键、NaN/Infinity、非法 UTF-8、过深 JSON 和类型错误均拒绝，不用默认值修补缺失身份。
-
-## 解释结果
+## 结果与边界
 
 | decision / exit | 含义 |
 |---|---|
-| pass / 0 | 当前提供的完整快照中，必需任务齐全，所有观测任务及 run 均成功 |
-| fail / 1 | 快照完整且已结束，但 run 或至少一个任务非 success |
-| invalid / 2 | 绑定、格式、状态、唯一性、预算、参数或 IO 校验失败 |
+| pass / 0 | 完整快照中，必需任务齐全，所有观察任务及 run 均成功 |
+| fail / 1 | 快照完整且已结束，run 或至少一个任务非 success |
+| invalid / 2 | 身份、格式、状态、唯一性、预算、参数、网络或 IO 校验失败 |
 | incomplete / 3 | 缺页、缺必需任务或 run/job 未结束；可同时含已知失败 |
 
-`success + failed + pending == total`。skipped、neutral、cancelled、timed_out 等非 success 的完成结果全部计入 failed。额外观测到的任务也必须成功，不能因未列入 required jobs 而隐藏其失败。任何 job 不能省略 `run_attempt` 或借用 run 字段补值。重复任务名称拒绝，避免将同名不同任务当作满足一个必需 gate。
+默认必需名称是现有 `merge-gate` 聚合任务，沿用它对底层工程任务的要求，不另建门禁。所有返回任务均须成功，额外任务失败也不能忽略。需要逐名约束时，两种 CLI 均支持重复 `--required-job`，提供**完整名单并包含 merge-gate**；名单来自待验工作流，不从观察到的成功任务反推。
 
-只重跑失败任务的 attempt 可能不包含之前成功的必需任务；工具会如实返回 incomplete，不跨 attempt 拼接“全绿”。若需要采纳旧成功证据，必须另有审查过的复用规则；本版本没有这种规则。
+校验 repository/run id/head SHA/event/attempt；每个 job 的 run_id/run_attempt/head_sha/run_url 必须匹配；每页 total_count 一致、ID/名称不重复、合并条数等于总数。`success + failed + pending == total`；skipped、neutral、cancelled、timed_out 等完成但非 success 的结果均计入 failed。JSON 重复键、NaN/Infinity、非法 UTF-8、缺失身份均拒绝。每输入文件最多 8 MiB，共 32 MiB，最多 100 页/10000 任务。
 
-`source_sha256` 记录本次本地输入文件的原始字节摘要和长度，用于复算；它不认证文件来自 GitHub。摘要记录的是保存后的文件字节，JSON 重排或空白变化会改变摘要。
+失败任务重跑可能返回此前成功任务的继承记录。若由**同一指定 attempt 端点**返回，且身份明确绑定本 attempt，可正常纳入快照；这不代表所有任务都重新执行。工具不计算实际重跑数量，也不根据 head SHA 推断 checkout 的 synthetic merge SHA。手工拼入其他 attempt 的记录会被拒绝。
 
-pass 只表达离线 CI 快照完整成功，不授予合并许可。它不验证当前远端 head、新鲜度、branch rules、review、对话解决、实际 checkout 的合成 merge SHA/base 组合、post-merge 或真实模型能力。run 的 head SHA 保留为 API 身份，不能当作实际测试 checkout SHA；checkout lineage 需要另读日志并单独审查。
+PR265 真实回放：attempt1 → fail，12=10 success+2 failed（frontend-tests/merge-gate）；attempt2 → pass，12 success。这是历史 run 的两个快照，不能据此宣称新分支的 CI 已通过。
 
-## 验证开发修改
+pass 仅为 CI 快照结论，不认证手工输入来源，不判断远端 head 新鲜度、branch rules、review、合并资格、checkout/base 拓扑、真实模型能力或产品 Issue 完成度。诊断不转抄原始值、路径或异常文本；摘要不包含 steps/日志。完整原始 JSON 留作本地复算，无须提交到 PR。
+
+## 修改后的验证
 
 ```powershell
-python -B -m unittest -v tests.test_ci_evidence tests.test_ci_contract
-python -m ruff check scripts/verify_ci_evidence.py tests/test_ci_evidence.py
-python -m bandit -q scripts/verify_ci_evidence.py
+python -B -m unittest -v tests.test_ci_evidence tests.test_ci_evidence_collection tests.test_ci_contract
+python -m ruff check scripts/verify_ci_evidence.py scripts/collect_ci_evidence.py tests/test_ci_evidence.py tests/test_ci_evidence_collection.py
+python -m bandit -q scripts/verify_ci_evidence.py scripts/collect_ci_evidence.py
 git diff --check
 ```
 
-沙箱若限制系统临时目录写入，可在测试进程内把 `tempfile.tempdir` 指向本任务可写临时目录；不修改产品或测试断言。
+普通测试 mock 网络，不需要 GitHub/模型凭据；现有完整 unittest CI 自动发现这些测试。设计及验收映射见 [实现记录](implementation/AUX_CI_EVIDENCE_2026-10-08.md)。

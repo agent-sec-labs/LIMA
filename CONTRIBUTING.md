@@ -61,6 +61,13 @@ one approving review, Code Owner review, resolved conversations, and the
 `merge-gate` status check. Do not require individual matrix names: the stable
 aggregate prevents branch rules from breaking when the compatibility matrix changes.
 
+For a reproducible CI handoff, use
+[`scripts/collect_ci_evidence.py`](docs/CI_EVIDENCE_VERIFICATION.md) to save and
+validate a specified public workflow attempt in one command. It retains raw JSON
+for offline replay, checks the existing `merge-gate`, and counts all observed jobs.
+Its report describes a CI snapshot; review and merge decisions still use the
+current GitHub state and project acceptance criteria.
+
 Direct pushes, force pushes, and branch deletion on `main` are not part of the
 project workflow.
 

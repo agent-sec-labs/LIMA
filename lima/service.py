@@ -68,6 +68,16 @@ from .repository_triage import (
     RepositorySemanticTriage,
     RepositorySemanticTriageError,
 )
+from .repository_investigation import (
+    FindingInvestigator,
+    InvestigationBudget,
+    InvestigationError,
+    InvestigationLLMClient,
+    InvestigationSnapshot,
+    build_investigation_targets,
+    build_module_targets,
+    merge_investigation_into_report,
+)
 from .experiments import ExperimentRunner, LLM_MODES
 from .real_world_evaluation import (
     LLMSecurityTriageClient,
@@ -325,6 +335,7 @@ class ReviewService:
             cxx_uaf_llm_factory=cxx_uaf_llm_factory,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
+        self.repository_investigation = self._build_repository_investigation()
         self.experiment_runner = ExperimentRunner(
             self.store,
             settings.experiment_dataset_root,
@@ -396,6 +407,37 @@ class ReviewService:
             client,
             mode=mode,
             max_candidates=self.settings.repository_scan_llm_max_candidates,
+        )
+
+    def _build_repository_investigation(self):
+        mode = self.settings.repository_investigation_mode
+        if mode == "off":
+            return None
+        if not self.llm_config:
+            if mode == "required":
+                raise ValueError(
+                    "required repository investigation needs an LLM provider"
+                )
+            return None
+        client = InvestigationLLMClient(
+            base_url=str(self.llm_config["base_url"]),
+            api_key=str(self.llm_config["api_key"]),
+            model=str(self.llm_config["model"]),
+            provider=str(self.llm_config["provider"]),
+            extra_headers=dict(self.llm_config.get("headers") or {}),
+            timeout_seconds=self.settings.repository_investigation_timeout_seconds,
+            max_completion_tokens=(
+                self.settings.repository_investigation_max_completion_tokens
+            ),
+            budget=InvestigationBudget(
+                max_requests=self.settings.repository_investigation_max_requests,
+            ),
+        )
+        return FindingInvestigator(
+            client,
+            batch_size=self.settings.repository_investigation_batch_size,
+            max_steps=self.settings.repository_investigation_max_steps,
+            timeout_seconds=self.settings.repository_investigation_timeout_seconds,
         )
 
     def _build_experiment_evaluator(self, mode: str) -> RealWorldSecurityEvaluator:
@@ -901,12 +943,14 @@ class ReviewService:
     def enqueue_repository_scan(
         self, repository_key: str, tenant_id: str = "default",
         agent_detection: bool | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> Dict[str, Any]:
         key = self.repository_import.normalize_key(repository_key)
         self.repository_import.resolve(key)
         return self._enqueue_scan_task(
             RepositorySource.local_import(key), tenant_id, label=key,
             agent_detection=agent_detection,
+            investigate_paths=investigate_paths,
         )
 
     def _ensure_repository_cache(self) -> RepositoryCache:
@@ -1032,11 +1076,16 @@ class ReviewService:
     def _enqueue_scan_task(
         self, normalized: RepositorySource, tenant_id: str, label: str = "",
         agent_detection: bool | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         label = label or normalized.canonical_name or normalized.repository_key
         is_local = normalized.type == LOCAL_IMPORT_SOURCE_TYPE
         task_id = str(uuid.uuid4())
         scan_source = normalized.to_dict()
+        investigate_paths = [
+            str(item).strip().strip("/\\") for item in (investigate_paths or [])
+            if str(item).strip()
+        ]
         # 模式在入队时解析一次并快照：队列重试与 worker 都用这份快照，
         # 不重新套用入队之后变更的全局设置（方案 §3.2）。
         effective_cxx_agent_mode = self._resolve_cxx_agent_mode(agent_detection)
@@ -1049,6 +1098,8 @@ class ReviewService:
             "cxx_memory_mode": self.settings.cxx_memory_mode,
             "agent_detection": agent_detection,
             "effective_cxx_agent_mode": effective_cxx_agent_mode,
+            "investigation_mode": self.settings.repository_investigation_mode,
+            "investigate_paths": investigate_paths,
         }
         message: dict[str, Any] = {
             "task_id": task_id,
@@ -1056,6 +1107,7 @@ class ReviewService:
             "scan_source": scan_source,
             "tenant_id": tenant_id,
             "effective_cxx_agent_mode": effective_cxx_agent_mode,
+            "investigate_paths": investigate_paths,
         }
         if is_local:
             task_input["repository_key"] = normalized.repository_key
@@ -1113,6 +1165,7 @@ class ReviewService:
         self, task_id: str, repository_key: str, tenant_id: str,
         scan_source: dict[str, Any] | None = None,
         cxx_agent_mode: str | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> None:
         tracker = self._scan_progress_tracker(task_id)
         try:
@@ -1136,6 +1189,7 @@ class ReviewService:
                 task_id, root, tenant_id, repository_key,
                 {"repository_key": repository_key}, tracker,
                 cxx_agent_mode=cxx_agent_mode,
+                investigate_paths=investigate_paths,
             )
         except Exception as exc:
             self._record_task_failure(task_id, exc, tracker)
@@ -1145,6 +1199,7 @@ class ReviewService:
         self, task_id: str, scan_source: dict[str, Any], tenant_id: str,
         tracker: ScanProgressTracker,
         cxx_agent_mode: str | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> None:
         # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
         source = parse_repository_source(scan_source)
@@ -1178,6 +1233,7 @@ class ReviewService:
                 tracker,
                 materializer_warnings=materialized.get("warnings") or [],
                 cxx_agent_mode=cxx_agent_mode,
+                investigate_paths=investigate_paths,
             )
 
     def _execute_repository_scan(
@@ -1186,6 +1242,7 @@ class ReviewService:
         progress: ScanProgressTracker | None = None,
         materializer_warnings: list[dict[str, Any]] | None = None,
         cxx_agent_mode: str | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> None:
         workspace = RepositoryWorkspace(
             root,
@@ -1276,6 +1333,54 @@ class ReviewService:
                 ),
                 "secret_persisted": False,
             }
+        # Model-driven investigation (the 2026-10-03 mainline): every
+        # scanner finding plus any requested module scopes goes through the
+        # bounded tool loop; verdicts re-bind to the original fingerprints
+        # and fold back into the adjudication/summary the user sees.
+        if self.repository_investigation is not None:
+            if progress is not None:
+                progress.pipeline_event(
+                    SEMANTIC_TRIAGE, "正在模型调查全部候选与指定模块"
+                )
+            try:
+                with metrics.timer("repository_investigation_duration"):
+                    snapshot = InvestigationSnapshot(
+                        root,
+                        max_files=self.settings.repository_scan_max_files,
+                        max_file_bytes=self.settings.repository_scan_max_file_bytes,
+                        max_total_bytes=self.settings.repository_scan_max_total_bytes,
+                    )
+                    targets = build_investigation_targets(
+                        result.report.findings, snapshot
+                    )
+                    module_targets = build_module_targets(
+                        snapshot, investigate_paths or []
+                    )
+                    investigation_outcome = self.repository_investigation.investigate(
+                        [*targets, *module_targets], snapshot,
+                    )
+            except InvestigationError as exc:
+                metrics.inc("repository_investigation_failed_total")
+                if self.settings.repository_investigation_mode == "required":
+                    raise PermanentTaskError(str(exc)) from exc
+                result.report.collaboration["investigation"] = {
+                    "mode": self.settings.repository_investigation_mode,
+                    "status": "failed-open",
+                    "detail": str(exc)[:300],
+                    "secret_persisted": False,
+                }
+            else:
+                merge_investigation_into_report(
+                    result.report, investigation_outcome,
+                    result.report.findings,
+                )
+                metrics.inc("repository_investigation_completed_total")
+        elif self.settings.repository_investigation_mode != "off":
+            result.report.collaboration["investigation"] = {
+                "mode": self.settings.repository_investigation_mode,
+                "status": "llm-not-configured",
+                "secret_persisted": False,
+            }
         # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
         warnings_by_reason = coverage_warning_counts(result.inventory)
         for warning in materializer_warnings or []:
@@ -1341,6 +1446,9 @@ class ReviewService:
             scan_source = payload.get("scan_source") or (
                 task.get("input") or {}
             ).get("scan_source")
+            investigate_paths = payload.get("investigate_paths") or (
+                task.get("input") or {}
+            ).get("investigate_paths") or []
             # 任务级模式快照优先取队列消息（重试沿用同一份），缺失时回退
             # 持久化 task input；两者都没有（旧任务）则用 scanner 默认。
             effective_mode = payload.get("effective_cxx_agent_mode") or (
@@ -1354,6 +1462,7 @@ class ReviewService:
                     tenant_id,
                     scan_source,
                     cxx_agent_mode=effective_mode,
+                    investigate_paths=investigate_paths,
                 )
             else:
                 self._process_repository_scan(
@@ -1362,6 +1471,7 @@ class ReviewService:
                     or (task.get("input") or {}).get("repository_key", ""),
                     tenant_id,
                     cxx_agent_mode=effective_mode,
+                    investigate_paths=investigate_paths,
                 )
             return
         diff = self.store.get_task_payload(task_id)

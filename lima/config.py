@@ -204,6 +204,15 @@ class Settings:
     repository_scan_llm_max_candidates: int = 6
     repository_scan_llm_max_context_chars: int = 36_000
     repository_scan_llm_max_completion_tokens: int = 3_000
+    # Model-driven investigation of every scanner finding (the 2026-10-03
+    # Python-agent mainline).  Off by default; enabling routes every finding
+    # plus any requested module scopes through the bounded tool loop.
+    repository_investigation_mode: str = "off"
+    repository_investigation_batch_size: int = 6
+    repository_investigation_max_steps: int = 5
+    repository_investigation_timeout_seconds: int = 120
+    repository_investigation_max_requests: int = 40
+    repository_investigation_max_completion_tokens: int = 3_000
 
     def effective_cxx_agent_model(self) -> str:
         """The C/C++ agent model, falling back to the shared LLM model."""
@@ -549,5 +558,23 @@ class Settings:
             ),
             repository_scan_llm_max_completion_tokens=_int(
                 "LIMA_REPOSITORY_SCAN_LLM_MAX_COMPLETION_TOKENS", 3_000
+            ),
+            repository_investigation_mode=os.getenv(
+                "LIMA_REPOSITORY_INVESTIGATION_MODE", "off"
+            ).strip().lower(),
+            repository_investigation_batch_size=_int(
+                "LIMA_REPOSITORY_INVESTIGATION_BATCH_SIZE", 6
+            ),
+            repository_investigation_max_steps=_int(
+                "LIMA_REPOSITORY_INVESTIGATION_MAX_STEPS", 5
+            ),
+            repository_investigation_timeout_seconds=_int(
+                "LIMA_REPOSITORY_INVESTIGATION_TIMEOUT_SECONDS", 120
+            ),
+            repository_investigation_max_requests=_int(
+                "LIMA_REPOSITORY_INVESTIGATION_MAX_REQUESTS", 40
+            ),
+            repository_investigation_max_completion_tokens=_int(
+                "LIMA_REPOSITORY_INVESTIGATION_MAX_COMPLETION_TOKENS", 3_000
             ),
         )

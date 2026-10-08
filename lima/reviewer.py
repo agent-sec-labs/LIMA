@@ -26,7 +26,7 @@ class LLMResponseTooLarge(RuntimeError):
     """The chat completion body exceeded the caller-provided byte limit."""
 
 
-def post_chat_completion_text(
+def _post_chat_completion_document(
     provider: str,
     base_url: str,
     api_key: str,
@@ -34,15 +34,15 @@ def post_chat_completion_text(
     timeout: int,
     extra_headers: dict[str, str] | None = None,
     max_bytes: int | None = None,
-) -> str:
-    """POST one chat completion and return the raw choices content text.
+) -> dict[str, Any]:
+    """POST one chat completion and return the full parsed response body.
 
-    Shared transport for ``OpenAICompatibleReviewer`` and the strict C/C++
-    LLM client (stdlib ``urllib`` only). ``max_bytes`` bounds the response
-    body the same way as ``GitHubClient._request``: ``None`` keeps the old
-    unbounded behavior, otherwise one byte past the bound is read so an
-    oversized body is detected before decoding. Raises ``LLMTransportError``
-    for HTTP/timeout/connection failures, ``LLMResponseTooLarge`` for an
+    Shared transport for the wrappers below (stdlib ``urllib`` only).
+    ``max_bytes`` bounds the response body the same way as
+    ``GitHubClient._request``: ``None`` keeps the old unbounded behavior,
+    otherwise one byte past the bound is read so an oversized body is
+    detected before decoding. Raises ``LLMTransportError`` for
+    HTTP/timeout/connection failures, ``LLMResponseTooLarge`` for an
     oversized body and ``LLMResponseFormatError`` when the choices content
     is missing; all are :class:`RuntimeError` subclasses. The API key never
     appears in a raised message.
@@ -97,7 +97,28 @@ def post_chat_completion_text(
         raise LLMResponseFormatError(
             f"{provider} returned an invalid JSON review response"
         )
-    return content
+    if not isinstance(parsed, dict):
+        raise LLMResponseFormatError(
+            f"{provider} returned a non-object JSON response"
+        )
+    return parsed
+
+
+def post_chat_completion_text(
+    provider: str,
+    base_url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int,
+    extra_headers: dict[str, str] | None = None,
+    max_bytes: int | None = None,
+) -> str:
+    """POST one chat completion and return the raw choices content text."""
+    document = _post_chat_completion_document(
+        provider, base_url, api_key, payload, timeout,
+        extra_headers=extra_headers, max_bytes=max_bytes,
+    )
+    return document["choices"][0]["message"]["content"]
 
 
 def post_chat_completion(
@@ -123,6 +144,44 @@ def post_chat_completion(
     if not isinstance(result, dict):
         raise LLMResponseFormatError("%s returned a non-object JSON response" % provider)
     return result
+
+
+def post_chat_completion_full(
+    provider: str,
+    base_url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int,
+    extra_headers: dict[str, str] | None = None,
+    max_bytes: int | None = None,
+) -> Dict[str, Any]:
+    """POST one chat completion and return content plus usage metadata.
+
+    Same transport, errors and credential handling as
+    :func:`post_chat_completion_text`; additionally surfaces ``usage``
+    (token counts when the provider reports them) and ``finish_reason``
+    so bounded agent loops can account for every request they send.
+    """
+    document = _post_chat_completion_document(
+        provider, base_url, api_key, payload, timeout,
+        extra_headers=extra_headers, max_bytes=max_bytes,
+    )
+    raw_usage = document.get("usage")
+    usage: Dict[str, Any] = {}
+    if isinstance(raw_usage, dict):
+        usage = {
+            key: int(raw_usage.get(key, 0) or 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+    try:
+        finish_reason = str(document["choices"][0].get("finish_reason", ""))
+    except (KeyError, IndexError, TypeError):
+        finish_reason = ""
+    return {
+        "content": document["choices"][0]["message"]["content"],
+        "usage": usage,
+        "finish_reason": finish_reason,
+    }
 
 
 class Reviewer(ABC):

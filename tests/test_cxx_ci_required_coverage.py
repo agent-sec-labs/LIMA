@@ -16,7 +16,7 @@ class RequiredCoverageTests(unittest.TestCase):
             unittest.runner._WritelnDecorator(io.StringIO()), True, 2
         )
         result.testsRun = len(runner.EXPECTED_METHODS)
-        result.passed_methods = set(runner.EXPECTED_METHODS)
+        result.passed_test_ids = set(runner.EXPECTED_TEST_IDS)
         return result
 
     def test_all_expected_passes_are_accepted(self):
@@ -30,8 +30,10 @@ class RequiredCoverageTests(unittest.TestCase):
 
     def test_missing_or_unexpected_test_is_rejected(self):
         result = self.result()
-        result.passed_methods.remove("test_container_timeout_kills_run")
-        result.passed_methods.add("unrelated_test")
+        result.passed_test_ids.remove(
+            "tests.test_cxx_analyzer.ReproContainerTests.test_container_timeout_kills_run"
+        )
+        result.passed_test_ids.add("tests.unrelated.OtherTests.test_container_timeout_kills_run")
         self.assertFalse(runner.required_execution_succeeded(result))
         result = self.result()
         result.testsRun -= 1
@@ -81,6 +83,7 @@ class RequiredCoverageTests(unittest.TestCase):
             self.assertEqual(mounted.root, root / "build-backed/source")
             self.assertEqual(mounted.build_root, mounted.root / "build")
             self.assertEqual(mounted.checked, [mounted.root])
+            self.assertEqual(adapter.used_labels, {"build-backed"})
             snapshot.checked.clear()
             snapshot.corrupt = True
             with patch.object(trust, "_longest_mount_readonly", side_effect=[True, False]):

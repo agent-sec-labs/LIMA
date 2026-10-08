@@ -22,28 +22,33 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 SNAPSHOTS = Path("/work/snapshots")
-TEST_CLASSES = (
-    "SourceScanContainerTests",
-    "BuildScanContainerTests",
-    "SanitizerContainerTests",
-    "ReproContainerTests",
-    "TrustedGenerationContainerTests",
-    "UafFactExtractionContainerTests",
-)
-EXPECTED_METHODS = frozenset(
-    {
+REQUIRED_TESTS = {
+    "SourceScanContainerTests": (
         "test_fixture_manifest_is_complete_and_semgrep_marks_only_candidates",
+    ),
+    "BuildScanContainerTests": (
         "test_build_backed_fixture_coverage_lists_every_uncovered_identity",
-        "test_asan_fixture_subset_confirms_vulnerable_c_and_not_safe_c",
+    ),
+    "SanitizerContainerTests": ("test_asan_fixture_subset_confirms_vulnerable_c_and_not_safe_c",),
+    "ReproContainerTests": (
         "test_container_clean_driver_no_report",
         "test_container_compile_failure_returns_diagnostics",
         "test_container_timeout_kills_run",
         "test_container_uaf_driver_hits_report",
-        "test_default_container_runs_no_cmake",
+    ),
+    "TrustedGenerationContainerTests": ("test_default_container_runs_no_cmake",),
+    "UafFactExtractionContainerTests": (
         "test_container_loop_is_cfg_gap",
         "test_container_malloc_free_member_facts",
         "test_container_new_delete_deref_facts",
-    }
+    ),
+}
+TEST_CLASSES = tuple(REQUIRED_TESTS)
+EXPECTED_METHODS = frozenset(method for methods in REQUIRED_TESTS.values() for method in methods)
+EXPECTED_TEST_IDS = frozenset(
+    "tests.test_cxx_analyzer." + cls + "." + method
+    for cls, methods in REQUIRED_TESTS.items()
+    for method in methods
 )
 
 
@@ -129,21 +134,23 @@ def readonly_snapshot_adapter(original, root: Path, manifest: dict):
             # The original test-generated inventory checks every staged byte.
             # It is not replaced by an unverified manifest's claimed inventory.
             mounted.verify_inventory()
+            prepare.used_labels.add(label)
             return mounted
         except BaseException:
             snapshot.cleanup()
             raise
 
+    prepare.used_labels = set()
     return prepare
 
 
 class RequiredExecutionResult(unittest.TextTestResult):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.passed_methods = set()
+        self.passed_test_ids = set()
 
     def addSuccess(self, test):
-        self.passed_methods.add(test.id().rsplit(".", 1)[-1])
+        self.passed_test_ids.add(test.id())
         super().addSuccess(test)
 
 
@@ -152,7 +159,7 @@ def required_execution_succeeded(result) -> bool:
         result.wasSuccessful()
         and not result.skipped
         and result.testsRun == len(EXPECTED_METHODS)
-        and result.passed_methods == EXPECTED_METHODS
+        and result.passed_test_ids == EXPECTED_TEST_IDS
     )
 
 
@@ -180,13 +187,17 @@ def run_required_tests(root: Path = SNAPSHOTS) -> bool:
         result = unittest.TextTestRunner(verbosity=2, resultclass=RequiredExecutionResult).run(
             suite
         )
-    success = required_execution_succeeded(result)
+    success = required_execution_succeeded(result) and adapter.used_labels == {
+        "build-backed",
+        "asan",
+    }
     print(
         json.dumps(
             {
                 "required_tests": len(EXPECTED_METHODS),
                 "run": result.testsRun,
-                "passed": len(result.passed_methods),
+                "passed": len(result.passed_test_ids),
+                "readonly_fixtures": sorted(adapter.used_labels),
                 "skipped": len(result.skipped),
                 "result": "PASS" if success else "FAIL",
             }

@@ -4,7 +4,7 @@
 
 Source Finding 是 [PR #265](https://github.com/agent-sec-labs/LIMA/pull/265) 交付中的人工记录错误：run37721994494/attempt1 应为 pull_request、12 项（10 成功+2 失败），且须区分 attempt2 的继承成功与实际重跑。没有对应的产品 Source Issue；本切片减少维护者重复核对 API 的工作，不认领 #264 的能力验收，不改变 Audit → Mining → Verified Repair 目标。
 
-2026-10-08 用户先授权隔离辅助开发，随后要求补齐实际入口并提交独立 PR。独立 codex/aux-ci-evidence-2026-10-08 分支从 caed1b6 开始，交付前整合 PR265 已合并的 main@7956e360。既有 lima/、frontend/、.github/、依赖和冻结测试只读；只新增两脚本、两测试、两说明，在 CONTRIBUTING 链接入口。
+2026-10-08 用户先授权隔离辅助开发，随后要求补齐实际入口并提交独立 PR。独立 codex/aux-ci-evidence-2026-10-08 分支从 caed1b6 开始，交付前整合 PR265 已合并的 main@7956e360。既有 lima/、frontend/、.github/、依赖和冻结测试只读；新增两脚本、两测试、两说明，在 CONTRIBUTING 链接入口。Dockerfile 仅在 test 阶段复制两脚本，供完整容器测试导入；其他镜像阶段保持原样。
 
 ## 最小设计
 

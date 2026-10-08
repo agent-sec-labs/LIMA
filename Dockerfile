@@ -82,6 +82,7 @@ COPY --chown=lima:lima schemas ./schemas
 COPY --chown=lima:lima docs/assets ./docs/assets
 COPY --chown=lima:lima scripts/lima.ps1 ./scripts/lima.ps1
 COPY --chown=lima:lima scripts/run_ci_tests.py ./scripts/run_ci_tests.py
+COPY --chown=lima:lima scripts/run_cxx_container_tests.py ./scripts/run_cxx_container_tests.py
 COPY --chown=lima:lima scripts/verify_ci_evidence.py ./scripts/verify_ci_evidence.py
 COPY --chown=lima:lima scripts/collect_ci_evidence.py ./scripts/collect_ci_evidence.py
 COPY --chown=lima:lima scripts/run_lf_baseline.py ./scripts/run_lf_baseline.py

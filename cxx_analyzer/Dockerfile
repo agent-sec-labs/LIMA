@@ -52,4 +52,5 @@ CMD ["python", "-m", "cxx_analyzer.server"]
 FROM base AS test
 COPY --chown=analyzer:analyzer lima ./lima
 COPY --chown=analyzer:analyzer tests ./tests
+COPY --chown=analyzer:analyzer scripts/run_cxx_container_tests.py ./scripts/
 USER analyzer:analyzer

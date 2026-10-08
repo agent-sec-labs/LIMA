@@ -248,6 +248,7 @@ jobs:
           test "${{ needs.cxx-sidecar-integration.result }}" = "success"
   cxx-sidecar-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -256,17 +257,28 @@ jobs:
         run: >-
           docker build --file cxx_analyzer/Dockerfile --target test
           --tag lima-cxx-analyzer:test .
-      - name: Exercise all 24 fixtures without network access
+      - name: Stage verified CMake fixture snapshots without executing them
+        run: |
+          docker volume create lima-cxx-test-snapshots
+          docker run --rm --network none --read-only \
+            --cpus 2 --memory 3g --pids-limit 128 \
+            --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002 \
+            --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002 \
+            --mount type=volume,source=lima-cxx-test-snapshots,target=/work/snapshots \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 10002:10002 \
+            lima-cxx-analyzer:test python scripts/run_cxx_container_tests.py stage
+      - name: Require all C++ fixture regressions to execute without skips
         run: >-
           docker run --rm --network none --read-only
+          --cpus 2 --memory 3g --pids-limit 128
           --tmpfs /tmp:rw,size=64m,mode=0700,uid=10002,gid=10002
           --tmpfs /work:rw,exec,size=512m,mode=0700,uid=10002,gid=10002
+          --mount type=volume,source=lima-cxx-test-snapshots,target=/work/snapshots,readonly
+          --tmpfs /work/snapshots/build-backed/source/build:rw,exec,size=128m,mode=0700,uid=10002,gid=10002
+          --tmpfs /work/snapshots/asan/source/build:rw,exec,size=128m,mode=0700,uid=10002,gid=10002
           --cap-drop ALL --security-opt no-new-privileges:true
           --user 10002:10002 lima-cxx-analyzer:test
-          python -m unittest -v
-          tests.test_cxx_analyzer.SourceScanContainerTests
-          tests.test_cxx_analyzer.BuildScanContainerTests
-          tests.test_cxx_analyzer.SanitizerContainerTests
+          python scripts/run_cxx_container_tests.py run
       - name: Validate Compose security constraints
         env:
           LIMA_POSTGRES_PASSWORD: ci-only-database-password
@@ -312,3 +324,4 @@ jobs:
         run: |
           docker rm --force lima-cxx-app lima-cxx-analyzer 2>/dev/null || true
           docker network rm lima-cxx-ci 2>/dev/null || true
+          docker volume rm lima-cxx-test-snapshots 2>/dev/null || true

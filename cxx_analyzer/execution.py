@@ -26,9 +26,12 @@ CLEAN_ENVIRONMENT = {
 SANITIZER_ENVIRONMENT = {
     "CC": "clang-14",
     "CXX": "clang++-14",
-    "CFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
-    "CXXFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
-    "LDFLAGS": "-fsanitize=address",
+    # These are disposable analysis binaries, not deployment artifacts.
+    # clang-14's PIE ASan runtime can fail before producing a report in
+    # the restricted container; a fixed executable layout avoids this.
+    "CFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g -fno-pie",
+    "CXXFLAGS": "-fsanitize=address -fno-omit-frame-pointer -g -fno-pie",
+    "LDFLAGS": "-fsanitize=address -no-pie",
     # abort_on_error would route every report through tgkill, which the
     # process-isolation denylist blocks; a plain nonzero exit keeps the
     # report complete without the sandboxed abort path.

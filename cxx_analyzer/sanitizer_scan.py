@@ -21,6 +21,11 @@ MAX_FINDINGS: Final = 64
 MAX_DIAGNOSTICS: Final = 64
 MAX_TOOL_RUNS: Final = 64
 _ANSI: Final = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_UNREPORTED_CRASH: Final = re.compile(
+    r"AddressSanitizer:DEADLYSIGNAL|\*\*\*Exception:\s*SegFault\b|"
+    r"^\s*Segmentation fault(?: \(core dumped\))?\s*$",
+    re.MULTILINE,
+)
 _ERROR: Final = re.compile(
     r"^==\d+==ERROR: AddressSanitizer: "
     r"(heap-buffer-overflow|stack-buffer-overflow|global-buffer-overflow|"
@@ -138,7 +143,12 @@ def parse_asan_log(
             verification_state="confirmed", language=language, symbol=symbol,
             analysis_mode="sanitizer-confirmed", trace=trace, diagnostics=[],
         ))
-    return (findings, []) if findings else _review()
+    if findings:
+        # A valid report from one test cannot explain a separate bare
+        # crash in an aggregate CTest stream. Retain confirmed findings,
+        # but make the incomplete execution visible to the caller.
+        return findings, ["needs-human-review"] if _UNREPORTED_CRASH.search(clean) else []
+    return _review()
 
 
 def _tool_run(execution: ToolExecution, run_id: str) -> dict[str, object]:

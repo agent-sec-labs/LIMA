@@ -2,7 +2,8 @@
 
 Only the two CMake fixtures need staged, read-only sources. Staging invokes
 their fixture construction and real snapshot verification, and stops BEFORE
-the analyzer body. Execution uses the unchanged trust probes and assertions.
+the analyzer body. Execution retains the real trust probes and fixture
+vulnerability, safe-case, deadline and sandbox assertions.
 No staging result is counted as a test pass. See docs/CXX_CI_COVERAGE.md.
 """
 

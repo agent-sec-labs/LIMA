@@ -451,6 +451,7 @@ def _scanner_config_document() -> dict[str, object]:
     refuses any drift before anything runs.
     """
     return {
+        "implementation": b1_source.scanner_implementation_manifest(),
         "workload": _WORKLOAD,
         "fixture_key": _FIXTURE_KEY,
         "snapshot_tree_sha256": b1_source._registry_fingerprint(
@@ -1030,6 +1031,12 @@ def verify_b1_real_evidence(
     if manifest["schema_version"] != 1:
         raise B1RealError(
             B1RealErrorCode.B1_REAL_RECEIPT_INVALID, "$.b1_real_manifest.schema_version"
+        )
+    if not isinstance(manifest["scanner_config"], dict) or compute_content_digest(
+        manifest["scanner_config"]
+    ) != manifest["scanner_config_sha256"]:
+        raise B1RealError(
+            B1RealErrorCode.B1_REAL_BINDING_MISMATCH, "$.scanner_config_sha256"
         )
     for field in (
         "approval_sha256",

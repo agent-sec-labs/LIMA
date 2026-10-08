@@ -555,6 +555,16 @@ class _B1RealTestCase(unittest.TestCase):
     def expected_scanner_config_document(self):
         """The B1-real scanner config document (Packet 7.3; PC3 mirror)."""
         return {
+            "implementation": {
+                "scheme": "lima-python-source-v1",
+                "runtime": {"implementation": sys.implementation.name,
+                            "python_version": list(sys.version_info[:3])},
+                "sources": {
+                    "lima/" + path.relative_to(_REPO_ROOT / "lima").as_posix():
+                    hashlib.sha256(path.read_text(encoding="utf-8").encode()).hexdigest()
+                    for path in sorted((_REPO_ROOT / "lima").rglob("*.py"))
+                },
+            },
             "workload": _B1_REAL_WORKLOAD,
             "fixture_key": _B1_REAL_FIXTURE_KEY,
             "snapshot_tree_sha256": self.registry_fingerprint(_B1_REAL_FIXTURE_KEY),

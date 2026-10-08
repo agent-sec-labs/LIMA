@@ -49,6 +49,7 @@ import pathlib
 import tempfile
 import typing
 
+from benchmarks.v4.baseline.analyzer_identity import scanner_implementation_manifest
 from benchmarks.v4.baseline.fixtures import (
     compute_tree_fingerprint,
     load_registry,
@@ -501,6 +502,7 @@ def run_b1_source_baseline_suite(
                 B1SourceErrorCode.SOURCE_RECEIPT_INVALID, "$.snapshot_tree_sha256"
             )
         scanner_config: dict[str, object] = {
+            "implementation": scanner_implementation_manifest(),
             "workload": workload,
             "fixture_key": fixture_key,
             "snapshot_tree_sha256": snapshot_tree_sha256,
@@ -798,6 +800,20 @@ def verify_b1_evidence(output_dir: str | pathlib.Path) -> dict[str, object]:
     manifest = _read_json_file(directory / "b1-manifest.json", "$.b1_manifest")
     if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEY_SET:
         raise B1SourceError(B1SourceErrorCode.SOURCE_RECEIPT_INVALID, "$.b1_manifest")
+    if not isinstance(manifest["scanner_config"], dict) or compute_content_digest(
+        manifest["scanner_config"]
+    ) != manifest["scanner_config_sha256"]:
+        raise B1SourceError(
+            B1SourceErrorCode.SOURCE_BINDING_MISMATCH, "$.scanner_config_sha256"
+        )
+    expected_analyzer = compute_content_digest({
+        "analyzer_name": manifest["analyzer_name"],
+        "scanner_config_sha256": manifest["scanner_config_sha256"],
+    })
+    if manifest["analyzer_fingerprint"] != expected_analyzer:
+        raise B1SourceError(
+            B1SourceErrorCode.SOURCE_BINDING_MISMATCH, "$.analyzer_fingerprint"
+        )
     receipts = manifest["source_receipts"]
     if not isinstance(receipts, list) or not receipts:
         raise B1SourceError(

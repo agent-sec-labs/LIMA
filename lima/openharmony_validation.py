@@ -198,7 +198,12 @@ def _preflight_revision(
             raise CheckoutPreflightError(
                 "fixed-commit-unresolvable", resolve_fixed_commit[:12],
             )
-    if _run_git(path, "diff", "--quiet", "--no-ext-diff").returncode != 0:
+    # ``HEAD`` is explicit: a bare ``diff --quiet`` only compares the
+    # worktree against the index, so a staged edit (``git add``) would
+    # sail through while HEAD still matches the pinned manifest commit.
+    if _run_git(
+        path, "diff", "HEAD", "--quiet", "--no-ext-diff",
+    ).returncode != 0:
         raise CheckoutPreflightError("tracked-files-dirty")
 
     workspace = RepositoryWorkspace(

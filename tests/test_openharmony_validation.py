@@ -450,6 +450,47 @@ class CheckoutValidationTests(unittest.TestCase):
             self.validate(case, policy, limits)
         self.assertEqual("tracked-files-dirty", caught.exception.reason)
 
+    def test_staged_changes_rejected_like_dirty_trees(self):
+        # Review finding 2: a bare ``git diff --quiet`` compares the
+        # worktree to the index only, so staged modifications, additions
+        # and deletions passed the preflight while HEAD still matched the
+        # pinned commit -- the run then fingerprinted attacker-controlled
+        # content as the pinned snapshot.
+        policy_maker = self.policy
+        limits = self.limits(max_files=500, max_file_bytes=65536,
+                             max_total_bytes=1 << 20)
+
+        def _expect_rejected(fixture, case):
+            with self.assertRaises(self.error) as caught:
+                self.validate(
+                    case, policy_maker(str(fixture.import_root)), limits,
+                )
+            self.assertEqual("tracked-files-dirty", caught.exception.reason)
+
+        # Staged modification of a tracked file.
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        (fixture.vulnerable_repo / "src" / "parser.c").write_text(
+            "tampered\n", encoding="utf-8"
+        )
+        _git(fixture.vulnerable_repo, "add", "src/parser.c")
+        _expect_rejected(fixture, fixture.case(entry))
+
+        # Staged addition of a new file.
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        (fixture.vulnerable_repo / "src" / "evil.c").write_text(
+            "int evil(void);\n", encoding="utf-8"
+        )
+        _git(fixture.vulnerable_repo, "add", "src/evil.c")
+        _expect_rejected(fixture, fixture.case(entry))
+
+        # Staged deletion of a tracked file (index-only, worktree intact).
+        fixture = CheckoutFixture()
+        entry = fixture.stage_case_files()
+        _git(fixture.vulnerable_repo, "rm", "-q", "--cached", "src/util.c")
+        _expect_rejected(fixture, fixture.case(entry))
+
     def test_missing_files_and_stray_untracked_rejected(self):
         fixture = CheckoutFixture()
         entry = fixture.stage_case_files()

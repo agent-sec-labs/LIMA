@@ -1,20 +1,20 @@
 # Implementation Packet IP-0023 — Monorepo Component Graph & Per-Component Profile/RAM（#60-CLOSURE-A 首片）
 
-> 文档类型：Implementation Packet（P&V 制作；本版为 **D1 修订（D1R）** 产物——只修订 Packet 文档，未写测试/产品/schema、未冻结；v3 = v2 之上的 **ER 闭合最小修订**，仅落 ER Record 三项 Shadow Finding 的最小回应）
+> 文档类型：Implementation Packet（P&V 制作；本版为 **D1 收口（D1F）** 产物——只修订 Packet 文档，未写测试/产品/schema、未冻结；v4 = v3 之上的 **五裁定收口修订**，落 P60-V3-01..05 全部五项采纳裁定）
 >
-> Packet 版本：`IP-0023-PACKET/v3`；**v3 supersedes v2**（v2 = 同文件 @`176d22f9eff77ffd149c86b5f7aea5487edaf8`，SHA-256 `19915a7a9a6807afe88a2c417d96e2550281f3255475543e4bf8300613d52453`，原样保留在提交历史，不重写、不删除）；**v2 supersedes v1**（v1 = 同文件 @`41c899ef10be682e52d61ab0f92e4bef11aed27c`，SHA-256 `e9702fe2bbf403f58a60afa07400cb0ef7fe4aca1cd1d20f736195048d1f7f9f`，原样保留在提交历史，不重写、不删除）。v1→v2 修订依据：Maintainer 指令 `MR-60-PR282-GOAL-CORRECTION-20261009/v1`（§五 R60-01..08、§六 测试计划、§七 custody、§八 呈审）+ Coordinator Assignment `ASSIGN-60-CLOSURE-A-PKT-D1R_v1`（SHA-256 `30a0e9198bd3914e3c2ea511f8d5ad523addabd1496dc654ce755d03d61c040a`）+ `MDR-60-PR282-GOAL-CORRECTION-20261009-v1`（逐项处置见 §0.1）。**v2→v3 修订依据**：同指令 §五/§九（ER 揭示的真实承重缺陷由责任角色按验收规则解决；最小修订不需新 Assignment）+ ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1` 三项 Shadow Finding 的最小回应（探针证据 SHA 见 DI-022 与附 C；逐项处置见 §0.2）。
+> Packet 版本：`IP-0023-PACKET/v4`；**v4 supersedes v3**（v3 = 同文件 @`d55a9f298e88dd5a656437e10cc93c64cd69ad9d`，SHA-256 `1b07cc65c9855d05fa3361c5953a73f8ebd66069ac37898e5b58704605e427cf`，原样保留在提交历史，不重写、不删除）；**v3 supersedes v2**（v2 = 同文件 @`176d22f9eff77ffd149c86b5f7aea5487edaf8`，SHA-256 `19915a7a9a6807afe88a2c417d96e2550281f3255475543e4bf8300613d52453`，原样保留在提交历史，不重写、不删除）；**v2 supersedes v1**（v1 = 同文件 @`41c899ef10be682e52d61ab0f92e4bef11aed27c`，SHA-256 `e9702fe2bbf403f58a60afa07400cb0ef7fe4aca1cd1d20f736195048d1f7f9f`，原样保留在提交历史，不重写、不删除）。v1→v2 修订依据：Maintainer 指令 `MR-60-PR282-GOAL-CORRECTION-20261009/v1`（§五 R60-01..08、§六 测试计划、§七 custody、§八 呈审）+ Coordinator Assignment `ASSIGN-60-CLOSURE-A-PKT-D1R_v1`（SHA-256 `30a0e9198bd3914e3c2ea511f8d5ad523addabd1496dc654ce755d03d61c040a`）+ `MDR-60-PR282-GOAL-CORRECTION-20261009-v1`（逐项处置见 §0.1）。v2→v3 修订依据：同指令 §五/§九 + ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1` 三项 Shadow Finding 的最小回应（探针证据 SHA 见 DI-022 与附 C；逐项处置见 §0.2）。**v3→v4 修订依据**：Maintainer 指令 `MR-60-PR282-FINALIZATION-20261009/v1`（§四 五项已采纳产品裁定 = 本版 P60-V3-01..05 裁定内容来源；§六 测试计划要求）+ Coordinator Assignment `ASSIGN-60-CLOSURE-A-PKT-D1F_v1`（SHA-256 `2774bd4333c3974fb6369e7f9492bb3a6bf0e46ad9233d93a541aa5bfa2ebf8a`，D1F 唯一任务合同，读取前重算一致）+ 配套规划 `docs/LIMA_Issue60_PR282_v3_Rulings_and_Delivery_Plan_2026-10-09.md` + `MDR-60-PR282-FINALIZATION-20261009-v1`（逐项处置见 §0.3；离线消费探针证据见 DI-027 与附 D）。
 >
-> 状态：`D1R-REVISION / PENDING-REVIEW`（**未冻结的修订待审态**：v3 = v2 + ER 三项 Shadow Finding 最小闭合，仍待 Coordinator readiness 复核与 Maintainer 对修订后具体 PR 的合并批准；获批合并进 main 并由 Coordinator 标 `PACKET-MERGED` 前，本状态行不得改标为任何"可进入实现"表述——判据见 §13）
+> 状态：`D1F-REVISION / PENDING-REVIEW`（**未冻结的修订待审态**：v4 = v3 + 五裁定收口，仍待 Coordinator readiness 复核、ER 独立语义反证与 Maintainer 对修订后具体 PR head 的合并批准；获批合并进 main 并由 Coordinator 标 `PACKET-MERGED` 前，本状态行不得改标为任何"可进入实现"表述——判据见 §13）
 >
-> Exact base：修订基线 = 分支 `codex/ip-0023-monorepo-packet` @`176d22f9eff77ffd149c86b5f7aea5487edaf8`（Packet v2 提交；v1 @`41c899ef…` 在其下保留）；产品/冻结面基线 = `fbbbd619fb0b96efbbb903916ab46dc0daed2214`（origin/main；D1R 开工与 v3 修订开工各 `git fetch origin` 亲验未前移，2026-10-09）
+> Exact base：修订基线 = 分支 `codex/ip-0023-monorepo-packet` @`d55a9f298e88dd5a656437e10cc93c64cd69ad9d`（Packet v3 提交 = PR #282 当前 head；v2 @`176d22f9…`、v1 @`41c899ef…` 在其下保留）；产品/冻结面基线 = `fbbbd619fb0b96efbbb903916ab46dc0daed2214`（origin/main；D1R/v3/v4 各开工 `git fetch origin` 亲验未前移，2026-10-09；PR head 对 main 的 diff 恰为本文档一个新增——v4 开工 `git diff --name-only fbbbd619...HEAD` 亲验 docs-only）
 >
-> 制作人：lima-packet-verification（v1：Assignment `ASSIGN-60-CLOSURE-A-PKT-D1_v1`，任务 `PKT-IP-0023-D1`；v2：Assignment `ASSIGN-60-CLOSURE-A-PKT-D1R_v1`，任务 `PKT-IP-0023-D1R`，2026-10-09；v3：同 D1R Assignment 范围内的最小修订——Maintainer 指令 `MR-60-PR282-GOAL-CORRECTION-20261009/v1` §五/§九 授权，闭合 ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1` 三项 Shadow Finding，2026-10-09，不需新 Assignment）
+> 制作人：lima-packet-verification（v1：Assignment `ASSIGN-60-CLOSURE-A-PKT-D1_v1`，任务 `PKT-IP-0023-D1`；v2：Assignment `ASSIGN-60-CLOSURE-A-PKT-D1R_v1`，任务 `PKT-IP-0023-D1R`，2026-10-09；v3：同 D1R Assignment 范围内的最小修订——Maintainer 指令 `MR-60-PR282-GOAL-CORRECTION-20261009/v1` §五/§九 授权，闭合 ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1` 三项 Shadow Finding，2026-10-09，不需新 Assignment；**v4：Assignment `ASSIGN-60-CLOSURE-A-PKT-D1F_v1`，任务 `PKT-IP-0023-D1F`，2026-10-09，Maintainer 指令 `MR-60-PR282-FINALIZATION-20261009/v1` §五 授权（MAINTAINER_AUTHORIZED/SHADOW）**）
 >
 > 编号依据：`ALLOC-IP-0023-60-CLOSURE-A/v1`（Coordinator，2026-10-09，基线 fbbbd619；2026-10-09 编号四查通过；IP-0023 = #60-CLOSURE-A 首片编号，**不是整个 Issue 的 closure 编号**）
 >
-> 上游决策：Maintainer 批复 `MR-60-RESUME-APPROVAL-20261009/v1` §五/§六（批复正文 SHA-256 `e4bcc9c3772fecddd7a3dc67e232aa56bd1d46aede643f2dcdbe5eda5cabbbbc`）+ 修订指令 `MR-60-PR282-GOAL-CORRECTION-20261009/v1`（正文 SHA-256 `4f7134551994f521f94f722eb9ef5a41b2f8da85246aca2b6edbdd1f220edd89`；§五/§九 兼作 v3 授权）+ ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1`（v3 修订对象，探针证据见 DI-022/附 C）；恢复审计 `RESUME-AUDIT-60-2026-10-09_v1` + addendum-1/2；PI-DR1..PI-DR6 全部生效
+> 上游决策：Maintainer 批复 `MR-60-RESUME-APPROVAL-20261009/v1` §五/§六（批复正文 SHA-256 `e4bcc9c3772fecddd7a3dc67e232aa56bd1d46aede643f2dcdbe5eda5cabbbbc`）+ 修订指令 `MR-60-PR282-GOAL-CORRECTION-20261009/v1`（正文 SHA-256 `4f7134551994f521f94f722eb9ef5a41b2f8da85246aca2b6edbdd1f220edd89`；§五/§九 兼作 v3 授权）+ **收口指令 `MR-60-PR282-FINALIZATION-20261009/v1`（正文 SHA-256 `02133d0978e4b08389af3c7139541bbd4cb997e177804cb6faa4176fcd8402e3`；§四 五裁定 = v4 修订内容来源；§五 角色链；§六 测试计划）**+ ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1`（v3 修订对象，探针证据见 DI-022/附 C）；恢复审计 `RESUME-AUDIT-60-2026-10-09_v1` + addendum-1/2；PI-DR1..PI-DR6 全部生效
 >
-> 阶段边界：本版仍只交付设计（D1 修订）。验收测试文件、有效 RED、Frozen Test Commit 属 D2，另行 Assignment 派发；本阶段无 Frozen Test Commit，Mechanical Test Correction Allowance = NOT_ALLOWED（D1R 明示）。
+> 阶段边界：本版仍只交付设计（D1 收口）。验收测试文件、有效 RED、Frozen Test Commit 属 D2，另行 Assignment 派发；本阶段无 Frozen Test Commit，Mechanical Test Correction Allowance = NOT_ALLOWED（D1R/D1F 均明示）。D2 冻结、Implementation、独立验证、合并、post-merge、IP-DONE 均未授权。
 
 ---
 
@@ -65,13 +65,13 @@ Upstream ruling：ALLOC-IP-0023-60-CLOSURE-A/v1；MR-60-RESUME-APPROVAL-20261009
 
 ## 0.1 D1R 变更记录（R60-01..08 逐项处置；行号均指 v1 @41c899ef）
 
-每项格式：原规则（v1 行号）→ 反例（review_probe_results.json，SHA-256 `90f3d975…acb8a4`）→ 修订规则（v2 节）→ 对应验收（测试符号/命令）→ 剩余限制（如实）。（本表为 v2 时点处置记录；v3 对 T6 判据（R60-06 行"主仓 cap 截断"已扩为"cap 截断或准入跳过"）及排序/构造器措辞的 ER 增补与勘误见 §0.2——如有出入，以 §0.2 与正文 v3 版为准。）
+每项格式：原规则（v1 行号）→ 反例（review_probe_results.json，SHA-256 `90f3d975…acb8a4`）→ 修订规则（v2 节）→ 对应验收（测试符号/命令）→ 剩余限制（如实）。（本表为 v2 时点处置记录；v3 对 T6 判据（R60-06 行"主仓 cap 截断"已扩为"cap 截断或准入跳过"）及排序/构造器措辞的 ER 增补与勘误见 §0.2；**v4 对 R60-03 行聚合模型调用包络（默认 128 提案）的否决与重设计见 §0.3 P60-V3-05——如有出入，以 §0.2/§0.3 与正文 v4 版为准。**）
 
 | # | 原规则（v1） | 反例 | 修订规则（v2） | 对应验收 | 剩余限制 |
 |---|---|---|---|---|---|
 | R60-01 | 候选范围="根+一级子目录"（§5.1.1 L192），示例却用 `component:services/api`（§5.1.2 L203）；测试 #1–#6 全平铺形态（L574-579） | RULE-01：`services/api/pyproject.toml`、`packages/core/pyproject.toml` 按字面规则均不在候选集 | 锚点=主 workspace 已准入 inventory 中 manifest 类文件（封闭名集）的 POSIX 父目录，**任意深度**；组件边界证据=manifest+静态 workspace/build 配置+源码/导入证据组合（§5.1.1/§5.1.2/§5.1.5） | C1 类 `test_detect_components_nested_services_packages` 等（§6 表 1-10）；D1R 探针 D1-RULE01（设计推导+实跑 inventory） | 调用方 ignore 集/扩展策略裁剪掉的 manifest 不可发现（策略继承语义，如实声明）；不支持形态以 typed gap 承载（§5.1.5） |
 | R60-02 | "锚定目录互不嵌套⇒至多一归属"（§5.1.1 L194、§5.1.3 L210-213），但根组件用普通 `RepositoryWorkspace(仓库根)`（§5.2.1 L235），递归吸入子组件文件 | API-01：根 workspace 看到 `a/main.py`（root_modules=2），子组件再计 1——计数/所有权与构建输入不一致 | 最深锚点前缀精确归属（仓库级坐标，in-module 单解）+ 组件 workspace 构造（锚点根 + 继承五参数 + 嵌套锚点名 ignore）+ **所有权不变量**：构建后逐文件比对组件扫描集与精确切片，分歧→`unbuilt_components` typed 承载，不出错误数据（§5.1.3/§5.2.1） | C1 类 `test_component_counts_match_build_inputs`、`test_root_component_excludes_child_files`（§6 #9/#10）；D1R 探针 D2-API01/D7-COLLISION | 祖先组件的 Profile 层 manifest 候选仍含其一级子目录内嵌套组件 manifest（确定性、有界，已知限度）；名字碰撞目录触发不变量分歧→typed 承载——彻底消除需共享层支持（DR-IP-0023-02 草案随交接报告，不进 v2 正文为既成事实） |
-| R60-03 | 从路径重建默认 workspace（§5.2.1 L235）；每组件默认预算 5000/512KiB/20MiB + 每组件独立 SemanticBudgets（§5.4.4 L431-434）＝变相扩预算；§5.7 L550 称"公共入口合法使用" | API-02：父 workspace 1/30/30 且忽略 a；子 workspace 5000/524288/20971520 且忽略规则丢失 | 组件 workspace **继承调用方全部五个策略参数**（max_files/max_file_bytes/max_total_bytes/extensions/ignored_directories）；主仓未准入输入不得因组件切分重新准入（隔离不变量强制）；聚合模型调用包络 `max_total_model_calls`（默认 128=16×8）作为**显式新预算设计**呈审 + fail-closed typed 截断；资源计量口径显式（§5.4.4）；墙钟降级为"F4 未闭合、不宣称聚合上界"（§5.4.4 末） | C3 类 `test_policy_inheritance_all_five_params`、`test_no_readmission_under_caller_caps`、`test_aggregate_model_call_envelope` 等（§6 #19-#25）；D1R 探针 D3-API02 | 调用方 cap 收紧导致组件扫描集与精确切片分歧时，该组件 typed 不构建（不扩权优先于多产出）；F4/聚合墙钟未闭合（归 C） |
+| R60-03 | 从路径重建默认 workspace（§5.2.1 L235）；每组件默认预算 5000/512KiB/20MiB + 每组件独立 SemanticBudgets（§5.4.4 L431-434）＝变相扩预算；§5.7 L550 称"公共入口合法使用" | API-02：父 workspace 1/30/30 且忽略 a；子 workspace 5000/524288/20971520 且忽略规则丢失 | 组件 workspace **继承调用方全部五个策略参数**（max_files/max_file_bytes/max_total_bytes/extensions/ignored_directories）；主仓未准入输入不得因组件切分重新准入（隔离不变量强制）；~~聚合模型调用包络 `max_total_model_calls`（默认 128=16×8）作为显式新预算设计呈审~~（**v4 否决**：默认 128 被 `MR-60-PR282-FINALIZATION-20261009/v1` §四 P60-V3-05 否决——全仓默认 8、模型默认 off、聚合 token 池三口径区分，见 §0.3/§5.4.4）；资源计量口径显式（§5.4.4）；墙钟降级为"F4 未闭合、不宣称聚合上界"（§5.4.4 末） | C3 类 `test_policy_inheritance_all_five_params`、`test_no_readmission_under_caller_caps`、`test_aggregate_model_call_envelope` 等（§6 #19-#25，#21 已按 v4 重写）；D1R 探针 D3-API02 | 调用方 cap 收紧导致组件扫描集与精确切片分歧时，该组件 typed 不构建（不扩权优先于多产出；v4 起分歧类归 `unbuilt` reason=cap-divergence，§5.2.1）；F4/聚合墙钟未闭合（归 C） |
 | R60-04 | 坐标分离（§5.2.1 L248）+ 准入仅覆盖 unassigned/evidence 路径（§5.8 L562-564，测试 #26 L599） | API-03：整仓 `secrets/main.py` 被拒（0 模块+gap）；根重设为 secrets 后局部坐标 `main.py` 被采纳（1 模块）——坐标变换绕过准入 | **仓库级坐标先准入、后建组件视图**：主仓 inventory（工作区级准入）→ 锚点准入（is_secret_shaped_path@仓库级）→ 归属划分 → 组件视图；锚点级准入使组件坐标下 Profile 准入与仓库级**等价**（§5.2.1 时序 + §5.8 公开面准入规则表：component_id/root_dir/manifests/unassigned/evidence/scan_summary/unknown_imports/digests/candidate_ids 逐项） | C4 类 `test_repo_level_admission_before_component_views`、`test_all_public_surfaces_admission_rules`、`test_secret_gap_reason_count_no_filename`（§6 #26-#29）；D1R 探针 D4-API03 | 启发式非穷尽声明保留（不改成"零泄漏"）；reason→count/内部无原文件名口径保留；内部 family 级全 vocabulary 留痕归 D |
 | R60-05 | anchors=剥离前缀后第一级目录名（§5.3.2 L283-284，src/alpha 与 src/beta 同得 `src`）；`T ∉ anchors` 一律归外部无边无 gap（§5.3.3 L292-303，测试 #10-#14 L583-587） | RULE-02：A `import beta` → 无边、无 gap（被伪装成外部/未知） | **模块根解析**替代目录首段臆断：模块根=组件根 ∪ 构建配置声明目录（封闭键集）∪ 含包/模块内容的直接子目录 `src`；顶层名表（含 namespace）；解析优先级 自身→唯一他组件→歧义；**已知外部（stdlib 冻结集 ∪ manifest 静态声明依赖名）与未知导入区分**，未知入 `unknown_imports` typed 承载；相对导入按包上下文解析；动态 import 位点自计 `dynamic_import_site_count`（§5.3.1-§5.3.3）；与 `lima/python_dataflow.py` 只读语义对照（§5.3.5） | C2 类 `test_module_resolution_src_layout_cross_component` 等（§6 #11-#18）；D1R 探针 D6-RULE02 | 构建配置识别键集封闭（未识别配置→回退根+src 约定+未知承载）；stdlib 集为冻结快照（跨解释器版本稳定优先于穷尽）；不执行/install/sys.path 探测 |
 | R60-06 | complete=False 封闭两触发（§5.2.4 L265-269）与 edge-limit 置 False（§5.3.4 L310-311）矛盾；"真实无依赖"不要求 gaps 空（L265-267）；解析失败靠"组件 RAM 继承"（§5.3.1 L276） | API-04：`parse_error_files=1` 而 RAM `coverage_gaps=[]`——"底层继承"不成立 | **单一封闭触发集 T1-T7**（组件数/python-file-limit/edge-limit/图自计 parse_error/图自计 read_failure/主仓 cap 截断/unbuilt 非空），全文唯一定义（§5.2.4）；三态判据表修订：空边集+缺口 ≠ 真实无依赖（机械可查）；解析/读失败由图层级 `ComponentScanSummary` 自计承载（不依赖"底层继承"四字）（§5.2.4/§5.3.1） | C5 类 `test_dependencies_complete_unified_triggers`、`test_parse_error_carried_in_graph`、`test_empty_edge_set_with_gap_not_no_dep` 等（§6 #30-#34）；D1R 探针 D5-API04 | read_failure 在静态快照下难以确定性构造（TOCTOU 类，归 F3/C）——承载字段保留、触发入封闭集、测试以默认零值+相邻触发覆盖并如实声明 |
@@ -82,7 +82,7 @@ R60-09（记录补齐）不属本 Assignment：归主会话/Coordinator 一次�
 
 ## 0.2 v3 变更记录（ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1` 三项 Shadow Finding 逐项处置）
 
-每项格式：Shadow Finding（探针证据）→ 处置（落位节）→ 对应验收（测试符号）→ 剩余限制（如实）。修订范围仅限本表三项的最小回应（+随动的测试符号表增补与引用修正）；v2 其余设计零改动。
+每项格式：Shadow Finding（探针证据）→ 处置（落位节）→ 对应验收（测试符号）→ 剩余限制（如实）。修订范围仅限本表三项的最小回应（+随动的测试符号表增补与引用修正）；v2 其余设计零改动。（本表为 v3 时点处置记录；**v4 已按 P60-V3-04 将 SF-2 的四类盲点收口为元数据通道默认正例（§5.1.1/§5.1.7 重写，#54 断言改写）——如有出入，以正文 v4 版与 §0.3 为准。**）
 
 | # | Shadow Finding（证据） | 处置（v3 落位） | 对应验收 | 剩余限制 |
 |---|---|---|---|---|
@@ -90,13 +90,25 @@ R60-09（记录补齐）不属本 Assignment：归主会话/Coordinator 一次�
 | SF-2 | 锚点名集默认策略盲点（报告修正+验收缺口）：DEFAULT_EXTENSIONS 37 项无 `.txt/.cfg/.mod/.xml` → `requirements*.txt`/`setup.cfg`/`go.mod`/`pom.xml` 四类默认策略下恒不可准入为锚点；且冻结层 `_manifest_candidates` 用 raw os.listdir 绕过扩展策略——同一文件可作组件 Profile 的 manifest 证据却永不能锚定，不对称未披露 | §5.1.1 精确声明默认策略盲点：九类 kind 中默认可锚定五类（pyproject/cargo_toml/package_json/environment_yml/setup_py），**requirements/setup_cfg/go_mod/pom_xml 四类默认永不可锚定**（归宿=unassigned+skipped 计数可见，不产组件不编造）；与 `_manifest_candidates` 的"可作证据、不可作锚点"不对称显式披露（§3.1/§3.3 基座）；锚点通道**不**绕开扩展策略（绕开/扩 DEFAULT 列为 DR-IP-0023-03 备选，§13，默认不做） | `test_default_extension_anchor_blindspot_unassigned`（§6 #54） | 默认策略盲点为如实声明的范围限制（非需求缩减）；四类默认可锚定化需 DR（选项见 §13.5） |
 | SF-3 | 三处措辞（无语义后果）：①§5.1.2"component:. 因 `.`(0x2E) 排序最前"为假（段字符集含 `-`(0x2D)）；②§5.2.1 extensions"构造器内部与 DEFAULT 的并集幂等"为假（构造器为 None→DEFAULT 的 **or 替换**；ignored_directories 才是恒并集）；③INV-OWN-2 的"秘密形态拒绝 `.py` 计数"独立项与 python_file_count/unassigned 划分未限定，可误读为双重计数 | 三句勘误（源码 @fbbbd619 亲验）：①排序仅为 component_id 字典序、根组件**不保证最前**（`-`(0x2D)<`.`(0x2E)，稳定性来自排序键单解）；②extensions=or 替换非并集、ignored_directories=恒与 DEFAULT_IGNORED_DIRECTORIES 并集、有效值回灌构造幂等；③INV-OWN-2 收敛为两项互斥完备划分式并废除独立秘密项（秘密形态已准入 `.py` 含于 python_file_count 或 unassigned_file_count，不另立第三项）（§5.1.2/§5.1.3/§5.2.1） | 既有 #9（INV-OWN-2 守恒）/#30（T 表驱动）随动覆盖；无新增方法 | 无 |
 
+## 0.3 v4 变更记录（P60-V3-01..05 五裁定逐项处置；`MR-60-PR282-FINALIZATION-20261009/v1` §四 + D1F Assignment §P）
+
+每项格式（指令 §八第 3 条四段式 + 未来部分）：原问题（v3 @d55a9f29 行号）→ 采纳裁定（指令 §四）→ 修订规则（v4 落位节）→ 真实 API/源码/参考证据（@fbbbd619 亲验；探针见 DI-027/附 D）→ D2 验收锚 → 仍属未来实现的部分（如实，不以"无 TBD"代替）。
+
+| # | 原问题（v3） | 采纳裁定 | 修订规则（v4 落位） | 真实证据（亲验） | D2 验收锚 | 仍属未来实现 |
+|---|---|---|---|---|---|---|
+| P60-V3-01 | §5.2.1（L298-327）组件视图 = 继承五参数 + `ignored_directories \| {子锚点 basename}` 的 basename-ignore：名字碰撞目录触发 INV-OWN-1 分歧 → typed 不构建（已知限度 (ii)）；祖先组件 Profile 层 `_manifest_candidates` 混入子组件 manifest（已知限度 (i)）——二者被当作默认完成方案 | 采纳 DR-IP-0023-02 精确视图目标：选**文件清单视图**（P&V 冻结单解，弃路径级排除方案——单一机制即约束三入口，无需双份簿记）；所有权按最深合法锚点；三入口（inventory/读取/_manifest_candidates）全链约束；父 Profile 不纳入子组件 manifest；同名非子锚点目录 = 正例；`unbuilt` 收缩为真拒绝/资源耗尽/无法成视图三类可区分 | §5.2.1 重写：`RepositoryWorkspace(root, 五参数继承, admitted_files=精确切片文件集)`；INV-OWN-1 由构造成立+事后机械复核；§5.2.1-new 三入口调用链小节（公开签名/缺省兼容/预算/测试锚逐项）；§5.1.3 INV-OWN-3（manifest 元数据所有权）；§4.3.1 条件性共享层 additive 白名单（workspace `admitted_files` + inventory `_manifest_candidates` 过滤，本轮零实现）；已知限度 (i)(ii) 撤销 | `inventory.py` L392-417 `_manifest_candidates` raw `os.listdir` 不消费 inventory 文件集/不读 ignored_directories/无扩展过滤（仅给 inventory 加排除参数不构成约束——三入口须显式覆盖）；`workspace.py` L112-137 构造器五参数现状；v3 D7-COLLISION 探针（basename 分歧机械可检） | `test_detect_components_same_name_dir_not_nested_anchor_builds`、`test_parent_component_profile_manifest_excludes_child`、INV-OWN-1/2/3 守恒扩展（#9/#10 扩展+#55/#56） | 共享层 additive 白名单两项（激活条件=本 Packet v4 获 Maintainer 批准合并；获批前实现层仍以白名单外零触碰为界）；受限态组件视图与 INV-OWN-3 的产品实现全部属 D2 后 |
+| P60-V3-02 | §5.4.7 消费示例四点缺陷（L639/L643/L644/无 semantic 核对）；§5.4.3 L548 "不 import ram_schema" 与 §5.4.6 "产出 RAM wire" 矛盾；wire 产出未声明传实际生效 budgets/options | 只读复用 ram_schema 公共接口（不复制/不重定义摘要、gap、execution_required 规则）；消费示例四点修正并**逐字采用指令 §四内嵌 API 基准代码**；产出 wire 传实际生效 profile/ram budgets 与 semantic_options，禁回填默认；有效配置承载写入接口与返回结构 | §5.4.3 依赖方向 +`lima.audit.ram_schema`（只读复用）；§5.4.7 消费示例整体替换为内嵌基准（逐字）+ 外围叙述；§5.4.6 三 digest 核对路径重写（facts/semantic 两函数对 entry 槽、wire digest 只对 identity.wire_digest、gaps 两 section+execution_required 复算）+ 有效配置承载（`ComponentBuildResult` 携带 effective 配置、payload build 段自洽、无默认回填）；§5.6.3 改写 | `ram_schema.py` L268-377（`ram_wire_payload(…, *, profile_budgets/ram_budgets/semantic_options=None)` 预算/options 进 build 段→wire digest，None=层默认=回填即自洽破坏点）、L495-505/L551-595（两摘要重组函数）、L454-486（wire digest=build+三身份摘要，wire_digest 槽不参与）、L236-258（execution_required 10 码全集/9 触发/OFF 永不触发）；`profile.py` L1238-1254（`decode_profile_envelope(data: bytes)`）；`semantic_prioritizer.py` L623-660（两冻结 digest 形与 wire 重组一一对应）；**离线消费探针对 golden application.json 实跑 12/12 过**（附 D：validate 通过、facts=84fec013…/semantic=8aecae4e…两摘要复算、wire=b92a2aa4… 且 ≠facts digest、顶层无 coverage_gaps、execution_required 复算一致、篡改被拒、bytes 解码/JSON 对象被拒） | `test_consumer_obtains_all_facts_from_public_artifacts`（#42 重写：bytes 解码+三摘要分别核对+gaps 两 section+execution_required 复算+篡改被拒）、`test_component_ram_wire_effective_config_no_default_backfill`（#57）；#36/#47 随动 | 真实 graph 的端到端消费（D2 绑定真实 graph payload 后）；本轮探针仅验证"已有部分"（既有 golden+既有公共 API），不声明未实现的 graph 已可调用 |
+| P60-V3-03 | §5.4.3 L495-501 MonorepoBudgets 允许任意 ≥1 正整数，而 §5.4.8 V8/§5.5 schema 把数量 cap 固定在默认值（16/4096/…）——矛盾；`semantic_topn` ≤20 cap 与 SemanticOptions `top_n=1..100` 冲突；零额度降级路径未定义非法对象防线 | 默认值/合法域/硬上限**三分离**（构造期校验=合法域、schema maxItems=独立硬上限）；`max_components=17`/`top_n=21`/紧 cap 唯一行为；图承载对齐 `top_n=1..100`（默认 20 非帽）；零额度降级不构造非法 SemanticBudgets/不填伪 digest/不删已得事实，部分产物过自身 validator | §5.4.3 MonorepoBudgets 重写（每字段 默认/域/帽 三列）；§5.4.4-new 参数边界行为表（逐样例唯一判定）；§5.4.8 V7/V8 + §5.5 表统一（schema maxItems=域帽；`semantic_topn` 增 `top_n` 承载字段，ranked cap=top_n 实际生效值，schema maxItems 100）；§5.4.4 降级路径细化 | `semantic_prioritizer.py` L80（`SEMANTIC_MAX_TOP_N=100`）、L258-268（`top_n` 域 [1,100] 越界 ValueError）、L221-246（SemanticBudgets 全字段正值+总量≥prompt+output 构造校验——`max_llm_calls=0` 非法即冻结事实）；`ram_schema.py` L379-452（validator 六步完整性=部分产物过自身 validator 的可执行面） | `test_monorepo_budgets_invariants`（#24 重写：三分离）、`test_parameter_boundary_unique_behavior`（#58）、`test_partial_products_pass_own_validators`（#59）；#7/#46 随动 | 域帽具体数值（64/16384/1024/4096/…）属本 Packet 冻结设计但产品实现与 schema 落盘在 D2 后；动态 schema 校验路线已被弃（单解=静态独立硬帽） |
+| P60-V3-04 | §5.1.1 L237 四类（requirements*/setup.cfg/go.mod/pom.xml）默认永不可锚定的声明式盲点 + §3.3 单集合表述"发现范围=已准入 inventory"；ER addendum-1 判定该盲点为"声明承载而非消除" | 采纳 DR-IP-0023-03 受控元数据通道方向（备选→已采纳设计；选项 B 触 DEFAULT_EXTENSIONS 仍禁止）：九类 manifest 默认策略正例（四类原盲点尤其）；两个输入集合（可分析源码集/可只读发现的 manifest 元数据集）分离，各自准入/所有权/计数/provenance；封闭只读有预算；严格 admitted-only 策略可选且不被悄悄失效；跳过计数分通道；不重新准入源码 | §5.1.7 新增"受控 manifest 元数据通道"设计节（九类封闭名集、默认/严格两策略、数量+字节预算、分通道跳过计数、只读安全边界全列）；§5.1.1 盲点声明重写为通道默认正例；§5.1.3 两集合判据表+INV-OWN-3；§13.5 DR-IP-0023-03 改已采纳方向；#54 断言改写（默认正例+严格负例） | `workspace.py` L11+（`DEFAULT_EXTENSIONS` 37 项不含 .txt/.cfg/.mod/.xml——通道绕开的是"锚点可见性"而非源码准入）；`inventory.py` L147-150+L392-417（`_MANIFEST_EXACT_NAMES` 8 类+`requirements*.txt` 模式=九类来源，值重述）；ER addendum-1（`c9402a9d…88a8`）"声明承载而非消除"判定 | `test_manifest_metadata_default_positive_and_strict_negative`（#54 重写）、`test_manifest_channel_no_source_readmission`（#60）、`test_two_input_sets_counts_and_provenance_separated`（#61） | 通道的产品实现（含 `ComponentManifestRef.source` 字段、metadata 预算字段）属 D2 后；本轮仅设计冻结；调用方严格策略的公共参数形态在 D2 定稿签名时锁定（语义本轮锁定） |
+| P60-V3-05 | §5.4.4 L554 默认 `max_total_model_calls=128`（=16×8）提案；聚合 token 无池设计；三口径（单次预估/每组件额度/全仓累计）未区分；读放大无计量 | **128 否决**：模型默认 off；启用 fake/获准客户端时**全仓默认调用额度 8**（尝试次数口径，超时/失败计入）；更高=显式配置+政策授权（本轮不授予）；聚合 token 池（数值/单位/预调用计量/预留/耗尽/失败行为；保守默认 ≤ 调用方 SemanticBudgets 对应值）；三口径区分不改旧 SemanticBudgets；耗尽=静态事实+确定性 Top-N+typed gap+三摘要可验证；读放大计量+可核验上界 | §5.4.4 整节重写：聚合模型调用包络（默认 8、尝试口径、政策授权点）；聚合 token 池三字段（默认=单组件 SemanticBudgets 值，不放大）；三口径声明（含冻结代码行号锚）；降级语义（BUDGET_EXHAUSTED detail 口径、不造非法对象、部分产物自洽）；§5.4.4-new 计量小节（重扫/AST/manifest 三类读取的累计次数/字节计量与公式上界；`ResourceMetering` 结果承载）；§0.1 R60-03 行、§6 #21/#24、§13.3 随动 | `semantic_prioritizer.py` L439-470（每组件语义内部：L451 `calls_made >= max_llm_calls`、L456/L459-460/L463-465 三项**单次预调度预估校验**、L469-470 墙钟——全部每组件口径）、L221-246（SemanticBudgets 定义=每组件语义）、L344-345（`_estimate_tokens=ceil(chars/4)` 冻结估算器）——旧字段无一是全仓累计池（v3 L554 的 128 即被否决对象）；附 D 探针（golden build.semantic.budgets=每组件 8/24000/4096/28096/120 实测） | `test_aggregate_model_call_envelope`（#21 重写）、`test_aggregate_token_pool_exhaustion_typed_degradation`（#62）、`test_read_amplification_metered_and_bounded`（#63）；#25 随动 | 真实模型客户端永不入本片（政策授权另批）；聚合墙钟/F3/F4 物理强制上界仍归 C（本片不宣称）；计量承载的产品实现属 D2 后 |
+
 ---
 
 ## 1. Goal / Non-goals
 
 ### Goal
 
-1. 新增 `lima/audit/component_graph.py`：确定性、只读、stdlib-only 的 monorepo 组件层——**嵌套**组件识别（manifest 锚定 + 静态 workspace/build 配置 + 包结构/导入证据组合，仓库级坐标、有界、确定顺序）、**单一真实归属**（最深锚点前缀精确划分 + 机器可校验所有权不变量）、每组件 Profile/RAM/semantic 全链（**复用三层冻结公共接口** `build_repository_profile` / `build_python_ram_facts` / `build_semantic_top_n`，组件 workspace 继承调用方策略）、组件间依赖分析（resolved / ambiguous / unresolved 边 + **未知导入 typed 承载**，AST import 证据 + provenance）、**仓库级秘密形态准入先于坐标变换**、**统一完整性触发集**、**聚合预算新设计（fail-closed）**；
+1. 新增 `lima/audit/component_graph.py`：确定性、只读、stdlib-only 的 monorepo 组件层——**嵌套**组件识别（manifest 锚定 + 静态 workspace/build 配置 + 包结构/导入证据组合，仓库级坐标、有界、确定顺序）、**单一真实归属**（最深锚点前缀精确划分 + 机器可校验所有权不变量；**精确文件清单视图**（§5.2.1，P60-V3-01 冻结单解）约束 inventory/读取/_manifest_candidates 三入口）、每组件 Profile/RAM/semantic 全链（**复用三层冻结公共接口** `build_repository_profile` / `build_python_ram_facts` / `build_semantic_top_n`，组件 workspace 继承调用方策略；**RAM wire 产出/校验/消费只读复用 `lima.audit.ram_schema` 公共接口**（P60-V3-02，不复制不重定义其摘要、gap、execution_required 规则））、组件间依赖分析（resolved / ambiguous / unresolved 边 + **未知导入 typed 承载**，AST import 证据 + provenance）、**仓库级秘密形态准入先于坐标变换**、**统一完整性触发集**、**受控 manifest 元数据通道**（P60-V3-04，九类默认正例、两输入集合分离）、**聚合预算新设计（fail-closed；全仓默认 8 次尝试口径 + 聚合 token 池，P60-V3-05）**；
 2. 新增 `schemas/v4/lima.component-graph.json`：独立版本化 component graph wire schema（**不注册 version_compatibility_matrix**，BG-60-01 口径），携带仅凭公开 Artifact 即可消费/核对全部五类事实的承载；
 3. 图与每组件产物经独立 digest 关联（`component_graph_digest` 64-hex + 每组件三 digest 键控关联；相同内容不同组件允许摘要相等——身份用 component ID/坐标/版本表达），**沿用 IP-0019 B-10 独立承载先例**（DI-007：v4 RepositoryProfile 非空 extensions 即拒）；
 4. monorepo golden fixture（可重放、排序稳定、输入顺序无关；**expected 由 P&V 独立产出并在实现前冻结**，不由实现输出定义）。
@@ -104,7 +116,7 @@ R60-09（记录补齐）不属本 Assignment：归主会话/Coordinator 一次�
 ### Non-goals
 
 - 不修改 `lima/audit/__init__.py`（`__all__` 54 帽零触碰，见 §5.6.1）；
-- 不修改三层冻结面 `lima/audit/{inventory,ram,semantic_prioritizer}.py`、`lima/audit/ram_schema.py`、既有 tests/audit 全部测试与 fixtures、既有 schemas/v4 15 文件、`lima/contracts/**`、`lima/workspace.py`（确需共享层配合的精确隔离增强 → DR-IP-0023-02 草案随交接报告呈审，获批前不实现，见 §13）；
+- 不修改三层冻结面 `lima/audit/{inventory,ram,semantic_prioritizer}.py`、`lima/audit/ram_schema.py`、既有 tests/audit 全部测试与 fixtures、既有 schemas/v4 15 文件、`lima/contracts/**`、`lima/workspace.py`——**唯一例外**：§4.3.1 条件性共享层 additive 白名单（`lima/workspace.py` 文件清单视图参数 + `lima/audit/inventory.py` `_manifest_candidates` 受限过滤；DR-IP-0023-02 已采纳目标的落点，激活条件=本 Packet v4 获 Maintainer 批准合并；**本轮零实现**，白名单外的一切共享层修改仍禁止）；`lima.audit.ram_schema` 只读复用其公共接口（P60-V3-02 授权，非修改）；
 - 不把图挂入 `RepositoryProfile` / `AttackSurfaceEntry.extensions` / RAM wire payload / 任何 #58 envelope（B-10 + Assignment 冻结约束）；
 - 不扩展 digest 家族既有成员语义（ram_facts/semantic_config/semantic_result/prompt/model/wire 六 digest 原样；新增的 `component_graph_digest` 是独立新成员，不改不动旧成员）；
 - 不执行、不 import、不安装目标项目；不通过目标脚本补证据；不引入网络/付费模型调用（semantic 默认 off；有界离线 fake client 仅限设计反证与测试，不调真实模型——指令 §五 R60-03）；
@@ -138,12 +150,17 @@ R60-09（记录补齐）不属本 Assignment：归主会话/Coordinator 一次�
 | DI-020 | Decision | **MDR 登记 `published/MDR-60-PR282-GOAL-CORRECTION-20261009-v1.md`**（SHA-256 `759a9225f58af509cf32e38417c9e3bd54d7f2a22df4773c9d1b8260db953403`，重算一致） | 2026-10-09 | R60-01..09 语义登记（§三） | normative | — |
 | DI-021 | Code | `lima/python_dataflow.py`（@fbbbd619 只读亲验：`PythonDataflowAnalyzer.analyze_project(files: dict[path→text])` 纯静态、`_module_name` 由全路径派生点分模块名、结果含 `parse_errors/dynamic_import_sites/ambiguous_modules` 计数）——**只读语义参照**（R60-05：比较模块解析语义一致性；不作为代码依赖，见 §5.3.5） | @fbbbd619 | 模块解析语义对照声明 | current-behavior（参照） | 不引入新依赖方向 |
 | DI-022 | Finding | **ER Record `ERR-60-IP-0023-D1R-2026-10-09-v1`**（v3 修订对象；本体由主会话另存，未亲读——如实声明；要点经派发消息传递）+ 其探针证据全文亲验：`%TEMP%/er_probe_ip0023_d1r_results.json`（SHA-256 `d34b1b505b263f060762478bf59fd50d875bde250b2e85f362c6c421e1fbae1c`）+ `%TEMP%/er_probe_refine_results.json`（`12d63e5ffbdfb09823d5300195155a26de0c85aafc81da5dffa5638dae88c26d`）+ 两探针脚本（`7a4e485d89c9189325f040e292c6a4c9692569b1cd389d7c551cc80a60b3ce5a` / `7d53a372885a32998b4ab668c01a5cd7b47b86e755f58502e26a5534d4f998a0`，E1/E2 断言与 v2 字面规则逐项核对）+ 授权链 `MR-60-PR282-GOAL-CORRECTION-20261009/v1` §五/§九 | 2026-10-09，SHA 重算一致 | v3 三项 SF 修订（§0.2 → §5.1.1/§5.1.2/§5.1.3/§5.2.1/§5.2.4/§5.6.3/§6/§11/§13） | normative（v3 修订范围合同） | 探针结果只作设计证据，不替代产品验收（指令 §三同口径）；ER Record 正文与探针不一致时停止上报 |
+| DI-023 | Decision | **Maintainer 收口指令 `MR-60-PR282-FINALIZATION-20261009/v1`**（机械抽取正文 `.pv_tmp/issue60-resume-2026-10-09/authorization/v4/FINALIZATION_BODY.md`，SHA-256 `02133d0978e4b08389af3c7139541bbd4cb997e177804cb6faa4176fcd8402e3`，读取前重算一致） | 2026-10-09 | §四 五项已采纳产品裁定（P60-V3-01..05 裁定内容与内嵌 API 基准代码来源）、§二 授权与禁止、§五 角色链、§六 测试计划 | normative（最高需求权威） | 与 v3 设计冲突处以指令为准（128 默认预算等已否决项不得重试） |
+| DI-024 | Decision | **配套规划 `docs/LIMA_Issue60_PR282_v3_Rulings_and_Delivery_Plan_2026-10-09.md`**（main 工作区，SHA-256 `75798f8ba6bbae5b8379b3a33a9db5f2aa0491f8751c7b36cadaca8d6be48e95`，本轮重算一致） | 2026-10-09 | §2 五项问题证据/处置/验收出口表（本 Packet §0.3 逐条引用）、§4 M1 推进定义 | normative（背景裁定建议+证据索引） | — |
+| DI-025 | Decision | **MDR 登记 `published/MDR-60-PR282-FINALIZATION-20261009-v1.md`**（SHA-256 `9cd79d20775317d904f651c385c03fd6019ccd0a5d6f55c89caf68d06bdb4a1c`，重算一致） | 2026-10-09 | §三 五裁定语义登记、§四 授权边界、§五 P&V D1 边界 | normative | — |
+| DI-026 | Decision | **Coordinator Assignment `ASSIGN-60-CLOSURE-A-PKT-D1F_v1`**（SHA-256 `2774bd4333c3974fb6369e7f9492bb3a6bf0e46ad9233d93a541aa5bfa2ebf8a`，读取前重算一致；取代 D1R 成为当前活动 Assignment，D1/D1R 未撤销其 Goal/Frozen Interfaces/安全基线/停止条件继续有效除本文明确修订处） | 2026-10-09 | v4 范围（P60-V3-01..05 逐项修订要求+逐字 API 基准、T 节测试计划方向、Acceptance 1-8、停点收紧） | normative（唯一任务合同） | 与其他输入冲突时以 Assignment 为准并提交 Decision Request |
+| DI-027 | Evidence | **ER 链收口证据 + v4 离线消费探针**：`ERR-60-IP-0023-D1R-2026-10-09-v1` 本体（SHA-256 `4fac90eeec6c5a3a76a89d950eca244c9623230a2c56c67aaa2cc430b8a60e3d`，本轮重算一致——v4 起本体已归档可亲读）+ addendum-1（`c9402a9df80fa7bcd9a0cabba809fe43ec2fc02134ebaf10826f2f754ad588a8`，重算一致；其"四类 manifest 盲点是声明承载而非消除"判定 = P60-V3-04 收口对象）+ 本轮探针 `%TEMP%/ip0023_d1f_consumption_probe.py`（SHA-256 `74a346184228f2d3352667c6500c6cf97520d1dea781bb6add2b575f130d0882`）与 `%TEMP%/ip0023_d1f_consumption_probe_results.json`（`b60447e0709b465a332f9d71ebfc8c2171fc2ea671a72e8ca0037858408b76ce`；12/12 过；探针对象 = 既有 golden `tests/audit/fixtures/golden_matrix/golden/application.json`，SHA-256 `23c0f3ce0ea44dbccfc5b6a9cedefc8badc968eb4ea268b6436bd8e4c1240ceb`；详见附 D） | 2026-10-09，SHA 重算一致 | P60-V3-02 消费示例"已有部分"的 D1 设计证据（区分"已有行为实测"与"D2 待绑定"）；P60-V3-04 盲点判定基座 | normative（设计证据；不替代产品验收） | 探针结果只证明既有公共 API 行为，不声明未实现的 graph 已可调用 |
 
 ### Explicitly Rejected Inputs
 
-- 任何需要修改 `lima/workspace.py` 或共享输入/安全层才能表达的方案**作为 v2 默认设计**（F3 路线归 #60-CLOSURE-C；确需共享层配合的精确隔离增强以 DR-IP-0023-02 草案呈审，获批前不实现——Assignment R60-02 交付形态）；
+- 任何需要修改 `lima/workspace.py` 或共享输入/安全层才能表达的方案**作为默认设计**（F3 路线归 #60-CLOSURE-C；**v4：DR-IP-0023-02 已采纳，其共享层 additive 需求已全部具体化为 §4.3.1 白名单两项并以本 Packet v4 获批为激活条件——白名单外的共享层修改仍在此拒绝**）；
 - 任何扩展 `lima/audit/__init__.py.__all__` 54 帽、私加 #58 Profile 字段、借 `AttackSurfaceEntry.extensions` / RAM wire payload / 任何未知 extensions 携带图的方案（B-10 + `_validated_extensions` 冻结语义冲突）；
-- 已否决路线（累计，不得重试）：D1_v1 原清单（prompt/wire 层掩码 path；full-payload digest 扩展；公开 redact:sha8/家族计数；摘要检查前置于结构检查；IP-0022 单 PR 流程例外；借 extensions 携带图）+ **本轮反例否决**（指令 §二/D1R Known Gaps）：从路径重建默认 workspace 覆盖调用方策略（API-02）；以目录首段推导 import 锚点（RULE-02）；坐标变换后再准入/仅覆盖部分公开面（API-03）；"底层继承"当作解析失败 gap 的证明（API-04）；组件 content_digest 互异断言（API-05）；实现后产 golden 自证（R60-07）；消费者重跑构建获取事实（R60-08）；
+- 已否决路线（累计，不得重试）：D1_v1 原清单（prompt/wire 层掩码 path；full-payload digest 扩展；公开 redact:sha8/家族计数；摘要检查前置于结构检查；IP-0022 单 PR 流程例外；借 extensions 携带图）+ **本轮反例否决**（指令 §二/D1R Known Gaps）：从路径重建默认 workspace 覆盖调用方策略（API-02）；以目录首段推导 import 锚点（RULE-02）；坐标变换后再准入/仅覆盖部分公开面（API-03）；"底层继承"当作解析失败 gap 的证明（API-04）；组件 content_digest 互异断言（API-05）；实现后产 golden 自证（R60-07）；消费者重跑构建获取事实（R60-08）；**v4 追加否决**（指令 §四 P60-V3-05/FINALIZATION §二）：默认 `max_total_model_calls=128`（按组件数自动放大的旧提案）；basename-ignore 组件视图 + 合法组件 typed 不构建作为默认完成方案（P60-V3-01）；组件层复制/重定义 ram_schema 摘要与 gap 规则、禁止组件层 import ram_schema（P60-V3-02：矛盾表述废除，只读复用为唯一路线）；`DEFAULT_EXTENSIONS` 增补 .txt/.cfg/.mod/.xml（P60-V3-04 选项 B）；
 - `lima/python_dataflow.py`、`lima/semantic_retrieval.py` 的**代码依赖**（v2 仅将前者作只读语义参照文档化，§5.3.5；semantic 链复用指 `lima.audit.semantic_prioritizer` 公共入口；组件层 import 扫描自带最小 AST 解析，不引入对共享模块的新依赖方向）；
 - 修改 `repository_kinds` monorepo 判定语义（inventory 冻结行为；本片组件图与 kinds 分类各自表述，见 §5.1.6）；
 - #266（OpenHarmony pilot）与 #281（offline preflight）的任何文件/语义面（恢复审计 addendum-2 §5 四查③亲验与 #60 预期路径零交集；#281 的 profile_consumer 仅为只读参考，不作为本片验收依据）；
@@ -161,8 +178,8 @@ R60-09（记录补齐）不属本 Assignment：归主会话/Coordinator 一次�
 - **Layer 1（inventory）**：`build_repository_profile(workspace, *, tenant_id, task_id, workflow_id, stage_attempt_id, artifact_id, repository_snapshot_digest, producer="lima.audit.inventory", policy_digest=<sentinel e3b0c442…b855>, toolchain_digest=<sentinel>, options: ProfileInventoryOptions|None)` → `ProfileBuildResult{profile, envelope, provenance_anchor_ids, admission_skips}`；`ProfileInventoryOptions{budgets=ProfileBudgets(), schema_version=SchemaVersion(4,0)}`；`ProfileBudgets{manifest_max_bytes=262_144, max_manifest_files=64}`；`is_secret_shaped_path`（段级检测，`tests/secrets/x.py`→True / `tests/tokenizer/x.py`→False 亲验；`secrets/pyproject.toml`/`secrets/main.py`→True、`main.py`→False 亲验）；`AdmissionSkipRecord{index, reason, family}`（内部留痕，无文件名）。**入口行为（R60-02/03/04 承重）**：`isinstance(workspace, RepositoryWorkspace)` 硬校验（鸭子类型视图不可注入）；内部自行 `workspace.inventory()` 与 `_manifest_candidates(workspace)`（`os.listdir` root+一级子目录，**不读 ignored_directories**）。
 - **Layer 2（ram）**：`build_python_ram_facts(workspace, *, budgets=None)` → `RamFactsBuildResult{facts, provenance_anchor_ids, admission_skips}`；`RamBudgets{max_python_files=512, max_key_flows=256, max_unresolved_edges=1024}`；`PythonRamFacts` 11 字段（含 `counters: Mapping[str,int]`——`parse_error_files`、`modules_indexed` 等在此）；`ram_facts_digest(facts)`（64-hex）。**入口行为同上**：isinstance 硬校验 + 自行 `workspace.inventory()`；py 候选排序后先过 `_secret_shape_family` 准入（路径=该 workspace 相对坐标），拒绝计数入 `INVENTORY_SKIPPED`（detail `reason=sensitive-filename; count=N`）；`>max_python_files` 截断入 `BUDGET_EXHAUSTED`（detail `reason=python-file-limit; count=…`）。
 - **Layer 3（semantic）**：`build_semantic_top_n(facts, *, options=None, model_client=None)`；`SemanticOptions{top_n=20, weights, seed=0, budgets, model_id="unset", prompt_template, tie_break="kind-path-symbol-ordinal"}`；`SemanticBudgets{max_llm_calls=8, max_prompt_tokens_estimate=24_000, max_output_tokens_estimate=4_096, max_total_tokens_estimate=28_096, max_wall_time_seconds=120}`；`candidate_id("sensitive-sink","a/b.py",None,0) == "sensitive-sink:a/b.py:-#0"`（冻结编码亲验）；`semantic_result_digest(result, *, input_facts_digest=None)`；模型默认 off（`model_id="unset"` 或无 client → 零调用零网络）。
-- **Schema 层（ram_schema）**：`GAP_CODES_ALL` 恰 10 码（AMBIGUOUS_DISPATCH / BUDGET_EXHAUSTED / DYNAMIC_IMPORT / INVENTORY_SKIPPED / MANIFEST_PARSE_ERROR / NO_LANGUAGES_DETECTED / SEMANTIC_MALFORMED_OUTPUT / SEMANTIC_MODEL_OFF / SEMANTIC_MODEL_TIMEOUT / UNSUPPORTED_LANGUAGE）；`GAP_EXECUTION_REQUIRED_TRIGGERS = GAP_CODES_ALL - {"SEMANTIC_MODEL_OFF"}` 恰 9 码；`PROVENANCE_ANCHOR_CHAIN=("inventory","ram-facts","semantic-prioritizer")`；`ram_wire_payload` / `validate_ram_wire_payload` / `ram_wire_digest` / `execution_required_from_gaps` / `load_ram_wire_schema`。
-- **manifest 候选机制（inventory 私有，值重述不 import）**：`_MANIFEST_EXACT_NAMES` = {Cargo.toml, environment.yml, go.mod, package.json, pom.xml, pyproject.toml, setup.cfg, setup.py} + `requirements*.txt` 模式；候选 = 根目录 + 一级子目录（os.listdir 后 sorted；**这是 inventory 冻结旧行为，不授权本片组件层沿用浅层限制**——R60-01）；候选匹配**不施加扩展/忽略策略与秘密形态过滤**（raw os.listdir 名集匹配——与主仓 inventory 扩展准入不对称，SF-2 声明依据，见 §5.1.1）；`_record_manifest_error` 用 `manifest-index=<排序下标>` 稳定标识（DR-IP-0022-04 A 定稿版，不泄漏敏感文件名）。
+- **Schema 层（ram_schema）**：`GAP_CODES_ALL` 恰 10 码（AMBIGUOUS_DISPATCH / BUDGET_EXHAUSTED / DYNAMIC_IMPORT / INVENTORY_SKIPPED / MANIFEST_PARSE_ERROR / NO_LANGUAGES_DETECTED / SEMANTIC_MALFORMED_OUTPUT / SEMANTIC_MODEL_OFF / SEMANTIC_MODEL_TIMEOUT / UNSUPPORTED_LANGUAGE）；`GAP_EXECUTION_REQUIRED_TRIGGERS = GAP_CODES_ALL - {"SEMANTIC_MODEL_OFF"}` 恰 9 码；`PROVENANCE_ANCHOR_CHAIN=("inventory","ram-facts","semantic-prioritizer")`；`ram_wire_payload` / `validate_ram_wire_payload` / `ram_wire_digest` / `execution_required_from_gaps` / `load_ram_wire_schema`。**v4 增补（P60-V3-02 只读复用消费面，@fbbbd619 亲验，行号=本 worktree 源码）**：`ram_wire_payload(ram_result, semantic_result, *, profile_budgets=None, ram_budgets=None, semantic_options=None)`（L268-377）——预算/options 进 `build` 段从而进 wire digest，`None`=层默认（**回填默认即 wire 自洽破坏点**：build 段与实际构建配置不一致时 wire_digest 校验必失配）；wire 顶层键恰 8（schema_version/model_kind/build/ram/semantic/identity/provenance/execution_required，**无顶层 coverage_gaps**），gaps 在 `ram.coverage_gaps` 与 `semantic.coverage_gaps`（每项含 `gap_code`），顶层 `execution_required={"required": bool, "trigger_gap_codes": list}`；`validate_ram_wire_payload`（L379-452）六步完整性（路径→ranked 绑定→facts/config/result/model 四 digest→wire_digest 收尾）；`ram_wire_digest`（L454-486）= `compute_content_digest(build 段+三身份摘要)`，wire_digest 槽自身不参与、对诚实载荷等于内嵌值、**恒不等于 ram_facts_digest**；`ram_facts_digest_from_wire`（L495-505）= `compute_content_digest(payload["ram"])`；`semantic_result_digest_from_wire`（L551-595）按 `semantic_prioritizer._result_digest` 冻结形（config_digest+input_facts_digest+ranked 六字段+total_candidates+coverage_gaps）重组重算；`execution_required_from_gaps`（L236-258）10 码全集外抛 ValueError、9 触发码、`SEMANTIC_MODEL_OFF` 永不触发。
+- **manifest 候选机制（inventory 私有，值重述不 import）**：`_MANIFEST_EXACT_NAMES` = {Cargo.toml, environment.yml, go.mod, package.json, pom.xml, pyproject.toml, setup.cfg, setup.py} + `requirements*.txt` 模式；候选 = 根目录 + 一级子目录（os.listdir 后 sorted；**这是 inventory 冻结旧行为，不授权本片组件层沿用浅层限制**——R60-01）；候选匹配**不施加扩展/忽略策略与秘密形态过滤**（raw os.listdir 名集匹配——v3 曾以此披露"可作证据、不可作锚点"不对称；**v4：该不对称叙述已由 §5.1.7 元数据通道设计取代**（九类默认可锚定+两输入集合分离），此行仅保留冻结事实本身作为 P60-V3-01 三入口约束的锚（§3.6））；`_record_manifest_error` 用 `manifest-index=<排序下标>` 稳定标识（DR-IP-0022-04 A 定稿版，不泄漏敏感文件名）。
 - **monorepo kind 判定（inventory 冻结行为，亲验 `_repository_kinds`）**：`has_languages and len(manifest_subdirs) >= 2` → `RepositoryKind.MONOREPO`（wire 值 `"monorepo"`，#58 IP-0003 §10 冻结）。
 
 ### 3.2 `lima/audit/__init__.py` 现状（DI-012）
@@ -173,7 +190,7 @@ R60-09（记录补齐）不属本 Assignment：归主会话/Coordinator 一次�
 
 - 构造器 `RepositoryWorkspace(root, *, max_files=5_000, max_file_bytes=512KiB, max_total_bytes=20MiB, extensions=None→DEFAULT_EXTENSIONS, ignored_directories=None→∅∪DEFAULT_IGNORED_DIRECTORIES)`——**五策略参数即策略继承的公共载体（R60-03）**；构造语义（v3 勘误锚定，源码亲验）：`extensions` 为 **None/空→DEFAULT 的 or 替换**（非空入参完全生效、**不与 DEFAULT 并集**），`ignored_directories` 为**恒与 DEFAULT_IGNORED_DIRECTORIES 并集**（非 None 亦并集）；
 - `inventory()`：os.walk topdown、`followlinks=False`；目录按**名字** ∈ ignored_directories 剪枝（无路径级排除——R60-02 设计边界）；文件级跳过原因 closed 词表（ignored-directory/symlink/sensitive-config/unsupported-extension/unreadable/file-size-limit/file-limit/total-size-limit/binary/non-utf8）；候选按 `_candidate_priority`（low-priority/source-root/其余 + 相对路径）排序后过 cap；返回 `WorkspaceInventory{files: list[WorkspaceFile], skipped: dict[reason→count]（**公开**）, total_bytes, discovered_files/bytes, truncated}`——**主仓准入与截断状态对组件层可观察（R60-03/04/06 依据）**；
-- `read_text` = 有界（≤max_file_bytes）`read_bytes().decode("utf-8")`，无 universal-newline 归一（保留 CRLF）；`absolute_file`=`_safe_path`（相对、不越界、常规文件）；`DEFAULT_EXTENSIONS` 37 项（含 C++/构建类；**不含 `.txt`/`.cfg`/`.mod`/`.xml`——requirements*.txt/setup.cfg/go.mod/pom.xml 四类 manifest 文件默认策略下不可准入为 inventory 成员，SF-2 声明依据；含 `.toml`/`.json`/`.yml`/`.py`——pyproject/Cargo/package.json/environment.yml/setup.py 五类默认可准入**）、`DEFAULT_FILENAMES` 6 项（不含任何 manifest 名）、`WorkspaceFile` 第 4 字段 `line_count`、`fingerprint()`=逐文件 path/size/sha256——**输入域扩容为既有事实，本片不依赖新扩展进入 inventory**；`inventory()` 截断（`truncated=True`）仅在 file-limit/total-size-limit 跳过计数时置位（源码亲验——§5.2.4 T6 逐键承载恒非空的依据）；
+- `read_text` = 有界（≤max_file_bytes）`read_bytes().decode("utf-8")`，无 universal-newline 归一（保留 CRLF）；`absolute_file`=`_safe_path`（相对、不越界、常规文件）；`DEFAULT_EXTENSIONS` 37 项（含 C++/构建类；**不含 `.txt`/`.cfg`/`.mod`/`.xml`——requirements*.txt/setup.cfg/go.mod/pom.xml 四类 manifest 文件默认策略下不可准入为 (S1) inventory 成员（v4：此冻结事实不变，但其"锚点不可见"后果已由 §5.1.7 元数据通道 (S2) 收口为默认正例——两输入集合分离）；含 `.toml`/`.json`/`.yml`/`.py`——pyproject/Cargo/package.json/environment.yml/setup.py 五类默认可准入**）、`DEFAULT_FILENAMES` 6 项（不含任何 manifest 名）、`WorkspaceFile` 第 4 字段 `line_count`、`fingerprint()`=逐文件 path/size/sha256——**输入域扩容为既有事实，本片不依赖新扩展进入 inventory**；`inventory()` 截断（`truncated=True`）仅在 file-limit/total-size-limit 跳过计数时置位（源码亲验——§5.2.4 T6 逐键承载恒非空的依据）；
 - F3（_safe_path TOCTOU）未闭合，归 #60-CLOSURE-C。
 
 ### 3.4 基线数字（恢复审计 §5 Coordinator 实跑 @fbbbd619，锚定引用非本轮重跑）
@@ -183,6 +200,14 @@ contracts `617 OK` / audit `235 OK 0 skip`（含 IP-0022 51 例回归锚）/ evi
 ### 3.5 反例索引（DI-019；七例 SHA 锚定于 `90f3d975…acb8a4`）
 
 API-01（根 workspace 吸入子组件文件：root_modules=2 / child=1）、API-02（子 workspace 重置策略：1/30/30+ignore a → 5000/524288/20971520+丢失）、API-03（坐标重设绕过准入：整仓 0 模块+gap → rebased 1 模块）、API-04（`parse_error_files=1` 而 facts `coverage_gaps=[]`）、API-05（不同组件根同内容 → content_digest 相等）、RULE-01（`services/api`、`packages/core` 不在"根+一级"候选集）、RULE-02（src 布局 anchors 同为 `src`，`import beta` 无边无 gap）。处置映射见 §0.1；D1R 设计探针复跑结果见附录 B。
+
+### 3.6 P60-V3-01..05 衔接事实（v4 新增；@fbbbd619 亲验 + 本轮离线探针实测）
+
+- **`_manifest_candidates` 三入口事实（P60-V3-01）**：`lima/audit/inventory.py` L392-417 `_manifest_candidates(workspace)` 直接 `os.listdir(root)` 枚举根+一级子目录做名集匹配（`_MANIFEST_EXACT_NAMES` L147-150 + `requirements*.txt` 模式），**不消费 inventory 的精确文件集合、不读 ignored_directories、不施加扩展/秘密过滤**——故"仅给 inventory 加排除参数"不构成对 Profile manifest 候选入口的约束；三入口（inventory 扫描集合 / read_text 等全部读取入口 / `_manifest_candidates`）必须显式分别覆盖（§5.2.1）。
+- **消费链事实（P60-V3-02，§3.1 增补段同源）**：`decode_profile_envelope(data: bytes, *, limits) -> (ArtifactEnvelope, RepositoryProfile)`（`lima/contracts/profile.py` L1238-1254；`ArtifactEnvelope.content_digest` 公共字段）；`semantic_prioritizer.py` L623-660 `_config_digest_payload`/`_result_digest` 冻结形状与 wire 重组函数一一对应——RAM wire 已含完整 semantic 数据的证据。
+- **参数域事实（P60-V3-03）**：`semantic_prioritizer.py` L80 `SEMANTIC_MAX_TOP_N: Final[int] = 100`、L258-268 `top_n` 非 [1,100] 整数抛 ValueError（默认 20 只是默认不是帽）；L221-246 `SemanticBudgets` 全字段正值校验 + `max_total_tokens_estimate >= max_prompt + max_output` 构造校验——`max_llm_calls=0` 的 SemanticBudgets **不可构造**（零额度降级不得造非法对象的冻结面依据）。
+- **三口径事实（P60-V3-05）**：`SemanticBudgets{max_llm_calls=8, max_prompt_tokens_estimate=24_000, max_output_tokens_estimate=4_096, max_total_tokens_estimate=28_096, max_wall_time_seconds=120}` 是**每组件**语义的冻结面（Packet §3.1 L163 誊录一致）；`semantic_prioritizer.py` L439-470 的预调度校验（L451 调用数、L456 prompt 预估、L459-460 输出预估、L463-465 总量预估、L469-470 墙钟）全部在**每组件语义遍历内部**执行——`max_total_tokens_estimate` 是单次预调度预估校验字段，**不是**全仓累计池；v3 §5.4.4 L554 的 128 默认提案即被 P60-V3-05 否决的对象。
+- **离线消费探针实测（P60-V3-02 D1 设计证据，DI-027；详见附 D）**：对既有 golden `tests/audit/fixtures/golden_matrix/golden/application.json`（SHA-256 `23c0f3ce0ea44dbccfc5b6a9cedefc8badc968eb4ea268b6436bd8e4c1240ceb`）实跑指令内嵌 API 基准的"已有部分"——`validate_ram_wire_payload` 通过；`ram_facts_digest_from_wire` 复算 `84fec0134159f33e…` 与 `identity.ram_facts_digest` 相等；`semantic_result_digest_from_wire` 复算 `8aecae4e63146bfc…` 相等；`ram_wire_digest` 复算 `b92a2aa40fc9b4c9…` 与 `identity.wire_digest` 相等且 **≠ ram_facts_digest**；顶层无 coverage_gaps（ram 段 n=0、semantic 段 n=1=`SEMANTIC_MODEL_OFF`）；`execution_required_from_gaps` 复算 `{'required': False, 'trigger_gap_codes': []}` 与顶层一致；篡改 `semantic.ranked[0].score` → ContractError；`SEMANTIC_MODEL_OFF` 永不触发、全集外码 ValueError；`decode_profile_envelope` bytes 入参语义成立（合成样本经公共 API 构建，`envelope.content_digest=913d8d6ea58ee291…`），传 JSON 对象（非 bytes）在契约边界被拒。**以上为"已有行为实测"；真实 graph payload 的端到端消费属 D2 绑定**。
 
 ---
 
@@ -207,19 +232,30 @@ API-01（根 workspace 吸入子组件文件：root_modules=2 / child=1）、API
 
 ### 4.3 Product Files Allowed to Modify
 
-**无**。`lima/audit/__init__.py` 本 IP 零修改（与 IP-0019/0021/0022 的"纯追加 re-export"边界不同：本 IP 新公共符号不经 `lima.audit` 命名空间 re-export，见 §5.6.1 单解）。
+**无条件修改：无**。`lima/audit/__init__.py` 本 IP 零修改（与 IP-0019/0021/0022 的"纯追加 re-export"边界不同：本 IP 新公共符号不经 `lima.audit` 命名空间 re-export，见 §5.6.1 单解）。
+
+### 4.3.1 条件性共享层 additive 白名单（DR-IP-0023-02 已采纳目标的落点；激活条件=本 Packet v4 获 Maintainer 批准合并；**本轮零实现**，白名单外共享层修改一律仍属禁止）
+
+P60-V3-01 精确视图方案（§5.2.1 文件清单视图）所需的**全部**共享层 additive 能力，逐项列入（精确到文件 + 函数/字段/参数 + 旧默认兼容论证 + 调用链 + 冻结测试影响）。指令边界原文："允许设计新增模块内适配及必要共享层 additive 能力，但未来实现文件、接口、调用链和旧默认兼容须具体列出；当前不提前修改它们"；"本次采纳目标不等于已经批准未具体化的共享层实现"。
+
+| # | 文件 | additive 变更（函数/字段/参数） | 旧默认兼容论证 | 调用链 | 冻结测试影响 |
+|---|---|---|---|---|---|
+| W-1 | `lima/workspace.py` | `RepositoryWorkspace.__init__` 新增 keyword-only 参数 `admitted_files: Iterable[str] \| None = None`（workspace 相对 POSIX 路径集合）；存为 `self._admitted_files: frozenset[str] \| None`（None=不受限）+ 公开只读属性 `admitted_files: frozenset[str] \| None`；`inventory()` 在受限态把发现文件集限制为该集合的成员（walk 期间过滤，集合外文件**不发现、不计入 skipped、不进 discovered/total 统计**——其统计已在仓库级主 workspace 完成）；`read_text`/`absolute_file`（`_safe_path` 边界之上）在受限态对不属于集合的相对路径按既有越界错误口径拒绝（fail-closed，不新增错误类型）；`fingerprint()` 在受限态仅对集合内文件 | 缺省 `None` 时构造、inventory、read_text、fingerprint、跳过词表、cap 截断行为**逐字节同旧默认**（既有全部调用点零改动——tests/audit 既有 235 例与五形态 golden 不触及受限态）；参数仅收紧可见集，不放宽任何边界（`_safe_path`/扩展/忽略/秘密语义原样） | `build_monorepo_profile → 每组件 RepositoryWorkspace(root, 五参数继承, admitted_files=精确切片) → 三层公共入口（内部各自 workspace.inventory() / workspace.read_text）`——入口 (a) inventory 与入口 (b) 读取由此单机制约束（§5.2.1） | 既有冻结测试零影响（None 缺省不变）；D2 新增测试覆盖受限态（#55/#56/#9/#10 扩展锚） |
+| W-2 | `lima/audit/inventory.py` | `_manifest_candidates(workspace)` 增量尊重 `workspace.admitted_files`：受限态下候选输出过滤为属于该集合的路径（先列后滤或等效剪枝，语义=过滤） | 缺省 None 时 `os.listdir` 名集匹配行为逐字节同旧（既有 Profile 构建调用点全部不受限）；过滤只收窄候选，不新增候选来源、不改 `manifest-index` 稳定标识语义 | `build_monorepo_profile → build_repository_profile(component_ws) → _manifest_candidates(component_ws)`——入口 (c) Profile manifest 候选由此约束（父组件切片不含子组件 manifest → 父 Profile 不纳入子组件 manifest，P60-V3-01 裁定） | 既有冻结测试零影响；D2 新增 #56 断言父 Profile manifest 候选不含子组件 manifest |
+
+**白名单明确不含**（仍属禁止）：`DEFAULT_EXTENSIONS`/`DEFAULT_FILENAMES`/`DEFAULT_IGNORED_DIRECTORIES` 任何改动（P60-V3-04 选项 B 禁止）；`_safe_path` 语义变化（仅新增集合成员校验层）；`read_text` 编码/换行语义；`_repository_kinds` 判定；`lima/audit/__init__.py`；三层其余行为；`ram_schema` 任何修改（只读复用，非修改）。
 
 ### 4.4 Read-only Reference
 
-三层冻结面 `lima/audit/{inventory,ram,semantic_prioritizer,ram_schema}.py`、`lima/audit/__init__.py`、`lima/workspace.py`、`lima/contracts/**`、`schemas/v4/**` 既有 15 文件、`scripts/run_ci_tests.py`、tests/audit 既有 10 测试文件与全部既有 fixtures（`fixtures/{repo_shapes.py, library_profile_golden.json, ram/, semantic/, golden_matrix/}`）、五 IP Packet 与 DR 链文档、本 Packet（v2 与 v1 历史）。**只读语义参照**：`lima/python_dataflow.py`（§5.3.5 对照声明，不 import）。
+三层冻结面 `lima/audit/{inventory,ram,semantic_prioritizer,ram_schema}.py`、`lima/audit/__init__.py`、`lima/workspace.py`、`lima/contracts/**`、`schemas/v4/**` 既有 15 文件、`scripts/run_ci_tests.py`、tests/audit 既有 10 测试文件与全部既有 fixtures（`fixtures/{repo_shapes.py, library_profile_golden.json, ram/, semantic/, golden_matrix/}`）、五 IP Packet 与 DR 链文档、本 Packet（v3/v2 与 v1 历史）。**只读语义参照**：`lima/python_dataflow.py`（§5.3.5 对照声明，不 import）。**v4 注**：`lima/workspace.py` 与 `lima/audit/inventory.py` 的读取态不变；其**未来修改权**仅限 §4.3.1 白名单两项（激活条件=本 Packet v4 获批；激活前等同 Forbidden）；`lima.audit.ram_schema` 公共接口**只读复用**（P60-V3-02 授权——import 并调用公共函数非修改）。
 
 ### 4.5 Files Forbidden
 
-除 §4.1/§4.2 外的一切路径；特别冻结：`lima/audit/__init__.py`（54 帽）、三层+ram_schema 模块、既有 tests/audit 测试与 fixtures（含 `test_ip_0022_fix.py` 六处 DR-LINT-0022-A 登记处）、`schemas/v4/version_compatibility_matrix.json` 与既有 14 schema 文件、`lima/contracts/**`、`lima/workspace.py`、`lima/python_dataflow.py`、`lima/semantic_retrieval.py`、scanner/service/api/store/sandbox/frontend、`.zcode/**`、`.github/**`、#94/#266/#281/baseline 轨道路径、`docs/**`（本 Packet 阶段 D1R 定稿后）、根检出与全部历史 worktree、`main` 分支。
+除 §4.1/§4.2 与 §4.3.1 白名单（条件激活）外的一切路径；特别冻结：`lima/audit/__init__.py`（54 帽）、三层+ram_schema 模块（ram_schema 只读复用除外）、既有 tests/audit 测试与 fixtures（含 `test_ip_0022_fix.py` 六处 DR-LINT-0022-A 登记处）、`schemas/v4/version_compatibility_matrix.json` 与既有 14 schema 文件、`lima/contracts/**`、`lima/workspace.py`（§4.3.1 W-1 白名单激活前；`DEFAULT_EXTENSIONS` 等默认值**永远**在本 IP 禁改——P60-V3-04 选项 B 禁止，不随白名单激活而解禁）、`lima/python_dataflow.py`、`lima/semantic_retrieval.py`、scanner/service/api/store/sandbox/frontend、`.zcode/**`、`.github/**`、#94/#266/#281/baseline 轨道路径、`docs/**`（本 Packet 阶段 D1F 定稿后）、根检出与全部历史 worktree、`main` 分支。
 
 ### 4.6 Symbol-to-File Map（全部新增公共符号均在 `lima/audit/component_graph.py`）
 
-见 §5.4.7 模块级 `__all__` 导出清单（恰 34 项：23 个类型/函数/图常量 + 9 个 manifest kind 常量 + 2 个 v2 新增类型）。
+见 §5.4.7 模块级 `__all__` 导出清单（**v4：恰 46 项** = 23 个类型/函数/图常量 + 9 个 manifest kind 常量 + 2 个 v2 新增类型 + 12 个 v4 新增常量/类型：4 UNBUILT_REASON + 3 MANIFEST_SOURCE + 3 MANIFEST_POLICY + `ResourceMetering` + `UnbuiltComponentRecord`）。
 
 ### 4.7 冲突分析
 
@@ -233,13 +269,13 @@ API-01（根 workspace 吸入子组件文件：root_modules=2 / child=1）、API
 
 #### 5.1.1 发现范围与锚点集合（冻结单解；替代 v1 "根+一级子目录"）
 
-- **证据来源（组合，不单凭目录名）**：锚点 = 主 workspace **已准入 inventory** 中 manifest 类文件（封闭名集，值重述 inventory 冻结口径：`_MANIFEST_EXACT_NAMES` 8 类 + `requirements*.txt` 模式）的 POSIX 父目录，**任意深度**（`services/api`、`packages/core` 均落入——RULE-01 消除）。组件层**不另起 os.walk**：发现范围 = 调用方主 workspace 的已准入集合（有界 = 调用方 cap；确定顺序 = inventory 路径 sorted）。
-- **默认扩展策略盲点（v3/ER SF-2，冻结声明）**：锚点通道严格经主仓已准入 inventory，而 `DEFAULT_EXTENSIONS`（37 项，§3.3）不含 `.txt`/`.cfg`/`.mod`/`.xml`——故封闭名集九类 kind 中**默认可锚定仅五类**（pyproject/cargo_toml/package_json/environment_yml/setup_py），**requirements/setup_cfg/go_mod/pom_xml 四类在默认策略下永不可准入为锚点**（E2：requirements*.txt → `skipped["unsupported-extension"]`，对锚点通道不可见）；仅当调用方显式传入含对应扩展的 `extensions` 时方可锚定（策略继承单解）。**与冻结层 `_manifest_candidates` 的不对称（如实披露）**：inventory 私有候选机制 raw os.listdir **不施加扩展策略**（§3.1），同一 setup.cfg/requirements*.txt 文件可进入（已准入锚点的）组件 **Profile 层 manifest 证据**，却（默认策略下）永不能锚定组件——"可作证据、不可作锚点"的不对称是扩展策略单通道（仅主仓 inventory 施加扩展准入）的直接后果，非实现疏漏；锚点通道**不**绕开扩展策略（不做成默认——绕开/扩 DEFAULT 列为 DR-IP-0023-03 备选，§13，默认不做）。
+- **证据来源（组合，不单凭目录名；两个输入集合，P60-V3-04）**：锚点 = **两个输入集合**的并（去重）：(S1) 主 workspace **已准入 inventory** 中 manifest 类文件（封闭名集，值重述 inventory 冻结口径：`_MANIFEST_EXACT_NAMES` 8 类 + `requirements*.txt` 模式）的 POSIX 父目录，任意深度（`services/api`、`packages/core` 均落入——RULE-01 消除）；(S2) **受控 manifest 元数据通道**（§5.1.7）按同一封闭名集只读发现的 manifest 元数据文件的 POSIX 父目录。锚点的仓库级路径先过 `is_secret_shaped_path` 准入（下条）。组件层对 (S1) **不另起 os.walk**（发现范围 = 调用方主 workspace 的已准入集合，有界 = 调用方 cap，确定顺序 = 路径 sorted）；对 (S2) 的枚举受 §5.1.7 通道预算与安全边界约束（这是本 Packet 明示的有限发现权限，非源码准入）。
+- **默认策略下九类全部可锚定（v4 重写，P60-V3-04；替代 v3/SF-2 四类盲点声明）**：封闭名集九类 kind（pyproject/setup_py/setup_cfg/requirements/environment_yml/package_json/go_mod/cargo_toml/pom_xml）在**约定默认策略**下全部可识别为锚点证据——其中 requirements\*.txt/setup.cfg/go.mod/pom.xml 四类经 (S2) 元数据通道默认识别（v3 的"默认永不可锚定"盲点由通道收口，ER addendum-1"声明承载而非消除"的判定不再适用）；其余五类默认经 (S1) 已准入集合识别（`.toml/.json/.yml/.py` 在 DEFAULT_EXTENSIONS 内）。调用方**严格 admitted-only 策略**（§5.1.7）可选：仅 (S1) 可锚点（回到源码准入单通道），该选择不被悄悄失效。**通道不支持的情形（盲点声明仅保留于此）**：封闭名集之外的文件（如 `Gemfile`/`composer.json`/`build.gradle`）不是任何输入集合的 manifest 证据——不支持属范围声明而非漏识别；如需支持属新需求（经 Packet 修订/DR，不把漏识别写成 golden）。
 - **静态 workspace/build 配置证据（封闭规则集，只读静态解析）**：仓库根（`""` 锚点）的 manifest 若声明 workspace 协作语义——pyproject.toml 含非空 `tool.uv.workspace.members` 或 `tool.pdm.workspace`；package.json 含非空 `workspaces` 数组；Cargo.toml 含 `[workspace]` 表且**无** `[package]` 表——则该 manifest 为 **workspace 协作 manifest**，**不产生根组件**（其成员经自身 manifest 锚定）。除此之外的 manifest 一律为组件 manifest（含根级 pyproject 含 `[project]` 者——根组件，见 5.1.3 嵌套归属）。解析失败/未识别形态 → 按组件 manifest 保守处理（确定性默认）。
 - **同目录多 manifest 归并**：同锚点目录多个 manifest 归并为同一组件，`manifests` 列表按 path 排序全记。
 - **锚点准入（R60-04 前置）**：锚点目录的仓库级路径（`锚点/` + 任一子段探测）先过 `is_secret_shaped_path`——命中者**不准入为锚点**（不产组件、不进任何公开面），`INVENTORY_SKIPPED` gap（detail `reason=sensitive-filename; count=N`，N=被拒锚点数；不泄漏目录名）。
 - **发现预算与截断**：发现候选数以主仓 inventory 为上界（调用方 cap 有界）；组件数 > `MonorepoBudgets.max_components`（默认 16）→ 按 component_id 序取前 16 + `BUDGET_EXHAUSTED`（detail `reason=component-limit; count=<溢出>`）+ `truncated=True` + `dependencies_complete=False`（触发集 T1，§5.2.4）。
-- **不支持/受削形态（typed 承载，不静默排除）**：调用方 ignored_directories 剪枝掉的子树内 manifest（策略继承语义，随 `skipped` 计数可见）；调用方扩展策略排除的 manifest 类型（如 extensions={".py"} 时 .toml 不可见→无锚点，全仓 unassigned 如实呈现）；**默认扩展策略盲点（SF-2，上节声明）**：requirements*.txt/setup.cfg/go.mod/pom.xml 四类默认永不可锚定——非调用方选择而是默认策略事实，归宿=unassigned+`skipped["unsupported-extension"]` 计数可见，不产组件不编造；主仓 cap 截断或准入跳过（`truncated=True` 或 §5.2.4 T6 所列任一 skipped 键 >0）→ 发现不完整，触发 T6；秘密形态锚点 → 上述 gap。**以上均为范围声明而非需求缩减：无任何 Maintainer 批准的"仅一级目录"豁免，17 项原始/V5 mandatory 不删不降。**
+- **不支持/受削形态（typed 承载，不静默排除）**：调用方 ignored_directories 剪枝掉的子树内 manifest（策略继承语义，(S1) 随 `skipped` 计数可见、(S2) 随通道跳过计数可见——两通道计数**分列**不合并，§5.1.7）；调用方**严格 admitted-only 策略**下源码集合 (S1) 不含的 manifest 类型（如 extensions={".py"} 时 .toml 不可见→无锚点，全仓 unassigned 如实呈现——严格策略的显式选择，非漏识别）；调用方显式禁用元数据通道（§5.1.7 严格策略）时 (S2) 关闭，四类原盲点类 manifest 不再默认可锚定（显式选择，计数与策略声明承载）；主仓 cap 截断或准入跳过（`truncated=True` 或 §5.2.4 T6 所列任一 skipped 键 >0）→ 发现不完整，触发 T6；秘密形态锚点 → 上述 gap。**以上均为范围声明而非需求缩减：无任何 Maintainer 批准的"仅一级目录"豁免，17 项原始/V5 mandatory 不删不降。**
 
 #### 5.1.2 稳定 component ID（冻结单解）
 
@@ -258,8 +294,9 @@ component_id = "component:" + <已准入锚点目录的 repo-relative POSIX 路�
 - **归属唯一性**：最深前缀规则在任意嵌套锚点树上单解、可机械复算（D1R 探针 D1/D2/D7 复算验证）；目录名仅为路径计算输入，**不产生任何依赖边**（边唯一来源 = AST import 证据，§5.3）。
 - `python_file_count` = 该组件归属的已准入 `.py` 文件数；`is_empty = (python_file_count == 0)`（空组件如实保留、`is_empty=True`，不编造边、不剔除）。非 `.py` 已准入文件同样按归属规则划入组件构建输入（Profile inventory 维度），但不计入 `python_file_count`、不产 Python import 边。
 - **unassigned 文件**：`unassigned_files` 列表（repo-relative POSIX 排序，仅 `.py`，cap = `max_unassigned_files`，超限截断 + `BUDGET_EXHAUSTED` gap）+ `unassigned_file_count` 完整计数（不受 cap 影响）。列表准入：路径先过 `is_secret_shaped_path`（命中者不入列表仅计数，§5.8）。零组件仓库 = 全部已准入 `.py` 落 unassigned，`components=()`、`edges=()`——不因零组件报错。
-- **共同文件两义分别落位**：(a) "被多组件引用" = 跨组件 import 边的多条 evidence（文件归属仍唯一）；(b) "无法唯一归属" = unassigned 集。最深前缀规则下不存在第三种归属歧义（名字碰撞导致的**构建**隔离分歧不改变归属规则本身，由 unbuilt 承载，见 §5.2.1 不变量）。
+- **共同文件两义分别落位**：(a) "被多组件引用" = 跨组件 import 边的多条 evidence（文件归属仍唯一）；(b) "无法唯一归属" = unassigned 集。最深前缀规则下不存在第三种归属歧义（**v4/P60-V3-01**：名字碰撞目录在文件清单视图下不再产生构建隔离分歧——其文件按最深前缀正常归属并入切片、组件正常构建，"同名非子锚点目录"是**正例**（D2 锚 #55）；`unbuilt` 收缩为真拒绝/资源耗尽/无法成合法视图三类，见 §5.2.1）。
 - **守恒不变量（INV-OWN-2，测试锚）**：Σ(已构建组件 python_file_count) + Σ(unbuilt 组件 python_file_count) + unassigned_file_count = 主仓已准入 `.py` 总数（逐文件可复算；三项按归属划分**互斥完备**）。**v3 勘误（SF-3③）**：v2 原式第四项"秘密形态拒绝 `.py` 计数"废除——秘密形态已准入 `.py`（已过工作区级准入）按归属**已含于** python_file_count（组件内者，如 `app/secrets/cred.py`）或 unassigned_file_count（未归属者，仅计数不入列表，§5.8），另立独立项会造成双重计数误读；RAM 层段级准入拒绝（E5：app_ram_modules=1 而归属 `.py`=3）不影响归属计数——归属与公开列表准入是两个口径，互不抵扣。
+- **manifest 元数据所有权不变量（INV-OWN-3，v4 新增，P60-V3-01/04；测试锚）**：(a) **划分**：每个已发现 manifest（(S1)∪(S2) 去重后）属于恰一个组件的 `manifests` 列表（= 其锚定的组件），Σ(各组件 manifests 数) + 被秘密形态拒绝的锚点数 = manifest 发现总数（逐文件可复算、互斥完备）；(b) **父子隔离**：嵌套子组件的 manifest **不得**出现在祖先组件（含根组件）的 `manifests` 列表（键=path 精确比对，机械可查）；(c) **Profile 层一致性**：祖先组件 Profile 构建的 manifest 候选（§4.3.1 W-2 受限过滤后）不含嵌套子组件 manifest——(b) 与 (c) 是"父组件 Profile 不纳入子组件 manifest"裁定的两个可机械核对承载（图级 manifests 字段 + 层内候选行为）；(d) **来源可分**：`manifests[].source` ∈ {"source-inventory","metadata-channel"}，与该路径实际所属集合一致（§5.1.7 判据表）。
 
 #### 5.1.4 解析依据不足与不执行
 
@@ -274,6 +311,34 @@ component_id = "component:" + <已准入锚点目录的 repo-relative POSIX 路�
 #### 5.1.6 与 `repository_kinds` 的关系（不重算、不修改）
 
 monorepo kind 判定是 inventory 冻结行为（作用于全仓单仓构建）。本片每组件构建使用组件 workspace（其内部一般无嵌套 manifest 子目录，组件 profile 通常不判 monorepo——如实呈现，不修正）；全仓维度 kind 分类由既有 `build_repository_profile(全仓 workspace)` 独立承载（现状行为，零改动）。组件图与 kinds 各自表述，互不覆写。
+
+#### 5.1.7 受控 manifest 元数据通道（v4 新增，P60-V3-04；DR-IP-0023-03 已采纳方向的本片设计，冻结单解）
+
+**定位**：本通道是对九类 manifest 的**有限只读发现权限**，用于组件边界证据与静态声明依赖名（§5.3.3 P4b）——**不扩大源码准入**：通道发现的 manifest 文件不进入 (S1) 可分析源码集合（不计入 python_file_count、不被 AST 扫描、不进组件 Profile 的 inventory 维度——除非其扩展恰在调用方扩展策略内且经主仓 inventory 已准入，此时同一路径双集合成员、来源字段如实分列）；**不重新准入被主 workspace 拒绝的源码**（D2 锚 #60）。
+
+**封闭名集（九类，值重述 inventory 冻结口径 §3.1，不 import 私有符号）**：`_MANIFEST_EXACT_NAMES` 8 类精确名 {Cargo.toml, environment.yml, go.mod, package.json, pom.xml, pyproject.toml, setup.cfg, setup.py} + `requirements*.txt` fnmatch 模式（九类 kind 枚举 §5.4.2）。名集**封闭**：集合外文件（含 `Gemfile`/`composer.json`/`build.gradle` 等）不是本通道对象（不支持=范围声明，§5.1.1）。
+
+**两策略（调用方可选，不悄悄失效）**：
+- **默认策略 `metadata-channel`**：通道开启。九类（尤其 requirements\*.txt/setup.cfg/go.mod/pom.xml 四类原盲点）在约定默认策略下可识别为锚点证据（§5.1.1 (S2)）——**正例**（D2 锚 #54 前半）。
+- **严格策略 `admitted-only`**：通道关闭，锚点证据仅 (S1) 主仓已准入 inventory（回到 v2/v3 单通道语义）。严格策略一经指定，任何 (S2) 发现不得进入锚点/manifests/依赖声明——不因默认值或内部回退失效（**负例**，D2 锚 #54 后半）。
+- 策略参数形态（keyword，缺省=默认策略）：公开签名经 `detect_components` / `build_monorepo_profile` 的 `manifest_policy: str = "metadata-channel"` 参数承载（枚举两值，外值 `ValueError`；D2 定稿签名时锁定，语义本轮锁定）。
+
+**枚举与读取（封闭、只读、有界）**：通道枚举 = 仓库根起 `os.walk(topdown, followlinks=False)`，逐目录剪枝：目录名 ∈ 调用方 `ignored_directories`（按名，与 workspace 口径一致）、任一路径段命中 `is_secret_shaped_path`（段级，仓库级坐标）、symlink 目录（不跟随即天然剪枝）；仅收集命中封闭名集的**常规文件**（symlink 文件拒绝）。读取 = 每文件经主 workspace `read_text`（有界 ≤`max_file_bytes`、UTF-8、`_safe_path` 边界）——**优先复用已准入快照的读取通道，不另开裸文件 IO**（`read_text` 对仓库内相对路径的读取本不受扩展策略限制——扩展策略只作用于 inventory 发现（§3.3 亲验），故**通道自身零共享层 additive 需求**，§4.3.1 白名单与它无关；组件层自有 os.walk 即本条明示的有限发现权限，非 (S1) 源码准入通道）。静态解析 = `tomllib`/逐行 regex（§5.3.3 P4b 同口径）+ workspace/build 协作键识别（§5.1.1）；**不执行构建脚本**；静态边界证据按明确组合规则处理（manifest 存在性 + 静态声明内容），不把非 Python 图边能力纳入本片。
+
+**预算（数量+字节，P60-V3-03 三分离口径）**：`max_metadata_manifests`（默认 64 / 合法域 1..1024 / schema 硬帽 1024——通道发现并读取的 manifest 文件数上界）与 `max_metadata_total_bytes`（默认 1 MiB=1_048_576 / 合法域 ≥1 / 语义=通道累计读取字节预算；逐文件另受 `max_file_bytes` 上界）。任一预算触发：停止进一步发现/读取 + `BUDGET_EXHAUSTED` gap（detail `reason=metadata-manifest-limit; count=<溢出>` 或 `reason=metadata-byte-limit; count=<溢出字节>`）+ 已得静态事实保留（fail-closed 部分产物，过自身 validator，§5.4.4）。
+
+**跳过计数（分通道，不改写主 inventory 事实）**：通道自有 `metadata_channel_skipped: dict[reason→count]`（封闭词表：`ignored-directory` / `sensitive-filename` / `symlink` / `unreadable` / `non-utf8` / `metadata-manifest-limit` / `metadata-byte-limit`），与主仓 `skipped` **分列呈现**、不合并、不回写——主 inventory 事实（reason→count）不被通道追平或改写（D2 锚 #61 前半）。
+
+**两输入集合的准入/所有权/计数/provenance 判据（机械可核对）**：
+
+| 维度 | (S1) 可分析源码集合 | (S2) manifest 元数据集合 |
+|---|---|---|
+| 准入 | 仅经主仓 workspace 工作区级准入（ignored/symlink/sensitive-config/extension/size/binary/non-utf8 + cap） | 仅经通道封闭名集 + 通道剪枝规则（ignored 按名/秘密段/symlink/常规文件）+ 通道双预算 |
+| 所有权 | 最深锚点前缀归属（§5.1.3） | 每 manifest 属于其锚定的组件（父目录=锚点）；** INV-OWN-3**（§5.1.3） |
+| 计数 | `python_file_count` / `unassigned_file_count` / 主仓 `skipped` | 每组件 `manifests[]`（含 `source` 字段）+ `metadata_manifest_count`（图级）+ `metadata_channel_skipped` |
+| provenance | workspace 层级准入链（既有语义） | `ComponentManifestRef.source ∈ {"source-inventory","metadata-channel"}`（同一路径双集合成员时=`source-inventory`，(S1) 优先单值）；通道读取计量入 `ResourceMetering`（§5.4.4-vi） |
+
+**安全边界（全尊重，逐项）**：调用方明确禁止（ignored_directories 按名剪枝；严格 admitted-only=显式禁用通道）；秘密形态（路径段级 `is_secret_shaped_path`——命中目录/文件不入通道任何输出，仅 `sensitive-filename` 计数）；symlink（目录不跟随、文件拒绝）；仓库边界（`_safe_path`/`read_text` 有界通道，不越 root）；不可变 Snapshot（通道纯只读，零写盘零执行零网络）。
 
 ### 5.2 每组件 Profile/RAM/semantic 全链（R60-02/R60-03/R60-04；复用公共接口 + 策略继承 + 隔离不变量）
 
@@ -293,7 +358,9 @@ monorepo kind 判定是 inventory 冻结行为（作用于全仓单仓构建）�
 或为组件内坐标且其仓库级原像已过 (1)(2) 准入——无第三种来源。
 ```
 
-#### 5.2.1 组件视图构造与所有权不变量（冻结单解；替代 v1 L235 默认重建）
+#### 5.2.1 组件视图构造与所有权不变量（v4 重写，P60-V3-01；精确文件清单视图，冻结单解）
+
+**方案选定（P&V 冻结单解）**：在"完整文件清单视图"与"路径级排除视图"两者中选定**文件清单视图（explicit file-list view）**——组件 workspace 以 `admitted_files=精确归属切片` 构造（§4.3.1 W-1 additive 白名单，激活条件=本 Packet v4 获批），用**单一机制**同时约束三入口，弃路径级排除方案（其只影响 walk 剪枝，读取入口需另加校验、双份簿记且无法表达"恰好这个集合"）。
 
 ```python
 # 每组件（component_id 序遍历，未超 max_components 截断的全部处理）：
@@ -303,28 +370,43 @@ component_ws = RepositoryWorkspace(
     max_file_bytes=workspace.max_file_bytes,
     max_total_bytes=workspace.max_total_bytes,
     extensions=workspace.extensions,
-    ignored_directories=workspace.ignored_directories
-                      | {严格嵌套于本锚点内的子锚点目录 basename})
+    ignored_directories=workspace.ignored_directories,   # 原样继承；不再并集子锚点 basename
+    admitted_files=<精确归属切片：主仓已准入文件中归属本组件者的组件内相对 POSIX 路径集>)
 if {map_to_repo(f) for f in component_ws.inventory().files} != ownership_slice(root_dir):
-    # 隔离不变量（INV-OWN-1）分歧：名字碰撞目录被同名剪枝 / 调用方 cap 导致扫描集
-    # 与精确切片不一致 —— 该组件三段链不构建，typed 承载，不出错误数据：
-    unbuilt_components += [component_id]        # 触发 T7（§5.2.4）
+    # 隔离不变量（INV-OWN-1）事后机械复核（受限态下由构造保证成立；此处防御性复核
+    # 捕获：继承 cap 在受限态截断切片（cap-divergence）/ 锚点根无法解析为常规目录
+    # （view-unformable）/ 防御性准入拒绝（admission-refused）—— 三类 typed 可区分）：
+    unbuilt_components += [UnbuiltComponentRecord(component_id, reason=<三类之一>)]  # T7
     continue
 profile_result   = build_repository_profile(component_ws, **六 ID 参数原样透传,
                         producer="lima.audit.component_graph",
                         policy_digest=..., toolchain_digest=...,
                         options=profile_options)            # 复用 IP-0016 入口
-ram_result       = build_python_ram_facts(component_ws, budgets=ram_budgets)
-semantic_result  = build_semantic_top_n(ram_result.facts, options=effective_semantic_options,
-                       model_client=model_client)           # 复用 IP-0019 入口（聚合包络 §5.4.4）
+ram_result       = build_python_ram_facts(component_ws, budgets=effective_ram_budgets)
+semantic_result, effective_semantic_options = _semantic_stage(   # 复用 IP-0019 入口；
+    ram_result.facts, semantic_options,                      # 聚合包络/token 池 §5.4.4；
+    model_client, remaining_pool_state)                      # 返回实际生效 options（禁回填默认）
+ram_wire         = ram_wire_payload(ram_result, semantic_result,
+                        profile_budgets=effective_profile_budgets,   # 实际生效值（P60-V3-02）
+                        ram_budgets=effective_ram_budgets,
+                        semantic_options=effective_semantic_options) # 只读复用 ram_schema 公共接口
 ```
 
-- **策略继承（R60-03 冻结）**：不从路径重建默认 workspace；五参数逐一取自调用方 workspace 的公开属性（extensions/ignored_directories 为其**有效值** frozenset。**v3 勘误（SF-3②）**：构造器对 extensions 是 **None/空→DEFAULT_EXTENSIONS 的 or 替换、非与 DEFAULT 的并集**——非空入参完全生效（E4 探针：effective_extensions 不扩张）；ignored_directories 则**恒与 DEFAULT_IGNORED_DIRECTORIES 并集**（§3.3 源码亲验）；以有效值回灌构造同参组件视图幂等（同值同结果），继承语义不变——v2"构造器内部与 DEFAULT 的并集幂等"表述仅对 ignored_directories 成立，对 extensions 为假）。主仓未准入输入不因组件切分重新准入：组件视图文件集 ⊆ 主仓已准入集，由 INV-OWN-1 强制（分歧即不构建）；D1R 探针 D3-API02 实证继承构造可行、D7-COLLISION 实证分歧可机械检出。
-- **INV-OWN-1（机器可校验，测试锚 #9）**：`map_to_repo(component_ws.inventory().files) == 精确归属切片`（逐文件集合相等；`map_to_repo(p) = root_dir + "/" + p`，根组件恒等映射）。成立 ⇒ ComponentInfo 计数、Profile、RAM、Top-N、图 evidence **五处输入集合一致**（Profile/RAM/Top-N 的输入即该组件 workspace 的 inventory；图 evidence 的输入即精确切片的 `.py` 子集；两者经 INV-OWN-1 相等）。
-- **准入等价性（R60-04 证明，实现于锚点准入之上）**：对已准入锚点 a，其组件 workspace 相对坐标下任一文件路径的**目录段与文件名段** = 仓库级坐标对应段（仅丢失 a 之上的段，而已准入锚点无秘密形态段——§5.1.1 锚点准入）；`is_secret_shaped_path`/`_secret_shape_family` 按段判定 ⇒ 组件内 Profile/RAM 准入与仓库级准入对同一文件**判定一致**（API-03 的 rebased 重新采纳在 v2 下不可达：秘密形态锚点在 (2) 已被拒，根本不构造其组件视图——D1R 探针 D4-API03）。
+**三入口约束调用链（P60-V3-01 裁定落位；每入口：机制/公开签名/缺省兼容/预算/测试锚）**：
+
+| 入口 | 约束机制（调用链） | 公开签名（承载参数） | 缺省兼容（不传新参数） | 预算 | D2 测试锚 |
+|---|---|---|---|---|---|
+| (a) inventory 扫描集合 | `component_ws.inventory()` 在受限态仅返回 `admitted_files` 成员（§4.3.1 W-1）→ 三层入口内部各自调用的 `workspace.inventory()` 全部受限 | `RepositoryWorkspace.__init__(root, *, max_files, max_file_bytes, max_total_bytes, extensions, ignored_directories, admitted_files=None)` | `admitted_files=None` → 构造/inventory/统计逐字节同旧默认（既有调用点零改动） | 受限态 cap（max_files/max_total_bytes）作用于切片自身；溢出→truncated→INV-OWN-1 分歧→unbuilt(cap-divergence) | #9/#10（INV-OWN-1/2 扩展）、#55 |
+| (b) read_text/全部读取入口 | `component_ws.read_text(p)` 在受限态对 `p ∉ admitted_files` 按既有越界错误口径拒绝（`_safe_path` 边界之上的成员校验层）；图层级 AST 读取不经组件视图（主 workspace 仓库级，本就受主仓准入约束） | 同上（`admitted_files` 一并约束 `read_text`/`absolute_file`/`fingerprint`） | 同上（None 不增设任何拒绝） | 每读取 ≤`max_file_bytes`（既有）；读取次数/字节计量入 `ResourceMetering`（§5.4.4-vi） | #55/#56（读取边界随切片）、#63 |
+| (c) Profile 层 manifest 候选 | `build_repository_profile(component_ws) → inventory._manifest_candidates(component_ws)` 在受限态过滤为切片成员（§4.3.1 W-2）——`_manifest_candidates` 本不消费 inventory 文件集（§3.6 衔接事实），故必须显式经此白名单项约束 | 无新公开签名（经 `admitted_files` 间接承载；W-2 为 inventory 内部函数行为） | None → `os.listdir` 名集匹配逐字节同旧 | 每组件 ProfileBudgets 既有约束照旧 | #56（父 Profile 不纳入子组件 manifest=INV-OWN-3(c)） |
+
+- **策略继承（R60-03 冻结，不变）**：不从路径重建默认 workspace；五参数逐一取自调用方 workspace 的公开属性（extensions/ignored_directories 为其**有效值** frozenset。**v3 勘误（SF-3②）保留**：构造器对 extensions 是 **None/空→DEFAULT_EXTENSIONS 的 or 替换、非与 DEFAULT 的并集**——非空入参完全生效；ignored_directories 则**恒与 DEFAULT_IGNORED_DIRECTORIES 并集**（§3.3 源码亲验））。**v4 变化**：`ignored_directories` 不再并集"子锚点 basename"（basename-ignore 机制废除——名字碰撞目录文件在切片内正常扫描，正例构建）；`admitted_files` 为新增第六构造维度（白名单 W-1），主仓未准入输入不因组件切分重新准入：**组件视图文件集 = 主仓已准入集 ∩ 归属切片 ⊆ 主仓已准入集，由构造强制**（INV-OWN-1 降为事后机械复核）。
+- **INV-OWN-1（机器可校验，测试锚 #9；v4 语义）**：`map_to_repo(component_ws.inventory().files) == 精确归属切片`（逐文件集合相等；`map_to_repo(p) = root_dir + "/" + p`，根组件恒等映射）。受限态下**由构造成立**；仍保留为独立机械复核（防实现漂移/继承 cap 截断），分歧即 typed unbuilt（不出错误数据）。成立 ⇒ ComponentInfo 计数、Profile、RAM、Top-N、图 evidence **五处输入集合一致**。
+- **unbuilt 三类语义（P60-V3-01 裁定；`UnbuiltComponentRecord{component_id, reason}`，reason 封闭枚举）**：`cap-divergence`（继承 cap 在受限态截断切片：`inventory().truncated==True` 或集合不等且归因于 cap——真资源耗尽类）；`view-unformable`（锚点根路径无法解析为可枚举常规目录等无法形成合法视图类）；`admission-refused`（防御性：构建期发现锚点/切片准入失效——正常时序下不可达，保留以防 TOCTOU 类漂移，原因字段如实）。**真拒绝、资源耗尽、无法成合法视图三类可机械区分**（reason 字段），`unbuilt` 不再承载任何"同名目录"类假分歧（v3 已知限度 (ii) 撤销）。
+- **准入等价性（R60-04 证明，不变）**：对已准入锚点 a，其组件 workspace 相对坐标下任一文件路径的**目录段与文件名段** = 仓库级坐标对应段（仅丢失 a 之上的段，而已准入锚点无秘密形态段——§5.1.1 锚点准入）；`is_secret_shaped_path`/`_secret_shape_family` 按段判定 ⇒ 组件内 Profile/RAM 准入与仓库级准入对同一文件**判定一致**（API-03 的 rebased 重新采纳不可达——D1R 探针 D4-API03）。
 - **六 ID 参数**对每组件原样透传同一组值；`policy_digest`/`toolchain_digest` 默认 sentinel（DR-IP-0016-01 口径）；`producer` 固定 `"lima.audit.component_graph"`（调用方不可覆盖）。
-- **坐标分离（保留 v1 冻结声明，时序修正）**：每组件三段产物内路径 = 组件内相对坐标（与单仓行为一致）；图与边证据、unassigned、锚点、manifest refs 一律仓库级 repo-relative POSIX；映射 `仓库路径 = root_dir + "/" + 组件内路径` 确定可复算（payload 消费核对用，§5.4.6）。
-- **已知限度（如实声明，不掩饰）**：(i) 祖先组件（锚点内严格嵌套其他锚点者，含根组件）的 Profile 层 manifest 候选机制（`_manifest_candidates` 的 root+一级 os.listdir）可能把其一级子目录内嵌套子组件的 manifest 纳入该组件 Profile 的 manifest 证据（确定性、有界，文件 inventory 不受影响——INV-OWN-1 仍成立）；(ii) 名字碰撞目录（祖先子树内与嵌套锚点 basename 同名者）触发 INV-OWN-1 分歧 → typed 不构建。二者的**彻底**消除需 workspace 路径级排除/文件清单视图等共享层能力 → **DR-IP-0023-02 草案**（选项：构造器 additive `exclude_directory_paths` 参数 / 显式文件清单视图 / manifest 候选范围参数；推荐第一项；附调用链与兼容影响）随交接报告呈 Coordinator，获批前不写入实现（本节为 v2 默认单解，不依赖该 DR）。
+- **坐标分离（保留冻结声明）**：每组件三段产物内路径 = 组件内相对坐标（与单仓行为一致）；图与边证据、unassigned、锚点、manifest refs 一律仓库级 repo-relative POSIX；映射 `仓库路径 = root_dir + "/" + 组件内路径` 确定可复算（payload 消费核对用，§5.4.6）。
+- **v3 已知限度 (i)(ii) 的处置（v4 撤销）**：(i) 祖先组件 Profile 层 manifest 候选混入子组件 manifest——由入口 (c)（W-2 受限过滤）消除，撤销项；残余：**白名单激活前**（本 Packet v4 获批前）实现层不得使用受限态，此期间限度 (i) 依旧存在于"实现禁区"而非设计（设计单解已定）；(ii) 名字碰撞目录 typed 不构建——由文件清单视图消除（正例 #55），撤销项。两项不再是默认完成方案的终点（P60-V3-01 裁定原文达成）。
 
 #### 5.2.2 provenance（冻结单解）
 
@@ -349,7 +431,7 @@ semantic_result  = build_semantic_top_n(ram_result.facts, options=effective_sema
 | T4 解析失败 | 图层级 `parse_error_file_count` 总计 > 0（§5.3.1 自计，不依赖底层继承——API-04） |
 | T5 读取失败 | 图层级 `read_failure_file_count` 总计 > 0（同上；静态快照下难构造，保留触发并如实声明） |
 | T6 主仓 cap 截断或准入跳过 | 主仓 `inventory.truncated == True` 或 `skipped` 中 {`file-limit`, `total-size-limit`, `file-size-limit`, `binary`, `non-utf8`, `unreadable`} 任一键计数 >0（发现与证据输入不完整；**v3/ER SF-1**：保守纳入后四键——E1 实跑证明 v2 判据下 oversize/non-utf8/binary `.py` 跳过时 T1-T7 全不触发、"已看见全部输入"成为无据断言） |
-| T7 隔离分歧 | `unbuilt_components` 非空（INV-OWN-1 分歧组件） |
+| T7 隔离分歧 | `unbuilt_components` 非空（v4：`UnbuiltComponentRecord` 三类 reason——cap-divergence/view-unformable/admission-refused，P60-V3-01） |
 
 除 T1-T7 外无任何置 False 的来源；evidence/unassigned 列表截断不置 False（gap 承载，与 v1 §5.3.4 口径统一）。**T6 承载（v3，ER SF-1）**：T6 触发时图 `coverage_gaps` 对全部计数>0 的 T6 键**逐键**落 `INVENTORY_SKIPPED`（detail `reason=<键名>; count=<计数>`，如 `reason=non-utf8; count=1`；reason→count、无文件名——R1 口径）——按 workspace 冻结行为 `truncated=True` 必伴 `file-limit`/`total-size-limit` 键计数>0（§3.3 源码口径），故 T6 触发时逐键承载恒非空，E1 的"图输出零承载"形态不可达。**跳过原因逐项处置（封闭词表 10 键全归类，无静默项）**：`file-limit`/`total-size-limit`/`file-size-limit`/`binary`/`non-utf8`/`unreadable` → **入 T6**；`ignored-directory`/`unsupported-extension` → **豁免**（调用方或默认扩展/忽略策略的**显式选择**，属策略语义而非证据丢失——计入 T6 将使一切含 `.png`/`.md` 等文件的仓库恒不完整；计数经 `skipped` 公开可见 + §5.1.1 范围声明承载）；`sensitive-config` → **豁免**（工作区级准入语义：该类文件不得进入任何输出，计数可见）；`symlink` → **豁免**（与单仓 RAM 行为口径一致，避免双标准；计数可见）。**保守性如实声明**：`skipped` 公开计数无扩展名维度，非 `.py` 文件的 binary/non-utf8/file-size-limit/unreadable 跳过同样触发 T6——fail-closed 取向（未看见的输入不能成为完整性证明），宁可过度判"证据不足"。
 
@@ -420,8 +502,11 @@ semantic_result  = build_semantic_top_n(ram_result.facts, options=effective_sema
 ```python
 @dataclass(frozen=True)
 class ComponentManifestRef:
-    path: str            # 仓库级 repo-relative manifest 路径（已准入）
+    path: str            # 仓库级 repo-relative manifest 路径（已发现：S1 已准入或 S2 通道）
     manifest_kind: str   # COMPONENT_MANIFEST_KIND_* 枚举值（5.4.2）
+    source: str          # v4 新增（P60-V3-04 provenance 分离）：
+                         # "source-inventory"（S1 主仓已准入）| "metadata-channel"（S2 通道发现）；
+                         # 双集合成员时取 "source-inventory"（S1 优先单值）
 
 @dataclass(frozen=True)
 class EdgeEvidence:
@@ -433,7 +518,7 @@ class EdgeEvidence:
 class ComponentInfo:
     component_id: str    # "component:." / "component:<锚点相对路径（可多段）>"
     root_dir: str        # ""（根）或锚点 repo-relative 路径（可多段）
-    manifests: tuple[ComponentManifestRef, ...]   # 按 path 排序
+    manifests: tuple[ComponentManifestRef, ...]   # 按 path 排序（INV-OWN-3 划分/父子隔离）
     python_file_count: int
     is_empty: bool
 
@@ -451,12 +536,28 @@ class UnknownImportRecord:           # v2 新增（R60-05：未知导入 typed �
     count: int                       # 该名字的 import 位点数（evidence 同构口径）
 
 @dataclass(frozen=True)
+class UnbuiltComponentRecord:        # v4 新增（P60-V3-01：unbuilt 三类可区分）
+    component_id: str
+    reason: str                      # UNBUILT_REASON_* 封闭枚举（5.4.2）：
+                                     # "cap-divergence"（资源耗尽）| "view-unformable"
+                                     # （无法成合法视图）| "admission-refused"（真拒绝，防御性）
+
+@dataclass(frozen=True)
 class ComponentEdge:
     source_component_id: str
     target_component_id: str | None    # resolved 非 None；ambiguous/unresolved 为 None
     status: str                        # COMPONENT_EDGE_STATUS_*（5.4.2）
     imported_name: str
     evidence: tuple[EdgeEvidence, ...] # 排序去重 cap（5.3.4）
+
+@dataclass(frozen=True)
+class ResourceMetering:              # v4 新增（P60-V3-05：读放大计量与可核验上界）
+    component_rescan_file_reads: int  # 每组件链重扫读取次数（§5.4.4-vi 上界公式）
+    component_rescan_bytes: int
+    ast_read_files: int               # 图层级 AST 读取（主 workspace）
+    ast_read_bytes: int
+    metadata_manifest_reads: int      # §5.1.7 通道
+    metadata_manifest_bytes: int
 
 @dataclass(frozen=True)
 class ComponentGraph:
@@ -466,7 +567,7 @@ class ComponentGraph:
     unassigned_file_count: int
     unknown_imports: tuple[UnknownImportRecord, ...]   # 排序去重 cap（5.3.4）
     scan_summaries: tuple[ComponentScanSummary, ...]   # 按 component_id 升序
-    unbuilt_components: tuple[str, ...]                # INV-OWN-1 分歧组件（T7）
+    unbuilt_components: tuple[UnbuiltComponentRecord, ...]  # v4：三类 reason 可区分（T7）
     dependencies_complete: bool                        # 触发集 T1-T7（§5.2.4）
     coverage_gaps: tuple[ProfileCoverageGap, ...]      # gap_code 复用 10 码全集值重述（5.6.3）
     provenance_anchor_ids: tuple[str, ...] = (COMPONENT_GRAPH_PROVENANCE_ANCHOR,)
@@ -475,7 +576,7 @@ class ComponentGraph:
 #### 5.4.2 枚举（Final 常量，冻结单解）
 
 ```python
-COMPONENT_GRAPH_SCHEMA_VERSION: Final[str] = "2.0"    # v2 承载字段集（v1 未实现未发布，无迁移）
+COMPONENT_GRAPH_SCHEMA_VERSION: Final[str] = "2.0"    # v2 承载字段集（v1 未实现未发布，无迁移；v4 字段集仍称 2.0——从未实现/发布，无迁移负担）
 COMPONENT_GRAPH_SCHEMA_NAME: Final[str] = "lima.component-graph"
 COMPONENT_GRAPH_SCHEMA_FILE: Final[Path] = Path("schemas") / "v4" / "lima.component-graph.json"
 COMPONENT_GRAPH_PROVENANCE_ANCHOR: Final[str] = "component-graph"
@@ -486,6 +587,16 @@ COMPONENT_EDGE_STATUSES: Final[frozenset[str]] = frozenset({"resolved","ambiguou
 COMPONENT_MANIFEST_KIND_*: Final[str]  # 九值："pyproject" / "setup_py" / "setup_cfg" /
                                        # "requirements" / "environment_yml" / "package_json" /
                                        # "go_mod" / "cargo_toml" / "pom_xml"（对齐 manifest 候选口径）
+UNBUILT_REASON_CAP_DIVERGENCE: Final[str] = "cap-divergence"      # v4（P60-V3-01 三类）
+UNBUILT_REASON_VIEW_UNFORMABLE: Final[str] = "view-unformable"
+UNBUILT_REASON_ADMISSION_REFUSED: Final[str] = "admission-refused"
+UNBUILT_REASONS: Final[frozenset[str]] = frozenset({...三者...})
+COMPONENT_MANIFEST_SOURCE_INVENTORY: Final[str] = "source-inventory"   # v4（P60-V3-04）
+COMPONENT_MANIFEST_SOURCE_METADATA_CHANNEL: Final[str] = "metadata-channel"
+COMPONENT_MANIFEST_SOURCES: Final[frozenset[str]] = frozenset({...两者...})
+MANIFEST_POLICY_METADATA_CHANNEL: Final[str] = "metadata-channel"  # v4 默认策略（§5.1.7）
+MANIFEST_POLICY_ADMITTED_ONLY: Final[str] = "admitted-only"        # v4 严格策略
+MANIFEST_POLICIES: Final[frozenset[str]] = frozenset({...两者...})
 # 模块私有（不入 __all__）：_STDLIB_TOP_LEVEL_NAMES（冻结字面量快照，§5.3.3 P4a）
 ```
 
@@ -493,18 +604,35 @@ COMPONENT_MANIFEST_KIND_*: Final[str]  # 九值："pyproject" / "setup_py" / "se
 
 ```python
 @dataclass(frozen=True)
-class MonorepoBudgets:          # 全 int，__post_init__ 逐字段 type is int 且 ≥1 校验，否则 ValueError
-    max_components: int = 16
-    max_edges: int = 4_096
-    max_edge_evidence: int = 64
-    max_unassigned_files: int = 256
-    max_total_model_calls: int = 128    # v2 新增：聚合模型调用包络（显式新预算设计，§5.4.4）
+class MonorepoBudgets:
+    # v4 重写（P60-V3-03/05）：每字段 默认值 / 合法域 / 硬上限 三分离。
+    # 构造期校验（__post_init__）= 合法域（type is int 且域内，否则 ValueError）；
+    # schema maxItems（§5.5）= 独立硬上限（= 各域上界；单解：静态独立硬帽，弃动态 schema 校验——
+    # 保持 schema 静态可独立校验、不与 payload 内容耦合）；运行截断（builder）= 有效 budgets。
+    # 三者不相同时行为唯一：合法域内输入一律接受；产物计数 ≤ min(有效预算, 硬帽)；
+    # 超硬帽的负载只能来自非法构造/篡改 → 构造期 ValueError 或 validator 拒绝。
+    max_components: int = 16            # 默认 16 | 合法域 1..64 | schema maxItems 64
+    max_edges: int = 4_096              # 默认 4096 | 合法域 1..16_384 | schema maxItems 16384
+    max_edge_evidence: int = 64         # 默认 64 | 合法域 1..1_024 | schema maxItems 1024
+    max_unassigned_files: int = 256     # 默认 256 | 合法域 1..4_096 | schema maxItems 4096
+    max_total_model_calls: int = 8      # v4（P60-V3-05）：全仓累计**尝试次数**口径，默认 8
+                                        #（128 提案已否决）；合法域 1..512；非列表无 schema maxItems；
+                                        # >8 的取值=显式配置+政策授权（未来审批点，本轮不授予）
+    aggregate_max_prompt_tokens: int = 24_000     # v4：聚合 token 池（prompt 预估口径，单位=token）
+    aggregate_max_output_tokens: int = 4_096      # 合法域 1..1_000_000（三字段独立）
+    aggregate_max_total_tokens: int = 28_096      # 域内约束 total ≥ prompt+output（构造校验，
+                                                  # 与 SemanticBudgets L242-246 同构）；默认=单组件
+                                                  # SemanticBudgets 对应值（保守不放大，P60-V3-05）
+    max_metadata_manifests: int = 64    # v4（P60-V3-04）：§5.1.7 通道数量预算
+    max_metadata_total_bytes: int = 1_048_576     # 通道字节预算（默认 1 MiB | 合法域 ≥1）
 
 @dataclass(frozen=True)
 class ComponentDiscoveryResult:
     components: tuple[ComponentInfo, ...]
     unassigned_files: tuple[str, ...]
     unassigned_file_count: int
+    metadata_manifest_count: int                        # v4：(S2) 通道发现总数（两集合计数分离）
+    metadata_channel_skipped: Mapping[str, int]         # v4：通道分列跳过计数（§5.1.7 词表）
     coverage_gaps: tuple[ProfileCoverageGap, ...]
     truncated: bool                      # 组件数超 max_components
     provenance_anchor_ids: tuple[str, ...] = (COMPONENT_GRAPH_PROVENANCE_ANCHOR,)
@@ -515,16 +643,24 @@ class ComponentBuildResult:
     profile_result: ProfileBuildResult
     ram_result: RamFactsBuildResult
     semantic_result: SemanticTopNResult
+    ram_wire: Mapping[str, object]                     # v4（P60-V3-02）：该组件 RAM wire payload
+                                                       #（ram_wire_payload 只读复用产出，已含 build 段）
+    effective_profile_budgets: ProfileBudgets          # v4：实际生效配置（何者被保存的机械承载）
+    effective_ram_budgets: RamBudgets
+    effective_semantic_options: SemanticOptions        # 聚合调整后的实际值（禁回填 None/层默认）
 
 @dataclass(frozen=True)
 class MonorepoProfileBuildResult:
     discovery: ComponentDiscoveryResult
     per_component: tuple[ComponentBuildResult, ...]   # 按 component_id 升序（实际构建的组件）
     graph: ComponentGraph
+    metering: ResourceMetering                        # v4（P60-V3-05）：读放大计量（§5.4.4-vi）
     provenance_anchor_ids: tuple[str, ...] = (COMPONENT_GRAPH_PROVENANCE_ANCHOR,)
 
-def detect_components(workspace: RepositoryWorkspace,
-                      *, budgets: MonorepoBudgets | None = None) -> ComponentDiscoveryResult
+def detect_components(workspace: RepositoryWorkspace, *,
+                      budgets: MonorepoBudgets | None = None,
+                      manifest_policy: str = MANIFEST_POLICY_METADATA_CHANNEL,
+                      ) -> ComponentDiscoveryResult
 
 def build_monorepo_profile(workspace: RepositoryWorkspace, *,
                            tenant_id: str, task_id: str, workflow_id: str,
@@ -536,6 +672,7 @@ def build_monorepo_profile(workspace: RepositoryWorkspace, *,
                            ram_budgets: RamBudgets | None = None,
                            semantic_options: SemanticOptions | None = None,
                            monorepo_budgets: MonorepoBudgets | None = None,
+                           manifest_policy: str = MANIFEST_POLICY_METADATA_CHANNEL,
                            model_client: SemanticModelClient | None = None,
                            ) -> MonorepoProfileBuildResult
 
@@ -545,54 +682,74 @@ def validate_component_graph_payload(payload: Mapping[str, object]) -> None  # f
 def load_component_graph_schema() -> dict                       # 只读加载 schema 文件（零网络）
 ```
 
-**行为约束（冻结）**：stdlib-only + 既有 audit/contracts/workspace 模块；依赖方向 `lima.audit.component_graph → {lima.audit.inventory, lima.audit.ram, lima.audit.semantic_prioritizer, lima.contracts.*, lima.workspace}`（复用公共构建接口与 `is_secret_shaped_path`；**不 import** `lima.audit.ram_schema`——gap 码全集值重述，构建/验证解耦）；`detect_components`/`build_monorepo_profile` 入参非 `RepositoryWorkspace` → `ContractError(INVALID_FIELD_TYPE)`；非 str 六 ID / 非 64-hex digest 按 IP-0016 同口径 fail-closed（异常由底层传播，本层不吞不改）；模型路径失败不抛出到调用方（IP-0019 §5.0 部分结果语义）；纯函数确定性——无时钟/随机/env/网络/写盘。
+**行为约束（v4 修订，冻结）**：stdlib-only + 既有 audit/contracts/workspace 模块；依赖方向 `lima.audit.component_graph → {lima.audit.inventory, lima.audit.ram, lima.audit.semantic_prioritizer, lima.audit.ram_schema, lima.contracts.*, lima.workspace}`（复用公共构建接口与 `is_secret_shaped_path`；**只读复用** `lima.audit.ram_schema` 公共接口——`ram_wire_payload` / `validate_ram_wire_payload` / `ram_facts_digest_from_wire` / `semantic_result_digest_from_wire` / `ram_wire_digest` / `execution_required_from_gaps`——用于每组件 RAM wire 的产出、校验与消费核对；**不复制、不重定义其摘要、gap、execution_required 规则，不修改该模块既有行为**——P60-V3-02 裁定，废除 v3 "不 import ram_schema" 表述）；`detect_components`/`build_monorepo_profile` 入参非 `RepositoryWorkspace` → `ContractError(INVALID_FIELD_TYPE)`；`manifest_policy` ∉ MANIFEST_POLICIES → `ValueError`（fail-closed，严格策略不被悄悄失效）；非 str 六 ID / 非 64-hex digest 按 IP-0016 同口径 fail-closed（异常由底层传播，本层不吞不改）；模型路径失败不抛出到调用方（IP-0019 §5.0 部分结果语义）；纯函数确定性——无时钟/随机/env/网络/写盘（`metering` 只计读取次数与字节，均为确定量）。
 
-#### 5.4.4 预算语义单解（R60-03 重写；fail-closed）
+#### 5.4.4 预算语义单解（v4 重写，P60-V3-05 + P60-V3-03；fail-closed）
 
-- **策略继承（第一原则）**：组件视图五参数继承调用方（§5.2.1）；主仓未准入输入不重新准入（INV-OWN-1 强制，分歧→typed 不构建）；调用方 cap 收紧时"不扩权优先于多产出"。
-- **资源计量口径（显式声明）**：(i) 主仓 inventory 全仓一次（图层级发现/归属/AST 读取基准）；(ii) 每组件 workspace 各自重扫其锚点子树（重读字节计入该组件构建，受继承 cap 约束；重复读取不改变任何输出值——确定性优先）；(iii) 图层级 AST 读取经主仓 `read_text`（有界，每归属 `.py` 一次）；(iv) 每组件三层 Budgets（`RamBudgets` 512/256/1024、`SemanticBudgets` 8/24_000/4_096/28_096/120、`ProfileBudgets` 262_144/64）逐组件适用，不共享池；(v) 发现/图边/evidence/unassigned/未知导入预算 = `MonorepoBudgets` 各 cap（§5.3.4）。
-- **聚合模型调用包络（显式新预算设计，呈审对象）**：`max_total_model_calls`（默认 128 = 16 组件 × 每组件 8）——**这是本 Packet 的新预算提案，不是"旧每仓 8 次预算的自动延伸"**（指令 §五 R60-03：不得把每仓 8 次变成 16 份预算并声称无需新预算设计）。执行：`model_client is None`（默认）→ 零调用零网络；注入时按 component_id 序构建，每组件生效语义预算 = `min(每组件 SemanticBudgets.max_llm_calls, 剩余聚合额度)`（`dataclasses.replace` 公共构造），剩余归零后的组件 semantic 阶段跳过 + `BUDGET_EXHAUSTED`（detail `reason=aggregate-model-call-limit; count=<溢出组件数>`）+ 该组件 partial facts——机器可读截断，无静默。
-- **fail-closed（不静默截断）**：组件数/边/evidence/unassigned/未知导入五类 cap 全部 typed gap（§5.1.1/§5.3.4）；预算耗尽一律返回部分事实 + typed gap + 对应 complete 触发（T1/T3/T7），不报错、不吞。
-- **墙钟（降级表述）**：F4 未闭合——**本 Packet 不宣称任何已证明的聚合墙钟上界**；每组件 `max_wall_time_seconds` 语义照旧由 IP-0019 承载，聚合墙钟治理归 F4/#60-CLOSURE-C（无全局时钟入 digest，确定性优先）。
-- **与 `max_manifest_files`（BG-IP-0016-01）的关系**：组件层锚点发现不读 manifest 内容预算（仅封闭键集静态解析 §5.1.1/§5.3.2(b)，读取经 `read_text` 有界通道）；每组件 Profile 构建内部仍受其自身 ProfileBudgets 约束（既有行为）。BG-IP-0016-01 保持 OPEN，本片不清偿不扩大。
+- **策略继承（第一原则，不变）**：组件视图五参数 + `admitted_files` 继承调用方（§5.2.1）；主仓未准入输入不重新准入（构造强制 + INV-OWN-1 事后复核，分歧→typed unbuilt(cap-divergence)）；调用方 cap 收紧时"不扩权优先于多产出"。
+- **聚合模型调用包络（v4 重写；128 提案否决）**：**模型默认 off**——`model_client is None`（默认）→ 零调用零网络（与 IP-0019 缺省一致）；启用 fake/未来获准客户端时**全仓默认调用额度 8**（`MonorepoBudgets.max_total_model_calls` 默认 128→8，字段语义=**全仓累计尝试次数**口径：每次向 client 发起的调用计 1 次，**超时/失败尝试计入**，不用成功数代替尝试数）；**更高额度须显式配置并取得政策授权**——本 Packet 只冻结技术合法域（1..512）与默认 8，>8 的实际使用是未来审批点（本轮不授予真实模型调用权限；fake client 仅限离线设计反证与测试）。执行：按 component_id 序构建；每组件生效调用额度 = `min(该组件 SemanticBudgets.max_llm_calls, 剩余聚合尝试额度)`（`dataclasses.replace` 公共构造合法对象）；剩余归零后的组件 semantic 阶段以无 client 形态执行（确定性 Top-N 保留，模型补充跳过）+ `BUDGET_EXHAUSTED`（detail `reason=aggregate-model-call-limit; count=<溢出组件数>`）——机器可读截断，无静默。
+- **聚合 token 池（v4 新增）**：`aggregate_max_prompt_tokens` / `aggregate_max_output_tokens` / `aggregate_max_total_tokens`（单位=token，**预估口径**；默认=单组件 SemanticBudgets 对应值 24_000/4_096/28_096——**保守默认不自动高于调用方 SemanticBudgets 对应数值**，确需提高集中呈审）。**预调用计量/预留**：每次尝试调度前按冻结估算器口径（`_estimate_tokens=ceil(chars/4)` 同构，模块内私有实现或公共等价）预估 prompt tokens 与 output tokens（输出=每候选常数×批量，与冻结层同构），从池中**预扣**（prompt+output 同扣、总池校验 prompt+output ≤ total 剩余）；**耗尽**：不再调度新尝试，该组件按无 client 形态降级（同上 typed gap `reason=aggregate-token-pool-limit; count=<跳过尝试数>`）；**失败行为**：已预扣额度不退还（尝试已发生；与"超时/失败计入尝试数"同口径），client 抛出的异常按 IP-0019 部分结果语义降级不外抛。三池不进 digest（配置默认值进 wire build 段，实际计量不进任何 digest——确定性优先）。
+- **三口径区分声明（P60-V3-05 裁定；亲读冻结代码行号锚）**：本设计区分三个互不混淆的口径——(口径 1) **旧单次预估校验**：`SemanticBudgets.max_prompt_tokens_estimate/max_output_tokens_estimate/max_total_tokens_estimate`，在每组件语义遍历内部逐次调度前校验（`semantic_prioritizer.py` L456/L459-460/L463-465），是**单次调用的预估护栏**，冻结不变；(口径 2) **每组件调用额度**：`SemanticBudgets.max_llm_calls`（每组件 ≤8 次尝试，L451 校验），语义不变（聚合层只经 replace 收紧不放宽）；(口径 3) **全仓累计池（本片新增）**：`max_total_model_calls` 尝试次数池 + 三 token 累计池——**旧 SemanticBudgets 无任何字段实现此口径**（`max_total_tokens_estimate` 不是全仓累计池——它是口径 1 的单次预估上界）；本片不改旧 SemanticBudgets 定义。
+- **参数边界行为表（P60-V3-03 裁定；逐样例唯一判定 + D2 锚）**：
+
+| 样例 | 判定 | 唯一行为 | D2 锚 |
+|---|---|---|---|
+| `max_components=17` | 接受（域 1..64 内） | 组件数 ≤17 → 全构建无截断；>17 → 按 component_id 序保留前 17 + `BUDGET_EXHAUSTED(reason=component-limit; count=溢出)` + `truncated=True` + T1 | #58 |
+| `max_components=0/-1/非 int/65` | 拒绝 | 构造期 `ValueError`（合法域校验），无部分产物 | #24/#58 |
+| `top_n=21`（SemanticOptions） | 接受（冻结域 1..100 内，L258-268） | 每组件 ranked 承载 21 项；图 `semantic_topn.top_n=21`、`ranked_candidate_ids` 长度 ≤21（cap=top_n 实际生效值，默认 20 非帽）；schema maxItems 100 通过 | #58 |
+| `top_n=0/101` | 拒绝（既有冻结行为） | `SemanticOptions` 构造期 `ValueError`（本层传播不重定义） | #58 |
+| 调用方紧 cap（如 max_files=3、切片 5 文件） | 接受 + typed 降级 | 组件 inventory 受限态在 cap 处截断 → INV-OWN-1 分歧 → `unbuilt(cap-divergence)`；不扩权、不报错、主仓事实不变 | #20/#58 |
+| `max_total_model_calls=1`（fake client） | 接受 | 全仓恰 1 次尝试；其后组件无 client 降级 + `aggregate-model-call-limit` gap | #21/#62 |
+| 聚合 token 池耗尽（剩余 < 本次预估） | 接受 + typed 降级 | 不调度该尝试；已扣不退；静态事实+确定性 Top-N 保留 | #62 |
+| 零额度降级（聚合尝试与 token 双归零） | 接受 + typed 降级 | **不构造** `SemanticBudgets(max_llm_calls=0)`（非法，L221-246 正值校验冻结）——降级=组件 semantic 以无 client 形态执行（确定性 Top-N 保留）+ 图级 typed gap；**不填伪 digest**（digests 槽=该组件真实产物摘要，semantic_result_digest 为确定性排序的真实摘要）；**不删已得 Profile/RAM/确定性排序**；部分产物过自身 validator（§下"降级自洽"） | #59/#62 |
+- **降级自洽（P60-V3-03 第 4 点）**：耗尽/截断形态的部分产物——图 payload 过 `validate_component_graph_payload`、每组件 wire 过 `validate_ram_wire_payload`（两者皆公共 validator）；`built`/status、coverage_gaps、build 段有效配置（含聚合调整后的实际 semantic 配置——**不得回填 None/层默认**，回填即 wire_digest 自洽失配，§3.6 衔接事实）与三摘要自洽；**额度耗尽保留静态事实与确定性 Top-N**、增准确 typed gap/status（`BUDGET_EXHAUSTED` detail 口径如上）；**图依赖证据（AST 边）与模型补充状态（semantic 段/gap）区分**——无模型补充 ≠ 无组件依赖（三态判据表 §5.2.4 中 `SEMANTIC_MODEL_OFF` 不计入依赖证据的既有口径保持）。
+- **读放大计量与可核验上界（v4 新增，P60-V3-05；`ResourceMetering` 承载于 `MonorepoProfileBuildResult.metering`，不进 wire payload/digest——observability 载体，D2 以公式断言核验）**：(i) 主仓 inventory 全仓一次（发现/归属/AST 基准）；(ii) 每组件链对其切片重扫（component_rescan_file_reads/bytes 计量；**继承调用方 cap 不自动证明全仓无读放大**——每组件重扫是本片显式声明的放大源）；(iii) 图层级 AST 读取（ast_read_files/bytes，每归属 `.py` 恰一次经主仓 `read_text`）；(iv) §5.1.7 通道 manifest 读取（metadata_manifest_reads/bytes，双预算内）。**可核验上界（公式，机械可查）**：`component_rescan_file_reads ≤ Σ(已构建组件切片文件数)`、`ast_read_files ≤ 归属 .py 总数`、`metadata_manifest_reads ≤ max_metadata_manifests`、各 bytes ≤ 对应 files × `max_file_bytes` 且 `component_rescan_bytes + ast_read_bytes + metadata_manifest_bytes ≤ 三者上界之和`；超界即实现缺陷（D2 锚 #63 断言）。**截断规则**：任何读取通道达上界即停（通道预算触发处已列 typed gap），无第三种静默行为。A 自身新增的读放大（ii)+(iv)）由本计量+上界给出设计与验收；**聚合墙钟与真实客户端物理强制上界不宣称**（F3/F4 归 #60-CLOSURE-C，边界保留）。
+- **fail-closed（不静默截断，不变）**：组件数/边/evidence/unassigned/未知导入/元数据通道/聚合调用/聚合 token 各类 cap 全部 typed gap（§5.1.1/§5.1.7/§5.3.4/本节）；预算耗尽一律返回部分事实 + typed gap + 对应 complete 触发（T1/T3/T7），不报错、不吞。
+- **墙钟（降级表述，不变）**：F4 未闭合——本 Packet 不宣称任何已证明的聚合墙钟上界；每组件 `max_wall_time_seconds` 语义照旧由 IP-0019 承载（口径 1/2 内），聚合墙钟治理归 F4/#60-CLOSURE-C（无全局时钟入 digest，确定性优先）。
+- **与 `max_manifest_files`（BG-IP-0016-01）的关系（更新）**：组件层锚点发现的 manifest 内容读取受 §5.1.7 通道双预算约束（数量+字节，显式新预算非隐式扩容）；每组件 Profile 构建内部仍受其自身 ProfileBudgets 约束（既有行为）。BG-IP-0016-01 保持 OPEN，本片不清偿不扩大。
 
 #### 5.4.5 canonical bytes 与 graph digest（冻结单解）
 
 ```text
 component_graph_digest = compute_content_digest(canonical_dict)
 canonical_dict = {
-  "components": [每组件规范 dict（component_id/root_dir/manifests[{path,kind}]/
+  "components": [每组件规范 dict（component_id/root_dir/
+                  manifests[{path,kind,source}]/              # v4：source ∈ 两值（INV-OWN-3(d)）
                   python_file_count/is_empty）——按序],
   "edges": [每边规范 dict（source_component_id/target_component_id|null/status/
              imported_name/evidence[{path,line,imported_name}]）——按序],
   "unknown_imports": [{source_component_id, imported_name, count}]，      # v2
   "scan_summaries": [{component_id, parse_error_file_count,
                       read_failure_file_count, dynamic_import_site_count}]，# v2
-  "unbuilt_components": [...],                                            # v2
+  "unbuilt_components": [{component_id, reason}]，            # v4：三类 reason 记录（T7）
   "unassigned_files": [...], "unassigned_file_count": N,
   "dependencies_complete": bool,
   "coverage_gaps": [{"gap_code","detail"}...]   # 排序 (gap_code, detail)
 }
+# v4 注：metadata_manifest_count/metadata_channel_skipped/build 段有效 budgets/metering
+# 均为 payload 承载但**不进 canonical dict**（metering 结果对象承载；有效 budgets 经
+# V8 与计数交叉核对而非 digest 绑定）——identity 字段集保持 v2 冻结口径 + v4 三处扩展。
 ```
 
 - canonical JSON = `lima.contracts.codec.compute_content_digest` 口径（IP-0018/0019 digest 先例），恒 64-hex；**不含** digest 自身、时钟、耗时、环境；
 - 与 digest 家族的关系（冻结声明）：`component_graph_digest` 是**独立新成员**；既有六 digest 语义与算法零改动、零交叉（图 digest 不进任何 envelope、不进 RAM wire payload、不参与 wire_digest 计算）；
 - **独立重算（R60-07）**：消费者可对手写/独立构造的 canonical dict（不经产品代码）调用同一既有公共 `compute_content_digest` 复算核对——Oracle 独立于 `component_graph` 实现。
 
-#### 5.4.6 与组件 Profile/RAM 的关联及公开 Artifact 消费闭合（R60-08 重写）
+#### 5.4.6 与组件 Profile/RAM 的关联及公开 Artifact 消费闭合（v4 重写，P60-V3-02；R60-08 基础上修正核对路径）
 
-- **键控关联（替代 v1"消费者重放三段构建"表述）**：`component_graph_payload(result)` 的 `components[]` 以 `component_id` 为键携带 `{built, digests{profile_content_digest, ram_facts_digest, semantic_result_digest}|null, scan_summary, semantic_topn}`；三 digest 全部可由**公开 Artifact** 复算核对（见下），不要求重跑目标构建、不依赖构建者内存对象。
+- **键控关联（不变）**：`component_graph_payload(result)` 的 `components[]` 以 `component_id` 为键携带 `{built, digests{profile_content_digest, ram_facts_digest, semantic_result_digest}|null, scan_summary, semantic_topn{model_id, top_n, ranked_candidate_ids[]}}`；三 digest 全部可由**公开 Artifact** 复算核对（见下），不要求重跑目标构建、不依赖构建者内存对象。
 - **每组件完整事实的公开承载（不扩 #58/54 帽/旧 digest/matrix）**：
-  - 完整 Profile = 既有 #58 公共契约产物：`profile_result.envelope` 经既有 `encode_profile_envelope` 序列化的版本化 envelope（既有 schema `lima.repository-profile.json` / `lima.artifact-envelope.json` 校验）；
-  - 完整 RAM = 既有 IP-0021 公共产物：`ram_wire_payload` / `validate_ram_wire_payload` / `ram_wire_digest`（既有 schema 校验；`execution_required` 由既有公共 `execution_required_from_gaps` 对其 gaps 复算——不复制不重定义）；
-  - semantic 摘要消费 = 图 payload 自身承载 `semantic_topn{model_id, ranked_candidate_ids[]}`（cap=每组件 top_n≤20；`candidate_id` 冻结编码）；**full semantic payload 的下游消费归 #60-CLOSURE-D/#64/#68 真实 fixture（Not-covered 声明）**；
-  - 路径坐标映射：`仓库路径 = root_dir + "/" + 组件内路径`（root_dir="" 恒等）——payload 消费侧可核对组件产物坐标与图证据坐标的对应；
-  - 阶段 Artifact 交换形态：monorepo 阶段的公开 Artifact 集 = 1 个 graph payload + N 组每组件公开产物（profile envelope + RAM wire payload），全部经既有公共 schema/函数校验，阶段间交换不依赖内存对象（系统约束落位）。
-- **消费例（可重放，仅公开 Artifact；§5.4.7 代码块）**：decode 两族组件产物（既有公共 decoder）→ 三 digest 与 payload `digests` 逐组件比对 → `execution_required_from_gaps` 复算 → canonical 重算图 digest 比对 `identity.component_graph_digest` → 校验 scan_summary 与组件产物计数自洽。
+  - 完整 Profile = 既有 #58 公共契约产物：`profile_result.envelope` 经既有 `encode_profile_envelope` 序列化的版本化 envelope（既有 schema `lima.repository-profile.json` / `lima.artifact-envelope.json` 校验）；消费侧经 `decode_profile_envelope(profile_bytes)`（**bytes 入参**，返回 `(ArtifactEnvelope, RepositoryProfile)`，`envelope.content_digest` 公共字段）；
+  - 完整 RAM = 既有 IP-0021 公共产物：`ComponentBuildResult.ram_wire`（构建侧 `ram_wire_payload` 只读复用产出）或其序列化形态（既有 schema 校验）；**三摘要核对路径（v4 修正，逐字对齐指令 §四 P60-V3-02 内嵌基准）**：`ram_facts_digest_from_wire(ram_wire) == entry["digests"]["ram_facts_digest"]`（facts 摘要对 facts 槽）；`semantic_result_digest_from_wire(ram_wire) == entry["digests"]["semantic_result_digest"]`（semantic 摘要——RAM wire 已含完整 semantic 数据，无需另建契约）；`ram_wire_digest(ram_wire) == ram_wire["identity"]["wire_digest"]`（**wire digest 只与 wire 自身 identity.wire_digest 比较，绝不与 ram_facts_digest 比较**——两类摘要不同构造，v3 示例的跨类比较是类别错误）；**gaps 取自 `ram`/`semantic` 两 section 的 `coverage_gaps`**（顶层无 coverage_gaps），经 `execution_required_from_gaps` 复算后与顶层 `execution_required` 核对；全部经 `validate_ram_wire_payload` 先行校验；
+  - semantic 摘要消费 = 图 payload 自身承载 `semantic_topn{model_id, top_n, ranked_candidate_ids[]}`（**v4：cap=top_n 实际生效值（1..100，对齐冻结 SemanticOptions 合法域；默认 20 只是默认不是帽）**，`top_n` 字段随承载使 validator 可核对 `len(ranked_candidate_ids) ≤ top_n`；`candidate_id` 冻结编码）；**full semantic payload 的下游消费归 #60-CLOSURE-D/#64/#68 真实 fixture（Not-covered 声明）**；
+  - 路径坐标映射：`仓库路径 = root_dir + "/" + 组件内路径`（root_dir="" 恒等）——payload 消费侧可核对组件产物坐标与图证据坐标的对应（component_id→Artifact 关联的坐标面）；
+  - 阶段 Artifact 交换形态：monorepo 阶段的公开 Artifact 集 = 1 个 graph payload + N 组每组件公开产物（profile envelope + RAM wire payload），全部经既有公共 schema/函数校验，阶段间交换不依赖内存对象（系统约束落位）；**消费者只拿公开产物，不持有 workspace、不重跑构建、不接收构建者私有内存**。
+- **有效配置承载（v4 新增，P60-V3-02 第 4 点）**：构建侧产出每组件 RAM wire 时**传入实际生效**的 `profile_budgets` / `ram_budgets` / `semantic_options`（聚合额度调整每组件配置时经 `dataclasses.replace` 得到的实际值；**不得**在额度变化后回填 `None`/层默认——回填即 build 段与实际构建不一致、wire_digest 校验失配，§3.6）；"何种有效配置被保存、Artifact 如何产出"由两层承载：(a) `ComponentBuildResult.effective_*` 三字段（结果对象，构建者侧机械可核对）；(b) wire `build` 段（进入 wire_digest 的公开自洽面）+ 图 payload `build.monorepo_budgets`（有效聚合预算，V8 与计数交叉核对）——payload build 段与 wire build 段自洽（每组件 semantic 配置一致）。
+- **消费冻结面重申（不变+）**：graph validator（§5.4.8 十维）、图摘要独立重算（V9）、component_id→Artifact 关联、相对坐标映射（`仓库路径 = root_dir + "/" + 组件内路径`）、承重字段篡改验收（V9+每组件 wire validator 篡改拒绝）；**消费规则至少等价于指令 §四 P60-V3-02 内嵌示例**（§5.4.7 逐字采用；断言语义不得弱于它）。
 
-#### 5.4.7 公共消费路径（`__all__` 导出与消费示例）
+#### 5.4.7 公共消费路径（v4 重写，P60-V3-02；`__all__` 导出与消费基准）
 
-模块级 `__all__`（**恰 34 项**，字母序，封闭清单——实现不得增删公开名，D2 冻结测试逐一锁定）：
+模块级 `__all__`（**恰 46 项** = v3 34 + v4 新增 12，字母序，封闭清单——实现不得增删公开名，D2 冻结测试逐一锁定）：
 
 ```text
 COMPONENT_EDGE_STATUSES, COMPONENT_EDGE_STATUS_AMBIGUOUS, COMPONENT_EDGE_STATUS_RESOLVED,
@@ -603,14 +760,20 @@ COMPONENT_MANIFEST_KIND_GO_MOD, COMPONENT_MANIFEST_KIND_PACKAGE_JSON,
 COMPONENT_MANIFEST_KIND_POM_XML, COMPONENT_MANIFEST_KIND_PYPROJECT,
 COMPONENT_MANIFEST_KIND_REQUIREMENTS, COMPONENT_MANIFEST_KIND_SETUP_CFG,
 COMPONENT_MANIFEST_KIND_SETUP_PY,
+COMPONENT_MANIFEST_SOURCES, COMPONENT_MANIFEST_SOURCE_INVENTORY,
+COMPONENT_MANIFEST_SOURCE_METADATA_CHANNEL,
+MANIFEST_POLICIES, MANIFEST_POLICY_ADMITTED_ONLY, MANIFEST_POLICY_METADATA_CHANNEL,
+UNBUILT_REASONS, UNBUILT_REASON_ADMISSION_REFUSED, UNBUILT_REASON_CAP_DIVERGENCE,
+UNBUILT_REASON_VIEW_UNFORMABLE,
 ComponentBuildResult, ComponentDiscoveryResult, ComponentEdge, ComponentGraph,
 ComponentInfo, ComponentManifestRef, ComponentScanSummary, EdgeEvidence,
-MonorepoBudgets, MonorepoProfileBuildResult, UnknownImportRecord,
+MonorepoBudgets, MonorepoProfileBuildResult, ResourceMetering, UnbuiltComponentRecord,
+UnknownImportRecord,
 build_monorepo_profile, component_graph_digest, component_graph_payload,
 detect_components, load_component_graph_schema, validate_component_graph_payload
 ```
 
-构建与消费示例（公共接口，非内部窥探；**消费段不持有 workspace、不重跑构建**）：
+构建与消费示例（公共接口，非内部窥探；**消费段不持有 workspace、不重跑构建、不接收构建者私有内存**）：
 
 ```python
 # 构建侧（一次性）
@@ -625,29 +788,42 @@ result = build_monorepo_profile(ws, tenant_id=..., task_id=...,
 payload = component_graph_payload(result)             # 组件清单+边+未知导入+scan 摘要+
                                                       # 键控三 digest+semantic_topn+图 digest
 validate_component_graph_payload(payload)             # fail-closed 契约校验（5.4.8 十维）
-
-# 消费侧（只拿公开 Artifact：graph payload + 每组件 profile envelope + RAM wire payload，
-# 均为已落盘的版本化产物；不重跑目标构建、不依赖构建者内存）
-from lima.contracts.profile import decode_profile_envelope
-from lima.contracts.codec import compute_content_digest
-from lima.audit.ram_schema import (validate_ram_wire_payload, ram_wire_digest,
-                                   execution_required_from_gaps)
-
-for entry in payload["components"]:
-    if not entry["built"]:
-        continue                                       # typed 未构建组件（unbuilt 承载）
-    profile, _ = decode_profile_envelope(json.loads(read_artifact(f"{entry['component_id']}.profile.json")))
-    ram_wire = json.loads(read_artifact(f"{entry['component_id']}.ram.json"))
-    validate_ram_wire_payload(ram_wire)
-    assert profile_envelope_content_digest(profile) == entry["digests"]["profile_content_digest"]
-    assert ram_wire_digest(ram_wire) == entry["digests"]["ram_facts_digest"]
-    execution_required = execution_required_from_gaps(ram_wire["coverage_gaps"])
-    # semantic_topn：payload["components"][i]["semantic_topn"]["ranked_candidate_ids"]（cap≤20）
-recomputed = compute_content_digest(canonical_dict_from(payload))     # 独立重算（R60-07）
-assert recomputed == payload["identity"]["component_graph_digest"]
 ```
 
-（示例中 `read_artifact`/`canonical_dict_from`/`profile_envelope_content_digest` 为消费侧占位叙述：前两者是消费方自己的 Artifact 读取与 canonical 投影，后者为 envelope 上的公开 digest 字段访问——产品冻结面仅 §5.4.3 签名。）
+**消费基准（v4：`MR-60-PR282-FINALIZATION-20261009/v1` §四 P60-V3-02 内嵌代码，逐字采用；对每个 `built==true` 的 `entry in payload["components"]` 执行——`profile_bytes`/`ram_bytes` 为该组件已落盘的公开 Artifact 字节，`entry` 为图 payload 键控条目。断言语义不得弱于本基准；外围叙述（循环/读取/图摘要重算）见基准后注）**：
+
+```python
+import json
+from lima.contracts.profile import decode_profile_envelope
+from lima.audit.ram_schema import (
+    validate_ram_wire_payload,
+    ram_facts_digest_from_wire,
+    semantic_result_digest_from_wire,
+    ram_wire_digest,
+    execution_required_from_gaps,
+)
+
+envelope, profile = decode_profile_envelope(profile_bytes)
+ram_wire = json.loads(ram_bytes)
+validate_ram_wire_payload(ram_wire)
+assert envelope.content_digest == entry["digests"]["profile_content_digest"]
+assert ram_facts_digest_from_wire(ram_wire) == entry["digests"]["ram_facts_digest"]
+assert semantic_result_digest_from_wire(ram_wire) == entry["digests"]["semantic_result_digest"]
+assert ram_wire_digest(ram_wire) == ram_wire["identity"]["wire_digest"]
+gap_codes = [
+    gap["gap_code"]
+    for section in ("ram", "semantic")
+    for gap in ram_wire[section]["coverage_gaps"]
+]
+required, triggers = execution_required_from_gaps(gap_codes)
+assert ram_wire["execution_required"] == {
+    "required": required, "trigger_gap_codes": list(triggers)
+}
+```
+
+基准外围（消费方自己的叙述，不弱化基准断言）：逐 `built` 条目执行上块（`profile_bytes = read_artifact(f"{entry['component_id']}.profile.json")` 等消费方读取；`entry["digests"]` 三槽即图键控关联）；图级收尾 = canonical 投影独立重算 `compute_content_digest(canonical_dict_from(payload)) == payload["identity"]["component_graph_digest"]`（R60-07，篡改任一参与字段必失配）+ scan_summary 与组件产物计数自洽核对 + 坐标映射抽查（`仓库路径 = root_dir + "/" + 组件内路径`）。**D1 设计证据标注**：本基准的"已有部分"（validate 通过、facts/semantic 两摘要复算、wire digest 自洽且 ≠facts digest、顶层无 coverage_gaps、execution_required 复算、篡改被拒、bytes 解码语义）已于 D1F 对既有 golden `tests/audit/fixtures/golden_matrix/golden/application.json` 离线实跑验证（12/12 过，§3.6/附 D）——**已有行为实测；D2 再绑定真实 graph payload 的端到端消费（本 Packet 不声明未实现的 graph 已可调用）**。
+
+（示例中 `read_artifact`/`canonical_dict_from` 为消费侧占位叙述：前者是消费方自己的 Artifact 读取，后者为 canonical 投影——产品冻结面仅 §5.4.3 签名；v3 示例的 `profile_envelope_content_digest` 占位已由基准内 `envelope.content_digest` 公共字段访问取代。）
 
 #### 5.4.8 validator 单解（`validate_component_graph_payload` 行为清单，fail-closed）
 
@@ -659,8 +835,8 @@ assert recomputed == payload["identity"]["component_graph_digest"]
 | V4 | 目标存在 | 边 `target_component_id`（非 null）∈ components；`unknown_imports.source_component_id`、`scan_summaries.component_id`、`unbuilt_components[]` ∈ components |
 | V5 | 路径合法与秘密形态 | 全部路径字段满足 repo-relative POSIX 模式（无 NUL/绝对/`..`/首尾斜杠，UTF-8）；任一路径字段命中 `is_secret_shaped_path` → 拒绝（公开面零秘密形态路径） |
 | V6 | 排序去重 | components / edges / evidence / unassigned / unknown_imports / unbuilt / manifests / scan_summaries 各自按 §5.3.4/§5.1 规定序排列且去重 |
-| V7 | 数量与跨字段 | `unassigned_file_count ≥ len(unassigned_files)`；`is_empty ⇔ python_file_count==0`；`digests` 非 null ⇔ `built==true`；`built==false` ⇔ 该 id ∈ `unbuilt_components`；`unbuilt_components` 非空 ⇒ `dependencies_complete==false`；`semantic_topn.ranked_candidate_ids` 长度 ≤ 20 |
-| V8 | cap（maxItems） | components ≤16 / edges ≤4096 / 每边 evidence ≤64 / unassigned ≤256 / unknown_imports ≤4096（与 MonorepoBudgets 默认一致，schema maxItems） |
+| V7 | 数量与跨字段 | `unassigned_file_count ≥ len(unassigned_files)`；`is_empty ⇔ python_file_count==0`；`digests` 非 null ⇔ `built==true`；`built==false` ⇔ 该 id ∈ `unbuilt_components`（v4：记录含 `reason ∈ UNBUILT_REASONS`）；`unbuilt_components` 非空 ⇒ `dependencies_complete==false`；**`semantic_topn.top_n ∈ 1..100`（冻结域）且 `len(ranked_candidate_ids) ≤ top_n`**（v4：cap=top_n 实际生效值，默认 20 非帽）；`manifests[].source ∈ COMPONENT_MANIFEST_SOURCES`、同组件 manifests 按 path 去重；`metadata_manifest_count == Σ(S2 来源 manifests 数)`；`metadata_channel_skipped` 键 ∈ §5.1.7 词表 |
+| V8 | cap（三分离统一，v4/P60-V3-03） | **schema maxItems = 独立硬上限（合法域上界），不再固定在默认值**：components ≤64 / edges ≤16384 / 每边 evidence ≤1024 / unassigned ≤4096 / unknown_imports ≤16384 / 每组件 manifests ≤1024 / `ranked_candidate_ids` ≤100；**validator 另对有效 budgets 交叉核对**（payload `build.monorepo_budgets` 为有效值承载）：components ≤ 有效 `max_components`、edges+unknown_imports ≤ 有效 `max_edges`、evidence ≤ 有效 `max_edge_evidence`、unassigned 列表 ≤ 有效 `max_unassigned_files`、`metadata_manifest_count` ≤ 有效 `max_metadata_manifests`——合法构建（构造期域校验+运行截断）恒双过；仅非法构造/篡改可越（构造期 ValueError 或此处拒绝） |
 | V9 | 图 digest 自洽重算 | 由 payload 字段投影 canonical dict（§5.4.5 键集）经既有公共 `compute_content_digest` 重算 == `identity.component_graph_digest`；任一参与字段被篡改 → 失配拒绝 |
 | V10 | digest 形态 | 全部 digest 字段 64-hex 小写；`line ≥ 1`；`count ≥ 1`（unknown_imports）/ ≥0（scan 计数） |
 
@@ -675,22 +851,24 @@ assert recomputed == payload["identity"]["component_graph_digest"]
 | `schema_version` | `COMPONENT_GRAPH_SCHEMA_VERSION` | const `"2.0"` |
 | `model_kind` | `COMPONENT_GRAPH_SCHEMA_NAME` | const `"lima.component-graph"` |
 | `components[].component_id / root_dir / python_file_count / is_empty` | `ComponentInfo` | component_id = `"component:"` + 锚点 repo-relative 路径（根为 `"."`；段字符集 `[A-Za-z0-9._\-]`、多段嵌套、无 `..` 段——regex 按此单解书写于 schema）；root_dir 同段字符集或 `""`；is_empty 恒 `python_file_count==0`（V7） |
-| `components[].manifests[].{path, manifest_kind}` | `ComponentManifestRef` | kind ∈ 九值 const 枚举；按 path 升序；path 过 V5 模式+秘密形态拒绝 |
+| `components[].manifests[].{path, manifest_kind, source}` | `ComponentManifestRef`（v4：+source） | kind ∈ 九值 const 枚举；source ∈ {"source-inventory","metadata-channel"} const 枚举；按 path 升序；path 过 V5 模式+秘密形态拒绝 |
 | `components[].built` | INV-OWN-1 结果 | bool；与 digests/unbuilt 交叉校验（V7） |
 | `components[].digests.{profile_content_digest, ram_facts_digest, semantic_result_digest}` | 5.4.6 键控关联 | 64-hex；`built=false` 时为 null（V7） |
 | `components[].scan_summary.{parse_error_file_count, read_failure_file_count, dynamic_import_site_count}` | `ComponentScanSummary` | int ≥0；与图级 `scan_summaries` 同项相等（V7） |
-| `components[].semantic_topn.{model_id, ranked_candidate_ids[]}` | 每组件 semantic 摘要 | maxItems 20；candidate_id 冻结编码形态；`built=false` 时 null |
+| `components[].semantic_topn.{model_id, top_n, ranked_candidate_ids[]}` | 每组件 semantic 摘要（v4：+top_n） | **top_n ∈ 1..100（冻结域对齐，默认 20 非帽）；ranked maxItems 100 且 len ≤ top_n（V7）**；candidate_id 冻结编码形态；`built=false` 时 null |
 | `edges[].{source_component_id, target_component_id, status, imported_name, evidence[]}` | `ComponentEdge` | target 可 null（resolved 时必非 null 且 ≠ source；ambiguous/unresolved 时必 null——V7）；status ∈ 三值；evidence[].{path,line,imported_name}，line ≥ 1，path 过 V5 |
-| `unknown_imports[].{source_component_id, imported_name, count}` | `UnknownImportRecord` | count ≥ 1；排序去重；maxItems 4096 |
-| `unassigned_files[] / unassigned_file_count` | `ComponentGraph` | 排序字符串（过准入）；count ≥ len(list)；maxItems 256 |
+| `unknown_imports[].{source_component_id, imported_name, count}` | `UnknownImportRecord` | count ≥ 1；排序去重；maxItems 16384（=域帽，v4） |
+| `unassigned_files[] / unassigned_file_count` | `ComponentGraph` | 排序字符串（过准入）；count ≥ len(list)；maxItems 4096（=域帽，v4） |
 | `scan_summaries[]` | `ComponentScanSummary` | 按 component_id 升序；与 components 逐项对应 |
-| `unbuilt_components[]` | INV-OWN-1 分歧 | ⊆ components ids；`built=false` 恰对应 |
+| `unbuilt_components[].{component_id, reason}` | `UnbuiltComponentRecord`（v4） | reason ∈ 三值 const 枚举（cap-divergence/view-unformable/admission-refused）；component_id ⊆ components；`built=false` 恰对应 |
 | `dependencies_complete` | `ComponentGraph` | bool；触发集 T1-T7 唯一（§5.2.4） |
-| `coverage_gaps[].{gap_code, detail}` | `ProfileCoverageGap.to_dict()` | gap_code pattern `[A-Z][A-Z0-9_]{0,63}` 且 ∈ 10 码全集（值重述，不 import ram_schema） |
+| `coverage_gaps[].{gap_code, detail}` | `ProfileCoverageGap.to_dict()` | gap_code pattern `[A-Z][A-Z0-9_]{0,63}` 且 ∈ 10 码全集（值重述；wire 侧一律经 ram_schema 公共函数，§5.6.3 v4） |
+| `metadata_manifest_count` / `metadata_channel_skipped{reason→count}` | `ComponentDiscoveryResult`（v4） | count ≥0；skipped 键 ∈ §5.1.7 七词表；两集合计数分列（不改写主仓 `skipped`——后者不入本 payload） |
+| `build.monorepo_budgets.{十字段}` | 有效 MonorepoBudgets（v4：有效配置公开承载） | 各字段=实际生效值（合法域内）；V8 与集合计数交叉核对；默认回填禁止（§5.4.6） |
 | `identity.component_graph_digest` | `component_graph_digest(graph)` | 64-hex；V9 自洽重算 |
 | `provenance.provenance_anchor_ids[]` | `("component-graph",)` | const 单元序列 |
 
-版本语义：`"2.0"` 是 component graph 承载自身第 2 版（**v1.0 从未实现/发布/合并，无迁移兼容负担**——版本号跟随 Packet v2 字段集）；文件置于 `schemas/v4/` 沿用工程布局，但**不注册** `version_compatibility_matrix.json`（BG-60-01 口径维持；`tests/contracts/test_compatibility_matrix.py` 只以 matrix 文件行为枚举源，IP-0021 §3.4 先例，新增未注册 schema 不触及 contracts 617）。
+版本语义：`"2.0"` 是 component graph 承载自身第 2 版（**v1.0 从未实现/发布/合并，无迁移兼容负担**——版本号跟随 Packet v2 起的字段集；**v4 字段集（manifests.source / unbuilt reason / semantic_topn.top_n / metadata 计数 / build.monorepo_budgets）仍在 "2.0" 内扩展**——该 schema 从未发布，无消费者可破坏）；文件置于 `schemas/v4/` 沿用工程布局，但**不注册** `version_compatibility_matrix.json`（BG-60-01 口径维持；`tests/contracts/test_compatibility_matrix.py` 只以 matrix 文件行为枚举源，IP-0021 §3.4 先例，新增未注册 schema 不触及 contracts 617）。
 
 ### 5.6 兼容约束（Assignment §六.4；逐项冻结声明）
 
@@ -706,11 +884,11 @@ assert recomputed == payload["identity"]["component_graph_digest"]
 - 既有六 digest 算法与取值零改动；新增 `component_graph_digest` 独立成员（5.4.5）；**不扩展全 payload digest、不改 wire_digest 输入**（已否决路线不重试）；
 - **相同内容不同组件允许摘要相等**（API-05 事实；v1 §5.2.1/§5.6.4"互异"表述废除）：身份与关联一律经 component_id/root_dir/键控 digest 引用表达，不以摘要互异为不变量（§5.4.6/§6 C6）。
 
-#### 5.6.3 GAP 码全集与 execution_required 语义
+#### 5.6.3 GAP 码全集与 execution_required 语义（v4 修订，P60-V3-02）
 
-- `GAP_CODES_ALL` 10 码**不新增、不改名**：图 coverage_gaps 复用既有码值（**值重述** frozenset 字面量，注释锚定来源；不 import ram_schema）；使用码：`BUDGET_EXHAUSTED`（六类 cap：component/edge/edge-evidence/unassigned/unknown-import/aggregate-model-call）、`INVENTORY_SKIPPED`（①秘密形态拒绝：锚点与文件名准入，detail `reason=sensitive-filename; count=N`，R1 终案 reason→count；②**T6 主仓 cap 截断/准入跳过（v3/ER SF-1）**：逐键 detail `reason=<skipped 键名>; count=N`，§5.2.4——两种 detail reason 值域不相交，单解可分）；
-- **v2 新承载（ComponentScanSummary/UnknownImportRecord/unbuilt_components）是独立新字段，非新 GAP 码**——不触 `GAP_CODES_ALL` 冻结面与 9 码触发集推导；若 D2 发现确需新码 → 具体 DR；
-- `execution_required` 9 码触发语义零改动：图 payload **不承载**该字段（每组件值由既有 `execution_required_from_gaps` 对该组件 RAM wire gaps 复算——消费例 §5.4.7）。
+- `GAP_CODES_ALL` 10 码**不新增、不改名**。**v4 边界改写（废除 v3 "不 import ram_schema" 表述）**：图**自身** `coverage_gaps` 的构造可继续**值重述**码字面量（图 gap 是图级新字段，非 wire 复用——`ProfileCoverageGap` 公共类型构造）；而**每组件 RAM wire 的产出/校验/消费一律调用 `lima.audit.ram_schema` 真实公共函数**（`ram_wire_payload` / `validate_ram_wire_payload` / `ram_facts_digest_from_wire` / `semantic_result_digest_from_wire` / `ram_wire_digest` / `execution_required_from_gaps`），**不复制、不重定义其摘要、gap、execution_required 规则，不修改该模块既有行为**。使用码：`BUDGET_EXHAUSTED`（v4 八类 cap：component/edge/edge-evidence/unassigned/unknown-import/aggregate-model-call/aggregate-token-pool/metadata-manifest-or-byte）、`INVENTORY_SKIPPED`（①秘密形态拒绝：锚点与文件名准入，detail `reason=sensitive-filename; count=N`，R1 终案 reason→count；②**T6 主仓 cap 截断/准入跳过（v3/ER SF-1）**：逐键 detail `reason=<skipped 键名>; count=N`，§5.2.4——图级 detail reason 值域与通道 `metadata_channel_skipped` 键域不相交，单解可分）；
+- **独立新字段，非新 GAP 码**（v2 承载 + v4 增补：`UnbuiltComponentRecord.reason`、`metadata_channel_skipped`、`ResourceMetering`）——不触 `GAP_CODES_ALL` 冻结面与 9 码触发集推导；若 D2 发现确需新码 → 具体 DR；
+- `execution_required` 9 码触发语义零改动：图 payload **不承载**该字段（每组件值由既有 `execution_required_from_gaps` 对该组件 RAM wire 的 ram/semantic 两 section gaps 复算——消费基准 §5.4.7 逐字采用）。
 
 #### 5.6.4 #58 Contract 与 v4 schema/旧 golden
 
@@ -729,7 +907,7 @@ RAM wire 以 TaskManifest 消费面衔接的既有口径不变；`build_monorepo
 - **CRLF**：`read_text` 保留 CRLF（当前行为）；AST 行号按保留 CRLF 原文计算；本片 fixture 全 LF（5.7.1）；`line_count` 字段存在但本片不消费其值；
 - `fingerprint()`/skip 词表/`_safe_path` 边界语义未变（F3 归 CLOSURE-C）；
 - **确定性判据（冻结）**：同一 workspace 快照 + 同一 budgets/options 两次独立构建 ⇒ `component_graph_digest` 相等、`components`/`edges`/`unassigned`/`unknown_imports`/`scan_summaries`/`unbuilt_components` 逐字段相等、每组件三 digest 相等；**输入顺序变化**（目录枚举顺序/文件写入顺序不同、内容相同的两个快照目录）⇒ 结果不变——全部枚举入口（manifest 候选/锚点/组件/文件/边/evidence/未知导入）一律 sorted，禁 mtime/权限/随机/env/时钟；
-- **跨 workspace/共享安全层改动**：本片默认设计**零需求**（组件视图 = 继承策略的 `RepositoryWorkspace` 公共构造 + INV-OWN-1 校验；D1R 探针 D2/D3/D7 实证可构造可校验）；祖先组件精确隔离的共享层增强以 **DR-IP-0023-02** 呈审（§5.2.1 已知限度）；若 D2/实现期发现必须改 `lima/workspace.py` 才能表达的语义 → 停止并单列 DR（附调用链与理由）。
+- **跨 workspace/共享安全层改动（v4 修订，P60-V3-01）**：本片设计对共享层的**全部**需求已具体化为 §4.3.1 条件性 additive 白名单两项（W-1 workspace `admitted_files` 文件清单视图参数 / W-2 `_manifest_candidates` 受限过滤；DR-IP-0023-02 已采纳目标的落点）——**激活条件=本 Packet v4 获 Maintainer 批准合并，本轮零实现**；白名单外共享层修改仍零需求且禁止（不再出现"必须改共享层"与"共享层零触碰"并存的自相矛盾表述）；D1R 探针 D2/D3/D7 实证的继承构造与机械校验仍是受限态的可行性基座；若 D2/实现期发现白名单外必须改 `lima/workspace.py` 才能表达的语义 → 停止并单列 DR（附调用链与理由）。
 
 #### 5.7.1 fixture 口径约束（冻结）
 
@@ -761,7 +939,7 @@ RAM wire 以 TaskManifest 消费面衔接的既有口径不变；`build_monorepo
 
 ## 6. 测试矩阵（D2 冻结计划：FR→AC→T→预定测试符号；本阶段不写测试文件）
 
-**方法预算注记（R60-07 口径）**：v1 的 33/≤35 仅为规划参考；v2 按指令 §六七类"不配合算法"样例重排后计划 **52** 个方法；**v3 按 ER Record 三项 Shadow Finding 增补 2（#53 SF-1 / #54 SF-2），合计 54**——超出 35 的逐类覆盖收益见各类括注（反例暴露的承重行为必须有自己的语义覆盖，不以方法数帽换安全）。回归锚（contracts 617 / audit 235 / 五形态 golden 零改动 / DR-LINT-0022-A 六处恰存）经命令覆盖（§8），不计入新增方法数。断言一律**从需求推导**（V5-FR-03/AC-01/NFR-01/R1 终案等），不从算法实现推导。
+**方法预算注记（v4 重写，P60-V3 T 节口径）**：**54 = v3 旧计划数，不是目标也不是帽**（指令 §六：方法数按覆盖需要调整；不为保持数量删除反例，也不靠重复用例增加进度）。版本演化：v1 33（规划参考）→ v2 52（七类"不配合算法"样例重排）→ v3 54（ER 三 SF 增补 #53/#54）→ **v4 计划 63**（v4 = 54 − 0 删除 + #21/#24/#42/#54 四行原地重写（语义升级，符号保留）+ 增补 #55-#63 九项五裁定正例/边界）。超出 35 的逐类覆盖收益见各类括注（反例与五裁定暴露的承重行为必须有自己的语义覆盖，不以方法数帽换安全）。回归锚（contracts 617 / audit 235 / 五形态 golden 零改动 / DR-LINT-0022-A 六处恰存）经命令覆盖（§8），不计入新增方法数。断言一律**从需求推导**（V5-FR-03/AC-01/NFR-01/R1 终案/P60-V3-01..05 裁定等），不从算法实现推导。
 
 | # | 类别（方法数） | 预定测试符号（`test_file::test_symbol`） | 断言要点（需求来源） | 追踪 |
 |---|---|---|---|---|
@@ -773,8 +951,8 @@ RAM wire 以 TaskManifest 消费面衔接的既有口径不变；`build_monorepo
 | 6 | | `…::test_detect_components_empty_component` | 有 manifest 零 `.py`→is_empty=True 保留 | V5-FR-03 |
 | 7 | | `…::test_detect_components_max_components_truncation` | 17 组件→前 16+BUDGET_EXHAUSTED(reason=component-limit)+truncated+complete=False(T1) | 预算 fail-closed |
 | 8 | | `…::test_detect_components_secret_shaped_anchor_suppressed` | `secrets/` 锚点不准入；INVENTORY_SKIPPED reason=sensitive-filename; count=N；无目录名泄漏 | NFR-01、R60-04 |
-| 9 | | `…::test_component_counts_match_build_inputs` | INV-OWN-1：每组件计数/Profile 输入/RAM 输入/Top-N 输入/图 evidence 五处输入集合逐文件一致；INV-OWN-2 守恒 | R60-02、AC-01 |
-| 10 | | `…::test_root_component_excludes_child_files` | API-01 输入集：根组件 RAM 不计子组件文件；跨组件模块计数不重复 | R60-02、FR-02 复验 |
+| 9 | | `…::test_component_counts_match_build_inputs` | INV-OWN-1：每组件计数/Profile 输入/RAM 输入/Top-N 输入/图 evidence 五处输入集合逐文件一致；INV-OWN-2 守恒；**v4 扩展：INV-OWN-3 manifest 划分/父子隔离/来源可分（P60-V3-01/04）** | R60-02、AC-01、P60-V3-01/04 |
+| 10 | | `…::test_root_component_excludes_child_files` | API-01 输入集：根组件 RAM 不计子组件文件；跨组件模块计数不重复；**v4 扩展：文件清单视图下根/子切片精确（admitted_files 构造性隔离）** | R60-02、FR-02 复验、P60-V3-01 |
 | 11 | C2 模块解析与未知区分（8；收益：RULE-02 反例 + 未知导入三态可观察） | `…::test_module_resolution_src_layout_cross_component` | RULE-02 输入集：A `import beta`→resolved 边 A→B（src 布局模块根解析） | R60-05、AC-01 |
 | 12 | | `…::test_module_resolution_build_config_declared_root` | pyproject setuptools `where`/`package-dir` 声明目录成为模块根 | R60-05 |
 | 13 | | `…::test_module_resolution_namespace_package` | 无 `__init__.py` 目录作 namespace 名解析；跨组件可产边；多名跨组件→ambiguous | R60-05 |
@@ -785,10 +963,10 @@ RAM wire 以 TaskManifest 消费面衔接的既有口径不变；`build_monorepo
 | 18 | | `…::test_dynamic_import_sites_carried` | 封闭检测集位点→dynamic_import_site_count；不产边 | FR-05、三态 |
 | 19 | C3 策略与预算不扩权（7；收益：API-02 反例 + 聚合包络新设计的机器可读验证） | `…::test_policy_inheritance_all_five_params` | API-02 输入集：组件视图五策略参数逐一==调用方有效值；ignore 集不丢失 | R60-03、NFR-01 |
 | 20 | | `…::test_no_readmission_under_caller_caps` | 调用方 max_files=1：全输出不得含未准入文件；分歧组件 typed 不构建（不扩权优先） | R60-03 |
-| 21 | | `…::test_aggregate_model_call_envelope` | 注入有界离线 fake client：聚合 cap 触发→BUDGET_EXHAUSTED(reason=aggregate-model-call-limit)+partial facts；component_id 序确定；默认 off 零调用 | R60-03、AC-02 |
+| 21 | | `…::test_aggregate_model_call_envelope` | **v4 重写（P60-V3-05）**：默认（无 client）零调用零网络；注入有界离线 fake client：全仓默认 8 次**尝试**口径（超时/失败尝试计入——fake client 制造 timeout/异常后尝试计数不回退）；第 9 次起组件 typed 降级 `BUDGET_EXHAUSTED(reason=aggregate-model-call-limit)`+静态事实保留；component_id 序确定 | R60-03、AC-02、P60-V3-05 |
 | 22 | | `…::test_budget_caps_edge_evidence_unassigned_unknown` | 四类列表 cap 截断+typed gap（detail reason/count）不静默 | 预算 fail-closed |
 | 23 | | `…::test_invalid_inputs_fail_closed` | 非 workspace/坏 budgets（0/负/非 int）/非 str 六 ID/空 digest→ContractError/ValueError | fail-closed |
-| 24 | | `…::test_monorepo_budgets_invariants` | MonorepoBudgets 默认（16/4096/64/256/128）+构造期正值校验 | 预算单解 |
+| 24 | | `…::test_monorepo_budgets_invariants` | **v4 重写（P60-V3-03 三分离）**：MonorepoBudgets 每字段 默认值（16/4096/64/256/8/24000/4096/28096/64/1MiB）/ 合法域（1..64 等）/ 硬上限（schema maxItems=域上界）三分离——域内接受、域外（0/负/非 int/越上界）构造期 ValueError；total ≥ prompt+output 同构校验 | 预算单解、P60-V3-03 |
 | 25 | | `…::test_budget_exhaustion_partial_facts` | 各截断形态返回部分事实+对应 gap+complete 触发（T1/T3/T7 对号） | fail-closed、R60-03 |
 | 26 | C4 秘密形态与坐标变换（4；收益：API-03 反例的全公开面机械扫描） | `…::test_repo_level_admission_before_component_views` | API-03 输入集：`secrets/` 不产组件、`secrets/main.py` 不入任何组件 RAM/Profile/图面；整仓输出 0 模块语义保持+gap | R60-04、NFR-01 |
 | 27 | | `…::test_all_public_surfaces_admission_rules` | 对序列化 payload 全文机械执行 §5.8 准入表（逐公开面字段过 `is_secret_shaped_path`）→零命中 | R60-04、NFR-01 |
@@ -806,7 +984,7 @@ RAM wire 以 TaskManifest 消费面衔接的既有口径不变；`build_monorepo
 | 39 | | `…::test_golden_monorepo_replay_and_topn` | 两次独立构建 digest 相等+每组件 ranked candidate_id 序列逐位相等 | AC-01（可重放） |
 | 40 | | `…::test_golden_monorepo_provenance_chain` | 图 anchor=("component-graph",)+每组件三段 anchor 链+manifests provenance | AC-01（provenance） |
 | 41 | | `…::test_golden_tamper_detected` | 篡改 golden 任一参与字段→digest 失配被识别 | R60-07 |
-| 42 | C7 公开 Artifact 消费自洽（11；收益：R60-08 消费闭合与 validator 十维） | `test_component_graph.py::test_consumer_obtains_all_facts_from_public_artifacts` | 仅凭 payload+每组件 envelope/RAM wire（无 workspace/不重跑构建/无内存对象）：取得并核对五类事实（Profile/RAM/semantic 摘要/坐标映射/gap+execution_required 复算/图关联） | R60-08、系统约束 |
+| 42 | C7 公开 Artifact 消费自洽（11+1；收益：R60-08 消费闭合与 validator 十维） | `test_component_graph.py::test_consumer_obtains_all_facts_from_public_artifacts` | **v4 重写（P60-V3-02 四点核对）**：仅凭 payload+每组件 envelope/RAM wire（无 workspace/不重跑构建/无内存对象）：①bytes 解码（`decode_profile_envelope(profile_bytes)`→`envelope.content_digest`==profile 槽）；②三摘要分别核对（`ram_facts_digest_from_wire`==facts 槽、`semantic_result_digest_from_wire`==semantic 槽、`ram_wire_digest`==`identity.wire_digest` 且 ≠facts digest）；③gaps 取自 ram/semantic 两 section+`execution_required_from_gaps` 复算==顶层；④篡改被拒（ranked score/envelope payload→ContractError/DIGEST_MISMATCH）+坐标映射+图摘要独立重算 | R60-08、P60-V3-02、系统约束 |
 | 43 | | `…::test_validator_unknown_fields` | 未知顶层/嵌套字段→ContractError(UNKNOWN_FIELD)（V1） | fail-closed |
 | 44 | | `…::test_validator_enums_and_digest_format` | 枚举外 status/kind、非 64-hex、line<1→ContractError(INVALID_FIELD_VALUE)（V2/V10） | fail-closed |
 | 45 | | `…::test_validator_uniqueness_target_existence_ordering` | ID 唯一/目标存在/各集合排序去重违规→拒绝（V3/V4/V6） | fail-closed |
@@ -818,7 +996,16 @@ RAM wire 以 TaskManifest 消费面衔接的既有口径不变；`build_monorepo
 | 51 | | `…::test_static_no_network_no_env_no_syspath` | AST 断言零网络/subprocess/os.environ/文件写/sys.path 变更 import | V5-FR-04 |
 | 52 | | `…::test_determinism_and_input_order_invariance` | 同快照两次构建全字段相等；同内容不同写入顺序两快照→digest 相等（含嵌套/unknown/unbuilt 字段） | AC-01、FR-04 |
 | 53 | C5 完整性与缺口（**v3 增补，ER SF-1**） | `test_component_graph.py::test_admission_skipped_py_t6_incomplete_and_carried` | E1 输入集（根 pyproject.toml + good.py + oversize/non-utf8/binary `.py` 各一）：`dependencies_complete=False`（T6：file-size-limit/binary/non-utf8 键>0）+ coverage_gaps 含 INVENTORY_SKIPPED 逐键 `reason=<键>; count=N`（无文件名）+ 三文件不入 components/unassigned_files/edges evidence 任何公开面 + INV-OWN-2 守恒（三者不计入已准入总数）；豁免键（ignored-directory/unsupported-extension/sensitive-config/symlink）不触发 T6 的对照断言 | R60-06、ER SF-1、fail-closed |
-| 54 | C1 组件发现与计数一致（**v3 增补，ER SF-2**） | `test_component_graph.py::test_default_extension_anchor_blindspot_unassigned` | 仅 setup.cfg+requirements*.txt manifest（无 .toml/.py/.json/.yml manifest）+ 散 `.py` 的仓库，默认策略下：components=()、散 `.py` 落 unassigned、`skipped["unsupported-extension"]` 计数可见——四类 kind（requirements/setup_cfg/go_mod/pom_xml）默认永不可锚定（§5.1.1 声明锚：归宿=unassigned/typed，不产组件、不编造） | R60-01、ER SF-2、E2 |
+| 54 | C1 组件发现与计数一致（**v3 增补 ER SF-2 → v4 重写，P60-V3-04**） | `test_component_graph.py::test_manifest_metadata_default_positive_and_strict_negative` | **默认正例**：仅 setup.cfg / requirements\*.txt / go.mod / pom.xml manifest（四类原盲点）+ 散 `.py` 的仓库，默认策略（metadata-channel）下**可锚定**——组件正常构建、manifests[].source="metadata-channel"、散 `.py` 归属正确；九类各一形态全覆盖（尤其四类原盲点）；**严格负例**：同仓库 `manifest_policy="admitted-only"` 下 components=()（通道关闭不悄悄失效）、散 `.py` 落 unassigned、主仓 `skipped["unsupported-extension"]` 计数可见、通道跳过计数与主仓计数分列 | R60-01、ER SF-2、P60-V3-04 |
+| 55 | C1' 精确视图正例（**v4 增补，P60-V3-01**） | `test_component_graph.py::test_detect_components_same_name_dir_not_nested_anchor_builds` | 同名非子锚点目录 = **正例可构建**：锚点 `a/b` 与无关目录 `a/other/b/`（同名 `b`、非嵌套锚点）并存——`a/other/b/` 内文件按最深前缀归属 `a`（或就近锚点）正常入切片、组件正常构建、**不进 unbuilt**（v3 名字碰撞 typed 不构建撤销）；INV-OWN-1/2 守恒（v3 D7-COLLISION 输入集转为正例基座） | P60-V3-01、R60-02 |
+| 56 | C1' 精确视图正例（**v4 增补，P60-V3-01**） | `test_component_graph.py::test_parent_component_profile_manifest_excludes_child` | 父组件 Profile 不纳入子组件 manifest：根+子组件（`services/`）形态——子组件 manifest 不在根组件 `manifests`（INV-OWN-3(b) 键级比对）；根组件 Profile 构建的 manifest 候选（W-2 受限过滤后）不含 `services/pyproject.toml`（INV-OWN-3(c) 层内行为）；manifests[].source 与实际集合一致（INV-OWN-3(d)） | P60-V3-01、P60-V3-04 |
+| 57 | C7 公开 Artifact 消费自洽（**v4 增补，P60-V3-02**） | `test_component_graph.py::test_component_ram_wire_effective_config_no_default_backfill` | 聚合额度变化后每组件 wire `build` 段 = **实际生效** profile/ram budgets 与 semantic_options（`dataclasses.replace` 后的值），非 None/层默认；`ComponentBuildResult.effective_*` 与 wire build 段逐字段相等；wire_digest 自洽（回填默认必失配的机械验证）；图 payload `build.monorepo_budgets` = 有效聚合预算 | P60-V3-02 |
+| 58 | C3' 参数边界（**v4 增补，P60-V3-03**） | `test_component_graph.py::test_parameter_boundary_unique_behavior` | `max_components=17`：≤17 全构建、>17 截断到 17+gap(component-limit)+T1（唯一行为）；`top_n=21`：ranked 承载 21 项+semantic_topn.top_n=21+schema maxItems 100 通过；`top_n=0/101`：SemanticOptions 冻结 ValueError 传播；紧 cap：unbuilt(cap-divergence) 唯一归宿；各拒绝样例构造期 ValueError | P60-V3-03 |
+| 59 | C3'/C5' 部分产物自洽（**v4 增补，P60-V3-03**） | `test_component_graph.py::test_partial_products_pass_own_validators` | 耗尽/截断形态（组件截断/边截断/聚合归零/通道预算触发）的部分产物：图 payload 过 `validate_component_graph_payload`、每组件 wire 过 `validate_ram_wire_payload`；built/status/gap/build 段有效配置/三摘要自洽；零额度不构造 `max_llm_calls=0` 的 SemanticBudgets（构造即 ValueError 断言）、不填伪 digest、不删已得 Profile/RAM/确定性排序 | P60-V3-03、P60-V3-05 |
+| 60 | C4' 通道不扩权（**v4 增补，P60-V3-04**） | `test_component_graph.py::test_manifest_channel_no_source_readmission` | 元数据通道发现不重新准入源码：(S2) 发现的 requirements.txt/setup.cfg 等**不进** (S1) 语义——不计 python_file_count、不被 AST 扫描、不进组件 Profile inventory 维度（除非扩展策略内且已准入，此时 source="source-inventory"）；主仓 `skipped` 事实不被通道改写/追平（分列呈现）；通道对秘密形态/ignored/symlink/越界的剪枝全负例（计数可见、无路径） | P60-V3-04、NFR-01 |
+| 61 | C1'' 两集合分离（**v4 增补，P60-V3-04**） | `test_component_graph.py::test_two_input_sets_counts_and_provenance_separated` | 两输入集合计数/provenance 分离核对：`metadata_manifest_count`==(S2) 来源 manifests 总数；`metadata_channel_skipped` 七词表封闭、与主仓 skipped 分列；INV-OWN-3(a) 划分守恒（Σ manifests + 秘密拒绝锚点数 = 发现总数）；同路径双集合成员单值 source="source-inventory" | P60-V3-04 |
+| 62 | C3'' 聚合 token 池（**v4 增补，P60-V3-05**） | `test_component_graph.py::test_aggregate_token_pool_exhaustion_typed_degradation` | 聚合 token 池耗尽（fake client + 小池）：预调用预估计量、预扣不退还（失败尝试额度已耗）；耗尽后新尝试不调度、组件 typed 降级 `BUDGET_EXHAUSTED(reason=aggregate-token-pool-limit)`；静态事实+确定性 Top-N 保留；三摘要/wire 仍可验证（与 #59 同一自洽面的池口径）；保守默认 ≤ 调用方 SemanticBudgets 对应值断言 | P60-V3-05 |
+| 63 | C5'' 读放大计量（**v4 增补，P60-V3-05**） | `test_component_graph.py::test_read_amplification_metered_and_bounded` | `ResourceMetering` 各计数器与公式上界机械核对：component_rescan_file_reads ≤ Σ(切片文件数)、ast_read_files ≤ 归属 .py 数、metadata_manifest_reads ≤ max_metadata_manifests、bytes ≤ files×max_file_bytes；超界=实现缺陷（断言失败）；截断规则唯一（达界即停+typed gap） | P60-V3-05 |
 
 PI-DR 落实：PI-DR1（LF 钉死/POSIX 断言/零平台权限依赖）；PI-DR4 模块缺席 RED 锚（新测试 import `lima.audit.component_graph` 失败为 RED 锚**之一**——不代替语义覆盖）；**PI-DR2 scratch/reference 流程（R60-07 D2 计划）**：D2 冻结前须以 scratch 参考实现或等价独立参考验证验收测试非自相矛盾、能接纳合规结果（存在满足全部断言的合法输出），并记录于 Frozen Test Commit；PI-DR6 冻结前非 Windows 平台完整跑一次并记录 run SHA；PI-DR5 PR 禁自动关闭关键字。
 
@@ -826,20 +1013,21 @@ PI-DR 落实：PI-DR1（LF 钉死/POSIX 断言/零平台权限依赖）；PI-DR4
 
 | Requirement | 本 IP 贡献声明 | Test（§6 #） |
 |---|---|---|
-| V5-FR-03（前半句：monorepo 输出 component graph） | 嵌套组件识别 + 边三态 + 未知导入承载 + 独立承载 + 每组件三段 | #1-#18、#42-#49、#54 |
+| V5-FR-03（前半句：monorepo 输出 component graph） | 嵌套组件识别 + 边三态 + 未知导入承载 + 独立承载 + 每组件三段 | #1-#18、#42-#49、#54-#56、#60-#61 |
 | AC-01/T-01（monorepo/重复模块/相对导入维度：provenance + Top-N 可重放） | golden（独立 Oracle）+ 边三态 + 确定性 | #11-#15、#38-#41、#52 |
 | V5-AC-01/V5-T-01（monorepo 维度：Profile/roles/support/execution capability/gap） | 每组件 Profile 全字段（复用 IP-0016 规则） | #3、#9-#10、#38-#40 |
 | V5-AC-02/V5-T-02（后半句：monorepo 按 component 生成 profile/RAM） | `build_monorepo_profile` 每组件全链（单一归属） | #9-#10、#21 |
-| FR-02/03/04/NFR-01（组件维度复验） | 复用三层公共接口逐组件重放（策略继承+隔离不变量） | #9-#10、#19-#21、#26-#29、#35-#37、#52 |
-| FR-05（typed gaps / 三态可观察） | 统一完整性触发集 + scan/unknown/unbuilt 承载 + T6 准入跳过承载（v3） | #16、#18、#30-#34、#53 |
-| 预算/安全基线 | 聚合包络 fail-closed + 隐私/no-execution/静态断言 | #7、#19-#25、#50-#51 |
+| FR-02/03/04/NFR-01（组件维度复验） | 复用三层公共接口逐组件重放（策略继承+隔离不变量） | #9-#10、#19-#21、#26-#29、#35-#37、#52、#55-#56 |
+| FR-05（typed gaps / 三态可观察） | 统一完整性触发集 + scan/unknown/unbuilt 承载 + T6 准入跳过承载（v3）+ 部分产物自洽（v4） | #16、#18、#30-#34、#53、#59、#62 |
+| 预算/安全基线 | 聚合包络 fail-closed（全仓 8 尝试+token 池，v4）+ 参数边界三分离（v4）+ 读放大计量（v4）+ 隐私/no-execution/静态断言 | #7、#19-#25、#50-#51、#57-#63 |
+| P60-V3-01..05 裁定锚（v4 新增行） | 精确视图/消费链修正/参数三分离/元数据通道/全仓资源约束逐裁定 | #9-#10（扩展）、#21/#24/#42/#54（重写）、#55-#63 |
 
 反向：§6 每个测试符号唯一指向上表行（D2 冻结时以 `test_file::test_symbol` 表落档）。本 IP 不宣称：AC-01 整体满足、V5-FR-03 后半句（安全停止）、T-03 端到端、F3/F4、#64/#68 消费。
 
 ## 8. 验收命令（Done Commands；D2/Implementation/验证共用，全部在交付 worktree 根执行）
 
 ```text
-# slice（新增用例全绿，0 skip；v3 计划 54 方法 = v2 52 + ER 增补 2——§6 注记）
+# slice（新增用例全绿，0 skip；v4 计划 63 方法 = v3 54 + 四行重写（#21/#24/#42/#54）+ 增补 #55-#63——§6 注记：54=旧计划数非帽）
 python -B -m unittest tests.audit.test_component_graph tests.audit.test_monorepo_golden -v
 # tests/audit 全量回归（基线锚 235 @fbbbd619；含 IP-0022 51 例回归锚；计数变化需解释、不得删测试追平）
 python -B -m unittest discover -s tests/audit -q
@@ -868,7 +1056,7 @@ sha256sum schemas/v4/lima.component-graph.json tests/audit/fixtures/monorepo/gol
 ## 9. Stop Conditions / Decision Request
 
 1. 组件识别需跨 manifest/路径组合证据而现有公共承载（workspace 只读 inventory + read_text）无法表达 → Contract Gap 停点，提 DR（选项+推荐+兼容影响+草案），不发明扩展字段；
-2. 任何需要修改 `lima/workspace.py`、`lima/contracts/**`、三层+ram_schema 冻结面、既有 tests/audit 文件、schemas/v4 既有 15 文件才能满足本 Packet 的情形 → 停点（共享层改动单列 DR 附调用链与理由；**DR-IP-0023-02（祖先组件精确隔离共享层增强）已按此预呈**；F3 路线归 #60-CLOSURE-C）；
+2. 任何需要修改 `lima/workspace.py`、`lima/contracts/**`、三层+ram_schema 冻结面、既有 tests/audit 文件、schemas/v4 既有 15 文件才能满足本 Packet 的情形 → 停点（共享层改动单列 DR 附调用链与理由；**v4：§4.3.1 白名单两项（DR-IP-0023-02 已采纳目标）是唯一预呈的共享层 additive 集，激活条件=本 Packet v4 获批，白名单外仍走本停点**；F3 路线归 #60-CLOSURE-C）；
 3. 触及冻结约束的新设计（54 帽扩帽、digest 家族语义、GAP 码新增、execution_required 语义、#58 字段、v4 schema/旧 golden 期望值）→ 具体 DR 获批前不实现、不留 TBD 空位；
 4. 与 #266/#281 出现文件或语义冲突迹象（含远端分支前移触及 #60 敏感路径）→ 停止上报 Coordinator；
 5. 基线前移：开工时已核验 fbbbd619 未前移；后续阶段（D2/Implementation）开工时重新 `git fetch origin`，前移涉冻结产品面/共享输入层/Contract·fixtures → 按批复 §四分类补核验，涉 #60 敏感路径上报复核后开工；
@@ -890,10 +1078,10 @@ sha256sum schemas/v4/lima.component-graph.json tests/audit/fixtures/monorepo/gol
 |---|---|---|---|
 | 嵌套组件（services/api、packages/core） | 浅层规则漏识别 | 任意深度锚点（已准入 manifest 父目录）；识别不了→unassigned/gap 如实 | #1 |
 | 根组件与子组件并存 | 根构建吸入子组件文件（API-01） | 继承策略组件视图+嵌套锚点名 ignore+INV-OWN-1 逐文件校验 | #9、#10 |
-| 名字碰撞目录（祖先子树内与嵌套锚点同名） | 同名剪枝过度排除 | INV-OWN-1 分歧→`unbuilt_components` typed 承载（T7），不出错误数据 | #9、#20 |
+| 名字碰撞目录（祖先子树内与嵌套锚点同名） | ~~同名剪枝过度排除~~（v4：basename-ignore 废除） | **正例可构建**（文件清单视图：碰撞目录文件按最深前缀入切片正常扫描，不进 unbuilt——P60-V3-01）；`unbuilt` 仅承载 cap-divergence/view-unformable/admission-refused 三类（reason 可区分） | #55（正例）、#9 |
 | 空仓库 / 零 manifest | 无组件边界证据 | components=()、edges=()、unassigned 计数如实；不报错 | #3 |
 | 根 workspace 协作 manifest | 误产根组件/双计 | workspace 键集识别→不产根组件 | #4 |
-| 调用方 cap 收紧（max_files=1 等） | 组件切分重新准入（API-02 反向） | 五参数继承+INV-OWN-1；分歧组件 typed 不构建 | #19、#20 |
+| 调用方 cap 收紧（max_files=1 等） | 组件切分重新准入（API-02 反向） | 五参数继承+admitted_files 构造性隔离+INV-OWN-1 复核；分歧组件 typed 不构建（v4：unbuilt reason=cap-divergence，三类可区分） | #19、#20、#58 |
 | ≥17 组件 | 聚合放大 | 前 16+BUDGET_EXHAUSTED+complete=False（T1） | #7 |
 | src 布局（src/alpha vs src/beta） | 锚点同名 `src`、跨组件导入丢失（RULE-02） | 模块根解析（构建配置+src 内容证据）；顶层名表跨组件 resolved | #11、#12 |
 | 两组件同名顶层包 | import 目标不唯一 | P1 自身优先；P3 ambiguous（target=None） | #15 |
@@ -907,7 +1095,9 @@ sha256sum schemas/v4/lima.component-graph.json tests/audit/fixtures/monorepo/gol
 | 秘密形态目录/文件名（secrets/ 等） | 坐标变换绕过准入（API-03） | 仓库级先准入：锚点拒绝+公开面准入表+validator V5；reason→count | #8、#26-#28、#48 |
 | CRLF 文件 | 行号口径漂移 | 行号按保留 CRLF 原文计算；fixture 全 LF | （并入 #52） |
 | symlink / 二进制 / 超大 / 非 UTF-8 / 不可读文件 | workspace 跳过后图输出零承载（E1：v2 判据下 complete=True + 三个 `.py` 隐形） | binary/non-utf8/file-size-limit/unreadable 入 T6 + 逐键 INVENTORY_SKIPPED `reason=<键>; count=N`（无文件名）；ignored-directory/unsupported-extension/sensitive-config/symlink 声明豁免 + 计数可见（§5.2.4 十键全归类） | #30、#53 |
-| 仅 setup.cfg / requirements*.txt / go.mod / pom.xml manifest 的仓库 | 默认扩展策略下永不可锚定（E2/SF-2：DEFAULT_EXTENSIONS 无 .txt/.cfg/.mod/.xml） | §5.1.1 默认策略盲点声明；归宿=unassigned + skipped 计数可见，不产组件不编造；锚点通道不绕开扩展策略（绕开=DR-IP-0023-03 备选，默认不做） | #54 |
+| 仅 setup.cfg / requirements*.txt / go.mod / pom.xml manifest 的仓库 | ~~默认扩展策略下永不可锚定~~（v4：四类盲点由元数据通道收口，P60-V3-04） | **默认策略（metadata-channel）下可锚定正例**（§5.1.7 受控通道：封闭名集只读发现、双预算、分列跳过计数、不扩源码准入）；严格 admitted-only 策略=通道关闭负例（不悄悄失效）；DEFAULT_EXTENSIONS 零改动（选项 B 禁止） | #54（重写：正例+负例）、#60、#61 |
+| 聚合模型/token 额度耗尽（fake client 下） | 静默丢 semantic 或回填默认配置 | 全仓 8 次尝试口径+聚合 token 池预扣不退；耗尽=typed gap（aggregate-model-call-limit / aggregate-token-pool-limit）+静态事实+确定性 Top-N 保留+三摘要/wire 可验证；不构造非法 SemanticBudgets、不回填默认（回填即 wire_digest 失配） | #21（重写）、#59、#62 |
+| 每组件重扫/AST/manifest 读放大 | 无界或未计量的重复读取 | `ResourceMetering` 六计数器计量+公式上界（files×cap 等）+达界即停截断规则；继承 cap 不自动证明无读放大（显式声明） | #63 |
 | manifest 静态解析失败 | 模块根/依赖证据缺失 | 保守回退（根+src 约定+unknown 承载）；Profile 层既有 MANIFEST_PARSE_ERROR 不受影响 | #12、#16 |
 | 非 workspace 入参 / 非法预算值 / 空 digest | 类型违约 | ContractError/ValueError fail-closed | #23、#24 |
 | 边/evidence/unassigned/未知导入超量 | 无界放大 | cap+typed gap（count 如实），无静默截断 | #22 |
@@ -917,19 +1107,19 @@ sha256sum schemas/v4/lima.component-graph.json tests/audit/fixtures/monorepo/gol
 
 ## 12. Completion Summary / PR contract
 
-- Completion Summary 必含：base/final commit、修改文件与公共符号清单（§5.4.7 的 `__all__` 逐项）、AC→Test→Result 表（§7 + §6 符号）、§8 全部命令实际输出与统计（含计数与退出码）、schema 与 golden 文件 SHA-256、文件边界自查（`__init__.py` 未改动证明）、**R60-01..08 逐项实现对照**（实现行为 → §0.1 修订规则 → 对应测试符号）、已知限制（monorepo golden 单形态、Python-only 组件边、祖先组件 manifest 证据范围限度、名字碰撞 typed 不构建、安全停止/T-03/F3/F4 归 B/C、FR-01 全 vocabulary 留痕归 D、full semantic 下游消费归 D）；
+- Completion Summary 必含：base/final commit、修改文件与公共符号清单（§5.4.7 的 `__all__` 逐项）、AC→Test→Result 表（§7 + §6 符号）、§8 全部命令实际输出与统计（含计数与退出码）、schema 与 golden 文件 SHA-256、文件边界自查（`__init__.py` 未改动证明；§4.3.1 白名单实施时另附：白名单内 diff 恰为两项、缺省 None 行为不变的既有测试证据）、**R60-01..08 + P60-V3-01..05 逐项实现对照**（实现行为 → §0.1/§0.3 修订规则 → 对应测试符号）、已知限制（v4 起：monorepo golden 单形态、Python-only 组件边、安全停止/T-03/F3/F4 归 B/C、FR-01 全 vocabulary 留痕归 D、full semantic 下游消费归 D、真实模型客户端不入本片、聚合墙钟不宣称——~~祖先组件 manifest 证据范围限度、名字碰撞 typed 不构建~~两项已由 v4 精确视图撤销）；
 - Implementation PR：`Implements IP-0023` + `Related to #60`；正文含 Packet merge commit、Frozen Test Commit、covered/not-covered（§0）、AC 矩阵、命令实测、Verdict、`This PR does not auto-close the Source Issue.`；**禁止** close/fix/resolve 与 #60 组合（PI-DR5）；
-- Packet docs PR（主会话在 Coordinator readiness 复核通过后执行）：docs-only，恰含本 Packet 修改（同文件 v2 commit），`Related to #60`，禁自动关闭关键字；合并批准逐项请求 Maintainer；PR 正文重写围绕最终问题与行为，说明实际验证/未验证（含 D1R 探针为设计证据而非产品验收）。
+- Packet docs PR（主会话在 Coordinator readiness 复核与 ER 反证后执行）：docs-only，恰含本 Packet 修改（同文件 v1→v4 提交链），`Related to #60`，禁自动关闭关键字；合并批准逐项请求 Maintainer（随包呈交：五项处置、公开消费实证、实际验证/未验证、真实 head/base/diff/CI、共享层方案及兼容影响、资源上界、尚待决定事项——指令 §八）；PR 正文重写围绕最终问题与行为，说明实际验证/未验证（含 D1R/D1F 探针为设计证据而非产品验收）。
 
 ## 13. Packet 完成定义与 Open Decisions
 
-- 本 Packet 关键 TBD 数 = 0；状态 `D1R-REVISION / PENDING-REVIEW`——**不标 READY-FOR-CODE**；`READY-FOR-CODE` 当且仅当：本文档（v2 或后续修订版）合并进 main（Coordinator 标 `PACKET-MERGED`）且 D2 按 §6 计划完成有效 RED（含 PI-DR2 scratch/reference 非自相矛盾验证）与 PI-DR6 双平台记录；
-- **Open Decisions（呈审项，非实现阻塞、非 TBD 空位）**：
-  1. DR-IP-0023-01（备选）：`lima.audit` 命名空间追加 re-export（=扩 54 帽）——默认不扩帽，草案随交接报告；
-  2. DR-IP-0023-02：祖先组件精确隔离的共享层增强（workspace 路径级排除参数 / 显式文件清单视图 / manifest 候选范围参数；推荐 additive `exclude_directory_paths`；附调用链与兼容影响）——v2 默认设计不依赖它（INV-OWN-1 分歧→typed 不构建 + 限度声明），获批后可消除 §5.2.1 已知限度 (i)(ii)；
-  3. 聚合模型调用包络 `max_total_model_calls=128` 为本 Packet **显式新预算设计**（§5.4.4），随修订版 PR 一并呈审（非"旧预算已批准"的引申）；
+- 本 Packet 关键 TBD 数 = 0；状态 `D1F-REVISION / PENDING-REVIEW`——**不标 READY-FOR-CODE**；`READY-FOR-CODE` 当且仅当：本文档（v4 或后续修订版）合并进 main（Coordinator 标 `PACKET-MERGED`）且 D2 按 §6 计划完成有效 RED（含 PI-DR2 scratch/reference 非自相矛盾验证）与 PI-DR6 双平台记录；
+- **Open Decisions（呈审项，非实现阻塞、非 TBD 空位；v4 改写）**：
+  1. DR-IP-0023-01（备选，维持）：`lima.audit` 命名空间追加 re-export（=扩 54 帽）——默认不扩帽，草案随交接报告；
+  2. **DR-IP-0023-02（已采纳目标，P60-V3-01/指令 §四裁定）**：精确组件视图的共享层 additive 白名单已具体化为 §4.3.1 两项（W-1 workspace `admitted_files` 文件清单视图 / W-2 `_manifest_candidates` 受限过滤）——方案取舍已冻结（文件清单视图，弃路径级排除：单一机制约束三入口）；**激活条件=本 Packet v4 获 Maintainer 批准合并**（本次采纳目标不等于已批准未具体化的共享层实现——白名单外仍禁止）；激活后消除 v3 已知限度 (i)(ii)（§5.2.1）；
+  3. ~~聚合模型调用包络 `max_total_model_calls=128` 呈审项~~（**v4 关闭：128 已被指令 §四 P60-V3-05 否决**，列入已否决路线不得重试）；改立**政策审批点**：`max_total_model_calls > 8` 或聚合 token 池高于保守默认（>调用方 SemanticBudgets 对应值）的实际使用须显式配置+政策授权（未来审批点，本轮不授予；技术合法域已冻结 §5.4.3，非开放设计项）；
   4. BG-IP-0016-01 / BG-60-01 / DR-LINT-0022-A 维持 OPEN（归置权在 Coordinator）；F4 聚合墙钟未闭合（归 #60-CLOSURE-C）；
-  5. **DR-IP-0023-03（备选，v3/ER SF-2 呈审项，非实现阻塞）**：四类 manifest（requirements*.txt / setup.cfg / go.mod / pom.xml）的默认可锚定化——选项 A 组件层锚点通道对封闭名集豁免扩展策略（组件层内实现，但与"主仓未准入输入不重新准入"隔离不变量冲突，需专项论证例外边界）；选项 B `DEFAULT_EXTENSIONS` 增补 .txt/.cfg/.mod/.xml（触 `lima/workspace.py` 冻结面，且改变全仓 inventory 行为与既有 golden）。**默认均不做**（策略继承单解优先；盲点以 §5.1.1 冻结声明承载 + §6 #54 验收锚定）；如 Maintainer 认为四类应默认可锚定，经具体 DR 批准后实施。
+  5. **DR-IP-0023-03（已采纳方向，P60-V3-04/指令 §四裁定；原"备选，默认不做"状态废除）**：受控 manifest 元数据通道为本片已采纳设计（§5.1.7 冻结单解）——选项取舍：通道化变体（组件层封闭名集只读元数据发现，两输入集合分离），**选项 B（`DEFAULT_EXTENSIONS` 增补 .txt/.cfg/.mod/.xml）明确禁止不采**（触 workspace 冻结面且改变全仓 inventory 行为与既有 golden）；九类默认正例+严格 admitted-only 负例的验收锚 #54/#60/#61；如 Maintainer 认为通道预算/策略默认值需调整，经 Packet 修订实施（设计已具体化，无开放式备选残留）。
 - 后续阶段（D2 冻结测试、Implementation、独立验证、ER、合并、post-merge、IP-DONE）均未授权，另行 Assignment。
 
 ---
@@ -954,3 +1144,12 @@ sha256sum schemas/v4/lima.component-graph.json tests/audit/fixtures/monorepo/gol
 - **ER 证据亲验**：探针结果 `%TEMP%\er_probe_ip0023_d1r_results.json`（SHA-256 `d34b1b505b263f060762478bf59fd50d875bde250b2e85f362c6c421e1fbae1c`）与 `%TEMP%\er_probe_refine_results.json`（`12d63e5ffbdfb09823d5300195155a26de0c85aafc81da5dffa5638dae88c26d`）及两探针脚本（`7a4e485d89c9189325f040e292c6a4c9692569b1cd389d7c551cc80a60b3ce5a` / `7d53a372885a32998b4ab668c01a5cd7b47b86e755f58502e26a5534d4f998a0`）全文读取；E1（T6 判据逐字复算：`truncated or file-limit>0 or total-size-limit>0` 于真实 workspace 上不触发）与 E2（`".txt" in ws.extensions == False`、requirements.txt 计入 `unsupported-extension`）断言与输出逐项核对。ER Record 本体（`ERR-60-IP-0023-D1R-2026-10-09-v1`）由主会话另存、本轮未亲读（如实声明；处置依派发要点 + 探针证据独立可核）。
 - **冻结面源码亲验（@fbbbd619，只读，SF 事实基座）**：`DEFAULT_EXTENSIONS` 恰 37 项、不含 .txt/.cfg/.mod/.xml（含 .toml/.json/.yml/.py）；构造器 `extensions=(extensions or DEFAULT_EXTENSIONS)`（or 替换）与 `ignored_directories=DEFAULT_IGNORED_DIRECTORIES ∪ 入参`（恒并集）；`inventory()` 的 `truncated=True` 仅在 file-limit/total-size-limit 跳过计数处置位；`_manifest_candidates` raw `os.listdir` 名集匹配、无扩展过滤；跳过原因词表恰 10 键（§3.3）。
 - **本轮未执行**：产品代码/测试/schema 修改、冻结（D2 另行 Assignment）、全量产品测试重跑（基线锚沿用 §3.4）、远端推送。
+
+## 附 D. v4 修订制作证据（D1F 收口轮，2026-10-09，全部本轮亲验）
+
+- **授权与范围**：Maintainer 指令 `MR-60-PR282-FINALIZATION-20261009/v1`（§四 五裁定 + §五 角色链 + §六 测试计划）+ Coordinator Assignment `ASSIGN-60-CLOSURE-A-PKT-D1F_v1`（SHA-256 `2774bd4333c3974fb6369e7f9492bb3a6bf0e46ad9233d93a541aa5bfa2ebf8a`，读取前重算一致，D1F 唯一任务合同）+ 主会话派发（Operating Mode=SHADOW / MAINTAINER_AUTHORIZED）；修订对象 = Packet v3 @`d55a9f298e88dd5a656437e10cc93c64cd69ad9d`（文件 SHA-256 `1b07cc65c9855d05fa3361c5953a73f8ebd66069ac37898e5b58704605e427cf`，开工 `git show d55a9f29:…` 重算一致）；恰好一个新 commit（叠加于 v3 之上），不 push（派发指令；Assignment 允许推送以 Coordinator 后续指令为准）；变更范围 = P60-V3-01..05 全部五项（§0.3）+ T 节测试计划修订（#21/#24/#42/#54 重写 + #55-#63 增补）+ 要件随动（DI-023..027/§3.6/§4.3.1/§5.x/§7/§8/§11/§12/§13）。
+- **基线（D1F 开工亲验）**：`git fetch origin` 后 `origin/main = fbbbd619fb0b96efbbb903916ab46dc0daed2214`（未前移，与 D1R/v3 开工一致）；worktree `D:/BaseAIProject/LIMA-60-closure-a-pv-wt`（分支 `codex/ip-0023-monorepo-packet`）HEAD=`d55a9f29…`、开工 `git status --porcelain` 为空；`git diff --name-only fbbbd619...HEAD` 恰为本文档一个文件（docs-only——本 worktree 产品代码与归档 baseline-runtime（`_review_base_sha.txt` 校验 fbbbd619）逐字节同源，离线探针以此为准）。
+- **输入 SHA-256 重算一致（D1F Acceptance 第 8 条，全部亲验）**：D1F Assignment `2774bd43…ebf8a`、FINALIZATION_BODY `02133d0978e4b08389af3c7139541bbd4cb997e177804cb6faa4176fcd8402e3`、配套规划 `75798f8b…8e95`、MDR-FINALIZATION `9cd79d20…41c`、Packet v3 `1b07cc65…27cf`、ERR 本体 `4fac90ee…0e3d`（**本轮全文亲读**——96 行，SF-1/2/3 与六主张反证表核对）、ERR addendum-1 `c9402a9d…88a8`（亲读，L42"声明承载而非消除"判定核对）、D1R Assignment `30a0e919…c040a`、D1 Assignment `5a118ea9…73b82`。
+- **冻结面源码亲验（@fbbbd619 同源 worktree，只读，零目标执行）**：`inventory.py` L392-417（`_manifest_candidates` raw os.listdir 三入口事实）+ L147-150（`_MANIFEST_EXACT_NAMES`）；`ram_schema.py` L74-92/L236-258/L268-377/L379-452/L454-486/L495-505/L551-595（§3.1 v4 增补段全部行号锚）；`semantic_prioritizer.py` L80/L221-246/L258-268/L344-345/L439-470/L623-660（三口径+域校验+两冻结 digest 形）；`contracts/profile.py` L1238-1254（bytes 入参）；`workspace.py` L11+/L112-137（DEFAULT_EXTENSIONS 37 项、五参数构造器）。
+- **离线消费探针（P60-V3-02 D1 设计证据，DI-027）**：脚本 `%TEMP%\ip0023_d1f_consumption_probe.py`（SHA-256 `74a346184228f2d3352667c6500c6cf97520d1dea781bb6add2b575f130d0882`）、结果 `%TEMP%\ip0023_d1f_consumption_probe_results.json`（SHA-256 `b60447e0709b465a332f9d71ebfc8c2171fc2ea671a72e8ca0037858408b76ce`；12/12 过，exit 0）。对象 = 既有 golden `tests/audit/fixtures/golden_matrix/golden/application.json`（SHA-256 `23c0f3ce0ea44dbccfc5b6a9cedefc8badc968eb4ea268b6436bd8e4c1240ceb`）+ 合成样本（系统临时目录、经公共 API `build_repository_profile`/`encode_profile_envelope` 构建，零目标执行零网络零模型）。**指令内嵌 API 基准代码逐字实跑**其"已有部分"：validate 通过；facts 摘要复算 `84fec0134159f33e…`==identity 槽；semantic 摘要复算 `8aecae4e63146bfc…`==identity 槽；wire digest 复算 `b92a2aa40fc9b4c9…`==identity.wire_digest 且 **≠ ram_facts_digest**；顶层无 coverage_gaps（ram n=0/semantic n=1=SEMANTIC_MODEL_OFF）；`execution_required_from_gaps` 复算 `{'required': False, 'trigger_gap_codes': []}`==顶层；篡改 ranked score → ContractError；OFF 永不触发、全集外码 ValueError；`decode_profile_envelope(bytes)` 成功（content_digest `913d8d6ea58ee291…` 公共字段）、JSON 对象（非 bytes）被拒。**定性：以上全部为"已有行为实测"（既有 golden+既有公共 API），非"graph 产品实测"——真实 graph payload 的端到端消费属 D2 绑定（本 Packet 不声明未实现的 graph 已可调用）。**
+- **本轮未执行**：产品代码/测试/schema 修改、冻结（D2 另行 Assignment——指令 §二明禁）、全量产品测试重跑（基线锚沿用 §3.4；指令 §Acceptance 8 明示不重跑）、远端推送、台账/PR 正文/登记文件修改（归主会话/Coordinator）。

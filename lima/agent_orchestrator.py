@@ -1088,12 +1088,16 @@ def _discover_leads(
             f"{_MAX_DISCOVERY_WINDOWS}"
         )
         windows = windows[:_MAX_DISCOVERY_WINDOWS]
-    discovery_timeout = _bounded_step_timeout(timeout, deadline)
-    if discovery_timeout is None:
-        return (), (*notes, "llm-discovery-skipped: deadline exceeded")
     calls = [0]
     quadruples: list[tuple[str, int, str, str]] = []
     for unit, window_text, start_line in windows:
+        window_timeout = _bounded_step_timeout(timeout, deadline)
+        if window_timeout is None:
+            # The remaining windows (this one included) stay unaudited;
+            # the deadline is re-checked per window, not once up front,
+            # so earlier windows still got their bounded attempts.
+            notes.append("llm-discovery-skipped: deadline exceeded")
+            break
         user = (
             "The memory-fact instrument abstained on these translation "
             f"units (no deterministic candidates). This window covers "
@@ -1104,8 +1108,9 @@ def _discover_leads(
         )
         try:
             quadruples.extend(_platform_round(
-                resolved, _SYSTEM_PLATFORM_DISCOVERY, user, discovery_timeout,
+                resolved, _SYSTEM_PLATFORM_DISCOVERY, user, window_timeout,
                 budget, calls, _parse_discovery_reply, frozenset(sources),
+                deadline,
             ))
         except PlatformFormatError as exc:
             notes.append(

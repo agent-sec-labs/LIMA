@@ -1026,6 +1026,57 @@ class DiscoveryFallbackTests(unittest.TestCase):
             outcome.diagnostics,
         )
 
+    def test_discovery_rechecks_deadline_per_window(self):
+        # The reviewer probe: the deadline was computed once before the
+        # window loop, so windows kept being sent after it passed.  The
+        # budget must be re-derived per window -- the first window gets a
+        # deadline-bounded timeout, and once the deadline passes no
+        # further window is sent at all.
+        from lima import agent_orchestrator
+
+        big_source = "\n".join(
+            f"int filler_{index}(void) {{ return {index}; }}"
+            for index in range(4000)
+        )
+
+        class _FlatWorkspace:
+            def read_text(self, relative_path):
+                return big_source
+
+        ticks = iter([100.0])
+
+        def fake_monotonic():
+            try:
+                return next(ticks)
+            except StopIteration:
+                return 103.0
+
+        sends = []
+
+        def fake_send(resolved, system, user, timeout, budget):
+            sends.append(timeout)
+            return discovery_json([])
+
+        with patch.object(
+            agent_orchestrator, "send_semantic_request", fake_send,
+        ), patch.object(
+            agent_orchestrator.time, "monotonic", fake_monotonic,
+        ):
+            leads, notes = agent_orchestrator._discover_leads(
+                {"model": "probe"}, _FlatWorkspace(), ("big.c",),
+                60, 102.0, CxxAgentBudget(
+                    max_calls=8, max_output_bytes=1_048_576,
+                ), "required",
+            )
+        self.assertEqual((), leads)
+        self.assertEqual(
+            [2], sends,
+            "the first window must be bounded by the remaining budget",
+        )
+        self.assertIn(
+            "llm-discovery-skipped: deadline exceeded", notes,
+        )
+
     def test_mode_off_never_uses_discovery(self):
         outcome = _run(
             mode="off",

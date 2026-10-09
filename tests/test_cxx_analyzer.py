@@ -6011,6 +6011,147 @@ class ReproTests(unittest.TestCase):
         for stray in ("-I", "incA", "incB", "-Isrc/incA", "-Isrc/incB"):
             self.assertNotIn(stray, calls[0]["argv"])
 
+    def test_run_repro_keeps_separated_target_and_sysroot_spellings(self):
+        # Review round 2: rendering every shared unit as
+        # ``f"{option}{value}"`` produced ``--targetx86_64-...`` and
+        # ``--sysrootsrc/sysroot`` -- not legal spellings -- and the
+        # whitelist rejected them before the compile could start.  The
+        # -I/-D family stays joined; target and sysroot options keep
+        # their separated two-token form.
+        driver_code = (
+            'extern "C" int cross_magic(void);\n'
+            "int main() { return cross_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        cross_c = (
+            "#include \"common.h\"\n"
+            "int cross_magic(void) { return 42; }\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "cross.c",
+                    "arguments": [
+                        "clang-14", "-c", "-I", "include",
+                        "--target", "x86_64-unknown-linux-gnu",
+                        "--sysroot", "sysroot",
+                        "cross.c", "-o", "cross.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/cross.c": cross_c,
+                    "src/include/common.h": "#define CROSS_HEADER 1\n",
+                    "src/sysroot/keep.h": "#define SYSROOT_MARKER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/cross.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        # Separated spellings survive as adjacent token pairs, the
+        # sysroot value rebased onto the snapshot root, -I stays joined.
+        for pair in (
+            ("--target", "x86_64-unknown-linux-gnu"),
+            ("--sysroot", "src/sysroot"),
+        ):
+            self.assertIn(list(pair), [argv[i:i + 2] for i in range(len(argv))])
+        self.assertIn("-Isrc/include", argv)
+        for broken in (
+            "--targetx86_64-unknown-linux-gnu",
+            "--sysrootsrc/sysroot",
+            "-targetx86_64-unknown-linux-gnu",
+        ):
+            self.assertNotIn(broken, argv)
+
+    def test_run_repro_keeps_clang_dash_target_separated(self):
+        driver_code = (
+            'extern "C" int arm_magic(void);\n'
+            "int main() { return arm_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        compdb = json.dumps(
+            [
+                {
+                    "directory": ".",
+                    "file": "src/arm.c",
+                    "arguments": [
+                        "clang-14", "-c", "-target", "arm-none-linux-gnueabi",
+                        "src/arm.c", "-o", "arm.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/arm.c": "int arm_magic(void) { return 42; }\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/arm.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        self.assertIn(
+            ["-target", "arm-none-linux-gnueabi"],
+            [argv[i:i + 2] for i in range(len(argv))],
+        )
+        self.assertNotIn("-targetarm-none-linux-gnueabi", argv)
+
     # ------------------------------------------------------- run_repro flow
 
     def test_run_repro_compiles_runs_and_parses_report(self):

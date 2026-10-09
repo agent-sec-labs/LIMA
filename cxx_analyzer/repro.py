@@ -64,9 +64,13 @@ _CPP_LANGUAGE: Final = "c++"
 _REPRO_CONTEXT_OPTIONS: Final = SEMANTIC_ARG_OPTIONS - {"-std"}
 # Joined spellings of the value-taking context options (-DFOO, -Ilib, ...).
 _SEMANTIC_JOINED: Final = ("-I", "-D", "-U", "-isystem")
-# Context options whose value is a path relative to the compdb entry's
+# Options whose value is a path relative to the compdb entry's
 # ``directory`` (everything else -- macros, target triples -- is verbatim).
 _REPRO_PATH_VALUE_OPTIONS: Final = frozenset({"-I", "-isystem", "--sysroot"})
+# Options that accept a joined spelling (-Iinclude, -DCOMMON=1).  The
+# target and sysroot options have no joined form: ``--targetx86_64-...``
+# is not a legal spelling, so their units must render as two tokens.
+_JOINED_RENDER_OPTIONS: Final = frozenset(_SEMANTIC_JOINED)
 
 _BINARY_HASH_BUDGET_BYTES: Final = 64 * 1024 * 1024
 _DIAGNOSTIC_ENTRY_BYTES: Final = 2_048
@@ -529,6 +533,19 @@ def _context_units(
     return tuple(units)
 
 
+def _render_unit(option: str, value: str) -> tuple[str, ...]:
+    """Render one context unit back onto the command line.
+
+    The -I/-D/-U/-isystem family accepts a joined spelling; ``--target``,
+    ``-target`` and ``--sysroot`` do not (``--targetx86_64-...`` is not a
+    legal option), so those units keep their separated two-token form.
+    """
+
+    if option in _JOINED_RENDER_OPTIONS:
+        return (f"{option}{value}",)
+    return (option, value)
+
+
 def _context_flags(
     snapshot: PreparedSnapshot,
     sources: tuple[str, ...],
@@ -544,7 +561,7 @@ def _context_flags(
     keeps the bare pinned argv (the historical behavior) instead of a
     partially guessed context.  The intersection is taken over complete
     (option, value) units rebased onto the snapshot root, and the shared
-    units are rendered back in their joined spelling.
+    units render back in each option's legal spelling.
     """
     if settings is None:
         return ()
@@ -566,9 +583,10 @@ def _context_flags(
     if shared is None:
         return ()
     return tuple(
-        f"{option}{value}" if option else value
+        token
         for option, value in order
         if (option, value) in shared
+        for token in _render_unit(option, value)
     )
 
 

@@ -926,9 +926,14 @@ class CliAndCiContractTests(unittest.TestCase):
             step.get("run", "") for step in sidecar["steps"] if isinstance(step, dict)
         )
         self.assertIn("docker network create --internal", commands)
-        self.assertIn("SourceScanContainerTests", commands)
-        self.assertIn("BuildScanContainerTests", commands)
-        self.assertIn("SanitizerContainerTests", commands)
+        from scripts import run_cxx_container_tests
+
+        self.assertIn("scripts/run_cxx_container_tests.py stage", commands)
+        self.assertIn("scripts/run_cxx_container_tests.py run", commands)
+        self.assertTrue(
+            {"SourceScanContainerTests", "BuildScanContainerTests", "SanitizerContainerTests"}
+            <= set(run_cxx_container_tests.TEST_CLASSES)
+        )
         self.assertIn("--network none", commands)
         self.assertIn("--read-only", commands)
         self.assertIn("--cap-drop ALL", commands)

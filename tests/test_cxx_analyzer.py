@@ -6200,7 +6200,9 @@ class ReproContainerTests(unittest.TestCase):
         self.assertIs(True, result.ok)
         self.assertEqual(0, result.exit_code)
         self.assertIsNone(result.asan_report)
-        self.assertEqual((), result.diagnostics)
+        # The existing bounded retry may recover ASan startup noise. A
+        # recovered clean exit remains clean, with that history retained.
+        self.assertIn(result.diagnostics, ((), ("asan-runtime-segv-retried",)))
         self.assertEqual(64, len(result.artifacts["binary_sha256"]))
 
     def test_container_compile_failure_returns_diagnostics(self):

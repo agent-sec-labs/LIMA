@@ -863,6 +863,7 @@ class PairedRunTests(unittest.TestCase):
         # zero findings and the revision must land on inconclusive
         # instead of laundering an unaudited snapshot into a pass.
         from unittest.mock import patch
+
         from lima.reviewer import LLMTransportError
 
         def dead_provider(*args, **kwargs):
@@ -904,6 +905,7 @@ class PairedRunTests(unittest.TestCase):
         # the loop kept going, but the unit's coverage is partial -- the
         # paired validation must land on inconclusive, not passed.
         from unittest.mock import patch
+
         from lima.reviewer import LLMTransportError
 
         two_window_source = "\n".join(

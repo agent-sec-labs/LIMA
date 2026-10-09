@@ -567,7 +567,7 @@ _REPLAY_ROUNDS: Final = 3
 _NON_POSITIVE_FINDING_STATES: Final = frozenset({"abstain", "rejected"})
 
 
-class ValidationStatus(str, Enum):
+class ValidationStatus(str, Enum):  # noqa: UP042 -- frozen wire values
     PASSED = "passed"
     FAILED = "failed"
     INCONCLUSIVE = "inconclusive"

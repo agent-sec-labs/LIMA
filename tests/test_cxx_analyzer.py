@@ -5866,6 +5866,151 @@ class ReproTests(unittest.TestCase):
             calls[0]["argv"],
         )
 
+    def test_run_repro_rebases_compdb_relative_directory(self):
+        # The compdb entry compiles from directory "src", so its -Iinclude
+        # names src/include; the experiment argv runs at the snapshot root
+        # and must carry the rebased -Isrc/include instead.
+        driver_code = (
+            'extern "C" int pilot_magic(void);\n'
+            "int main() { return pilot_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        feature_c = (
+            "#include \"feature.h\"\n"
+            "#ifdef PILOT_FLAG\n"
+            "int pilot_magic(void) { return 42; }\n"
+            "#else\n"
+            "#error pilot context flags did not reach the compile\n"
+            "#endif\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "feature.c",
+                    "arguments": [
+                        "clang-14", "-c", "-Iinclude", "-DPILOT_FLAG",
+                        "feature.c", "-o", "obj.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/feature.c": feature_c,
+                    "src/include/feature.h": "#define FEATURE_HEADER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/feature.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        self.assertIn("-Isrc/include", calls[0]["argv"])
+        self.assertNotIn("-Iinclude", calls[0]["argv"])
+
+    def test_run_repro_multi_source_intersection_keeps_option_value_pairs(self):
+        # Two resolved sources sharing -D COMMON=1 but using separate
+        # include directories: the per-unit intersection keeps the macro
+        # definition and drops both -I spellings instead of re-pairing a
+        # bare "-I" with the next token.
+        driver_code = (
+            'extern "C" int a_magic(void);\n'
+            "int main() { return a_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        source = (
+            "#ifdef COMMON\n"
+            "int {name}_magic(void) {{ return 42; }}\n"
+            "#else\n"
+            "#error shared context flags did not reach the compile\n"
+            "#endif\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "a.c",
+                    "arguments": [
+                        "clang-14", "-c", "-I", "incA", "-D", "COMMON=1",
+                        "a.c", "-o", "a.o",
+                    ],
+                },
+                {
+                    "directory": "src",
+                    "file": "b.c",
+                    "arguments": [
+                        "clang-14", "-c", "-I", "incB", "-D", "COMMON=1",
+                        "b.c", "-o", "b.o",
+                    ],
+                },
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/a.c": source.format(name="a"),
+                    "src/b.c": source.format(name="b"),
+                    "src/incA/common.h": "#define COMMON_HEADER 1\n",
+                    "src/incB/common.h": "#define COMMON_HEADER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/a.c", "src/b.c"),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        self.assertIn("-DCOMMON=1", calls[0]["argv"])
+        for stray in ("-I", "incA", "incB", "-Isrc/incA", "-Isrc/incB"):
+            self.assertNotIn(stray, calls[0]["argv"])
+
     # ------------------------------------------------------- run_repro flow
 
     def test_run_repro_compiles_runs_and_parses_report(self):

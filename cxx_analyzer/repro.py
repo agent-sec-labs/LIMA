@@ -27,6 +27,7 @@ Red lines implemented here:
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
 import time
 from collections.abc import Sequence
@@ -63,6 +64,9 @@ _CPP_LANGUAGE: Final = "c++"
 _REPRO_CONTEXT_OPTIONS: Final = SEMANTIC_ARG_OPTIONS - {"-std"}
 # Joined spellings of the value-taking context options (-DFOO, -Ilib, ...).
 _SEMANTIC_JOINED: Final = ("-I", "-D", "-U", "-isystem")
+# Context options whose value is a path relative to the compdb entry's
+# ``directory`` (everything else -- macros, target triples -- is verbatim).
+_REPRO_PATH_VALUE_OPTIONS: Final = frozenset({"-I", "-isystem", "--sysroot"})
 
 _BINARY_HASH_BUDGET_BYTES: Final = 64 * 1024 * 1024
 _DIAGNOSTIC_ENTRY_BYTES: Final = 2_048
@@ -465,6 +469,66 @@ def _repro_context_projection(tokens: Sequence[str]) -> tuple[str, ...]:
     return tuple(projected)
 
 
+def _context_value(option: str, value: str, relative_directory: str) -> str:
+    """Rebase one option value onto the snapshot root when it is a path.
+
+    The compdb entry's arguments are relative to its ``directory`` while
+    the experiment argv runs at the snapshot root, so a relative path
+    value (``-Iinclude`` from ``directory: src``) must become
+    ``-Isrc/include``.  Absolute values and non-path options pass through.
+    """
+
+    if (
+        option not in _REPRO_PATH_VALUE_OPTIONS
+        or not relative_directory
+        or value.startswith("/")
+    ):
+        return value
+    return posixpath.normpath(posixpath.join(relative_directory, value))
+
+
+def _context_units(
+    tokens: Sequence[str], relative_directory: str,
+) -> tuple[tuple[str, str], ...]:
+    """Split projected context tokens into normalized (option, value) units.
+
+    Both spellings fold onto one unit (``-I inc`` and ``-Iinc`` are the
+    same ``("-I", "inc")``), so a per-unit intersection can never re-pair
+    an option with a different option's value the way a token-wise
+    intersection does.
+    """
+
+    units: list[tuple[str, str]] = []
+    expect_value: str | None = None
+    for token in tokens:
+        if expect_value is not None:
+            units.append((
+                expect_value,
+                _context_value(expect_value, token, relative_directory),
+            ))
+            expect_value = None
+            continue
+        joined = next(
+            (
+                prefix for prefix in _SEMANTIC_JOINED
+                if token.startswith(prefix) and len(token) > len(prefix)
+            ),
+            None,
+        )
+        if joined is not None:
+            units.append((
+                joined,
+                _context_value(joined, token[len(joined):], relative_directory),
+            ))
+        elif token in _REPRO_CONTEXT_OPTIONS:
+            expect_value = token
+        else:
+            units.append(("", token))
+    if expect_value is not None:
+        raise ValueError("context projection ended inside an option value")
+    return tuple(units)
+
+
 def _context_flags(
     snapshot: PreparedSnapshot,
     sources: tuple[str, ...],
@@ -478,22 +542,34 @@ def _context_flags(
     Only when every source resolves does the intersection of their
     semantic arguments reach the experiment argv; any unresolved source
     keeps the bare pinned argv (the historical behavior) instead of a
-    partially guessed context.
+    partially guessed context.  The intersection is taken over complete
+    (option, value) units rebased onto the snapshot root, and the shared
+    units are rendered back in their joined spelling.
     """
     if settings is None:
         return ()
-    shared: tuple[str, ...] | None = None
+    shared: frozenset[tuple[str, str]] | None = None
+    order: tuple[tuple[str, str], ...] = ()
     for source in sources:
         context = resolve_build_context_execution(snapshot.root, source, settings)
         if context.status != "resolved":
             return ()
         semantic = _repro_context_projection(semantic_arguments(context.arguments))
-        shared = semantic if shared is None else tuple(
-            flag for flag in shared if flag in semantic
-        )
+        units = _context_units(semantic, context.relative_directory)
+        keys = frozenset(units)
+        if shared is None:
+            shared, order = keys, units
+        else:
+            shared &= keys
         if not shared:
             return ()
-    return shared or ()
+    if shared is None:
+        return ()
+    return tuple(
+        f"{option}{value}" if option else value
+        for option, value in order
+        if (option, value) in shared
+    )
 
 
 def run_repro(

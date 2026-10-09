@@ -207,6 +207,15 @@ def validate_case(record: dict) -> None:
     decisions = adjudication["decisions"]
     if adjudication["overall_disposition"] == "clear":
         raise ValueError("offline probe must not clear an unresolved case")
+    expected_fingerprints = {finding["fingerprint"] for finding in report["findings"]}
+    if not case.startswith("dynamic-"):
+        expected_fingerprints.add("module-scope:" + MODULE_PATH)
+    if (
+        not decisions
+        or len(decisions) != len(expected_fingerprints)
+        or {decision["fingerprint"] for decision in decisions} != expected_fingerprints
+    ):
+        raise ValueError("persisted decisions do not cover the exact candidate/module population")
     transcript = record["transcript"]
     if (
         not transcript
@@ -246,15 +255,20 @@ def validate_case(record: dict) -> None:
         ):
             raise ValueError("discovery source binding or candidate state lost")
         decision = next(d for d in decisions if d["fingerprint"] == finding["fingerprint"])
-        if decision["disposition"] != "needs_review" or not decision.get(
+        if decision["disposition"] != "needs_review" or decision.get(
             "investigation_evidence_refs"
-        ):
+        ) != ["read_source:" + MODULE_PATH + ":1-6"]:
             raise ValueError("candidate review/evidence missing")
     else:
-        if not report["findings"] or not all(
-            d.get("investigation_verdict") == "insufficient" for d in decisions
+        if (
+            len(report["findings"]) != 1
+            or report["risk"] != "critical"
+            or not all(d.get("investigation_verdict") == "insufficient" for d in decisions)
         ):
             raise ValueError("static candidates were dropped or falsely resolved")
+        finding = report["findings"][0]
+        if finding["path"] != DYNAMIC_PATH or finding["line"] != 2:
+            raise ValueError("static candidate source binding lost")
         feedback = transcript[-1]["messages"][-1]["content"]
         if "PREVIOUS TOOL OBSERVATIONS" not in feedback or "dynamic_contrast" not in feedback:
             raise ValueError("tool observation did not feed the next production prompt")

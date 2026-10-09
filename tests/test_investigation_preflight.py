@@ -34,6 +34,19 @@ class InvestigationPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "feed the next"):
             probe.validate_case(record)
 
+    def test_empty_decisions_and_wrong_source_reference_cannot_pass(self):
+        for case in probe.CASES:
+            record = copy.deepcopy(self.records[case])
+            record["report"]["adjudication"]["decisions"] = []
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                probe.validate_case(record)
+        record = copy.deepcopy(self.records["module-discovery"])
+        for decision in record["report"]["adjudication"]["decisions"]:
+            if decision.get("investigation_evidence_refs"):
+                decision["investigation_evidence_refs"] = ["read_source:outside.py:1-6"]
+        with self.assertRaises(ValueError):
+            probe.validate_case(record)
+
     def test_discovery_downgrade_and_evidence_loss_are_detected(self):
         original = self.records["module-discovery"]
         for mutation in ("risk", "evidence"):

@@ -112,6 +112,7 @@ import time
 import typing
 import urllib.request
 
+from benchmarks.v4.baseline.analyzer_identity import scanner_implementation_manifest
 from benchmarks.v4.baseline.budget import (
     BUDGET_DIMENSIONS,
     BudgetGateError,
@@ -487,6 +488,7 @@ def _build_artifact_family() -> dict[str, dict[str, object]]:
     # the one-time {1,4} pilot shape) so its canonical digest is
     # independently recomputable offline from the committed registry alone.
     b1_scanner_config: dict[str, object] = {
+        "implementation": scanner_implementation_manifest(),
         "workload": _B1_REAL_WORKLOAD,
         "fixture_key": _B1_REAL_FIXTURE_KEY,
         "snapshot_tree_sha256": fingerprints[_B1_REAL_FIXTURE_KEY],

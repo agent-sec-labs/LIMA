@@ -73,6 +73,8 @@ import tarfile
 import tempfile
 import typing
 
+from benchmarks.v4.baseline.analyzer_identity import scanner_implementation_manifest
+
 from benchmarks.v4.baseline.collect import (
     PlatformSources,
     classify_failure,
@@ -711,6 +713,7 @@ def run_lf_local_baseline_suite(
         )
 
     scanner_config: dict[str, object] = {
+        "implementation": scanner_implementation_manifest(),
         "workload": LF_WORKLOAD,
         "dataset_name": LF_DATASET_NAME,
         "commit_sha": LF_TARGET_COMMIT_SHA,

@@ -524,10 +524,16 @@ def load_openharmony_case(path: str | Path) -> OpenHarmonyCase:
     overlay_payload = payload.get("dependency_overlay")
     overlay: tuple[DependencyOverlayEntry, ...] = ()
     if overlay_payload is not None:
+        # An explicitly empty list means the same as an omitted field (no
+        # overlay), which is what the bundle writer emits: keeping the
+        # loader strict about "non-empty" made the exporter's case.json
+        # unloadable as a replay input (review finding 7).
+        if not isinstance(overlay_payload, list):
+            _fail("dependency_overlay must be a list")
+        if len(overlay_payload) > _MAX_LIST_ITEMS:
+            _fail(f"dependency_overlay exceeds {_MAX_LIST_ITEMS} entries")
         entries = [
-            _decode_overlay_entry(entry)
-            for entry in _bounded_list(overlay_payload,
-                                       "dependency_overlay")
+            _decode_overlay_entry(entry) for entry in overlay_payload
         ]
         if len({entry.path for entry in entries}) != len(entries):
             _fail("dependency_overlay paths must be unique")

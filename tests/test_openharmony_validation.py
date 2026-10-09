@@ -116,6 +116,28 @@ class OpenHarmonyCaseContractTests(unittest.TestCase):
         case = load_openharmony_case(write_case(payload))
         self.assertEqual(case.dependency_overlay, ())
 
+    def test_overlay_less_case_survives_export_reload(self):
+        # Review finding 7: the loader allowed an omitted overlay but
+        # rejected the exporter's explicit empty list, so a bundle's
+        # case.json could not be fed back as a replay input.  Both
+        # spellings of "no overlay" must decode identically.
+        load_or_skip(self)
+        from lima.openharmony_validation import _case_document
+
+        payload = {k: v for k, v in VALID_CASE.items() if k != "dependency_overlay"}
+        case = load_openharmony_case(write_case(payload))
+        document = _case_document(case)
+        self.assertEqual([], document["dependency_overlay"])
+        reloaded = load_openharmony_case(write_case(document))
+        self.assertEqual((), reloaded.dependency_overlay)
+        # The explicit empty list also decodes on its own.
+        self.assertEqual(
+            (),
+            load_openharmony_case(write_case(
+                dict(payload, dependency_overlay=[])
+            )).dependency_overlay,
+        )
+
     def test_unknown_and_missing_fields_rejected(self):
         load_or_skip(self)
         extra = dict(VALID_CASE)
@@ -233,11 +255,14 @@ class OpenHarmonyCaseContractTests(unittest.TestCase):
             payload["dependency_overlay"] = [entry]
             with self.assertRaises(ValueError, msg=f"{field}={bad!r}"):
                 load_openharmony_case(write_case(payload))
-        # Empty overlay list is rejected; drop the field entirely instead.
+        # An explicitly empty overlay list means the same as an omitted
+        # field; the exporter emits it, so it must reload (review 7).
         payload = json.loads(json.dumps(VALID_CASE))
         payload["dependency_overlay"] = []
-        with self.assertRaises(ValueError):
-            load_openharmony_case(write_case(payload))
+        self.assertEqual(
+            (),
+            load_openharmony_case(write_case(payload)).dependency_overlay,
+        )
         # Duplicate overlay paths are rejected.
         payload = json.loads(json.dumps(VALID_CASE))
         payload["dependency_overlay"] = [base_entry, dict(base_entry)]
@@ -293,6 +318,12 @@ class CaseSchemaParityTests(unittest.TestCase):
         self.assertEqual(set(overlay["properties"]), OVERLAY_FIELDS)
         self.assertEqual(
             set(overlay["properties"]["role"]["enum"]), OVERLAY_ROLES
+        )
+        # An empty overlay array is the same as an omitted field, so the
+        # schema must not carry a minItems bound the Python loader no
+        # longer enforces (review finding 7).
+        self.assertNotIn(
+            "minItems", schema["properties"]["dependency_overlay"],
         )
 
 

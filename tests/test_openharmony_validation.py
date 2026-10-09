@@ -348,7 +348,10 @@ def _git(path: Path, *args: str) -> str:
 class CheckoutFixture:
     """Two pinned git checkouts below one import root."""
 
-    def __init__(self, overlay: bytes | None = None) -> None:
+    def __init__(
+        self, overlay: bytes | None = None,
+        parser_source: str | None = None,
+    ) -> None:
         self.root = Path(tempfile.mkdtemp(suffix="-oh-checkout"))
         self.import_root = self.root / "imports"
         self.import_root.mkdir()
@@ -357,7 +360,10 @@ class CheckoutFixture:
         _git(repo, "init", "-q")
         (repo / "src").mkdir()
         (repo / "src" / "parser.c").write_text(
-            "int parse(void) { return 1; }\n", encoding="utf-8"
+            parser_source
+            if parser_source is not None
+            else "int parse(void) { return 1; }\n",
+            encoding="utf-8",
         )
         (repo / "src" / "util.c").write_text(
             "int util(void) { return 2; }\n", encoding="utf-8"
@@ -366,7 +372,10 @@ class CheckoutFixture:
         _git(repo, "commit", "-q", "-m", "vulnerable")
         self.vulnerable_commit = _git(repo, "rev-parse", "HEAD")
         (repo / "src" / "parser.c").write_text(
-            "int parse(void) { return 2; }\n", encoding="utf-8"
+            parser_source + "\n/* fixed revision */\n"
+            if parser_source is not None
+            else "int parse(void) { return 2; }\n",
+            encoding="utf-8",
         )
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "fixed")
@@ -654,7 +663,7 @@ def _finding(path="src/parser.c", cwe="CWE-416", state="runtime-confirmed",
     )
 
 
-def _outcome(findings, diagnostics=()):
+def _outcome(findings, diagnostics=(), unreviewed_units=()):
     from lima.agent_orchestrator import (
         PlatformReviewOutcome,
         PlatformReviewStats,
@@ -663,6 +672,7 @@ def _outcome(findings, diagnostics=()):
         findings=tuple(findings), targets=tuple(findings),
         stats=PlatformReviewStats(1, 1, len(findings), 0, 0, 0, 0),
         diagnostics=tuple(diagnostics),
+        unreviewed_units=tuple(unreviewed_units),
     )
 
 
@@ -885,6 +895,96 @@ class PairedRunTests(unittest.TestCase):
             for code in result.reason_codes
         ), result.reason_codes)
         self.assertIn("fixed-not-run", result.reason_codes)
+
+    def test_discovery_partial_window_degradation_is_inconclusive(self):
+        # Round 2 review, the reviewer's own probe on the real
+        # orchestrator path: one translation unit spanning several
+        # windows.  The first window completes, a later one fails
+        # transport.  The completed window keeps its (empty) reply and
+        # the loop kept going, but the unit's coverage is partial -- the
+        # paired validation must land on inconclusive, not passed.
+        from unittest.mock import patch
+        from lima.reviewer import LLMTransportError
+
+        two_window_source = "\n".join(
+            f"int filler_{index}(void) {{ return {index}; }}"
+            for index in range(4000)
+        )
+        self.fixture = CheckoutFixture(parser_source=two_window_source)
+        self.entry = self.fixture.stage_case_files()
+        self.case = self.fixture.case(self.entry)
+        # The multi-window source is ~145 KB, past the default 64 KB
+        # per-file bound; widen the limits so the preflight accepts it.
+        self.limits = self.module.WorkspaceLimits(
+            max_files=500, max_file_bytes=262144,
+            max_total_bytes=1 << 22,
+        )
+
+        sends = []
+
+        def partially_dead_provider(*args, **kwargs):
+            sends.append(args)
+            if len(sends) == 1:
+                return json.dumps({"leads": []})
+            raise LLMTransportError("gateway down")
+
+        with patch(
+            "lima.agent_orchestrator.send_semantic_request",
+            partially_dead_provider,
+        ), patch.object(
+            self.module, "ReproWorkbench",
+            lambda client, budget, default_timeout=60: FakeWorkbench([]),
+        ):
+            result = self.module.run_openharmony_case(
+                self.case,
+                import_policy=self.policy(str(self.fixture.import_root)),
+                workspace_limits=self.limits,
+                analyzer_client=None,
+                llm_config={"provider": "custom", "base_url": "x",
+                            "api_key": "k", "model": "m"},
+                budget_factory=self.budget_factory,
+                timeout=60, deadline_seconds=600.0,
+                parallelism=1, dialogue_rounds=1,
+            )
+        self.assertGreaterEqual(len(sends), 2)
+        self.assertEqual("inconclusive", result.status.value)
+        self.assertEqual(
+            ("src/parser.c",),
+            result.vulnerable.platform_outcome.unreviewed_units,
+        )
+        self.assertTrue(any(
+            code.startswith("required-review-unreviewed-units")
+            for code in result.reason_codes
+        ), result.reason_codes)
+
+    def test_fixed_partial_unreviewed_blocks_pass(self):
+        # The reviewer's end-to-end shape: the vulnerable side confirms
+        # 3/3 and the fixed side replays clean, but the fixed review has
+        # partially unaudited units -- the pair is inconclusive, never a
+        # pass.
+        target_hit = _observation(
+            ok=False, stage="run", error_type="'heap-use-after-free'",
+            faulting_file="'src/parser.c'", exit_code=1,
+        )
+        clean = _observation(ok=True, stage="run", exit_code=0)
+        result, _ = self._run(
+            vulnerable_outcome=_outcome([_finding()]),
+            vulnerable_replay=[target_hit] * 3,
+            fixed_outcome=_outcome(
+                [], unreviewed_units=("src/parser.c",),
+            ),
+            fixed_replay=[clean] * 3,
+        )
+        from lima.openharmony_validation import ValidationStatus
+
+        self.assertEqual("inconclusive", result.status.value)
+        self.assertEqual(
+            ValidationStatus.INCONCLUSIVE, result.fixed.status,
+        )
+        self.assertTrue(any(
+            code.startswith("required-review-unreviewed-units")
+            for code in result.reason_codes
+        ), result.reason_codes)
 
     def test_unrelated_fixed_findings_are_recorded_not_decisive(self):
         target_hit = _observation(

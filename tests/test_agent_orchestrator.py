@@ -1076,9 +1076,10 @@ class DiscoveryFallbackTests(unittest.TestCase):
         self.assertIn(
             "llm-discovery-skipped: deadline exceeded", notes,
         )
-        # The unit kept its one completed window, so it is partially
-        # audited rather than unaudited; the cut itself stays in notes.
-        self.assertEqual(frozenset(), unreviewed)
+        # Round 2 review: the unit completed one window but the deadline
+        # cut the rest, so its coverage is partial -- it must land in the
+        # unaudited set, not read as a clean review.
+        self.assertEqual(frozenset({"big.c"}), unreviewed)
 
     def test_discovery_deadline_before_first_window_marks_unit_unreviewed(self):
         # Deadline already in the past: not a single window is sent, so
@@ -1172,6 +1173,133 @@ class DiscoveryFallbackTests(unittest.TestCase):
             "llm-discovery-window-transport-failed" in note
             for note in notes
         ))
+
+    def test_discovery_same_unit_partial_transport_failure_is_unreviewed(self):
+        # Round 2 review, the reviewer's own probe: one unit, two
+        # windows; the first returns a valid empty reply, the second
+        # fails transport.  The completed window keeps its leads and the
+        # loop keeps going, but the unit's coverage is partial, so it
+        # must surface as unaudited -- never as a clean no-findings.
+        from lima import agent_orchestrator
+
+        big_source = "\n".join(
+            f"int filler_{index}(void) {{ return {index}; }}"
+            for index in range(4000)
+        )
+
+        class _FlatWorkspace:
+            def read_text(self, relative_path):
+                return big_source
+
+        sends = []
+
+        def fake_send(resolved, system, user, timeout, budget):
+            sends.append(user)
+            if len(sends) == 1:
+                return discovery_json([])
+            raise LLMTransportError("gateway down")
+
+        with patch.object(
+            agent_orchestrator, "send_semantic_request", fake_send,
+        ):
+            leads, notes, unreviewed = agent_orchestrator._discover_leads(
+                {"model": "probe"}, _FlatWorkspace(), ("big.c",),
+                60, None, CxxAgentBudget(
+                    max_calls=8, max_output_bytes=1_048_576,
+                ), "required",
+            )
+        self.assertEqual((), leads)
+        # One send per window: the first succeeded, every later one
+        # raised -- the unit is covered only in part.
+        window_count = len(agent_orchestrator._split_windows(big_source))
+        self.assertGreaterEqual(window_count, 2)
+        self.assertEqual(window_count, len(sends))
+        self.assertEqual(frozenset({"big.c"}), unreviewed)
+        self.assertTrue(any(
+            "llm-discovery-window-transport-failed" in note
+            for note in notes
+        ))
+
+    def test_discovery_same_unit_partial_format_failure_is_unreviewed(self):
+        # Same shape with the format failure class: the second window's
+        # reply (and its one repair) are both malformed, so the window
+        # never completes and the unit stays partially unaudited.
+        from lima import agent_orchestrator
+
+        big_source = "\n".join(
+            f"int filler_{index}(void) {{ return {index}; }}"
+            for index in range(4000)
+        )
+
+        class _FlatWorkspace:
+            def read_text(self, relative_path):
+                return big_source
+
+        sends = []
+
+        def fake_send(resolved, system, user, timeout, budget):
+            sends.append(user)
+            if len(sends) == 1:
+                return discovery_json([])
+            return "not a platform reply"
+
+        with patch.object(
+            agent_orchestrator, "send_semantic_request", fake_send,
+        ):
+            leads, notes, unreviewed = agent_orchestrator._discover_leads(
+                {"model": "probe"}, _FlatWorkspace(), ("big.c",),
+                60, None, CxxAgentBudget(
+                    max_calls=8, max_output_bytes=1_048_576,
+                ), "required",
+            )
+        # One send for the first window, then attempt plus repair (two
+        # sends) for each later window that never parses.
+        window_count = len(agent_orchestrator._split_windows(big_source))
+        self.assertGreaterEqual(window_count, 2)
+        self.assertEqual(1 + 2 * (window_count - 1), len(sends))
+        self.assertEqual(frozenset({"big.c"}), unreviewed)
+        self.assertTrue(any(
+            "llm-discovery-window-format-failed" in note
+            for note in notes
+        ))
+
+    def test_discovery_window_cap_leaves_units_partially_unreviewed(self):
+        # A unit spanning more windows than the cap keeps its audited
+        # prefix, but the windows the cap drops leave a permanent hole:
+        # the unit is unaudited-in-part even though every sent window
+        # succeeded.
+        from lima import agent_orchestrator
+
+        huge_source = "\n".join(
+            f"int filler_{index}(void) {{ return {index}; }}"
+            for index in range(13000)
+        )
+
+        class _FlatWorkspace:
+            def read_text(self, relative_path):
+                return huge_source
+
+        sends = []
+
+        def fake_send(resolved, system, user, timeout, budget):
+            sends.append(user)
+            return discovery_json([])
+
+        with patch.object(
+            agent_orchestrator, "send_semantic_request", fake_send,
+        ):
+            leads, notes, unreviewed = agent_orchestrator._discover_leads(
+                {"model": "probe"}, _FlatWorkspace(), ("huge.c",),
+                60, None, CxxAgentBudget(
+                    max_calls=16, max_output_bytes=4_194_304,
+                ), "required",
+            )
+        self.assertEqual(agent_orchestrator._MAX_DISCOVERY_WINDOWS,
+                         len(sends))
+        self.assertTrue(any(
+            note.startswith("llm-discovery-windows-capped") for note in notes
+        ), notes)
+        self.assertEqual(frozenset({"huge.c"}), unreviewed)
 
     def test_mode_off_never_uses_discovery(self):
         outcome = _run(

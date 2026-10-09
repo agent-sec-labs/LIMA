@@ -721,11 +721,11 @@ class PlatformReviewOutcome:
     ``rejected``); ``findings`` is the positive subset whose states are in
     :data:`lima.uaf_orchestrator.UAF_FINDING_STATES` and is the only list a
     scanner may project.  ``unreviewed_units`` lists the translation units
-    that were inside the Discovery agent's required scope but ended up
-    without a single completed model round (transport/format failures, a
-    deadline cut or the size skip); a non-empty set means "not audited",
-    and a required caller must treat the review as inconclusive rather
-    than reading the missing findings as a clean pass.
+    with ANY Discovery window left without a completed model round --
+    window transport/format failures, a deadline cut, the window cap or
+    the size skip.  A non-empty set means "not fully audited", and a
+    required caller must treat the review as inconclusive rather than
+    reading the missing findings as a clean pass.
     """
 
     findings: tuple[PlatformFinding, ...]
@@ -1063,12 +1063,14 @@ def _discover_leads(
     and the lead source plus its call count are recorded as diagnostics so
     reporting can distinguish instrument leads from agent leads.
 
-    The third return value is the set of units that were in discovery's
-    scope but ended up without a single completed model round -- every
-    window transport- or format-failed, the deadline cut the loop short,
-    or the unit was skipped for size.  An empty window outcome over a
-    non-empty set is "not audited", never "no findings", so the caller
-    must surface it instead of reading it as a clean review.
+    The third return value is the set of units with ANY window left
+    without a completed model round -- a window that transport- or
+    format-failed, windows cut off by the cap or a passed deadline, and
+    units skipped for size all count.  An outcome over a unit in this
+    set is "not fully audited", never "no findings", so a required
+    caller must surface it instead of reading it as a clean review
+    (frozen AC5: transport failure, timeouts and coverage truncation
+    are inconclusive).
     """
 
     if mode == MODE_OFF or not resolved:
@@ -1098,6 +1100,12 @@ def _discover_leads(
     for unit, text in sources.items():
         for window_text, start_line in _split_windows(text):
             windows.append((unit, window_text, start_line))
+    # Window-level coverage bookkeeping: ``expected`` counts every window
+    # BEFORE the cap, so the windows the cap drops leave a permanent
+    # hole in their unit's coverage.
+    expected: dict[str, int] = {unit: 0 for unit in sources}
+    for unit, _window_text, _start_line in windows:
+        expected[unit] += 1
     if len(windows) > _MAX_DISCOVERY_WINDOWS:
         notes.append(
             f"llm-discovery-windows-capped: {len(windows)} -> "
@@ -1106,7 +1114,7 @@ def _discover_leads(
         windows = windows[:_MAX_DISCOVERY_WINDOWS]
     calls = [0]
     quadruples: list[tuple[str, int, str, str]] = []
-    audited: set[str] = set()
+    completed: dict[str, int] = {}
     for unit, window_text, start_line in windows:
         window_timeout = _bounded_step_timeout(timeout, deadline)
         if window_timeout is None:
@@ -1129,7 +1137,7 @@ def _discover_leads(
                 budget, calls, _parse_discovery_reply, frozenset(sources),
                 deadline,
             ))
-            audited.add(unit)
+            completed[unit] = completed.get(unit, 0) + 1
         except PlatformFormatError as exc:
             notes.append(
                 f"llm-discovery-window-format-failed"
@@ -1174,7 +1182,10 @@ def _discover_leads(
         *notes,
         f"leads-from-llm-discovery: {len(leads)} leads, {calls[0]} calls "
         f"over {len(windows)} windows",
-    ), frozenset(set(sources) - audited) | set(skipped)
+    ), frozenset(
+        unit for unit, count in expected.items()
+        if completed.get(unit, 0) < count
+    ) | set(skipped)
 
 
 def _match_candidate(

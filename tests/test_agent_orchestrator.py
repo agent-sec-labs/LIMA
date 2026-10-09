@@ -1175,6 +1175,18 @@ class DiscoveryFallbackTests(unittest.TestCase):
         )
         self.assertIn("compress the timing", _SYSTEM_PLATFORM_CRITIC)
 
+    def test_specialist_schema_states_field_bounds_upfront(self):
+        # Frozen from the l2cap battle: the 1000-character
+        # experiment_design bound was enforced on arrival but never
+        # stated in the prompt, so verbose stub plans died at parse and
+        # the repair round could not recover.
+        from lima.agent_orchestrator import _platform_schema
+
+        schema = _platform_schema()
+        self.assertIn("experiment_design <= 1000", schema)
+        self.assertIn("hypothesis <= 2000", schema)
+        self.assertIn("one sentence", schema)
+
     def test_compile_failures_grant_extra_repair_rounds(self):
         # dialogue_rounds=1 buys two experiments; two compile failures
         # each grant one bounded repair round, so the third (hitting)

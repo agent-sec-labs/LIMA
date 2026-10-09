@@ -205,6 +205,11 @@ def _platform_schema() -> str:
         "The driver_code must be a complete C or C++ translation unit with a "
         "main() that exercises the hypothesized path against the provided target "
         "sources and triggers the hypothesized bug class under AddressSanitizer. "
+        "Hard field bounds enforced on arrival (non-compliant replies are "
+        "rejected): hypothesis <= 2000 characters, experiment_design <= 1000 "
+        "characters, trigger_path and unresolved_assumptions at most 16 "
+        "entries of 300 characters each. State any link-closure plan as one "
+        "sentence; the stub code itself belongs in driver_code only. "
         "Bind the hypothesis to the target_id from the context; never invent ids."
     )
 
@@ -228,7 +233,9 @@ _SPECIALIST_PLAYBOOK: Final = (
     "On undefined-reference errors, embed no-op stubs for exactly the "
     "missing out-of-snapshot symbols inside your driver (extern \"C\" "
     "blocks for C APIs; for C++ copy each declaration verbatim from its "
-    "header) and keep the same main() design. Stubs may only replace "
+    "header) and keep the same main() design; describe the closure plan "
+    "in one sentence in experiment_design and put stub code only in "
+    "driver_code. Stubs may only replace "
     "environment the hypothesis never traverses: never stub a function on "
     "the hypothesized fault path or the allocator/lock machinery it "
     "depends on, and remember no-op stubs shrink timing windows -- a race "

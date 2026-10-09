@@ -223,6 +223,16 @@ _SPECIALIST_PLAYBOOK: Final = (
     "- Double free: call the public free/destroy twice on one handle.\n"
     "- Out-of-bounds: feed boundary-exact input lengths (exact, off-by-one, "
     "huge).\n"
+    "- Link closure: a correct driver can still fail to link when the "
+    "target unit calls functions the one compile command does not include. "
+    "On undefined-reference errors, embed no-op stubs for exactly the "
+    "missing out-of-snapshot symbols inside your driver (extern \"C\" "
+    "blocks for C APIs; for C++ copy each declaration verbatim from its "
+    "header) and keep the same main() design. Stubs may only replace "
+    "environment the hypothesis never traverses: never stub a function on "
+    "the hypothesized fault path or the allocator/lock machinery it "
+    "depends on, and remember no-op stubs shrink timing windows -- a race "
+    "that never fires under stubs proves nothing about the real system.\n"
     "- A clean run means the fault condition was never met; a driver that "
     "only exercises normal use proves nothing about error paths."
 )
@@ -252,7 +262,15 @@ _SYSTEM_PLATFORM_CRITIC: Final = (
     "Adversarially review the Specialist hypothesis against the experiment "
     "observations: look for guards, pointer rebinds, unreachable paths, wrong "
     "bug classes and flawed drivers. If a safety mechanism cannot be excluded "
-    f"from the provided evidence, answer hypothesis-wrong. "
+    "from the provided evidence, answer hypothesis-wrong. "
+    "Ownership-strip rule: a raw pointer taken from a temporary smart "
+    "pointer (e.g. api().get()) has no owner keeping the object alive once "
+    "the statement ends -- assess such code for a null return AND a "
+    "dangling object under concurrent removal, and treat a null-check-only "
+    "fix as insufficient: only holding the owning smart pointer in a local "
+    "across the whole use fixes it. Also reject experiments whose no-op "
+    "stubs sit on the hypothesized fault path or compress the timing "
+    "window the hypothesis depends on: answer revise-experiment for those. "
     f"{_UNTRUSTED_DATA_RULE} {_CRITIC_SCHEMA}"
 )
 _DISCOVERY_SCHEMA: Final = (
@@ -578,7 +596,12 @@ def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
         "include paths above.\n"
         "- Only repository headers reachable through the include paths above "
         "exist in the sandbox; never include a header that is not in the "
-        "snapshot (no invented placeholder headers)."
+        "snapshot (no invented placeholder headers).\n"
+        "- When the link reports undefined references to symbols outside "
+        "the snapshot, define no-op stubs for exactly those symbols inside "
+        "your driver (the command still compiles only the target unit and "
+        "your driver); never stub a symbol the hypothesized fault path "
+        "itself executes."
     )
 
 

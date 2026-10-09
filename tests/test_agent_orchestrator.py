@@ -1132,6 +1132,49 @@ class DiscoveryFallbackTests(unittest.TestCase):
         finally:
             _rmtree(root)
 
+    def test_driver_contract_allows_embedded_link_stubs(self):
+        # Frozen after the bluetooth/dsoftbus stub-link battles: when the
+        # one compile command hits undefined references, the driver author
+        # may embed no-op stubs -- but never on the audited path.
+        from lima.agent_orchestrator import _driver_contract
+
+        unit = "src/a.c"
+        root = tempfile.mkdtemp(suffix="-driver-contract-stubs")
+        try:
+            workspace = _write_cxx_repo(root, name=unit)
+            contract = _driver_contract(workspace, unit)
+            self.assertIn("no-op stubs for exactly those symbols", contract)
+            self.assertIn(
+                "never stub a symbol the hypothesized fault path", contract
+            )
+        finally:
+            _rmtree(root)
+
+    def test_playbook_teaches_link_closure_and_stub_limits(self):
+        from lima.agent_orchestrator import _SPECIALIST_PLAYBOOK
+
+        self.assertIn("Link closure", _SPECIALIST_PLAYBOOK)
+        self.assertIn(
+            "no-op stubs for exactly the missing", _SPECIALIST_PLAYBOOK
+        )
+        self.assertIn("never stub a function on", _SPECIALIST_PLAYBOOK)
+        self.assertIn("shrink timing windows", _SPECIALIST_PLAYBOOK)
+
+    def test_critic_enforces_ownership_strip_and_stub_validity(self):
+        # Frozen from the avrcp finding: naive null-check fixes of
+        # temporary-extracted raw pointers leave the UAF path open, and
+        # no-op stubs on the fault path invalidate the experiment.
+        from lima.agent_orchestrator import _SYSTEM_PLATFORM_CRITIC
+
+        self.assertIn("Ownership-strip rule", _SYSTEM_PLATFORM_CRITIC)
+        self.assertIn(
+            "null-check-only fix as insufficient", _SYSTEM_PLATFORM_CRITIC
+        )
+        self.assertIn(
+            "holding the owning smart pointer", _SYSTEM_PLATFORM_CRITIC
+        )
+        self.assertIn("compress the timing", _SYSTEM_PLATFORM_CRITIC)
+
     def test_compile_failures_grant_extra_repair_rounds(self):
         # dialogue_rounds=1 buys two experiments; two compile failures
         # each grant one bounded repair round, so the third (hitting)

@@ -725,16 +725,30 @@ def run_openharmony_case(
                 diagnostics=tuple(local),
             ), None, workbench
 
+        # A normally returned outcome still cannot be read as a pass when
+        # required Discovery scope went unaudited: with the provider down
+        # every window fails, the review returns no findings, and treating
+        # that as "clean" would launder an unreviewed snapshot into a
+        # verified one (review finding 1, AC5: provider-down is
+        # inconclusive).
+        status = ValidationStatus.PASSED
+        local.extend(outcome.diagnostics)
+        if outcome.unreviewed_units:
+            status = ValidationStatus.INCONCLUSIVE
+            local.append(
+                "required-review-unreviewed-units: "
+                + ", ".join(outcome.unreviewed_units)
+            )
         return (
             RevisionValidation(
-                revision=revision, status=ValidationStatus.PASSED,
+                revision=revision, status=status,
                 snapshot_hash=snapshot_hash, platform_outcome=outcome,
                 replay_observations=(), replay_elapsed_seconds=(),
                 elapsed_seconds=round(time.monotonic() - revision_started, 6),
                 file_coverage=inventory.file_coverage,
                 byte_coverage=inventory.byte_coverage,
                 budget_usage=_budget_usage(budget),
-                diagnostics=tuple(outcome.diagnostics),
+                diagnostics=tuple(local),
             ),
             outcome,
             workbench,
@@ -987,6 +1001,10 @@ def _platform_document(record) -> dict:
         "byte_coverage": record.byte_coverage,
         "budget_usage": dict(record.budget_usage),
         "elapsed_seconds": record.elapsed_seconds,
+        "unreviewed_units": list(
+            record.platform_outcome.unreviewed_units
+            if record.platform_outcome is not None else ()
+        ),
     }
 
 

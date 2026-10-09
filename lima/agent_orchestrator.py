@@ -720,7 +720,12 @@ class PlatformReviewOutcome:
     ``targets`` carries every audited target (including ``abstain`` and
     ``rejected``); ``findings`` is the positive subset whose states are in
     :data:`lima.uaf_orchestrator.UAF_FINDING_STATES` and is the only list a
-    scanner may project.
+    scanner may project.  ``unreviewed_units`` lists the translation units
+    that were inside the Discovery agent's required scope but ended up
+    without a single completed model round (transport/format failures, a
+    deadline cut or the size skip); a non-empty set means "not audited",
+    and a required caller must treat the review as inconclusive rather
+    than reading the missing findings as a clean pass.
     """
 
     findings: tuple[PlatformFinding, ...]
@@ -729,6 +734,7 @@ class PlatformReviewOutcome:
     diagnostics: tuple[str, ...] = ()
     leads_considered: int = 0
     translation_units: tuple[str, ...] = ()
+    unreviewed_units: tuple[str, ...] = ()
 
 
 def platform_rule_id(cwe: str) -> str:
@@ -843,6 +849,8 @@ def _hex64(value: str, field_name: str) -> str:
 
 def _empty_outcome(
     diagnostics: tuple[str, ...], units: tuple[str, ...] = (),
+    *,
+    unreviewed_units: tuple[str, ...] = (),
 ) -> PlatformReviewOutcome:
     return PlatformReviewOutcome(
         findings=(),
@@ -851,6 +859,7 @@ def _empty_outcome(
         diagnostics=diagnostics,
         leads_considered=0,
         translation_units=units,
+        unreviewed_units=unreviewed_units,
     )
 
 
@@ -1044,7 +1053,7 @@ def _discover_leads(
     deadline: float | None,
     budget: CxxAgentBudget,
     mode: str,
-) -> tuple[tuple[ScoutLead, ...], tuple[str, ...]]:
+) -> tuple[tuple[ScoutLead, ...], tuple[str, ...], frozenset[str]]:
     """Agent-side discovery when the deterministic facts instrument abstains.
 
     The Discovery agent receives exactly the audited translation units -- the
@@ -1053,10 +1062,17 @@ def _discover_leads(
     Its leads flow through the ordinary Scout review like any triage lead,
     and the lead source plus its call count are recorded as diagnostics so
     reporting can distinguish instrument leads from agent leads.
+
+    The third return value is the set of units that were in discovery's
+    scope but ended up without a single completed model round -- every
+    window transport- or format-failed, the deadline cut the loop short,
+    or the unit was skipped for size.  An empty window outcome over a
+    non-empty set is "not audited", never "no findings", so the caller
+    must surface it instead of reading it as a clean review.
     """
 
     if mode == MODE_OFF or not resolved:
-        return (), ()
+        return (), (), frozenset()
     sources: dict[str, str] = {}
     skipped: list[str] = []
     total_bytes = 0
@@ -1077,7 +1093,7 @@ def _discover_leads(
         sources[unit] = text
     notes = [f"llm-discovery-skipped-unit: {unit}" for unit in skipped]
     if not sources:
-        return (), tuple(notes)
+        return (), tuple(notes), frozenset(skipped)
     windows: list[tuple[str, str, int]] = []
     for unit, text in sources.items():
         for window_text, start_line in _split_windows(text):
@@ -1090,6 +1106,7 @@ def _discover_leads(
         windows = windows[:_MAX_DISCOVERY_WINDOWS]
     calls = [0]
     quadruples: list[tuple[str, int, str, str]] = []
+    audited: set[str] = set()
     for unit, window_text, start_line in windows:
         window_timeout = _bounded_step_timeout(timeout, deadline)
         if window_timeout is None:
@@ -1112,6 +1129,7 @@ def _discover_leads(
                 budget, calls, _parse_discovery_reply, frozenset(sources),
                 deadline,
             ))
+            audited.add(unit)
         except PlatformFormatError as exc:
             notes.append(
                 f"llm-discovery-window-format-failed"
@@ -1156,7 +1174,7 @@ def _discover_leads(
         *notes,
         f"leads-from-llm-discovery: {len(leads)} leads, {calls[0]} calls "
         f"over {len(windows)} windows",
-    )
+    ), frozenset(set(sources) - audited) | set(skipped)
 
 
 def _match_candidate(
@@ -1869,6 +1887,7 @@ def run_platform_review(
     # Leads: caller-provided, else release events from the facts instrument,
     # else the Discovery agent reading the same audited units itself.
     bundle: UafFactBundle | None = None
+    discovery_unreviewed: tuple[str, ...] = ()
     if not given_leads:
         bundle = _fetch_bundle()
         given_leads = (
@@ -1877,19 +1896,24 @@ def run_platform_review(
             else ()
         )
         if not given_leads:
-            discovered, notes = _discover_leads(
+            discovered, notes, unreviewed = _discover_leads(
                 resolved_llm, workspace, units, timeout, deadline,
                 run_budget, mode,
             )
             diagnostics.extend(notes)
+            discovery_unreviewed = tuple(sorted(unreviewed))
             given_leads = discovered
         if not given_leads:
-            return _empty_outcome(("no-leads-available", *diagnostics), units)
+            return _empty_outcome(
+                ("no-leads-available", *diagnostics), units,
+                unreviewed_units=discovery_unreviewed,
+            )
 
     scout_timeout = _bounded_step_timeout(timeout, deadline)
     if scout_timeout is None:
         return _empty_outcome(
             ("deadline-exceeded before the scout review",), units,
+            unreviewed_units=discovery_unreviewed,
         )
     try:
         report: ScoutReport = review_leads(
@@ -1907,7 +1931,10 @@ def run_platform_review(
                 "platform review required the Scout but the LLM provider is "
                 f"not usable: {exc}"
             ) from exc
-        return _empty_outcome((f"scout-unavailable: {exc}",), units)
+        return _empty_outcome(
+            (f"scout-unavailable: {exc}",), units,
+            unreviewed_units=discovery_unreviewed,
+        )
     if report.degradation:
         diagnostics.append(f"scout: {report.degradation}")
     if not report.targets:
@@ -1920,6 +1947,7 @@ def run_platform_review(
             diagnostics=tuple(diagnostics),
             leads_considered=len(given_leads),
             translation_units=units,
+            unreviewed_units=discovery_unreviewed,
         )
 
     if bundle is None and analyzer_client is not None:
@@ -2146,4 +2174,5 @@ def run_platform_review(
         diagnostics=tuple(diagnostics),
         leads_considered=len(given_leads),
         translation_units=units,
+        unreviewed_units=discovery_unreviewed,
     )

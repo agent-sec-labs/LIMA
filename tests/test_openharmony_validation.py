@@ -774,6 +774,46 @@ class PairedRunTests(unittest.TestCase):
             result.reason_codes,
         )
 
+    def test_discovery_degradation_is_inconclusive_not_passed(self):
+        # Review finding 1, on the real orchestrator path (the review
+        # boundary itself is NOT patched): the provider refuses every
+        # required Discovery window, so the review returns normally with
+        # zero findings and the revision must land on inconclusive
+        # instead of laundering an unaudited snapshot into a pass.
+        from unittest.mock import patch
+        from lima.reviewer import LLMTransportError
+
+        def dead_provider(*args, **kwargs):
+            raise LLMTransportError("provider down")
+
+        with patch(
+            "lima.agent_orchestrator.send_semantic_request", dead_provider,
+        ), patch.object(
+            self.module, "ReproWorkbench",
+            lambda client, budget, default_timeout=60: FakeWorkbench([]),
+        ):
+            result = self.module.run_openharmony_case(
+                self.case,
+                import_policy=self.policy(str(self.fixture.import_root)),
+                workspace_limits=self.limits,
+                analyzer_client=None,
+                llm_config={"provider": "custom", "base_url": "x",
+                            "api_key": "k", "model": "m"},
+                budget_factory=self.budget_factory,
+                timeout=60, deadline_seconds=600.0,
+                parallelism=1, dialogue_rounds=1,
+            )
+        self.assertEqual("inconclusive", result.status.value)
+        self.assertEqual(
+            ("src/parser.c",),
+            result.vulnerable.platform_outcome.unreviewed_units,
+        )
+        self.assertTrue(any(
+            code.startswith("required-review-unreviewed-units")
+            for code in result.reason_codes
+        ), result.reason_codes)
+        self.assertIn("fixed-not-run", result.reason_codes)
+
     def test_unrelated_fixed_findings_are_recorded_not_decisive(self):
         target_hit = _observation(
             ok=False, stage="run", error_type="'heap-use-after-free'",

@@ -1062,7 +1062,7 @@ class DiscoveryFallbackTests(unittest.TestCase):
         ), patch.object(
             agent_orchestrator.time, "monotonic", fake_monotonic,
         ):
-            leads, notes = agent_orchestrator._discover_leads(
+            leads, notes, unreviewed = agent_orchestrator._discover_leads(
                 {"model": "probe"}, _FlatWorkspace(), ("big.c",),
                 60, 102.0, CxxAgentBudget(
                     max_calls=8, max_output_bytes=1_048_576,
@@ -1076,6 +1076,102 @@ class DiscoveryFallbackTests(unittest.TestCase):
         self.assertIn(
             "llm-discovery-skipped: deadline exceeded", notes,
         )
+        # The unit kept its one completed window, so it is partially
+        # audited rather than unaudited; the cut itself stays in notes.
+        self.assertEqual(frozenset(), unreviewed)
+
+    def test_discovery_deadline_before_first_window_marks_unit_unreviewed(self):
+        # Deadline already in the past: not a single window is sent, so
+        # the whole unit lands in the unaudited set for the caller to
+        # surface as inconclusive.
+        from lima import agent_orchestrator
+
+        class _FlatWorkspace:
+            def read_text(self, relative_path):
+                return "int f(void) { return 0; }"
+
+        sends = []
+
+        def fake_send(resolved, system, user, timeout, budget):
+            sends.append(timeout)
+            return discovery_json([])
+
+        with patch.object(
+            agent_orchestrator, "send_semantic_request", fake_send,
+        ), patch.object(
+            agent_orchestrator.time, "monotonic", lambda: 200.0,
+        ):
+            leads, notes, unreviewed = agent_orchestrator._discover_leads(
+                {"model": "probe"}, _FlatWorkspace(), ("small.c",),
+                60, 100.0, CxxAgentBudget(
+                    max_calls=8, max_output_bytes=1_048_576,
+                ), "required",
+            )
+        self.assertFalse(sends)
+        self.assertEqual((), leads)
+        self.assertIn("llm-discovery-skipped: deadline exceeded", notes)
+        self.assertEqual(frozenset({"small.c"}), unreviewed)
+
+    def test_discovery_transport_failure_marks_units_unreviewed(self):
+        # Review finding 1: with every Discovery window failing transport
+        # the run still returns normally with zero findings, so the
+        # outcome must carry the unaudited scope explicitly instead of
+        # reading as a clean no-leads review.
+        transport = ScriptedPlatformTransport(
+            discovery=[LLMTransportError("gateway down")],
+        )
+        outcome = _run(
+            llm_transport=transport,
+            analyzer=None,
+            leads=(),
+            workbench=FakeWorkbench([uaf_hit()]),
+        )
+        self.assertEqual((), outcome.findings)
+        self.assertEqual((), outcome.targets)
+        self.assertEqual((UNIT,), outcome.unreviewed_units)
+        self.assertTrue(
+            any(
+                "llm-discovery-window-transport-failed" in note
+                for note in outcome.diagnostics
+            ),
+            outcome.diagnostics,
+        )
+        self.assertEqual(1, transport.discovery_calls)
+
+    def test_discovery_partial_failure_keeps_audited_units_clean(self):
+        # Two units: the first completes its window, the second fails
+        # transport.  Only the second lands in the unaudited set; the
+        # loop keeps processing window by window either way.
+        from lima import agent_orchestrator
+
+        class _TwoUnitWorkspace:
+            def read_text(self, relative_path):
+                return UAF_SOURCE
+
+        sends = []
+
+        def fake_send(resolved, system, user, timeout, budget):
+            sends.append(user)
+            if len(sends) == 1:
+                return discovery_json([])
+            raise LLMTransportError("gateway down")
+
+        with patch.object(
+            agent_orchestrator, "send_semantic_request", fake_send,
+        ):
+            leads, notes, unreviewed = agent_orchestrator._discover_leads(
+                {"model": "probe"}, _TwoUnitWorkspace(),
+                (UNIT, "src/b.cpp"), 60, None,
+                CxxAgentBudget(max_calls=8, max_output_bytes=1_048_576),
+                "required",
+            )
+        self.assertEqual((), leads)
+        self.assertEqual(2, len(sends))
+        self.assertEqual(frozenset({"src/b.cpp"}), unreviewed)
+        self.assertTrue(any(
+            "llm-discovery-window-transport-failed" in note
+            for note in notes
+        ))
 
     def test_mode_off_never_uses_discovery(self):
         outcome = _run(

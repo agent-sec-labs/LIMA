@@ -93,7 +93,7 @@ hydration/provenance（下一片，§5 末段边界登记）；多用户身份�
 
 | 冻结项 | 值 | 依据/复核 |
 |---|---|---|
-| schema name | `lima.sanitized-log` | 匹配 `_SCHEMA_NAME_PATTERN`，18 字节 ≤128B；与 main `fbbbd619` 既有 19 个 `lima.*` schema name（`git grep '"lima\.'` 亲验）零冲突；命名遵循仓库 `lima.<dotted>` 惯例；设计探针实测（probe P3，可复现）通过契约校验 |
+| schema name | `lima.sanitized-log` | 匹配 `_SCHEMA_NAME_PATTERN`，18 字节 ≤128B；与 main `fbbbd619` 既有 18 个 `lima.*` schema name（`*_SCHEMA_NAME` 常量口径亲验，并经 ER 独立复核一致——见 ERR-IP-0044-D1-v1 第 25 项/SF-01；`lima.audit.inventory` 为 producer 锚点非 schema name）零冲突；命名遵循仓库 `lima.<dotted>` 惯例；设计探针实测（probe P3，可复现）通过契约校验 |
 | schema version | `4.0`（`SchemaVersion(4,0)`；仅此一个值，4.1+ 在本片 get/stage 均拒绝） | 4.0 是禁 extensions 的当前次版本；首片不引入未知次版本面 |
 | 编码 | UTF-8（封存字节 = 净化后 str 的 `encode("utf-8")`） | 条款 10 字节语义；probe P2 |
 | media type（blob_ref.media_type） | `text/plain` | 契约 `_MEDIA_TYPE_PATTERN` 不接受 `; charset=` 参数（亲验 common.py:60-62）；UTF-8 编码作为本片不变量单列，不写入 media type |
@@ -166,7 +166,7 @@ blob 文件移入 root/quarantine/，不动 metadata、不虚造 SEALED）、不
 | 故障点 | blob 实物 | metadata（SQLite） | 重启后分类 | get 行为 |
 |---|---|---|---|---|
 | S0–S2 中崩溃 | 无任何写入 | 无行 | 干净 | 无引用存在 |
-| S3 staging 写中崩溃 | 部分 staging 文件 | STAGING 行 | `staging`（未完成） | 该 staging 无引用可 get |
+| S3 staging 写中崩溃 | 部分 staging 文件 | 无行（content.bin 写中）或 STAGING 行（行事务已提交后） | `staging`（未完成） | 该 staging 无引用可 get |
 | S3 完成后、P1 前 | staging 完整 | STAGING 行 | `staging` | 同上 |
 | P1 临时文件写/fsync 中 | publish 临时文件 | STAGING 行 | `orphan`（临时） | 无 SEALED 行 |
 | P1 rename 后、P2 前 | 最终 blob 就位 | STAGING 行、无 artifacts 行 | `orphan`（blob 无 SEALED metadata） | 调用者从未获得引用；伪造 id → ARTIFACT_NOT_FOUND |
@@ -314,7 +314,7 @@ tenant 与调用者传入字符串均不作为身份认证依据（§4.5）。
 | 预算 | 默认 | 合法域（open 时可调范围） | 来源/依据 |
 |---|---|---|---|
 | 单条日志输入 UTF-8 字节 `max_input_bytes` | 262,144 | [1, 262,144] | `min(PrivacyLimits.max_string_bytes, ContractLimits.max_string_bytes)`=256 KiB（取交集，**不得扩大**） |
-| 净化后封存字节 `max_sealed_bytes` | 262,144 | [0, 262,144] | 同上交集（净化可能改变字节数：span 替换为 45 字符占位符；probe P4.1d） |
+| 净化后封存字节 `max_sealed_bytes` | 262,144 | [0, 262,144] | 同上交集（净化可能改变字节数：span 替换为 45 字符占位符，probe P4.1d）。注脚：**预算内输入可能因净化占位符膨胀触发本预算**——ER 对抗探针实测 262,119 B 输入膨胀至 365,378 B → `SEALED_BUDGET_EXCEEDED`（稳定失败、无数据丢失、无降级；ERR-IP-0044-D1-v1 SF-07） |
 | envelope wire 字节 `max_envelope_bytes` | 1,048,576 | 固定 | `ContractLimits.max_input_bytes`（encode_envelope 上限） |
 | blob 对象数 `max_blob_objects` | 10,000 | [1, 1,000,000] | 首片新存储预算（合法域内 operator 可调） |
 | 并发 live staging `max_live_staging` | 256 | [1, 10,000] | 首片新存储预算 |
@@ -335,7 +335,9 @@ actual:262145}`（probe P4.1）。容量不足拒绝新写（`CAPACITY_EXCEEDED`
   `quarantine/…`、`metadata.sqlite3`；API 面无任何调用者路径参数。
 - tenant_id 受契约 identifier pattern 约束（首字符必为字母数字，`/`、纯 `..` 不可构造），仍执行
   防御性终点校验：每次 IO 前 `Path.resolve()` 结果必须 `is_relative_to(root.resolve())`，否则
-  `PATH_POLICY_VIOLATION`。
+  `PATH_POLICY_VIOLATION`。Windows 文件名规范化声明：identifier 允许的 `:` 在 Win32 路径语义下
+  触发 OSError → `IO_ERROR` fail-closed（无逃逸）；尾随 `.`/空格的名称规范化混叠仅致**同 digest
+  同字节**的 blob 目录混叠、无跨租户信息泄露（D2 路径组测试覆盖；见 ERR-IP-0044-D1-v1 SF-04）。
 - symlink/junction/hardlink：发布/读取路径上的符号链接与 junction 拒绝（Linux `O_NOFOLLOW` 等
   价语义；Windows 显式 reparse-point 检查）；发布使用同目录临时文件 + `os.replace` 原子改名（同
   卷原子）；blob 发布后只读打开。hardlink 到同内容 blob 文件无害（内容寻址）；威胁是替换，由上
@@ -410,7 +412,7 @@ PARTIAL=本片冻结其中本机 SQLite/日志子集行为、余下归后续片�
 | NFR-02 | PARTIAL | Blob IO 与 SQLite metadata 分离、业务仅 ref/字节/错误；本片仅本地 backend、不写 S3 SDK/配置框架；S3-compatible Port 语义由行为契约保证 | 后续片（S3 adapter） |
 | AC-01/T-01 | PARTIAL | §4.3 矩阵 + §8 故障组（五 kill 点、两平台、真子进程）；无假 SEALED 断言 | D2+ 实证 |
 | AC-02/T-02 | PARTIAL | 同 handle 幂等、并发 seal 单胜者、租户隔离、无 ACL 放宽面（§4.4）；同字节≠同身份 | D2+ 实证 |
-| AC-03/T-03 | PARTIAL | corrupt/missing blob、路径逃逸 fail closed 且 metadata 不丢（§6.1）；lineage 自环/跨租户由契约层拒绝（探针 P3-B）+ 本片空 lineage only；Redis 不在链路（本片无 Redis 依赖，天然不丢事实） | D2+ 实证 |
+| AC-03/T-03 | PARTIAL | corrupt/missing blob、路径逃逸 fail closed 且 metadata 不丢（§6.1）；lineage 自环由契约层拒绝（源码复核：common.py `LINEAGE_SELF_REFERENCE`）、跨租户由契约层拒绝（探针 P3-B）+ 本片空 lineage only；Redis 不在链路（本片无 Redis 依赖，天然不丢事实） | D2+ 实证 |
 | V5-FR-01 | PARTIAL | 新增 artifact 路径只存 metadata+blob ref（envelope_wire 无正文，§7.3）；**历史 report_json 迁移不在本片**（#66 仍是唯一迁移 Owner） | 后续片（迁移 slice） |
 | V5-FR-02 | DESIGN-ONLY | seal 前强制 #94 policy 冻结于协议 S1（前置任何持久化；探针 P1 实测真实调用面）；实现证据归 D2+/IMPL | IMPL |
 | V5-FR-03 | PARTIAL | digest verification 冻结为 G3 必检（探针 P3-A 证明不可省略）；retention class 校验接受面；lineage query/tombstone 未实现（明确拒绝非空 lineage） | 后续片 |
@@ -492,6 +494,21 @@ Linux：同 harness，父进程 os.kill(pid, SIGKILL)；其余一致
 python -m unittest discover -s tests/artifacts -v && python -m unittest discover -s tests -v
 python -m lima.artifacts.demo --root <fresh tmp>
 ```
+
+### 10.1 D2 收敛义务（登记，不改本 Packet 冻结语义；来源 ERR-IP-0044-D1-v1）
+
+以下三项经 ER 独立审阅登记为 D2 冻结测试/符号/文档时必须收敛的义务（均为 P3 文字/API 语义级，
+不影响本 Packet 冻结协议与承重结论）：
+
+1. **SF-05（abort 载体）**：`STAGING_STATE_INVALID` 的「已 abort」触发条件需要明确的 abort 载
+   体——候选方案：`close()` 全量中止 live staging 并使 handle 失效；D2 Assignment 冻结为单值
+   （或删除该触发条件）。
+2. **SF-06（crash harness 命名统一）**：§10 kill 骨架的 `tests.artifacts.crash_harness` 模块名
+   与 §5.1 测试命名面（`tests/artifacts/test_*.py`）须在 D2 冻结时统一（harness 可为测试辅助
+   模块，但命名归属须单值）。
+3. **SF-08（判空语义提示）**：`SealedLogArtifact.content` 为双语义（seal 恒 `b""`、get 返回已
+   验证字节）——demo 与错误语义文档须提示调用方以 `envelope.blob_ref.size_bytes`（而非
+   `content == b""`）判空，避免与合法 0-byte Artifact 混淆。
 
 ## 11. Decision Request 区（随 Packet 呈批）
 

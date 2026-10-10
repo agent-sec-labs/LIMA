@@ -308,10 +308,20 @@ def _fence(content: str, language: str) -> str:
 
 
 def _has_runtime_hit(experiment_log: Sequence[Any]) -> bool:
+    """A hit is an executed run-stage ASan report, not an ``ok`` flag.
+
+    ``ok`` keeps its wire meaning ("the tested binary exited cleanly"), so a
+    real sanitizer hit necessarily carries ``ok=False``: the ``run`` stage
+    plus the parsed error type already prove the experiment executed.
+    Boolean-only records without a stage and an error type never upgrade a
+    report.
+    """
     return any(
         isinstance(entry, Mapping)
-        and bool(entry.get("ok"))
-        and bool(entry.get("hit"))
+        and entry.get("stage") == "run"
+        and entry.get("hit") is True
+        and isinstance(entry.get("error_type"), str)
+        and bool(entry.get("error_type"))
         for entry in experiment_log
     )
 

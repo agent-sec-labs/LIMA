@@ -52,13 +52,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Final
 
 from .agent_scale import ResultCache, map_bounded
-from .agent_scout import ScoutLead, ScoutReport, ScoutTarget, review_leads
+from .agent_scout import (
+    MAX_LEAD_SNIPPET_LINES,
+    ScoutLead,
+    ScoutReport,
+    ScoutTarget,
+    review_leads,
+)
 from .contracts.evidence import EvidenceLevel, EvidencePolarity
 from .cxx_agent_models import parse_untrusted_json
 from .cxx_agent_tools import AgentBudgetExceeded, CxxAgentBudget
@@ -198,8 +205,44 @@ def _platform_schema() -> str:
         "The driver_code must be a complete C or C++ translation unit with a "
         "main() that exercises the hypothesized path against the provided target "
         "sources and triggers the hypothesized bug class under AddressSanitizer. "
+        "Hard field bounds enforced on arrival (non-compliant replies are "
+        "rejected): hypothesis <= 2000 characters, experiment_design <= 1000 "
+        "characters, trigger_path and unresolved_assumptions at most 16 "
+        "entries of 300 characters each. State any link-closure plan as one "
+        "sentence; the stub code itself belongs in driver_code only. "
         "Bind the hypothesis to the target_id from the context; never invent ids."
     )
+
+
+_SPECIALIST_PLAYBOOK: Final = (
+    "Experiment-design playbook (generic trigger strategies; pick by "
+    "hypothesis class, never assume the answer):\n"
+    "- Error-path defects: under normal use memory allocation never fails, "
+    "so failure and cleanup paths stay cold. If the hypothesis lives on a "
+    "failure or cleanup path, inject the failure: where the library accepts "
+    "a custom memory suite, pass one that succeeds N times then fails, and "
+    "sweep N.\n"
+    "- Use-after-free: free through the public API, keep the handle, then "
+    "call any API touching it; or allocate many objects, free selectively, "
+    "and force reuse.\n"
+    "- Double free: call the public free/destroy twice on one handle.\n"
+    "- Out-of-bounds: feed boundary-exact input lengths (exact, off-by-one, "
+    "huge).\n"
+    "- Link closure: a correct driver can still fail to link when the "
+    "target unit calls functions the one compile command does not include. "
+    "On undefined-reference errors, embed no-op stubs for exactly the "
+    "missing out-of-snapshot symbols inside your driver (extern \"C\" "
+    "blocks for C APIs; for C++ copy each declaration verbatim from its "
+    "header) and keep the same main() design; describe the closure plan "
+    "in one sentence in experiment_design and put stub code only in "
+    "driver_code. Stubs may only replace "
+    "environment the hypothesis never traverses: never stub a function on "
+    "the hypothesized fault path or the allocator/lock machinery it "
+    "depends on, and remember no-op stubs shrink timing windows -- a race "
+    "that never fires under stubs proves nothing about the real system.\n"
+    "- A clean run means the fault condition was never met; a driver that "
+    "only exercises normal use proves nothing about error paths."
+)
 
 
 def _system_platform_specialist() -> str:
@@ -207,7 +250,8 @@ def _system_platform_specialist() -> str:
         f"You are the {SPECIALIST_ROLE} agent in the LIMA vulnerability platform. "
         "Form one concrete vulnerability hypothesis for the target: state what is "
         "wrong, the trigger path, the CWE class, and write the PoC driver for the "
-        f"reproduction workbench. {_UNTRUSTED_DATA_RULE} {_platform_schema()}"
+        f"reproduction workbench. {_SPECIALIST_PLAYBOOK} "
+        f"{_UNTRUSTED_DATA_RULE} {_platform_schema()}"
         + registry_prompt_addenda()
     )
 _CRITIC_SCHEMA: Final = (
@@ -225,9 +269,52 @@ _SYSTEM_PLATFORM_CRITIC: Final = (
     "Adversarially review the Specialist hypothesis against the experiment "
     "observations: look for guards, pointer rebinds, unreachable paths, wrong "
     "bug classes and flawed drivers. If a safety mechanism cannot be excluded "
-    f"from the provided evidence, answer hypothesis-wrong. "
+    "from the provided evidence, answer hypothesis-wrong. "
+    "Ownership-strip rule: a raw pointer taken from a temporary smart "
+    "pointer (e.g. api().get()) has no owner keeping the object alive once "
+    "the statement ends -- assess such code for a null return AND a "
+    "dangling object under concurrent removal, and treat a null-check-only "
+    "fix as insufficient: only holding the owning smart pointer in a local "
+    "across the whole use fixes it. Also reject experiments whose no-op "
+    "stubs sit on the hypothesized fault path or compress the timing "
+    "window the hypothesis depends on: answer revise-experiment for those. "
     f"{_UNTRUSTED_DATA_RULE} {_CRITIC_SCHEMA}"
 )
+_DISCOVERY_SCHEMA: Final = (
+    'Reply with exactly one JSON object {"leads": [{"path": <one audited '
+    "translation unit>, \"function\": <exact enclosing function name as "
+    "written in the source>, \"line\": <optional approximate line>, "
+    '"summary": <one sentence naming the object/pointer relationship>}]}; '
+    "0 to 8 leads, most promising first, no other text. Line numbers are "
+    "resolved mechanically from the function name, so the function name "
+    "must be exact; omit it only when the concern is not inside a function."
+)
+_SYSTEM_PLATFORM_DISCOVERY: Final = (
+    "You are the Discovery agent in the LIMA C/C++ vulnerability platform. "
+    "The deterministic memory-fact instrument abstained on the audited "
+    "translation units, so no triage leads exist. Read the sources yourself "
+    "and propose where a genuine memory-safety defect most likely hides, "
+    "focusing on use-after-free (CWE-416): which objects own which "
+    "allocations, which cleanup paths release them, and where a released "
+    "object can still be referenced -- including through pointers shared "
+    "between objects and on error or out-of-memory paths. Never report style "
+    "issues and never guess line numbers. "
+    f"{_UNTRUSTED_DATA_RULE} {_DISCOVERY_SCHEMA}"
+)
+_MAX_DISCOVERY_LEADS: Final = 8
+_MAX_DISCOVERY_SUMMARY_CHARS: Final = 512
+_MAX_DISCOVERY_UNIT_BYTES: Final = 1024 * 1024
+_MAX_DISCOVERY_TOTAL_BYTES: Final = 4 * 1024 * 1024
+_DISCOVERY_SEED: Final = "llm-discovery"
+# Extra experiment rounds granted only while the feedback is a compile
+# failure (precise, mechanical); clean runs buy no extra rounds.  Compile
+# repairs converge fast, so the cap sits above the dialogue budget.
+_MAX_COMPILE_REPAIR_ROUNDS: Final = 4
+# Reasoning-happy models hang on whole-file audits; one window per call
+# keeps every discovery round inside a step budget.  Line boundaries are
+# respected so approximate line numbers stay meaningful per window.
+_DISCOVERY_WINDOW_BYTES: Final = 48 * 1024
+_MAX_DISCOVERY_WINDOWS: Final = 8
 
 
 class PlatformFormatError(ValueError):
@@ -424,6 +511,107 @@ def _bounded_snippet(workspace: RepositoryWorkspace, path: str, line: int) -> st
     return _escape_text(numbered, _MAX_SNIPPET_CHARS)
 
 
+_DRIVER_CONTRACT_FLAGS_LIMIT: Final = 16
+_DRIVER_CONTRACT_VALUE_OPTIONS: Final = frozenset({
+    "-I", "-D", "-U", "-isystem", "-target", "--target", "--sysroot",
+})
+
+
+def _semantic_flags_from_compdb(
+    workspace: RepositoryWorkspace, unit_path: str,
+) -> tuple[str, ...]:
+    """The semantic ``-I``/``-D`` flags of the unit's trusted compdb entry.
+
+    Reads the snapshot's own ``compile_commands.json`` (the admin-trusted
+    build context) so the Specialist can be told the exact include and
+    define environment its driver will compile with; no entry means the
+    pinned ASan flags alone apply.
+    """
+
+    for name in ("compile_commands.json", "build/compile_commands.json"):
+        try:
+            raw = workspace.read_text(name)
+        except (OSError, ValueError):
+            continue
+        try:
+            entries = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            candidate_file = str(entry.get("file") or "")
+            if (
+                candidate_file != unit_path
+                and not candidate_file.endswith("/" + unit_path)
+            ):
+                continue
+            arguments = entry.get("arguments")
+            if not isinstance(arguments, list):
+                command = entry.get("command")
+                if not isinstance(command, str):
+                    continue
+                arguments = command.split()
+            flags: list[str] = []
+            expect_value = False
+            for token in arguments[1:]:
+                text = str(token)
+                if expect_value:
+                    flags.append(text)
+                    expect_value = False
+                elif text in _DRIVER_CONTRACT_VALUE_OPTIONS:
+                    flags.append(text)
+                    expect_value = True
+                elif text.startswith(("-I", "-D", "-U", "-isystem", "-target")):
+                    flags.append(text)
+                if len(flags) >= _DRIVER_CONTRACT_FLAGS_LIMIT:
+                    break
+            if flags:
+                return tuple(flags)
+    return ()
+
+
+def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
+    """The exact experiment compile command the driver author must target.
+
+    Models hallucinate headers and include the C target unit itself when
+    the compile environment is unknown; stating the pinned argv (with the
+    snapshot's own include/define flags) removes that guesswork.
+    """
+
+    flags = _semantic_flags_from_compdb(workspace, unit_path)
+    flags_text = " ".join(flags) if flags else "(no extra flags)"
+    if unit_path.endswith(".c"):
+        sources_text = f"-x c {unit_path} -x c++ <your driver>"
+    else:
+        sources_text = f"{unit_path} <your driver>"
+    return (
+        "Driver contract (immutable experiment environment):\n"
+        "- The workbench compiles exactly one command: "
+        f"clang++-14 -fsanitize=address -g -O1 {flags_text} "
+        f"{sources_text} -o <binary>\n"
+        "- Your driver is C++ in that same command; the target unit is "
+        "compiled separately, so never #include the target unit itself "
+        "(duplicate symbols).\n"
+        "- Your driver is staged at build/repro_driver_<hash>.cpp inside the "
+        "snapshot (cwd is the snapshot root): to satisfy link dependencies "
+        "you may #include sibling .c files of the same library with paths "
+        "relative to the snapshot root (e.g. #include "
+        "\\\"../<repo>/source/sibling.c\\\"); headers resolve through the "
+        "include paths above.\n"
+        "- Only repository headers reachable through the include paths above "
+        "exist in the sandbox; never include a header that is not in the "
+        "snapshot (no invented placeholder headers).\n"
+        "- When the link reports undefined references to symbols outside "
+        "the snapshot, define no-op stubs for exactly those symbols inside "
+        "your driver (the command still compiles only the target unit and "
+        "your driver); never stub a symbol the hypothesized fault path "
+        "itself executes."
+    )
+
+
 def build_hypothesis_context(
     *,
     target_id: str,
@@ -431,6 +619,7 @@ def build_hypothesis_context(
     line: int,
     fact_lines: tuple[str, ...],
     snippet: str,
+    driver_contract: str = "",
 ) -> str:
     """Assemble the Specialist user message (trusted envelope, escaped data)."""
 
@@ -439,6 +628,8 @@ def build_hypothesis_context(
         f"- target_id: {target_id}",
         f"- location: {path}:{line}",
     ]
+    if driver_contract:
+        parts.append("\n" + driver_contract)
     if fact_lines:
         parts.append(
             "\nVerified static facts bound to this snapshot "
@@ -529,7 +720,12 @@ class PlatformReviewOutcome:
     ``targets`` carries every audited target (including ``abstain`` and
     ``rejected``); ``findings`` is the positive subset whose states are in
     :data:`lima.uaf_orchestrator.UAF_FINDING_STATES` and is the only list a
-    scanner may project.
+    scanner may project.  ``unreviewed_units`` lists the translation units
+    with ANY Discovery window left without a completed model round --
+    window transport/format failures, a deadline cut, the window cap or
+    the size skip.  A non-empty set means "not fully audited", and a
+    required caller must treat the review as inconclusive rather than
+    reading the missing findings as a clean pass.
     """
 
     findings: tuple[PlatformFinding, ...]
@@ -538,6 +734,7 @@ class PlatformReviewOutcome:
     diagnostics: tuple[str, ...] = ()
     leads_considered: int = 0
     translation_units: tuple[str, ...] = ()
+    unreviewed_units: tuple[str, ...] = ()
 
 
 def platform_rule_id(cwe: str) -> str:
@@ -652,6 +849,8 @@ def _hex64(value: str, field_name: str) -> str:
 
 def _empty_outcome(
     diagnostics: tuple[str, ...], units: tuple[str, ...] = (),
+    *,
+    unreviewed_units: tuple[str, ...] = (),
 ) -> PlatformReviewOutcome:
     return PlatformReviewOutcome(
         findings=(),
@@ -660,6 +859,7 @@ def _empty_outcome(
         diagnostics=diagnostics,
         leads_considered=0,
         translation_units=units,
+        unreviewed_units=unreviewed_units,
     )
 
 
@@ -694,6 +894,298 @@ def _leads_from_candidates(
         )
         for candidate in candidates
     )
+
+
+def _parse_discovery_reply(
+    raw: object, known_units: frozenset[str],
+) -> tuple[tuple[str, int, str], ...]:
+    """Parse one strict discovery reply into (path, line, summary) triples.
+
+    ``function`` is optional but preferred: when present the caller resolves
+    the line mechanically from the source, because model-provided line
+    numbers are routinely off (the Scout then correctly discards the
+    mislocated lead).  A lead with neither a function nor a positive line
+    is malformed.
+    """
+
+    if not isinstance(raw, str):
+        raise PlatformFormatError("discovery reply must be text")
+    try:
+        parsed = json.loads(unwrap_fenced_json(raw))
+    except ValueError as exc:
+        raise PlatformFormatError(f"discovery reply is not JSON: {exc}") from exc
+    if not isinstance(parsed, dict) or set(parsed) != {"leads"}:
+        raise PlatformFormatError(
+            'discovery reply must hold exactly {"leads": [...]}'
+        )
+    items = parsed["leads"]
+    if not isinstance(items, list) or len(items) > _MAX_DISCOVERY_LEADS:
+        raise PlatformFormatError(
+            f"discovery leads must be a list of at most {_MAX_DISCOVERY_LEADS}"
+        )
+    triples: list[tuple[str, int, str]] = []
+    for item in items:
+        if not isinstance(item, dict) or not {"path", "summary"} <= set(item) <= {
+            "path", "line", "summary", "function",
+        }:
+            raise PlatformFormatError(
+                "each discovery lead may hold path, optional function and "
+                "line, and summary"
+            )
+        path = item["path"]
+        if not isinstance(path, str) or path not in known_units:
+            raise PlatformFormatError(
+                f"discovery lead path is not an audited unit: {path!r}"
+            )
+        line = item.get("line", 0)
+        if isinstance(line, bool) or not isinstance(line, int) or line < 0:
+            raise PlatformFormatError(
+                "discovery lead line must be a non-negative integer"
+            )
+        summary = item["summary"]
+        if not isinstance(summary, str) or not summary:
+            raise PlatformFormatError(
+                "discovery lead summary must be non-empty text"
+            )
+        function = item.get("function", "")
+        if function is None:
+            function = ""
+        if not isinstance(function, str) or len(function) > 256:
+            raise PlatformFormatError(
+                "discovery lead function must be bounded text"
+            )
+        if not function and line < 1:
+            raise PlatformFormatError(
+                "discovery lead needs a function or a positive line"
+            )
+        triples.append((path, line, summary, function))  # type: ignore[arg-type]
+    return tuple(triples)  # type: ignore[return-value]
+
+
+def _resolve_discovery_line(
+    source: str, function: str, approximated: int,
+) -> int | None:
+    """Resolve a discovery lead to the function's *definition* line.
+
+    Model line numbers are unreliable, so a lead naming a function is
+    located mechanically: the first line of the unit whose beginning looks
+    like that function's definition.  A match only counts when a body
+    brace opens before any semicolon -- prototypes (forward declarations)
+    are skipped, otherwise the Scout reviews a declaration snippet and
+    correctly discards the lead.  ``None`` when nothing locates and no
+    usable approximate line exists.
+    """
+
+    if function:
+        # The prefix class must accept C++ definition forms the lead may
+        # name unqualified: ``Class::method(``, ``std::string Class::m(``,
+        # reference returns (``const T &m(``).  ':' for scope qualifiers,
+        # '&' for references; '<'/'>' for template return types.
+        pattern = re.compile(
+            r"^[A-Za-z_][A-Za-z0-9_\s\*(,):&<>]*?\b" + re.escape(function)
+            + r"\s*\(",
+            re.MULTILINE,
+        )
+        for match in pattern.finditer(source):
+            window = source[match.start():match.start() + 600]
+            brace = window.find("{")
+            semicolon = window.find(";")
+            if brace != -1 and (semicolon == -1 or brace < semicolon):
+                return source.count("\n", 0, match.start()) + 1
+    return approximated if approximated >= 1 else None
+
+
+def _discovery_snippet_lines(
+    source: str, definition_line: int, function: str,
+) -> int:
+    """How many extra lines the Scout should read past a function lead.
+
+    The whole function body matters: the suspicious statement often sits
+    far past the opening lines, and a snippet that stops early makes the
+    Scout discard a correct lead with invented facts.  The extent runs to
+    the next column-0 closing brace (the function end in standard C/C++
+    layout), bounded by :data:`MAX_LEAD_SNIPPET_LINES`.
+    """
+
+    if not function:
+        return 0
+    lines = source.split("\n")
+    start = definition_line - 1
+    for offset in range(
+        start, min(len(lines), start + MAX_LEAD_SNIPPET_LINES),
+    ):
+        if lines[offset].startswith("}"):
+            return min(offset - start + 2, MAX_LEAD_SNIPPET_LINES)
+    return min(120, MAX_LEAD_SNIPPET_LINES)
+
+
+def _split_windows(text: str) -> tuple[tuple[str, int], ...]:
+    """Split one unit into byte-bounded windows of whole lines.
+
+    Returns ``(window_text, first_line_number)`` pairs; a unit within the
+    window budget stays a single window starting at line 1.
+    """
+
+    lines = text.split("\n")
+    windows: list[tuple[str, int]] = []
+    current: list[str] = []
+    current_bytes = 0
+    start_line = 1
+    for index, line in enumerate(lines, start=1):
+        encoded = len(line.encode("utf-8")) + 1
+        if current and current_bytes + encoded > _DISCOVERY_WINDOW_BYTES:
+            windows.append(("\n".join(current), start_line))
+            current = []
+            current_bytes = 0
+            start_line = index
+        current.append(line)
+        current_bytes += encoded
+    if current:
+        windows.append(("\n".join(current), start_line))
+    return tuple(windows)
+
+
+def _discover_leads(
+    resolved: Mapping[str, object],
+    workspace: RepositoryWorkspace,
+    units: Sequence[str],
+    timeout: int,
+    deadline: float | None,
+    budget: CxxAgentBudget,
+    mode: str,
+) -> tuple[tuple[ScoutLead, ...], tuple[str, ...], frozenset[str]]:
+    """Agent-side discovery when the deterministic facts instrument abstains.
+
+    The Discovery agent receives exactly the audited translation units -- the
+    same scope the facts instrument analyses -- and must return its own
+    suspicious locations; nothing about the sought answer is ever provided.
+    Its leads flow through the ordinary Scout review like any triage lead,
+    and the lead source plus its call count are recorded as diagnostics so
+    reporting can distinguish instrument leads from agent leads.
+
+    The third return value is the set of units with ANY window left
+    without a completed model round -- a window that transport- or
+    format-failed, windows cut off by the cap or a passed deadline, and
+    units skipped for size all count.  An outcome over a unit in this
+    set is "not fully audited", never "no findings", so a required
+    caller must surface it instead of reading it as a clean review
+    (frozen AC5: transport failure, timeouts and coverage truncation
+    are inconclusive).
+    """
+
+    if mode == MODE_OFF or not resolved:
+        return (), (), frozenset()
+    sources: dict[str, str] = {}
+    skipped: list[str] = []
+    total_bytes = 0
+    for unit in units:
+        try:
+            text = workspace.read_text(unit)
+        except (OSError, ValueError):
+            skipped.append(unit)
+            continue
+        encoded = len(text.encode("utf-8"))
+        if (
+            encoded > _MAX_DISCOVERY_UNIT_BYTES
+            or total_bytes + encoded > _MAX_DISCOVERY_TOTAL_BYTES
+        ):
+            skipped.append(unit)
+            continue
+        total_bytes += encoded
+        sources[unit] = text
+    notes = [f"llm-discovery-skipped-unit: {unit}" for unit in skipped]
+    if not sources:
+        return (), tuple(notes), frozenset(skipped)
+    windows: list[tuple[str, str, int]] = []
+    for unit, text in sources.items():
+        for window_text, start_line in _split_windows(text):
+            windows.append((unit, window_text, start_line))
+    # Window-level coverage bookkeeping: ``expected`` counts every window
+    # BEFORE the cap, so the windows the cap drops leave a permanent
+    # hole in their unit's coverage.
+    expected: dict[str, int] = {unit: 0 for unit in sources}
+    for unit, _window_text, _start_line in windows:
+        expected[unit] += 1
+    if len(windows) > _MAX_DISCOVERY_WINDOWS:
+        notes.append(
+            f"llm-discovery-windows-capped: {len(windows)} -> "
+            f"{_MAX_DISCOVERY_WINDOWS}"
+        )
+        windows = windows[:_MAX_DISCOVERY_WINDOWS]
+    calls = [0]
+    quadruples: list[tuple[str, int, str, str]] = []
+    completed: dict[str, int] = {}
+    for unit, window_text, start_line in windows:
+        window_timeout = _bounded_step_timeout(timeout, deadline)
+        if window_timeout is None:
+            # The remaining windows (this one included) stay unaudited;
+            # the deadline is re-checked per window, not once up front,
+            # so earlier windows still got their bounded attempts.
+            notes.append("llm-discovery-skipped: deadline exceeded")
+            break
+        user = (
+            "The memory-fact instrument abstained on these translation "
+            f"units (no deterministic candidates). This window covers "
+            f"{unit} from line {start_line}; line numbers you report are "
+            "relative to the file, not this window. Audit the code below.\n\n"
+            f"--- {unit} (from line {start_line}) ---\n"
+            f"```c\n{window_text}\n```"
+        )
+        try:
+            quadruples.extend(_platform_round(
+                resolved, _SYSTEM_PLATFORM_DISCOVERY, user, window_timeout,
+                budget, calls, _parse_discovery_reply, frozenset(sources),
+                deadline,
+            ))
+            completed[unit] = completed.get(unit, 0) + 1
+        except PlatformFormatError as exc:
+            notes.append(
+                f"llm-discovery-window-format-failed"
+                f"({calls[0]} calls): {exc}"[:256]
+            )
+        except (
+            LLMTransportError,
+            LLMResponseFormatError,
+            LLMResponseTooLarge,
+            ValueError,
+        ) as exc:
+            # A provider or gateway hiccup on one window never sinks the
+            # rest: record it and keep auditing the remaining windows.
+            notes.append(
+                f"llm-discovery-window-transport-failed: {exc}"[:256]
+            )
+    leads: list[ScoutLead] = []
+    for path, approximated, summary, function in quadruples:
+        if len(leads) >= 2 * _MAX_DISCOVERY_LEADS:
+            notes.append("llm-discovery-leads-capped")
+            break
+        line = _resolve_discovery_line(
+            sources.get(path, ""), function, approximated,
+        )
+        if line is None:
+            notes.append(
+                f"llm-discovery-dropped-unlocatable: {path} {function!r}"
+            )
+            continue
+        leads.append(ScoutLead(
+            lead_id=f"discovery-{len(leads) + 1}",
+            path=path,
+            line=line,
+            summary=summary[:_MAX_DISCOVERY_SUMMARY_CHARS],
+            seed=_DISCOVERY_SEED,
+            score=0,
+            snippet_lines=_discovery_snippet_lines(
+                sources.get(path, ""), line, function,
+            ),
+        ))
+    return tuple(leads), (
+        *notes,
+        f"leads-from-llm-discovery: {len(leads)} leads, {calls[0]} calls "
+        f"over {len(windows)} windows",
+    ), frozenset(
+        unit for unit, count in expected.items()
+        if completed.get(unit, 0) < count
+    ) | set(skipped)
 
 
 def _match_candidate(
@@ -764,11 +1256,12 @@ def _runtime_subject_id(
     return hashlib.sha256(material).hexdigest()
 
 
-def _experiment_hit(
+def experiment_matches_target(
     observation: Any,
     cwe: str,
-    target_path: str | None = None,
-    driver_paths: Any = None,
+    *,
+    target_path: str,
+    driver_paths: Sequence[str] = (),
 ) -> bool:
     """A hit is an executed run-stage ASan crash bound to the Scout target.
 
@@ -803,12 +1296,27 @@ def _experiment_hit(
     return _paths_bind(faulting_file, target_path)
 
 
+def _experiment_hit(
+    observation: Any,
+    cwe: str,
+    target_path: str | None = None,
+    driver_paths: Any = None,
+) -> bool:
+    """Backward-compatible alias of :func:`experiment_matches_target`."""
+    if not isinstance(target_path, str) or not target_path:
+        return False
+    return experiment_matches_target(
+        observation, cwe,
+        target_path=target_path, driver_paths=driver_paths,
+    )
+
+
 _DRIVER_STAGE_DIRECTORY: Final = "build"
 _DRIVER_STAGE_PREFIX: Final = "repro_driver_"
 _DRIVER_STAGE_SUFFIX: Final = ".cpp"
 
 
-def _repro_driver_relative_path(driver_code: str) -> str:
+def repro_driver_relative_path(driver_code: str) -> str:
     """The Sidecar's content-derived staging path for one repro driver.
 
     ``cxx_analyzer.repro.run_repro`` stages every driver into the
@@ -823,6 +1331,10 @@ def _repro_driver_relative_path(driver_code: str) -> str:
         f"{_DRIVER_STAGE_DIRECTORY}/{_DRIVER_STAGE_PREFIX}{tag}"
         f"{_DRIVER_STAGE_SUFFIX}"
     )
+
+
+# Historic private name kept for internal and test callers.
+_repro_driver_relative_path = repro_driver_relative_path
 
 
 def _normalized_source_path(text: Any) -> str:
@@ -1040,6 +1552,7 @@ def _process_target(
         line=target.line,
         fact_lines=fact_lines,
         snippet=snippet,
+        driver_contract=_driver_contract(workspace, target.path),
     )
     step_timeout = _bounded_step_timeout(timeout, deadline)
     if step_timeout is None:
@@ -1060,7 +1573,10 @@ def _process_target(
     driver = hypothesis.driver_code
     if experiments_allowed:
         sources = (target.path,)
-        for round_index in range(dialogue_rounds + 1):
+        max_rounds = dialogue_rounds + 1
+        compile_repairs = 0
+        round_index = 0
+        while round_index < max_rounds:
             experiment_timeout = _bounded_step_timeout(timeout, deadline)
             if experiment_timeout is None:
                 return _abstain_finding(target, "deadline-exceeded")
@@ -1071,11 +1587,11 @@ def _process_target(
                 repository_key, snapshot_hash, sources, driver,
                 **experiment_bound,
             )
-            hit = _experiment_hit(
+            hit = experiment_matches_target(
                 observation,
                 hypothesis.cwe,
                 target_path=target.path,
-                driver_paths=(_repro_driver_relative_path(driver),),
+                driver_paths=(repro_driver_relative_path(driver),),
             )
             experiment_log.append(
                 _experiment_entry(round_index, driver, observation, hit)
@@ -1083,7 +1599,17 @@ def _process_target(
             if hit:
                 hit_observation = observation
                 break
-            if round_index == dialogue_rounds:
+            # A compile failure is precise mechanical feedback and critic
+            # revisions after it demonstrably converge, so bounded extra
+            # repair rounds are granted beyond the dialogue budget; a clean
+            # run is information-poor and buys nothing extra.
+            if (
+                observation.stage == "compile"
+                and compile_repairs < _MAX_COMPILE_REPAIR_ROUNDS
+            ):
+                compile_repairs += 1
+                max_rounds += 1
+            if round_index + 1 >= max_rounds:
                 break
             critic_timeout = _bounded_step_timeout(timeout, deadline)
             if critic_timeout is None:
@@ -1105,6 +1631,7 @@ def _process_target(
                 and critic.revised_driver_code
             ):
                 driver = critic.revised_driver_code
+                round_index += 1
                 continue
             break
     else:
@@ -1368,8 +1895,10 @@ def run_platform_review(
             build_context_mode=build_context_mode,
         )
 
-    # Leads: caller-provided, else release events from the facts instrument.
+    # Leads: caller-provided, else release events from the facts instrument,
+    # else the Discovery agent reading the same audited units itself.
     bundle: UafFactBundle | None = None
+    discovery_unreviewed: tuple[str, ...] = ()
     if not given_leads:
         bundle = _fetch_bundle()
         given_leads = (
@@ -1378,12 +1907,24 @@ def run_platform_review(
             else ()
         )
         if not given_leads:
-            return _empty_outcome(("no-leads-available",), units)
+            discovered, notes, unreviewed = _discover_leads(
+                resolved_llm, workspace, units, timeout, deadline,
+                run_budget, mode,
+            )
+            diagnostics.extend(notes)
+            discovery_unreviewed = tuple(sorted(unreviewed))
+            given_leads = discovered
+        if not given_leads:
+            return _empty_outcome(
+                ("no-leads-available", *diagnostics), units,
+                unreviewed_units=discovery_unreviewed,
+            )
 
     scout_timeout = _bounded_step_timeout(timeout, deadline)
     if scout_timeout is None:
         return _empty_outcome(
             ("deadline-exceeded before the scout review",), units,
+            unreviewed_units=discovery_unreviewed,
         )
     try:
         report: ScoutReport = review_leads(
@@ -1401,7 +1942,10 @@ def run_platform_review(
                 "platform review required the Scout but the LLM provider is "
                 f"not usable: {exc}"
             ) from exc
-        return _empty_outcome((f"scout-unavailable: {exc}",), units)
+        return _empty_outcome(
+            (f"scout-unavailable: {exc}",), units,
+            unreviewed_units=discovery_unreviewed,
+        )
     if report.degradation:
         diagnostics.append(f"scout: {report.degradation}")
     if not report.targets:
@@ -1414,6 +1958,7 @@ def run_platform_review(
             diagnostics=tuple(diagnostics),
             leads_considered=len(given_leads),
             translation_units=units,
+            unreviewed_units=discovery_unreviewed,
         )
 
     if bundle is None and analyzer_client is not None:
@@ -1640,4 +2185,5 @@ def run_platform_review(
         diagnostics=tuple(diagnostics),
         leads_considered=len(given_leads),
         translation_units=units,
+        unreviewed_units=discovery_unreviewed,
     )

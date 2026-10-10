@@ -1327,6 +1327,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             "LIMA_CXX_MAX_MEMORY_MB",
             "LIMA_CXX_MAX_PROCESSES",
             "LIMA_CXX_MAX_OUTPUT_BYTES",
+            "LIMA_CXX_MAX_AST_JSON_BYTES",
         }
         self.assertTrue(main_configuration <= set(lima["environment"]))
         snapshot_limits = {
@@ -5720,6 +5721,579 @@ class ReproTests(unittest.TestCase):
             with self.subTest(sources=sources):
                 with self.assertRaises(ValueError):
                     repro.build_compile_argv(sources, "build/d.cpp", "build/out")
+
+    def test_compile_argv_c_sources_use_c_language_mode(self):
+        argv = repro.build_compile_argv(
+            ("lib/xmlparse.c",), "build/d.cpp", "build/out"
+        )
+        self.assertEqual(
+            [
+                "clang++-14",
+                "-fsanitize=address",
+                "-g",
+                "-O1",
+                "-x", "c", "lib/xmlparse.c",
+                "-x", "c++", "build/d.cpp",
+                "-o",
+                "build/out",
+            ],
+            argv,
+        )
+        # Mixed extensions keep the caller order; the language mode is
+        # re-pinned whenever it changes (a .cpp after a .c must switch
+        # back explicitly, -x stays in force until overridden).
+        mixed = repro.build_compile_argv(
+            ("a.c", "b.cpp", "c.c"), "build/d.cpp", "build/out"
+        )
+        self.assertEqual(
+            [
+                "clang++-14", "-fsanitize=address", "-g", "-O1",
+                "-x", "c", "a.c",
+                "-x", "c++", "b.cpp",
+                "-x", "c", "c.c",
+                "-x", "c++", "build/d.cpp",
+                "-o", "build/out",
+            ],
+            mixed,
+        )
+
+    def test_compile_argv_context_flags_after_asan_flags(self):
+        argv = repro.build_compile_argv(
+            ("lib/xmlparse.c",), "build/d.cpp", "build/out",
+            context_flags=("-DXML_POOR_ENTROPY", "-Ilib"),
+        )
+        self.assertEqual(
+            [
+                "clang++-14", "-fsanitize=address", "-g", "-O1",
+                "-DXML_POOR_ENTROPY", "-Ilib",
+                "-x", "c", "lib/xmlparse.c",
+                "-x", "c++", "build/d.cpp",
+                "-o", "build/out",
+            ],
+            argv,
+        )
+
+    def test_compile_argv_rejects_non_semantic_context_flags(self):
+        for bad in (
+            ("-o", "evil"),
+            ("-include", "x.h"),
+            ("-fsyntax-only",),
+            ("src/x.c",),
+            ("-D", "OK", "-Werror"),
+            ("-std=c99",),
+            ("-std", "c99"),
+        ):
+            with self.subTest(flags=bad):
+                with self.assertRaises(ValueError):
+                    repro.build_compile_argv(
+                        ("v.cpp",), "build/d.cpp", "build/out",
+                        context_flags=bad,
+                    )
+
+    def test_run_repro_c_source_gets_compdb_context_flags(self):
+        # feature.c only defines pilot_magic under -DPILOT_FLAG, which is
+        # declared by the snapshot's compile_commands.json: the recorded
+        # compile argv proves the semantic context reached the experiment
+        # compile, and the .c source is guarded by -x c.
+        driver_code = (
+            'extern "C" int pilot_magic(void);\n'
+            "int main() { return pilot_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        driver_relative = f"build/repro_driver_{tag}.cpp"
+        binary_relative = f"build/repro_bin_{tag}"
+        feature_c = (
+            "#ifdef PILOT_FLAG\n"
+            "int pilot_magic(void) { return 42; }\n"
+            "#else\n"
+            "#error pilot context flags did not reach the compile\n"
+            "#endif\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": ".",
+                    "file": "src/feature.c",
+                    "arguments": [
+                        "clang-14", "-c", "-DPILOT_FLAG", "-std=c99",
+                        "src/feature.c", "-o", "build/obj.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/feature.c": feature_c,
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/feature.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertIs(True, result.ok)
+        self.assertEqual(
+            [
+                "clang++-14", "-fsanitize=address", "-g", "-O1",
+                "-DPILOT_FLAG",
+                "-x", "c", "src/feature.c",
+                "-x", "c++", driver_relative,
+                "-o", binary_relative,
+            ],
+            calls[0]["argv"],
+        )
+
+    def test_run_repro_rebases_compdb_relative_directory(self):
+        # The compdb entry compiles from directory "src", so its -Iinclude
+        # names src/include; the experiment argv runs at the snapshot root
+        # and must carry the rebased -Isrc/include instead.
+        driver_code = (
+            'extern "C" int pilot_magic(void);\n'
+            "int main() { return pilot_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        feature_c = (
+            "#include \"feature.h\"\n"
+            "#ifdef PILOT_FLAG\n"
+            "int pilot_magic(void) { return 42; }\n"
+            "#else\n"
+            "#error pilot context flags did not reach the compile\n"
+            "#endif\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "feature.c",
+                    "arguments": [
+                        "clang-14", "-c", "-Iinclude", "-DPILOT_FLAG",
+                        "feature.c", "-o", "obj.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/feature.c": feature_c,
+                    "src/include/feature.h": "#define FEATURE_HEADER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/feature.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        self.assertIn("-Isrc/include", calls[0]["argv"])
+        self.assertNotIn("-Iinclude", calls[0]["argv"])
+
+    def test_run_repro_multi_source_intersection_keeps_option_value_pairs(self):
+        # Two resolved sources sharing -D COMMON=1 but using separate
+        # include directories: the per-unit intersection keeps the macro
+        # definition and drops both -I spellings instead of re-pairing a
+        # bare "-I" with the next token.
+        driver_code = (
+            'extern "C" int a_magic(void);\n'
+            "int main() { return a_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        source = (
+            "#ifdef COMMON\n"
+            "int {name}_magic(void) {{ return 42; }}\n"
+            "#else\n"
+            "#error shared context flags did not reach the compile\n"
+            "#endif\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "a.c",
+                    "arguments": [
+                        "clang-14", "-c", "-I", "incA", "-D", "COMMON=1",
+                        "a.c", "-o", "a.o",
+                    ],
+                },
+                {
+                    "directory": "src",
+                    "file": "b.c",
+                    "arguments": [
+                        "clang-14", "-c", "-I", "incB", "-D", "COMMON=1",
+                        "b.c", "-o", "b.o",
+                    ],
+                },
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/a.c": source.format(name="a"),
+                    "src/b.c": source.format(name="b"),
+                    "src/incA/common.h": "#define COMMON_HEADER 1\n",
+                    "src/incB/common.h": "#define COMMON_HEADER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/a.c", "src/b.c"),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        self.assertIn("-DCOMMON=1", calls[0]["argv"])
+        for stray in ("-I", "incA", "incB", "-Isrc/incA", "-Isrc/incB"):
+            self.assertNotIn(stray, calls[0]["argv"])
+
+    def test_run_repro_keeps_separated_target_and_sysroot_spellings(self):
+        # Review round 2: rendering every shared unit as
+        # ``f"{option}{value}"`` produced ``--targetx86_64-...`` and
+        # ``--sysrootsrc/sysroot`` -- not legal spellings -- and the
+        # whitelist rejected them before the compile could start.  The
+        # -I/-D family stays joined; target and sysroot options keep
+        # their separated two-token form.
+        driver_code = (
+            'extern "C" int cross_magic(void);\n'
+            "int main() { return cross_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        cross_c = (
+            "#include \"common.h\"\n"
+            "int cross_magic(void) { return 42; }\n"
+        )
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "cross.c",
+                    "arguments": [
+                        "clang-14", "-c", "-I", "include",
+                        "--target", "x86_64-unknown-linux-gnu",
+                        "--sysroot", "sysroot",
+                        "cross.c", "-o", "cross.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/cross.c": cross_c,
+                    "src/include/common.h": "#define CROSS_HEADER 1\n",
+                    "src/sysroot/keep.h": "#define SYSROOT_MARKER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/cross.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        # Separated spellings survive as adjacent token pairs, the
+        # sysroot value rebased onto the snapshot root, -I stays joined.
+        for pair in (
+            ("--target", "x86_64-unknown-linux-gnu"),
+            ("--sysroot", "src/sysroot"),
+        ):
+            self.assertIn(list(pair), [argv[i:i + 2] for i in range(len(argv))])
+        self.assertIn("-Isrc/include", argv)
+        for broken in (
+            "--targetx86_64-unknown-linux-gnu",
+            "--sysrootsrc/sysroot",
+            "-targetx86_64-unknown-linux-gnu",
+        ):
+            self.assertNotIn(broken, argv)
+
+    def test_run_repro_keeps_clang_dash_target_separated(self):
+        driver_code = (
+            'extern "C" int arm_magic(void);\n'
+            "int main() { return arm_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        compdb = json.dumps(
+            [
+                {
+                    "directory": ".",
+                    "file": "src/arm.c",
+                    "arguments": [
+                        "clang-14", "-c", "-target", "arm-none-linux-gnueabi",
+                        "src/arm.c", "-o", "arm.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/arm.c": "int arm_magic(void) { return 42; }\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/arm.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        self.assertIn(
+            ["-target", "arm-none-linux-gnueabi"],
+            [argv[i:i + 2] for i in range(len(argv))],
+        )
+        self.assertNotIn("-targetarm-none-linux-gnueabi", argv)
+
+    def test_run_repro_renders_equal_sign_target_and_sysroot(self):
+        # Round 3 review: ``--target=triple`` and ``--sysroot=path`` had
+        # become opaque ("", token) units, and the renderer emitted an
+        # empty argv token plus the original spelling, which the
+        # whitelist rejects.  Equal-sign spellings now normalize onto
+        # the same (option, value) unit as the separated form, so they
+        # render legally (and the sysroot value still rebases).
+        driver_code = (
+            'extern "C" int eq_magic(void);\n'
+            "int main() { return eq_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "eq.c",
+                    "arguments": [
+                        "clang-14", "-c",
+                        "--target=x86_64-unknown-linux-gnu",
+                        "--sysroot=sysroot",
+                        "eq.c", "-o", "eq.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/eq.c": "int eq_magic(void) { return 42; }\n",
+                    "src/sysroot/keep.h": "#define SYSROOT_MARKER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/eq.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        self.assertNotIn("", argv)
+        for pair in (
+            ("--target", "x86_64-unknown-linux-gnu"),
+            ("--sysroot", "src/sysroot"),
+        ):
+            self.assertIn(list(pair), [argv[i:i + 2] for i in range(len(argv))])
+        self.assertNotIn("--target=x86_64-unknown-linux-gnu", argv)
+        self.assertNotIn("--sysroot=sysroot", argv)
+
+    def test_run_repro_equal_and_separated_target_intersect(self):
+        # The normalization's intersection payoff: one source spells the
+        # target separated, the other with an equals sign.  They are the
+        # same semantic unit, so the shared context keeps the triple
+        # instead of degrading to the bare argv.
+        driver_code = (
+            'extern "C" int mix_magic(void);\n'
+            "int main() { return mix_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        compdb = json.dumps(
+            [
+                {
+                    "directory": ".",
+                    "file": "src/sep.c",
+                    "arguments": [
+                        "clang-14", "-c", "--target", "aarch64-linux-gnu",
+                        "src/sep.c", "-o", "sep.o",
+                    ],
+                },
+                {
+                    "directory": ".",
+                    "file": "src/eqs.c",
+                    "arguments": [
+                        "clang-14", "-c", "--target=aarch64-linux-gnu",
+                        "src/eqs.c", "-o", "eqs.o",
+                    ],
+                },
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/sep.c": "int mix_magic(void) { return 42; }\n",
+                    "src/eqs.c": "int mix_helper(void) { return 1; }\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/sep.c", "src/eqs.c"),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        self.assertIn(
+            ["--target", "aarch64-linux-gnu"],
+            [argv[i:i + 2] for i in range(len(argv))],
+        )
+        self.assertNotIn("--target=aarch64-linux-gnu", argv)
 
     # ------------------------------------------------------- run_repro flow
 

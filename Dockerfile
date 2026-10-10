@@ -93,6 +93,7 @@ COPY --chown=lima:lima scripts/audit_sensitive_artifacts.py ./scripts/audit_sens
 COPY --chown=lima:lima cxx_analyzer ./cxx_analyzer
 COPY --chown=lima:lima scripts/run_cxx_memory_evaluation.py scripts/prepare_cxx_memory_evaluation_case.py ./scripts/
 COPY --chown=lima:lima scripts/run_platform_evaluation.py scripts/run_uaf_v2_evaluation.py ./scripts/
+COPY --chown=lima:lima scripts/run_openharmony_validation.py ./scripts/run_openharmony_validation.py
 COPY --chown=lima:lima evaluation_data/cxx_memory_cases.json ./evaluation_data/cxx_memory_cases.json
 COPY --chown=lima:lima benchmarks ./benchmarks
 USER lima:lima

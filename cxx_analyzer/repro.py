@@ -27,15 +27,25 @@ Red lines implemented here:
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
+from .build_context import (
+    SEMANTIC_ARG_OPTIONS,
+    resolve_build_context_execution,
+    semantic_arguments,
+)
 from .deadline import AnalysisDeadline, AnalysisDeadlineExceeded
 from .execution import SANITIZER_ENVIRONMENT, ToolExecution, run_step
 from .snapshot import PreparedSnapshot
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only import
+    from .config import AnalyzerSettings
 
 REPRO_SCHEMA_VERSION: Final = 1
 COMPILE_DRIVER: Final = "clang++-14"
@@ -44,6 +54,23 @@ MAX_REPRO_SOURCES: Final = 16
 MAX_REPRO_DRIVER_BYTES: Final = 256 * 1024
 MAX_REPRO_PATH_CHARS: Final = 1024
 REPRO_STEP_OUTPUT_BYTES: Final = 1024 * 1024
+
+_C_SOURCE_SUFFIX: Final = ".c"
+_C_LANGUAGE: Final = "c"
+_CPP_LANGUAGE: Final = "c++"
+# Semantic options the experiment argv may carry.  ``-std`` is excluded:
+# one argv hosts the C target and the C++ driver, and a per-language
+# standard flag would be applied to both.
+_REPRO_CONTEXT_OPTIONS: Final = SEMANTIC_ARG_OPTIONS - {"-std"}
+# Joined spellings of the value-taking context options (-DFOO, -Ilib, ...).
+_SEMANTIC_JOINED: Final = ("-I", "-D", "-U", "-isystem")
+# Options whose value is a path relative to the compdb entry's
+# ``directory`` (everything else -- macros, target triples -- is verbatim).
+_REPRO_PATH_VALUE_OPTIONS: Final = frozenset({"-I", "-isystem", "--sysroot"})
+# Options that accept a joined spelling (-Iinclude, -DCOMMON=1).  The
+# target and sysroot options have no joined form: ``--targetx86_64-...``
+# is not a legal spelling, so their units must render as two tokens.
+_JOINED_RENDER_OPTIONS: Final = frozenset(_SEMANTIC_JOINED)
 
 _BINARY_HASH_BUDGET_BYTES: Final = 64 * 1024 * 1024
 _DIAGNOSTIC_ENTRY_BYTES: Final = 2_048
@@ -119,14 +146,63 @@ def _safe_relative_path(value: object) -> str:
     return value
 
 
+def _validated_context_flags(flags: object) -> tuple[str, ...]:
+    """Accept only semantic compile-context tokens, fail-closed otherwise.
+
+    The whitelist mirrors the semantic context options minus ``-std``
+    (option-plus-value or joined spelling); any other token could smuggle
+    inputs, outputs or behavior changes into the pinned experiment argv
+    and is rejected.
+    """
+    if isinstance(flags, str | bytes) or not isinstance(flags, list | tuple):
+        raise ValueError("repro context flags must be a sequence of strings")
+    validated: list[str] = []
+    expect_value = False
+    for flag in flags:
+        if not isinstance(flag, str) or not flag:
+            raise ValueError("repro context flags must be non-empty text")
+        if expect_value:
+            validated.append(flag)
+            expect_value = False
+            continue
+        if flag in _REPRO_CONTEXT_OPTIONS:
+            validated.append(flag)
+            expect_value = True
+            continue
+        option, separator, _ = flag.partition("=")
+        if separator and option in _REPRO_CONTEXT_OPTIONS:
+            validated.append(flag)
+            continue
+        if any(
+            flag.startswith(prefix) and len(flag) > len(prefix)
+            for prefix in _SEMANTIC_JOINED
+        ):
+            validated.append(flag)
+            continue
+        raise ValueError(
+            f"repro context flag is outside the semantic whitelist: {flag!r}"
+        )
+    if expect_value:
+        raise ValueError("repro context flag option is missing its value")
+    return tuple(validated)
+
+
 def build_compile_argv(
-    source_files: list[str], driver_path: str, output_path: str
+    source_files: list[str],
+    driver_path: str,
+    output_path: str,
+    *,
+    context_flags: Sequence[str] = (),
 ) -> list[str]:
     """Return the pinned, deterministic ASan compile argv for one experiment.
 
     Pure validation and assembly only: sources first, then the driver, so
     the driver's ``main`` links last; the binary lands in the snapshot's
     writable build root.  Every path must be a safe relative POSIX path.
+    ``.c`` sources are guarded with ``-x c`` (and switched back with
+    ``-x c++``) so the C++ driver invocation keeps C targets in C mode;
+    a C++-only source list produces the exact historical argv.
+    ``context_flags`` must pass :func:`_validated_context_flags`.
     """
 
     if isinstance(source_files, str | bytes) or not isinstance(
@@ -140,7 +216,20 @@ def build_compile_argv(
         raise ValueError("repro source files must be unique")
     driver = _safe_relative_path(driver_path)
     output = _safe_relative_path(output_path)
-    return [COMPILE_DRIVER, *COMPILE_FLAGS, *sources, driver, "-o", output]
+    argv = [COMPILE_DRIVER, *COMPILE_FLAGS, *_validated_context_flags(context_flags)]
+    language = _CPP_LANGUAGE
+    for source in sources:
+        target_language = (
+            _C_LANGUAGE if source.endswith(_C_SOURCE_SUFFIX) else _CPP_LANGUAGE
+        )
+        if target_language != language:
+            argv.extend(("-x", target_language))
+            language = target_language
+        argv.append(source)
+    if language != _CPP_LANGUAGE:
+        argv.extend(("-x", _CPP_LANGUAGE))
+    argv.extend((driver, "-o", output))
+    return argv
 
 
 def build_run_argv(binary_path: str) -> list[str]:
@@ -354,6 +443,166 @@ def _step_budget(deadline: AnalysisDeadline, timeout_seconds: int) -> int:
     return budget
 
 
+def _repro_context_projection(tokens: Sequence[str]) -> tuple[str, ...]:
+    """Project semantic tokens down to the language-neutral repro subset.
+
+    Options outside :data:`_REPRO_CONTEXT_OPTIONS` (``-std`` today) are
+    dropped together with their value token; the projection never raises
+    because the resolver already validated the source argv.
+    """
+    projected: list[str] = []
+    expect_value = False
+    for token in tokens:
+        if expect_value:
+            projected.append(token)
+            expect_value = False
+            continue
+        if token in _REPRO_CONTEXT_OPTIONS:
+            projected.append(token)
+            expect_value = True
+            continue
+        option, separator, _ = token.partition("=")
+        if separator and option in _REPRO_CONTEXT_OPTIONS:
+            projected.append(token)
+            continue
+        if any(
+            token.startswith(prefix) and len(token) > len(prefix)
+            for prefix in _SEMANTIC_JOINED
+        ):
+            projected.append(token)
+    return tuple(projected)
+
+
+def _context_value(option: str, value: str, relative_directory: str) -> str:
+    """Rebase one option value onto the snapshot root when it is a path.
+
+    The compdb entry's arguments are relative to its ``directory`` while
+    the experiment argv runs at the snapshot root, so a relative path
+    value (``-Iinclude`` from ``directory: src``) must become
+    ``-Isrc/include``.  Absolute values and non-path options pass through.
+    """
+
+    if (
+        option not in _REPRO_PATH_VALUE_OPTIONS
+        or not relative_directory
+        or value.startswith("/")
+    ):
+        return value
+    return posixpath.normpath(posixpath.join(relative_directory, value))
+
+
+def _context_units(
+    tokens: Sequence[str], relative_directory: str,
+) -> tuple[tuple[str, str], ...]:
+    """Split projected context tokens into normalized (option, value) units.
+
+    Both spellings fold onto one unit (``-I inc`` and ``-Iinc`` are the
+    same ``("-I", "inc")``), so a per-unit intersection can never re-pair
+    an option with a different option's value the way a token-wise
+    intersection does.
+    """
+
+    units: list[tuple[str, str]] = []
+    expect_value: str | None = None
+    for token in tokens:
+        if expect_value is not None:
+            units.append((
+                expect_value,
+                _context_value(expect_value, token, relative_directory),
+            ))
+            expect_value = None
+            continue
+        joined = next(
+            (
+                prefix for prefix in _SEMANTIC_JOINED
+                if token.startswith(prefix) and len(token) > len(prefix)
+            ),
+            None,
+        )
+        option, separator, inline_value = token.partition("=")
+        if joined is not None:
+            units.append((
+                joined,
+                _context_value(joined, token[len(joined):], relative_directory),
+            ))
+        elif separator and option in _REPRO_CONTEXT_OPTIONS:
+            # Equal-sign spellings (--target=triple, --sysroot=path) fold
+            # onto the same unit as the separated spelling, so the two
+            # intersect correctly across sources and render back in each
+            # option's legal syntax instead of a bare opaque token.
+            units.append((
+                option,
+                _context_value(option, inline_value, relative_directory),
+            ))
+        elif token in _REPRO_CONTEXT_OPTIONS:
+            expect_value = token
+        else:
+            units.append(("", token))
+    if expect_value is not None:
+        raise ValueError("context projection ended inside an option value")
+    return tuple(units)
+
+
+def _render_unit(option: str, value: str) -> tuple[str, ...]:
+    """Render one context unit back onto the command line.
+
+    The -I/-D/-U/-isystem family accepts a joined spelling; ``--target``,
+    ``-target`` and ``--sysroot`` do not (``--targetx86_64-...`` is not a
+    legal option), so those units keep their separated two-token form.
+    An empty option marks an opaque whole token and renders as itself.
+    """
+
+    if not option:
+        return (value,)
+    if option in _JOINED_RENDER_OPTIONS:
+        return (f"{option}{value}",)
+    return (option, value)
+
+
+def _context_flags(
+    snapshot: PreparedSnapshot,
+    sources: tuple[str, ...],
+    settings: object,
+) -> tuple[str, ...]:
+    """Semantic flags shared by every source, from trusted compdb entries.
+
+    Each source is resolved through the snapshot-compdb resolver (the same
+    trust model the facts extraction uses: paths must live inside the
+    snapshot, ambiguous or invalid entries degrade to ``incomplete``).
+    Only when every source resolves does the intersection of their
+    semantic arguments reach the experiment argv; any unresolved source
+    keeps the bare pinned argv (the historical behavior) instead of a
+    partially guessed context.  The intersection is taken over complete
+    (option, value) units rebased onto the snapshot root, and the shared
+    units render back in each option's legal spelling.
+    """
+    if settings is None:
+        return ()
+    shared: frozenset[tuple[str, str]] | None = None
+    order: tuple[tuple[str, str], ...] = ()
+    for source in sources:
+        context = resolve_build_context_execution(snapshot.root, source, settings)
+        if context.status != "resolved":
+            return ()
+        semantic = _repro_context_projection(semantic_arguments(context.arguments))
+        units = _context_units(semantic, context.relative_directory)
+        keys = frozenset(units)
+        if shared is None:
+            shared, order = keys, units
+        else:
+            shared &= keys
+        if not shared:
+            return ()
+    if shared is None:
+        return ()
+    return tuple(
+        token
+        for option, value in order
+        if (option, value) in shared
+        for token in _render_unit(option, value)
+    )
+
+
 def run_repro(
     snapshot: PreparedSnapshot,
     source_files: list[str],
@@ -361,6 +610,7 @@ def run_repro(
     *,
     deadline: AnalysisDeadline,
     timeout_seconds: int = 60,
+    settings: AnalyzerSettings | None = None,
 ) -> ReproExecution:
     """Compile verified sources plus one untrusted driver and run it.
 
@@ -410,7 +660,12 @@ def run_repro(
 
     deadline.check("repro compile")
     compile_execution = run_step(
-        build_compile_argv(sources, driver_relative, binary_relative),
+        build_compile_argv(
+            sources,
+            driver_relative,
+            binary_relative,
+            context_flags=_context_flags(snapshot, sources, settings),
+        ),
         snapshot,
         ".",
         _step_budget(deadline, timeout_seconds),

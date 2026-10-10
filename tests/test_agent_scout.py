@@ -483,6 +483,38 @@ class ContextTests(unittest.TestCase):
         self.assertIn("untrusted data", system)
         self.assertIn("JSON", system)
 
+    def test_wide_snippet_window_covers_function_body(self):
+        from lima.agent_scout import MAX_LEAD_SNIPPET_LINES
+
+        source = "\n".join(
+            ["int leak(void) {"]
+            + ["    (void)0;"] * 24
+            + ["    free(p);", "    return p->value;", "}"]
+        ) + "\n"
+        reply = json.dumps([_target_entry("lead-01")])
+        transport = FakeTransport(reply)
+        reader = FakeReader({"src/a.cpp": source})
+        wide = ScoutLead(
+            lead_id="lead-01",
+            path="src/a.cpp",
+            line=1,
+            summary="use after free deep inside the function",
+            seed="llm-discovery",
+            snippet_lines=30,
+        )
+        report, _, _ = run_review([wide], transport, reader=reader)
+        self.assertEqual("", report.degradation)
+        user_content = transport.calls[0]["payload"]["messages"][1]["content"]
+        # The evidence lines sit far past the default +-10 window; only the
+        # widened function window can carry them to the Scout.
+        self.assertIn("free(p);", user_content)
+        self.assertIn("return p->value;", user_content)
+        with self.assertRaises(ValueError):
+            ScoutLead(
+                lead_id="x", path="src/a.cpp", line=1, summary="s",
+                seed="s", snippet_lines=MAX_LEAD_SNIPPET_LINES + 1,
+            )
+
     def test_missing_snippet_file_degrades_context_not_crash(self):
         reply = json.dumps([_discard_entry("lead-01", "nothing to see")])
         transport = FakeTransport(reply)

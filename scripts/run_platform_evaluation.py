@@ -989,7 +989,13 @@ def scripted_platform_transport(
         del provider, base_url, api_key, timeout, extra_headers, max_bytes
         system = payload["messages"][0]["content"]
         counter["llm_calls"] += 1
-        if uaf_llm_branch.SPECIALIST_ROLE in system:
+        if "Discovery agent" in system:
+            # The honest scripted model finds nothing on its own: the
+            # committed cases hand the vulnerable side canned triage leads
+            # (or deterministic candidates), and the clean side must stay
+            # lead-free, so the discovery reply is always empty.
+            reply = json.dumps({"leads": []})
+        elif uaf_llm_branch.SPECIALIST_ROLE in system:
             reply = json.dumps(
                 {
                     "target_id": _target_id_from(payload),

@@ -27,6 +27,7 @@
 | `LIMA_CXX_MAX_RESPONSE_BYTES` | 2097152 | 16777216 |
 | `LIMA_CXX_MAX_MEMORY_MB`（Sidecar 容器 `mem_limit`） | 2048 | 8192 |
 | `LIMA_CXX_MAX_PROCESSES`（Sidecar 容器 `pids_limit`） | 128 | 512 |
+| `LIMA_CXX_MAX_AST_JSON_BYTES`（单 TU `-ast-dump=json` 输出预算；libexpat `xmlparse.c` 实测约 78MB） | 16777216 | 134217728 (128MB) |
 | `LIMA_CXX_STEP_TIMEOUT_SECONDS` / `LIMA_CXX_TOTAL_TIMEOUT_SECONDS`（受信构建步骤） | 120 / 300 | 600 / 1800 |
 
 智能体侧（按核数与预算调整，逐项含义见 `.env.competition.example`）：
@@ -111,3 +112,9 @@
   `{path: sha256}` 清单的三方差异（新增/修改/删除），是"仅变更文件重跑"的
   数据基础；按文件粒度的自动增量重跑为接口预留（当前缓存键以整快照指纹为
   锚，任何文件变更都会换指纹全量重算——这是快照身份贯穿不变量的直接后果）。
+
+| `LIMA_CXX_MAX_AST_JSON_BYTES`（单 TU `-ast-dump=json` 输出预算；libexpat `xmlparse.c` 实测约 78MB） | 16777216 | 134217728 (128MB) |
+| `LIMA_CXX_AGENT_REQUEST_PARAMS_JSON`（per-provider 请求参数，GLM 系必填思考开关） | (unset) | `{"thinking": {"type": "disabled"}}` |
+
+OpenHarmony pilot 验证 CLI（`scripts/run_openharmony_validation.py`）的完整
+运行手册见 `docs/competition/使用说明书.md` §10；限额必须与 Sidecar 同值。

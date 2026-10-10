@@ -351,7 +351,7 @@ def build_specialist_context(
 
 def _resolved_transport(
     resolved: Mapping[str, object],
-) -> tuple[str, str, str, str, dict[str, str]]:
+) -> tuple[str, str, str, str, dict[str, str], dict[str, object]]:
     if not isinstance(resolved, Mapping) or not resolved:
         raise ValueError(
             "UAF semantic branch LLM provider is not configured: "
@@ -365,12 +365,36 @@ def _resolved_transport(
         str(name): str(value)
         for name, value in dict(resolved.get("headers") or {}).items()
     }
+    request_params = _bounded_request_params(resolved.get("request_params"))
     if not base_url or not model:
         raise ValueError(
             "UAF semantic branch LLM provider is not configured: a base URL and "
             "a model are required"
         )
-    return provider, base_url, api_key, model, headers
+    return provider, base_url, api_key, model, headers, request_params
+
+
+def _bounded_request_params(value: object) -> dict[str, object]:
+    """Operator-trusted per-provider request parameters (like headers).
+
+    Small closed mapping merged verbatim into the chat payload, e.g. a
+    reasoning toggle (``{"thinking": {"type": "disabled"}}``).  Bounded so a
+    misconfigured operator file cannot smuggle an unbounded payload in.
+    """
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("request_params must be a non-empty mapping")
+    if len(value) > 8:
+        raise ValueError("request_params accepts at most 8 keys")
+    bounded: dict[str, object] = {}
+    for name, item in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("request_params keys must be non-empty text")
+        json.dumps(item)  # rejects anything not JSON-serializable
+        bounded[name] = item
+    return bounded
 
 
 def _check_timeout(timeout: int) -> int:
@@ -386,14 +410,14 @@ def _check_budget(budget: CxxAgentBudget) -> CxxAgentBudget:
 
 
 def _post_semantic_messages(
-    parts: tuple[str, str, str, str, dict[str, str]],
+    parts: tuple[str, str, str, str, dict[str, str], dict[str, object]],
     message_pairs: tuple[tuple[str, str], ...],
     timeout: int,
     budget: CxxAgentBudget,
     state: list[int],
 ) -> str:
     """One wire round trip: calls charged before send, bytes after arrival."""
-    provider, base_url, api_key, model, headers = parts
+    provider, base_url, api_key, model, headers, request_params = parts
     payload = {
         "model": model,
         "temperature": 0,
@@ -401,6 +425,10 @@ def _post_semantic_messages(
             {"role": role, "content": content} for role, content in message_pairs
         ],
         "response_format": {"type": "json_object"},
+        # Bounded generation: reasoning-happy models must not think past
+        # every step budget; operators can override via request_params.
+        "max_tokens": 8192,
+        **request_params,
     }
     budget.consume(calls=1)
     state[0] += 1

@@ -519,10 +519,20 @@ def _context_units(
             ),
             None,
         )
+        option, separator, inline_value = token.partition("=")
         if joined is not None:
             units.append((
                 joined,
                 _context_value(joined, token[len(joined):], relative_directory),
+            ))
+        elif separator and option in _REPRO_CONTEXT_OPTIONS:
+            # Equal-sign spellings (--target=triple, --sysroot=path) fold
+            # onto the same unit as the separated spelling, so the two
+            # intersect correctly across sources and render back in each
+            # option's legal syntax instead of a bare opaque token.
+            units.append((
+                option,
+                _context_value(option, inline_value, relative_directory),
             ))
         elif token in _REPRO_CONTEXT_OPTIONS:
             expect_value = token
@@ -539,8 +549,11 @@ def _render_unit(option: str, value: str) -> tuple[str, ...]:
     The -I/-D/-U/-isystem family accepts a joined spelling; ``--target``,
     ``-target`` and ``--sysroot`` do not (``--targetx86_64-...`` is not a
     legal option), so those units keep their separated two-token form.
+    An empty option marks an opaque whole token and renders as itself.
     """
 
+    if not option:
+        return (value,)
     if option in _JOINED_RENDER_OPTIONS:
         return (f"{option}{value}",)
     return (option, value)

@@ -6152,6 +6152,149 @@ class ReproTests(unittest.TestCase):
         )
         self.assertNotIn("-targetarm-none-linux-gnueabi", argv)
 
+    def test_run_repro_renders_equal_sign_target_and_sysroot(self):
+        # Round 3 review: ``--target=triple`` and ``--sysroot=path`` had
+        # become opaque ("", token) units, and the renderer emitted an
+        # empty argv token plus the original spelling, which the
+        # whitelist rejects.  Equal-sign spellings now normalize onto
+        # the same (option, value) unit as the separated form, so they
+        # render legally (and the sysroot value still rebases).
+        driver_code = (
+            'extern "C" int eq_magic(void);\n'
+            "int main() { return eq_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        compdb = json.dumps(
+            [
+                {
+                    "directory": "src",
+                    "file": "eq.c",
+                    "arguments": [
+                        "clang-14", "-c",
+                        "--target=x86_64-unknown-linux-gnu",
+                        "--sysroot=sysroot",
+                        "eq.c", "-o", "eq.o",
+                    ],
+                }
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/eq.c": "int eq_magic(void) { return 42; }\n",
+                    "src/sysroot/keep.h": "#define SYSROOT_MARKER 1\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/eq.c",),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        self.assertNotIn("", argv)
+        for pair in (
+            ("--target", "x86_64-unknown-linux-gnu"),
+            ("--sysroot", "src/sysroot"),
+        ):
+            self.assertIn(list(pair), [argv[i:i + 2] for i in range(len(argv))])
+        self.assertNotIn("--target=x86_64-unknown-linux-gnu", argv)
+        self.assertNotIn("--sysroot=sysroot", argv)
+
+    def test_run_repro_equal_and_separated_target_intersect(self):
+        # The normalization's intersection payoff: one source spells the
+        # target separated, the other with an equals sign.  They are the
+        # same semantic unit, so the shared context keeps the triple
+        # instead of degrading to the bare argv.
+        driver_code = (
+            'extern "C" int mix_magic(void);\n'
+            "int main() { return mix_magic() == 42 ? 0 : 1; }\n"
+        )
+        tag = hashlib.sha256(driver_code.encode("utf-8")).hexdigest()[:8]
+        compdb = json.dumps(
+            [
+                {
+                    "directory": ".",
+                    "file": "src/sep.c",
+                    "arguments": [
+                        "clang-14", "-c", "--target", "aarch64-linux-gnu",
+                        "src/sep.c", "-o", "sep.o",
+                    ],
+                },
+                {
+                    "directory": ".",
+                    "file": "src/eqs.c",
+                    "arguments": [
+                        "clang-14", "-c", "--target=aarch64-linux-gnu",
+                        "src/eqs.c", "-o", "eqs.o",
+                    ],
+                },
+            ]
+        )
+        deadline = AnalysisDeadline.start(90)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self._prepared_snapshot(
+                temporary,
+                {
+                    "src/sep.c": "int mix_magic(void) { return 42; }\n",
+                    "src/eqs.c": "int mix_helper(void) { return 1; }\n",
+                    "compile_commands.json": compdb,
+                },
+            ) as snapshot:
+                calls = []
+                responses = (
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                    {
+                        "execution": {"status": "completed", "returncode": 0},
+                        "produce_binary": f"repro_bin_{tag}",
+                    },
+                )
+                with patch(
+                    "cxx_analyzer.repro.run_step",
+                    side_effect=self._recorded_run_step(calls, responses, snapshot),
+                ):
+                    result = repro.run_repro(
+                        snapshot,
+                        ("src/sep.c", "src/eqs.c"),
+                        driver_code,
+                        settings=self._settings(),
+                        deadline=deadline,
+                        timeout_seconds=30,
+                    )
+        self.assertEqual("run", result.stage)
+        self.assertTrue(result.ok)
+        argv = calls[0]["argv"]
+        self.assertIn(
+            ["--target", "aarch64-linux-gnu"],
+            [argv[i:i + 2] for i in range(len(argv))],
+        )
+        self.assertNotIn("--target=aarch64-linux-gnu", argv)
+
     # ------------------------------------------------------- run_repro flow
 
     def test_run_repro_compiles_runs_and_parses_report(self):

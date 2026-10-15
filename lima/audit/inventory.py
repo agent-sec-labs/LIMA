@@ -414,7 +414,21 @@ def _manifest_candidates(workspace: RepositoryWorkspace) -> list[str]:
                 name in _MANIFEST_EXACT_NAMES
             ):
                 candidates.append(f"{directory}/{name}")
-    return sorted(candidates)
+    ordered = sorted(candidates)
+    # IP-0023 W-2 (Packet v5.1 section 4.3.1, conditional shared-layer
+    # additive whitelist): under the restricted double-list view the candidate
+    # set is filtered down to the read-admission union (own manifests stay
+    # visible; child-component manifests are constructively excluded).
+    # Unrestricted workspaces keep the byte-identical legacy behaviour.
+    admitted = getattr(workspace, "admitted_files", None)
+    metadata = getattr(workspace, "metadata_files", None)
+    if admitted is None and metadata is None:
+        return ordered
+    allowed: set[str] = set()
+    for group in (admitted, metadata):
+        if group is not None:
+            allowed.update(group)
+    return [item for item in ordered if item in allowed]
 
 
 def _record_manifest_error(

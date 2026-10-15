@@ -1,0 +1,147 @@
+{
+  "build": {
+    "monorepo_budgets": {
+      "aggregate_max_output_tokens": 4096,
+      "aggregate_max_prompt_tokens": 24000,
+      "aggregate_max_total_tokens": 28096,
+      "max_components": 16,
+      "max_edge_evidence": 64,
+      "max_edges": 4096,
+      "max_metadata_manifests": 64,
+      "max_metadata_total_bytes": 1048576,
+      "max_total_model_calls": 8,
+      "max_unassigned_files": 256
+    }
+  },
+  "collaboration_manifest_count": 1,
+  "components": [
+    {
+      "built": true,
+      "component_id": "component:packages/core",
+      "digests": {
+        "profile_content_digest": "0bc10bc1d63987fc824ced3a20ba937c4dc20881c5aae0023fbb79145e6f82bf",
+        "ram_facts_digest": "3734a37ffb598f436ffa00d086e5188b6d7650ed063e5148a7ddbb39ceb32914",
+        "semantic_result_digest": "4e1d25585434bdb24198f054a729e00f2f61dcaaf2ae5b386f5bf08b2746d96e"
+      },
+      "is_empty": false,
+      "manifests": [
+        {
+          "manifest_kind": "pyproject",
+          "path": "packages/core/pyproject.toml",
+          "source": "source-inventory"
+        }
+      ],
+      "python_file_count": 2,
+      "root_dir": "packages/core",
+      "scan_summary": {
+        "dynamic_import_site_count": 0,
+        "manifest_parse_failure_count": 0,
+        "parse_error_file_count": 0,
+        "read_failure_file_count": 0,
+        "unknown_truncated_count": 0
+      },
+      "semantic_topn": {
+        "model_id": "unset",
+        "ranked_candidate_ids": [],
+        "top_n": 20
+      }
+    },
+    {
+      "built": true,
+      "component_id": "component:services/api",
+      "digests": {
+        "profile_content_digest": "df089e74ad3a289dc128bc9186693c8d301ed1e87550dc02f16e7a6c0a9bf6a3",
+        "ram_facts_digest": "3c2917e125484584759997a8c8ebae355c86738aa4e19bf2a141b992cb8a3c76",
+        "semantic_result_digest": "a6ff3763d4bcfa453784ff8d512ab1d3804444b1d41354304ee8229ccf0f5331"
+      },
+      "is_empty": false,
+      "manifests": [
+        {
+          "manifest_kind": "pyproject",
+          "path": "services/api/pyproject.toml",
+          "source": "source-inventory"
+        },
+        {
+          "manifest_kind": "requirements",
+          "path": "services/api/requirements.txt",
+          "source": "metadata-channel"
+        }
+      ],
+      "python_file_count": 1,
+      "root_dir": "services/api",
+      "scan_summary": {
+        "dynamic_import_site_count": 0,
+        "manifest_parse_failure_count": 0,
+        "parse_error_file_count": 0,
+        "read_failure_file_count": 0,
+        "unknown_truncated_count": 0
+      },
+      "semantic_topn": {
+        "model_id": "unset",
+        "ranked_candidate_ids": [],
+        "top_n": 20
+      }
+    }
+  ],
+  "coverage_gaps": [],
+  "dependencies_complete": true,
+  "edges": [
+    {
+      "evidence": [
+        {
+          "imported_name": "core",
+          "line": 2,
+          "path": "services/api/api.py"
+        }
+      ],
+      "imported_name": "core",
+      "source_component_id": "component:services/api",
+      "status": "resolved",
+      "target_component_id": "component:packages/core"
+    }
+  ],
+  "identity": {
+    "component_graph_digest": "7a3b89f9378bfcbb8d5819d2809541278dc87699dc3145a22e99996e15d664f0"
+  },
+  "manifests_discovered_count": 4,
+  "metadata_channel_skipped": {},
+  "metadata_manifest_count": 4,
+  "model_kind": "lima.component-graph",
+  "overflow_manifest_count": 0,
+  "provenance": {
+    "provenance_anchor_ids": [
+      "component-graph"
+    ]
+  },
+  "scan_summaries": [
+    {
+      "component_id": "component:packages/core",
+      "dynamic_import_site_count": 0,
+      "manifest_parse_failure_count": 0,
+      "parse_error_file_count": 0,
+      "read_failure_file_count": 0,
+      "unknown_truncated_count": 0
+    },
+    {
+      "component_id": "component:services/api",
+      "dynamic_import_site_count": 0,
+      "manifest_parse_failure_count": 0,
+      "parse_error_file_count": 0,
+      "read_failure_file_count": 0,
+      "unknown_truncated_count": 0
+    }
+  ],
+  "schema_version": "2.0",
+  "unassigned_file_count": 1,
+  "unassigned_files": [
+    "main.py"
+  ],
+  "unbuilt_components": [],
+  "unknown_imports": [
+    {
+      "count": 1,
+      "imported_name": "missing_zeta",
+      "source_component_id": "component:services/api"
+    }
+  ]
+}

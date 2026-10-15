@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lima.local/schemas/v4/lima.component-graph.json",
+  "title": "LIMA component graph (IP-0023)",
+  "description": "Independently versioned monorepo component-graph wire payload (Packet IP-0023 v5.1 section 5.5). Not registered in version_compatibility_matrix.json (BG-60-01).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_kind",
+    "components",
+    "edges",
+    "unknown_imports",
+    "unassigned_files",
+    "unassigned_file_count",
+    "scan_summaries",
+    "unbuilt_components",
+    "dependencies_complete",
+    "coverage_gaps",
+    "metadata_manifest_count",
+    "metadata_channel_skipped",
+    "manifests_discovered_count",
+    "collaboration_manifest_count",
+    "overflow_manifest_count",
+    "build",
+    "identity",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0"
+    },
+    "model_kind": {
+      "const": "lima.component-graph"
+    },
+    "components": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "component_id",
+          "root_dir",
+          "manifests",
+          "python_file_count",
+          "is_empty",
+          "built",
+          "digests",
+          "scan_summary",
+          "semantic_topn"
+        ],
+        "properties": {
+          "component_id": {
+            "type": "string",
+            "pattern": "^component:(\\.|[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*)$"
+          },
+          "root_dir": {
+            "type": "string",
+            "pattern": "^$|^[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*$"
+          },
+          "manifests": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "manifest_kind", "source"],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^/]+(/[^/]+)*$"
+                },
+                "manifest_kind": {
+                  "enum": [
+                    "pyproject",
+                    "setup_py",
+                    "setup_cfg",
+                    "requirements",
+                    "environment_yml",
+                    "package_json",
+                    "go_mod",
+                    "cargo_toml",
+                    "pom_xml"
+                  ]
+                },
+                "source": {
+                  "enum": ["source-inventory", "metadata-channel"]
+                }
+              }
+            }
+          },
+          "python_file_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "is_empty": {
+            "type": "boolean"
+          },
+          "built": {
+            "type": "boolean"
+          },
+          "digests": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "profile_content_digest",
+                  "ram_facts_digest",
+                  "semantic_result_digest"
+                ],
+                "properties": {
+                  "profile_content_digest": {
+                    "$ref": "#/$defs/hex64"
+                  },
+                  "ram_facts_digest": {
+                    "$ref": "#/$defs/hex64"
+                  },
+                  "semantic_result_digest": {
+                    "$ref": "#/$defs/hex64"
+                  }
+                }
+              }
+            ]
+          },
+          "scan_summary": {
+            "$ref": "#/$defs/scanCounts"
+          },
+          "semantic_topn": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["model_id", "top_n", "ranked_candidate_ids"],
+                "properties": {
+                  "model_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "top_n": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "ranked_candidate_ids": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_component_id",
+          "target_component_id",
+          "status",
+          "imported_name",
+          "evidence"
+        ],
+        "properties": {
+          "source_component_id": {
+            "type": "string",
+            "pattern": "^component:(\\.|[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*)$"
+          },
+          "target_component_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "pattern": "^component:(\\.|[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*)$"
+              }
+            ]
+          },
+          "status": {
+            "enum": ["resolved", "ambiguous", "unresolved"]
+          },
+          "imported_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line", "imported_name"],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^/]+(/[^/]+)*$"
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "imported_name": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "unknown_imports": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_component_id", "imported_name", "count"],
+        "properties": {
+          "source_component_id": {
+            "type": "string",
+            "pattern": "^component:(\\.|[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*)$"
+          },
+          "imported_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "unassigned_files": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^/]+(/[^/]+)*$"
+      }
+    },
+    "unassigned_file_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scan_summaries": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "component_id",
+          "parse_error_file_count",
+          "read_failure_file_count",
+          "dynamic_import_site_count",
+          "unknown_truncated_count",
+          "manifest_parse_failure_count"
+        ],
+        "properties": {
+          "component_id": {
+            "type": "string",
+            "pattern": "^component:(\\.|[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*)$"
+          },
+          "parse_error_file_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "read_failure_file_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dynamic_import_site_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unknown_truncated_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "manifest_parse_failure_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "unbuilt_components": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["component_id", "reason"],
+        "properties": {
+          "component_id": {
+            "type": "string",
+            "pattern": "^component:(\\.|[A-Za-z0-9._\\-]+(/[A-Za-z0-9._\\-]+)*)$"
+          },
+          "reason": {
+            "enum": ["cap-divergence", "view-unformable", "admission-refused"]
+          }
+        }
+      }
+    },
+    "dependencies_complete": {
+      "type": "boolean"
+    },
+    "coverage_gaps": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gap_code", "detail"],
+        "properties": {
+          "gap_code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "metadata_manifest_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "metadata_channel_skipped": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "enum": [
+          "ignored-directory",
+          "sensitive-filename",
+          "symlink",
+          "unreadable",
+          "non-utf8",
+          "metadata-manifest-limit",
+          "metadata-byte-limit"
+        ]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "manifests_discovered_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "collaboration_manifest_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "overflow_manifest_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["monorepo_budgets"],
+      "properties": {
+        "monorepo_budgets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_components",
+            "max_edges",
+            "max_edge_evidence",
+            "max_unassigned_files",
+            "max_total_model_calls",
+            "aggregate_max_prompt_tokens",
+            "aggregate_max_output_tokens",
+            "aggregate_max_total_tokens",
+            "max_metadata_manifests",
+            "max_metadata_total_bytes"
+          ],
+          "properties": {
+            "max_components": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "max_edges": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "max_edge_evidence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "max_unassigned_files": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "max_total_model_calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 512
+            },
+            "aggregate_max_prompt_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "aggregate_max_output_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "aggregate_max_total_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "max_metadata_manifests": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "max_metadata_total_bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_graph_digest"],
+      "properties": {
+        "component_graph_digest": {
+          "$ref": "#/$defs/hex64"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provenance_anchor_ids"],
+      "properties": {
+        "provenance_anchor_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "const": "component-graph"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scanCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parse_error_file_count",
+        "read_failure_file_count",
+        "dynamic_import_site_count",
+        "unknown_truncated_count",
+        "manifest_parse_failure_count"
+      ],
+      "properties": {
+        "parse_error_file_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "read_failure_file_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dynamic_import_site_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_truncated_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "manifest_parse_failure_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

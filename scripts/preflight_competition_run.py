@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE_ERROR
 
     try:
-        validate_output_placement(
+        output = validate_output_placement(
             arguments.output,
             repository_import_root=arguments.repository_import_root,
             case_path=arguments.case,
@@ -85,7 +85,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"configuration error: {exc}")
         return EXIT_USAGE_ERROR
 
-    output = pathlib.Path(arguments.output)
     if output.exists():
         print("configuration error: output_already_exists")
         return EXIT_USAGE_ERROR
@@ -95,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         repository_import_root=arguments.repository_import_root,
         check_sidecar=arguments.check_sidecar,
         analyzer_url=arguments.analyzer_url or "",
-        output_path=arguments.output,
+        output_path=str(output),
     )
     try:
         payload = run_competition_preflight(request)

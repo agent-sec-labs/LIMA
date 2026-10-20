@@ -150,7 +150,7 @@ def validate_output_placement(
     *,
     repository_import_root: str,
     case_path: str,
-) -> None:
+) -> Path:
     """Refuse outputs that would land inside the tested inputs (#328 P2-1).
 
     A report written below the import root would become an untracked
@@ -174,6 +174,7 @@ def validate_output_placement(
         raise ValueError("output_is_input")
     if _is_within(output, import_root):
         raise ValueError("output_inside_repository_import_root")
+    return output
 
 
 # ------------------------------------------------------------ input checks
@@ -492,7 +493,7 @@ def preflight_exit_code(payload: dict) -> int:
 def write_preflight_report(payload: dict, output_path: str | Path) -> Path:
     """Write the report once; an existing target is never overwritten."""
 
-    path = Path(output_path)
+    path = Path(output_path).expanduser().resolve()
     if path.exists():
         raise ValueError("output_already_exists")
     with open(path, "x", encoding="utf-8") as handle:

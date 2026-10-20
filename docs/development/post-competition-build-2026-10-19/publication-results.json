@@ -1,0 +1,79 @@
+[
+  {
+    "key": "EPIC",
+    "number": 321,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/321",
+    "title": "[赛后开发][Epic] 用户提交仓库到 Docker 构建、智能配方适配与 PoC 验证的自动闭环",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  },
+  {
+    "key": "B02",
+    "number": 322,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/322",
+    "title": "[赛后开发][B02] 构建配方注册、版本匹配与适用范围管理",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  },
+  {
+    "key": "B01",
+    "number": 323,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/323",
+    "title": "[赛后开发][B01] 持久化 Docker 构建任务 API 与独立构建 Worker",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  },
+  {
+    "key": "B03",
+    "number": 324,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/324",
+    "title": "[赛后开发][B03] 前端构建并分析入口、实时阶段和失败诊断",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  },
+  {
+    "key": "B04",
+    "number": 325,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/325",
+    "title": "[赛后开发][B04] CMake 构建规划智能体：生成配方与有限修正",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  },
+  {
+    "key": "B05",
+    "number": 326,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/326",
+    "title": "[赛后开发][B05] 构建任务产物自动交接到分析与 PoC 工作台",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  },
+  {
+    "key": "B06",
+    "number": 327,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/327",
+    "title": "[赛后开发][B06] 自动构建到 PoC 的冷启动、多仓库与故障验收",
+    "action": "created",
+    "labels": [
+      "phase:post-competition"
+    ],
+    "verified": true
+  }
+]

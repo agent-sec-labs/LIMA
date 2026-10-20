@@ -194,200 +194,18 @@ _UNTRUSTED_DATA_RULE: Final = (
 )
 
 
-def _platform_schema() -> str:
-    cwe_enum = "|".join(registry_cwe_display_order())
-    return (
-        'Return JSON only, exactly one JSON object with exactly these seven fields '
-        'and no unknown fields: {"target_id":"<the target_id from the context>",'
-        '"hypothesis":"...","trigger_path":["..."],'
-        f'"cwe":"{cwe_enum}",'
-        '"driver_code":"<complete C/C++ PoC driver source>",'
-        '"experiment_design":"...","unresolved_assumptions":["..."]}. '
-        "The driver_code must be a complete C or C++ translation unit with a "
-        "main() that exercises the hypothesized path against the provided target "
-        "sources and triggers the hypothesized bug class under AddressSanitizer. "
-        "Hard field bounds enforced on arrival (non-compliant replies are "
-        "rejected): hypothesis <= 2000 characters, experiment_design <= 1000 "
-        "characters, trigger_path and unresolved_assumptions at most 16 "
-        "entries of 300 characters each. State any link-closure plan as one "
-        "sentence; the stub code itself belongs in driver_code only. "
-        "Bind the hypothesis to the target_id from the context; never invent ids."
-    )
-
-
-_SPECIALIST_PLAYBOOK: Final = (
-    "Experiment-design playbook (generic trigger strategies; pick by "
-    "hypothesis class, never assume the answer):\n"
-    "- Error-path defects: under normal use memory allocation never fails, "
-    "so failure and cleanup paths stay cold. If the hypothesis lives on a "
-    "failure or cleanup path, inject the failure: where the library accepts "
-    "a custom memory suite, pass one that succeeds N times then fails, and "
-    "sweep N.\n"
-    "- Use-after-free: the defect must come from the LIBRARY's own "
-    "lifetime management inside API-contract-valid sequences -- an "
-    "error path frees state another path still uses, shared ownership "
-    "outlives its refcount, a callback touches a dead object. Trigger "
-    "it through the contract: allocation-failure injection, inputs "
-    "that steer the library to its own error/cleanup path, or forced "
-    "internal reuse. The driver itself must never free an object and "
-    "then call any API on the stale handle -- that pattern is the "
-    "driver's own UAF, hits BOTH revisions, and proves nothing.\n"
-    "- Double free: only via contract-valid sequences that make the "
-    "LIBRARY free the same resource twice (an error path and a cleanup "
-    "path both destroying a shared object, a retry loop re-entering "
-    "the destroy). Calling the public free/destroy twice on a handle "
-    "you already own is the driver's own double free.\n"
-    "- Out-of-bounds: feed boundary-exact input lengths (exact, off-by-one, "
-    "huge).\n"
-    "- Link closure: a correct driver can still fail to link when the "
-    "target unit calls functions the one compile command does not include. "
-    "On undefined-reference errors, embed no-op stubs for exactly the "
-    "missing out-of-snapshot symbols inside your driver (extern \"C\" "
-    "blocks for C APIs; for C++ copy each declaration verbatim from its "
-    "header) and keep the same main() design; describe the closure plan "
-    "in one sentence in experiment_design and put stub code only in "
-    "driver_code. Stubs may only replace "
-    "environment the hypothesis never traverses: never stub a function on "
-    "the hypothesized fault path or the allocator/lock machinery it "
-    "depends on, and remember no-op stubs shrink timing windows -- a race "
-    "that never fires under stubs proves nothing about the real system.\n"
-    "- Handle lifetime (battle r18): never free an object and then "
-    "call any API on the stale handle -- a crash inside library code "
-    "reached that way is a driver self-UAF from invalid usage, not a "
-    "target defect, and it counts as a hit on BOTH revisions. If the "
-    "hypothesis needs an API called on a live object, control-check "
-    "it on a live object and stop there.\n"
-    "- A clean run means the fault condition was never met; a driver that "
-    "only exercises normal use proves nothing about error paths."
+# Compatibility exports for existing consumers and frozen regression tests.
+from .specialist_knowledge import (
+    _SPECIALIST_CWE_RECIPES,
+    _SPECIALIST_PLAYBOOK,
+    _platform_schema,
+    _specialist_recipe_appendix,
+    _system_platform_specialist,
+    SpecialistPromptBundle,
+    build_specialist_prompt,
 )
 
 
-# CWE-keyed recipe layer (V02): concrete trigger combinations distilled
-# from real campaigns, on top of the generic playbook. Only CWEs with
-# battle evidence carry a recipe; every other CWE stays generic, and new
-# keys require a frozen-test update by design.
-_SPECIALIST_CWE_RECIPES: Final[dict[str, str]] = {
-    "CWE-416": (
-        "Recipe lineage A -- injected-allocator error paths (expat "
-        "campaign): when the fault lives on an allocation-failure or "
-        "cleanup path of a library that accepts a custom memory suite at "
-        "creation (e.g. *_MM-style constructors), create the object "
-        "through those hooks and make the suite deterministic: succeed "
-        "exactly N allocations, fail the N+1st, and sweep N run by run -- "
-        "the faulting cleanup fires at one specific allocation ordinal, "
-        "and one generic OOM injection rarely lands on it. Combine the "
-        "sweep with the feature gate the path needs (external entities, "
-        "shared DTD, ...): first verify the target's build configuration "
-        "actually enables that feature; if the define is absent the "
-        "fault is unreachable in that build and the experiment must say "
-        "so instead of adding the define itself. The failing allocation "
-        "must land inside the exact composition the bug needs, not "
-        "merely near it. For the expat shared-DTD lineage "
-        "(CVE-2022-43680 family) the official regression test composes: "
-        "a DOCTYPE with an external SYSTEM subset, "
-        "XML_SetParamEntityParsing(XML_PARAM_ENTITY_PARSING_ALWAYS) so "
-        "the subset is fetched, and an external-entity handler that "
-        "fires with context == NULL -- a NULL context is the legal, "
-        "required semantics here, because in XML_DTD builds a NULL "
-        "context is exactly what makes the child share the parent DTD "
-        "(newDtd = oldDtd); never dismiss a NULL context as calling "
-        "outside the real path -- what is outside the real path is "
-        "creating the child parser outside the handler flow. The "
-        "handler passes a NON-NULL encoding name (e.g. \"UTF-8\") so "
-        "the swept failing allocation lands on the encoding-name copy "
-        "in parserInit, after the DTD share is set; when "
-        "XML_ExternalEntityParserCreate fails partway, the half-built "
-        "child frees the shared DTD, and the parent is then reused "
-        "(XML_ParserReset) to touch it. Link closure for this lineage: "
-        "read the target snapshot's actual compile parameters first and "
-        "choose how to reference the sibling implementation units to "
-        "match them. In the r11 expat snapshot the compile database "
-        "added only -I_overlay -Iexpat/lib, and the verified approach "
-        "there was including the siblings by bare name inside "
-        "extern \"C\" -- #include \"xmltok.c\" and "
-        "#include \"xmlrole.c\" (they carry the real encoding tables "
-        "the parser calls -- never stub them) -- while repo-relative "
-        "and build-relative paths did not resolve. A different "
-        "snapshot may expose different include paths: do not assume "
-        "the r11 flags carry over. Give callback handlers the XMLCALL "
-        "calling convention. Discriminating-PoC rule: a broad ordinal "
-        "sweep is for EXPLORATION only; the driver the case replays "
-        "on both revisions must pin the single verified failure "
-        "ordinal -- the composition probe verified the pinned ordinal "
-        "triggers exactly the target defect on the vulnerable side "
-        "and runs clean on the fixed side, while a sweeping driver "
-        "has no such verified discrimination and its replay is "
-        "fragile on the fixed build (r17 failed the 3+3 replay on "
-        "driver-invalid usage; r18 failed at the fixed-side review on "
-        "a driver self-UAF before the replay even ran). For this "
-        "expat lineage, count "
-        "allocations from the child-create call inside the handler "
-        "(fresh counter, exactly like the official regression test) "
-        "and pin the failure to the verified ordinal -- the FOURTH "
-        "allocation from the create (allow three, fail the fourth); "
-        "the committed composition probe verified the vulnerable side "
-        "crashes exactly there while the fixed side stays clean. "
-        "Handler discipline (battle r17): reuse the parent only AFTER "
-        "the XML_Parse call returns -- NEVER reset or re-parse from "
-        "inside the external-entity handler: doProlog still holds "
-        "pointers into the DTD on the stack, the reset frees them "
-        "(including the open entity), and the returning parser code "
-        "then writes freed memory -- a driver-induced UAF that crashes "
-        "BOTH builds and is invalid API usage, not the target defect. "
-        "These specifics are the expat "
-        "recipe, not universal necessary conditions for every "
-        "shared-state parser bug.\n"
-        "Recipe lineage B -- lifetime-race timing hammer (dsoftbus/avrcp "
-        "battles): replicate the real caller's precondition sequence "
-        "verbatim (guards, lookups, state checks) before the vulnerable "
-        "call -- the race window usually sits between an earlier "
-        "validated lookup and a second lookup inside the callee. Then "
-        "hammer with two threads: one loops the use path (re-register, "
-        "timeout, callback), the other loops the removal path (disconnect "
-        "-> delete resource); use 10-shot bursts, and millions of "
-        "iterations for the control build. Judge by an ASan report "
-        "attributed to the target TU; an empty-log bare crash may be ASan "
-        "startup mmap noise and proves nothing."
-    ),
-    "CWE-476": (
-        "Recipe lineage -- TOCTOU second lookup (avrcp battle): when the "
-        "caller dereference-guards its own lookup but the callee performs "
-        "a second independent lookup before dereferencing, the null "
-        "window is exactly between the two: race the concurrent removal "
-        "(disconnect / map erase) into that window after the caller's own "
-        "guard has passed. Check the lookup helper's API contract first: "
-        "a by-value smart-pointer getter returning an empty value on "
-        "missing entries exposes both a null dereference and a "
-        "dangling-object race at the same site when the raw pointer is "
-        "stripped with .get()."
-    ),
-}
-
-
-def _specialist_recipe_appendix() -> str:
-    """Deterministic CWE-keyed recipe block in registry display order."""
-
-    lines = [
-        "CWE-keyed recipes (battle-tested lineages; the generic playbook "
-        "above still governs everything else):"
-    ]
-    for cwe in registry_cwe_display_order():
-        recipe = _SPECIALIST_CWE_RECIPES.get(cwe)
-        if recipe is not None:
-            lines.append(f"[{cwe}] {recipe}")
-    return "\n".join(lines)
-
-
-def _system_platform_specialist() -> str:
-    return (
-        f"You are the {SPECIALIST_ROLE} agent in the LIMA vulnerability platform. "
-        "Form one concrete vulnerability hypothesis for the target: state what is "
-        "wrong, the trigger path, the CWE class, and write the PoC driver for the "
-        f"reproduction workbench. {_SPECIALIST_PLAYBOOK} "
-        f"{_specialist_recipe_appendix()} "
-        f"{_UNTRUSTED_DATA_RULE} {_platform_schema()}"
-        + registry_prompt_addenda()
-    )
 _CRITIC_SCHEMA: Final = (
     'Return JSON only, exactly one JSON object with exactly these four fields '
     'and no unknown fields: {"target_id":"<the target_id from the context>",'
@@ -941,6 +759,7 @@ def _target_cache_fingerprints(
     mode: str,
     source_mode: str,
     dialogue_rounds: int,
+    specialist_prompt: SpecialistPromptBundle | None = None,
 ) -> tuple[str, ...]:
     """The full semantic input set of one target outcome (cache key)."""
 
@@ -958,7 +777,7 @@ def _target_cache_fingerprints(
         # after import); the prompt is a few KB so this is cheap.
         (
             "specialist-prompt-sha256="
-            f"{_prompt_digest(_system_platform_specialist())}"
+            f"{(specialist_prompt or build_specialist_prompt(profile='legacy')).sha256}"
         ),
         f"critic-prompt-sha256={_prompt_digest(_SYSTEM_PLATFORM_CRITIC)}",
         f"lead-id={target.lead_id}",
@@ -1835,6 +1654,7 @@ def _process_target(
     diagnostics: list[str],
     specialist_calls: list[int],
     critic_calls: list[int],
+    specialist_prompt: SpecialistPromptBundle | None = None,
 ) -> PlatformFinding:
     """Hypothesis -> experiment -> revision loop for one Scout target."""
 
@@ -1857,7 +1677,9 @@ def _process_target(
     if step_timeout is None:
         return _abstain_finding(target, "deadline-exceeded")
     hypothesis: Hypothesis = _platform_round(
-        resolved_llm, _system_platform_specialist(), base_context, step_timeout,
+        resolved_llm,
+        (specialist_prompt or build_specialist_prompt(profile="legacy")).text,
+        base_context, step_timeout,
         budget, specialist_calls, parse_hypothesis_reply, target_ids, deadline,
     )
 
@@ -2065,6 +1887,9 @@ def run_platform_review(
     should_cancel: Any = None,
     tool_analysis: Any = None,
     cache: ResultCache | None = None,
+    specialist_profile: str = "legacy",
+    specialist_mechanism_ids: tuple[str, ...] = (),
+    specialist_component_id: str | None = None,
 ) -> PlatformReviewOutcome:
     """Run one agent-first review over the leads (or facts-derived leads).
 
@@ -2095,6 +1920,10 @@ def run_platform_review(
         raise ValueError("mode must be off, auto or required")
     if source_mode not in SOURCE_MODES:
         raise ValueError("source_mode must be repository or diff-only")
+    specialist_prompt = build_specialist_prompt(
+        profile=specialist_profile, mechanism_ids=specialist_mechanism_ids,
+        component_id=specialist_component_id,
+    )
     if build_context_mode not in UAF_FACTS_BUILD_CONTEXT_MODES:
         raise ValueError("build_context_mode is outside the closed domain")
     _hex64(snapshot_hash, "snapshot_hash")
@@ -2306,6 +2135,7 @@ def run_platform_review(
             mode=mode,
             source_mode=source_mode,
             dialogue_rounds=dialogue_rounds,
+            specialist_prompt=specialist_prompt,
         ))
 
     def _review_target(
@@ -2365,6 +2195,7 @@ def run_platform_review(
                 diagnostics=worker_diagnostics,
                 specialist_calls=specialist_calls,
                 critic_calls=critic_calls,
+                specialist_prompt=specialist_prompt,
             )
         except AgentBudgetExceeded as exc:
             if mode == MODE_REQUIRED:

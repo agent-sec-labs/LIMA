@@ -485,7 +485,7 @@ class OrchestratorCachePromptInvalidationTests(unittest.TestCase):
     def test_same_prompt_same_key_recipe_change_new_key(self):
         # AC-1 (same prompt -> stable key) and AC-3 (recipe content
         # change -> changed key) at the fingerprint level.
-        import lima.agent_orchestrator as orchestrator
+        import lima.specialist_knowledge as orchestrator
 
         before = self._fingerprints()
         self.assertEqual(before, self._fingerprints())
@@ -503,7 +503,7 @@ class OrchestratorCachePromptInvalidationTests(unittest.TestCase):
         # miss and actually run the Specialist again. The first pass
         # fills the cache under a mutated (stand-in "old") recipe dict;
         # the second pass runs with the real recipes and must not replay.
-        import lima.agent_orchestrator as orchestrator
+        import lima.specialist_knowledge as orchestrator
 
         root = tempfile.mkdtemp(suffix="-agent-scale-prompt-cache")
         cache_dir = Path(root) / "scale-cache"

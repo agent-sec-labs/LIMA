@@ -358,6 +358,34 @@ class AnalyzerBoundaryTests(unittest.TestCase):
                 },
             )
 
+    def test_expired_cleanup_reclaims_request_tree_asynchronously(self):
+        from cxx_analyzer.snapshot import _make_tree_owner_writable
+
+        with tempfile.TemporaryDirectory() as temporary:
+            import_root, repository, work_root = self._repository(temporary)
+            (repository / "main.cpp").write_text(
+                "int main() { return 0; }\n", encoding="utf-8"
+            )
+            expected = RepositoryWorkspace(repository).inventory().fingerprint()
+            snapshot = prepare_snapshot(
+                import_root, "team/project", expected, work_root
+            )
+            request_root = snapshot.root.parent
+            try:
+                with self.assertRaises(AnalysisDeadlineExceeded):
+                    snapshot.cleanup(deadline=AnalysisDeadline(0.0))
+                for _ in range(100):
+                    if not request_root.exists():
+                        break
+                    time.sleep(0.01)
+                self.assertFalse(
+                    request_root.exists(),
+                    "expired cleanup left the request snapshot on the shared work disk",
+                )
+            finally:
+                _make_tree_owner_writable(request_root)
+                shutil.rmtree(request_root, ignore_errors=True)
+
     def test_prepare_snapshot_disables_semgrep_default_ignore_table(self):
         """阶段 B 强制跟进项：生产快照必须自带 .semgrepignore。
 

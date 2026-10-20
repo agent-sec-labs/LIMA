@@ -130,6 +130,37 @@ class TaskQueue:
         if not self._stop.is_set():
             self._executor.submit(self._deliver, envelope)
 
+    def _deliver_with_lease_heartbeat(
+        self, redis_id: str, envelope: Dict[str, Any]
+    ) -> bool:
+        """Keep a pending Redis message leased while its handler is running."""
+        finished = threading.Event()
+        interval = max(0.1, self.lease_seconds / 3)
+
+        def renew_lease() -> None:
+            while not finished.wait(interval):
+                try:
+                    # Claiming the already-owned message resets its pending idle time.
+                    self._redis.xclaim(
+                        self.stream, self.group, self.consumer,
+                        min_idle_time=0, message_ids=[redis_id],
+                    )
+                except Exception:
+                    # A transient heartbeat failure must not hide the handler result.
+                    continue
+
+        heartbeat = threading.Thread(
+            target=renew_lease,
+            name="lima-lease-heartbeat",
+            daemon=True,
+        )
+        heartbeat.start()
+        try:
+            return self._deliver(envelope)
+        finally:
+            finished.set()
+            heartbeat.join()
+
     def _redis_worker(self) -> None:
         while not self._stop.is_set():
             self._reclaim_stale()
@@ -149,7 +180,7 @@ class TaskQueue:
                         self._redis.xack(self.stream, self.group, redis_id)
                         continue
                     try:
-                        self._deliver(envelope)
+                        self._deliver_with_lease_heartbeat(redis_id, envelope)
                         # ACK only after work completed or was safely requeued/DLQed.
                         self._redis.xack(self.stream, self.group, redis_id)
                     except Exception:
@@ -165,7 +196,7 @@ class TaskQueue:
             entries = result[1] if len(result) > 1 else []
             for redis_id, fields in entries:
                 envelope = json.loads(fields["envelope"])
-                self._deliver(envelope)
+                self._deliver_with_lease_heartbeat(redis_id, envelope)
                 self._redis.xack(self.stream, self.group, redis_id)
         except Exception:
             # Redis versions without XAUTOCLAIM still process new entries.

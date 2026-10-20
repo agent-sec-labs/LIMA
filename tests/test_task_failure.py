@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import time
 import unittest
 import urllib.error
 
@@ -257,6 +258,46 @@ class QueueRetrySemanticsTests(unittest.TestCase):
                 _time.sleep(0.02)
             self.assertEqual(("first", 1), seen[0])
         finally:
+            queue_ref.close()
+
+    def test_redis_delivery_renews_lease_while_handler_is_running(self):
+        class RecordingRedis:
+            def __init__(self):
+                self.claims = []
+
+            def xclaim(self, stream, group, consumer, min_idle_time, message_ids):
+                self.claims.append(
+                    (stream, group, consumer, min_idle_time, tuple(message_ids))
+                )
+
+        redis = RecordingRedis()
+
+        def handler(_payload):
+            time.sleep(0.38)
+
+        queue_ref = TaskQueue(handler, workers=1, lease_seconds=0.3)
+        queue_ref._redis = redis
+        try:
+            delivered = queue_ref._deliver_with_lease_heartbeat(
+                "123-0",
+                {
+                    "message_id": "task-with-long-handler",
+                    "attempt": 0,
+                    "payload": {"task_id": "task-with-long-handler"},
+                    "submitted_at": time.time(),
+                },
+            )
+
+            self.assertTrue(delivered)
+            self.assertGreaterEqual(len(redis.claims), 2)
+            for stream, group, consumer, min_idle_time, message_ids in redis.claims:
+                self.assertEqual(queue_ref.stream, stream)
+                self.assertEqual(queue_ref.group, group)
+                self.assertEqual(queue_ref.consumer, consumer)
+                self.assertEqual(0, min_idle_time)
+                self.assertEqual(("123-0",), message_ids)
+        finally:
+            queue_ref._redis = None
             queue_ref.close()
 
 

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scope": "report-materials-check",
+  "case_label": "synthetic-example-314",
+  "findings": [
+    {
+      "finding_id": "synthetic-001",
+      "field_refs": {
+        "source_excerpt": "synthetic/body.txt",
+        "description_and_cwe": "synthetic/body.txt",
+        "trigger_and_path": "synthetic/body.txt",
+        "poc_source": "synthetic/poc.txt",
+        "reproduction_instructions": "synthetic/body.txt",
+        "impact_modules_and_versions": "synthetic/body.txt",
+        "remediation": "synthetic/body.txt",
+        "maintainer_review": "synthetic/review.txt"
+      },
+      "cve_status": "not-assessed"
+    }
+  ]
+}

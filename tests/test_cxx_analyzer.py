@@ -83,7 +83,7 @@ def _dockerfile_instructions(dockerfile: str) -> list[tuple[str, str]]:
 def _validate_sidecar_dockerfile_contract(dockerfile: str) -> None:
     instructions = _dockerfile_instructions(dockerfile)
     pinned_image = (
-        "public.ecr.aws/docker/library/python:3.11-slim@sha256:"
+        "docker.io/library/python:3.11-slim@sha256:"
         "b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250"
     )
     expected_first = ("FROM", f"{pinned_image} AS base")

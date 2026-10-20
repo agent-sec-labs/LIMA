@@ -81,7 +81,7 @@ Scout 分诊 → Specialist 假设与 PoC → 沙箱 ASan 实验 → Critic 修�
 verified-only 门禁、降级链和无标签评测见
 [C/C++ 智能体检测说明](docs/AGENT_VULN_PLATFORM.md)。
 
-主应用 `Dockerfile` 默认从 Docker Hub 官方仓库拉取 Python（`docker.io/library/python`）和构建期 Node（`docker.io/library/node`）基镜像，并锁定 manifest digest。C/C++ Sidecar 的 Python 基镜像，以及 Compose 中的 PostgreSQL、Redis 镜像仍从 AWS Public ECR 拉取，也各自锁定 digest；完整部署需要能访问这两个镜像源。
+主应用 `Dockerfile` 默认从 Docker Hub 官方仓库拉取 Python（`docker.io/library/python`）和构建期 Node（`docker.io/library/node`）基镜像，C/C++ Sidecar 的 Python 基镜像也使用 Docker Hub 官方仓库，均锁定 manifest digest。Compose 中的 PostgreSQL、Redis 镜像仍从 AWS Public ECR 拉取，也各自锁定 digest；完整部署需要能访问这两个镜像源。
 
 如默认源出现限流或网络连接问题，可在构建主应用时通过 `--build-arg PYTHON_BASE_IMAGE=<镜像引用>` 和 `--build-arg NODE_BASE_IMAGE=<镜像引用>` 显式覆盖来源。例如，使用 ECR 上相同 digest 的官方镜像：
 

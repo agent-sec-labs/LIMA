@@ -1,0 +1,10 @@
+# Historical compatibility filename. The canonical Dockerfile now includes
+# all full-build dependencies. New runs use LIMA --project resinsight.
+ARG BASE_IMAGE=lima-builder-resinsight:latest
+FROM ${BASE_IMAGE}
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+        qt6-svg-dev qt6-networkauth-dev qt6-base-private-dev \
+        pkg-config autoconf automake libtool bison flex \
+        libglu1-mesa-dev libxkbcommon-x11-dev xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

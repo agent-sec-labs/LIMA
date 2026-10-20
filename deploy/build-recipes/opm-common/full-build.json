@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "opm-common-full-build-v1",
+  "image": "lima-builder-opm-common:local",
+  "configure": [["cmake", "-S", "/work/src", "-B", "/work/build", "-G", "Ninja",
+    "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    "-DCMAKE_INSTALL_PREFIX=/work/install", "-DBUILD_TESTING=ON",
+    "-DSIBLING_SEARCH=OFF", "-DOPM_ENABLE_DUNE=OFF", "-DUSE_MPI=OFF",
+    "-DOPM_ENABLE_PYTHON=OFF", "-DOPM_INSTALL_PYTHON=OFF",
+    "-DCMAKE_DISABLE_FIND_PACKAGE_fmt=ON"]],
+  "build": [["cmake", "--build", "/work/build", "--parallel", "{jobs}"]],
+  "test": [["ctest", "--test-dir", "/work/build", "--output-on-failure", "--no-tests=error",
+    "--parallel", "{jobs}", "--timeout", "300", "--output-junit", "/output/ctest-results.xml"]],
+  "install": [["cmake", "--install", "/work/build"]]
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "name": "resinsight-full-build-v1",
+  "image": "lima-builder-resinsight:full-build",
+  "environment": {
+    "VCPKG_DISABLE_METRICS": "1",
+    "VCPKG_MAX_CONCURRENCY": "{jobs}",
+    "VCPKG_BINARY_SOURCES": "clear;files,/work/vcpkg-cache,readwrite",
+    "VCPKG_DOWNLOADS": "/work/downloads",
+    "CC": "gcc",
+    "CXX": "g++",
+    "QT_PLUGIN_PATH": "/usr/lib/x86_64-linux-gnu/qt6/plugins",
+    "QT_QPA_PLATFORM": "offscreen",
+    "GTEST_OUTPUT": "xml:/output/tests/application.xml"
+  },
+  "setup": [
+    ["python3", "-c", "from pathlib import Path; [Path(p).mkdir(parents=True, exist_ok=True) for p in ['/work/downloads', '/work/vcpkg-cache', '/output/tests']]"],
+    ["python3", "-c", "import subprocess; from pathlib import Path; p=Path('/work/src/ThirdParty/vcpkg'); subprocess.run(['bash',str(p/'bootstrap-vcpkg.sh'),'-disableMetrics'],check=True) if not (p/'vcpkg').is_file() else None"]
+  ],
+  "configure": [[
+    "cmake", "-S", "/work/src", "-B", "/work/build", "-G", "Ninja",
+    "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    "-DCMAKE_INSTALL_PREFIX=/work/install",
+    "-DCMAKE_TOOLCHAIN_FILE=/work/src/ThirdParty/vcpkg/scripts/buildsystems/vcpkg.cmake",
+    "-DVCPKG_TARGET_TRIPLET=x64-linux-release", "-DVCPKG_HOST_TRIPLET=x64-linux-release",
+    "-DRESINSIGHT_ENABLE_GRPC=OFF", "-DRESINSIGHT_ENABLE_OPENVDS=OFF",
+    "-DRESINSIGHT_ENABLE_HDF5=OFF", "-DRESINSIGHT_DOWNLOAD_ODB_FROM_SERVER=OFF",
+    "-DRESINSIGHT_USE_EXTERNAL_OCTAVE_PLUGINS=OFF", "-DRESINSIGHT_BUILD_DOCUMENTATION=OFF",
+    "-DRESINSIGHT_ENABLE_UNITY_BUILD=OFF", "-DRESINSIGHT_ENABLE_PRECOMPILED_HEADERS=OFF",
+    "-DRESINSIGHT_UPDATE_SUBMODULES=OFF", "-DRESINSIGHT_INCLUDE_APPLICATION_UNIT_TESTS=ON",
+    "-DRESINSIGHT_TREAT_WARNINGS_AS_ERRORS=OFF"
+  ]],
+  "build": [["cmake", "--build", "/work/build", "--parallel", "{jobs}"]],
+  "test": [
+    ["ctest", "--test-dir", "/work/build/ApplicationLibCode/UnitTests", "--output-on-failure", "--no-tests=error", "--timeout", "600", "--output-junit", "/output/ctest-results.xml"],
+    ["/work/build/roffcpp-tests", "--gtest_output=xml:/output/tests/roffcpp.xml"],
+    ["/work/build/regression-analysis-tests", "--gtest_output=xml:/output/tests/regression-analysis.xml"],
+    ["/work/build/opm-parser-tests", "--gtest_output=xml:/output/tests/opm-parser.xml"],
+    ["/work/build/openzgy-tests", "--gtest_output=xml:/output/tests/openzgy.xml"]
+  ],
+  "test_reports": [
+    "tests/application.xml", "tests/roffcpp.xml", "tests/regression-analysis.xml",
+    "tests/opm-parser.xml", "tests/openzgy.xml"
+  ],
+  "install": [["cmake", "--install", "/work/build"]],
+  "verify": [
+    ["/work/install/bin/ResInsight", "--console", "--version"],
+    ["python3", "-c", "import subprocess; r=subprocess.run(['ldd','/work/install/bin/ResInsight'],capture_output=True,text=True,check=True); print(r.stdout); assert 'not found' not in r.stdout, 'Unresolved dynamic libraries'"]
+  ]
+}

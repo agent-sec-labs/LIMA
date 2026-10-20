@@ -22,6 +22,7 @@ try:  # preflight contract (RED until lima.competition_preflight lands)
         preflight_exit_code,
         run_competition_preflight,
         validate_analyzer_url,
+        validate_output_placement,
     )
 except ImportError:  # pragma: no cover - RED phase
     run_competition_preflight = None
@@ -375,6 +376,9 @@ class PreflightCheckoutTests(unittest.TestCase):
         manifest = _check(payload, "case-manifest")
         self.assertEqual(manifest["status"], "fail")
         self.assertEqual(manifest["reason_code"], "manifest-invalid")
+        self.assertEqual(
+            manifest["detail"], "case manifest is not valid JSON",
+        )
         checkouts = _check(payload, "checkouts")
         self.assertEqual(checkouts["status"], "not-requested")
         self.assertEqual(checkouts["reason_code"], "skipped-upstream-failed")
@@ -386,9 +390,9 @@ class PreflightCheckoutTests(unittest.TestCase):
             case_path=str(self.fixture.root / "absent.json"),
             environ=dict(MODEL_ENV),
         )
-        self.assertEqual(
-            _check(payload, "case-manifest")["reason_code"], "manifest-invalid",
-        )
+        record = _check(payload, "case-manifest")
+        self.assertEqual(record["reason_code"], "manifest-invalid")
+        self.assertEqual(record["detail"], "case manifest unreadable")
         self.assertEqual(preflight_exit_code(payload), 2)
 
     def test_import_root_unavailable_stops_checkouts(self):
@@ -410,11 +414,29 @@ class PreflightCheckoutTests(unittest.TestCase):
         record = _check(payload, "model-config")
         self.assertEqual(record["status"], "fail")
         self.assertEqual(record["reason_code"], "model-config-missing")
-        for name in ("provider_url", "model", "api_key"):
-            self.assertIn(name, record["detail"])
+        self.assertEqual(
+            record["detail"], "missing required items: model, provider_url",
+        )
         self.assertNotIn("unavailable", record["reason_code"])
         self.assertNotIn("unavailable", record["detail"])
         self.assertEqual(preflight_exit_code(payload), 2)
+
+    def test_no_key_local_service_config_passes(self):
+        # Review #328 (P2-3): the run entry accepts an empty API key
+        # for local endpoints, so the key is recorded but not required.
+        local_env = {
+            "LIMA_LLM_BASE_URL": "http://127.0.0.1:8000/v1",
+            "LIMA_CXX_AGENT_MODEL": "local-model",
+        }
+        payload = self._run(environ=local_env)
+        record = _check(payload, "model-config")
+        self.assertEqual(record["status"], "pass")
+        self.assertIn("api_key=absent", record["detail"])
+        self.assertIn(
+            "api_key=absent", " ".join(payload["diagnostics"]),
+        )
+        self.assertTrue(payload["prerequisites_passed"])
+        self.assertEqual(preflight_exit_code(payload), 0)
 
     def test_model_config_present_does_not_claim_auth_valid(self):
         payload = self._run(environ=dict(MODEL_ENV))
@@ -429,19 +451,38 @@ class PreflightCheckoutTests(unittest.TestCase):
             json.dumps(payload, ensure_ascii=False),
         )
 
-    def test_sensitive_exception_text_is_scrubbed(self):
-        secret = "sk-supersecret112233"  # noqa: S105 - synthetic token
+    def test_sensitive_input_never_reaches_the_report(self):
+        # Review #328 (P2-2): the loader echoes raw manifest values in
+        # its exception text (here the repr of an unsafe path), and a
+        # mocked loader may raise arbitrary text; neither may reach the
+        # report -- failure location is a fixed triage string instead.
+        secret = "topsecret-token-998877"  # noqa: S105 - synthetic token
+        payload = json.loads(json.dumps(self.fixture.case_payload()))
+        payload["translation_units"] = [f"C:\\{secret}"]
+        poisoned = self.fixture.root / "poisoned.json"
+        poisoned.write_text(json.dumps(payload), encoding="utf-8")
+        result = run_competition_preflight(
+            self.fixture.request(case_path=str(poisoned)),
+            environ=dict(MODEL_ENV),
+        )
+        record = _check(result, "case-manifest")
+        self.assertEqual(record["status"], "fail")
+        self.assertEqual(record["reason_code"], "manifest-invalid")
+        self.assertEqual(
+            record["detail"], "case manifest violates the frozen schema",
+        )
+        self.assertNotIn(secret, json.dumps(result, ensure_ascii=False))
+
+        api_secret = "sk-supersecret112233"  # noqa: S105 - synthetic token
         with patch(
             "lima.openharmony_validation.load_openharmony_case",
-            Mock(side_effect=ValueError(f"cannot read case: {secret}")),
+            Mock(side_effect=ValueError(f"boom {api_secret}")),
         ):
-            payload = self._run()
-        record = _check(payload, "case-manifest")
-        self.assertEqual(record["reason_code"], "manifest-invalid")
-        self.assertIn("sk-***", record["detail"])
+            mocked = self._run()
         self.assertNotIn(
-            secret, json.dumps(payload, ensure_ascii=False),
+            api_secret, json.dumps(mocked, ensure_ascii=False),
         )
+        self.assertNotIn("boom", json.dumps(mocked, ensure_ascii=False))
 
     def test_existing_validators_are_reused_with_their_interfaces(self):
         captured = {}
@@ -477,7 +518,9 @@ class PreflightCheckoutTests(unittest.TestCase):
         record = _check(payload, "checkouts")
         self.assertEqual(record["status"], "fail")
         self.assertEqual(record["reason_code"], "head-mismatch")
-        self.assertIn("drift", record["detail"])
+        # The validator's detail text can embed input values; only the
+        # stable reason category is projected, never the detail.
+        self.assertEqual(record["detail"], "")
 
     def test_no_model_or_platform_run_calls(self):
         with patch(
@@ -517,6 +560,31 @@ class PreflightCheckoutTests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(case_path.read_bytes()).hexdigest(), case_digest,
         )
+
+    def test_output_inside_import_root_is_rejected_before_checks(self):
+        # Review #328 (P2-1): a report written below the import root
+        # would become an untracked file and fail the next preflight of
+        # the same checkout; the guard fires before anything runs.
+        case_path = self.fixture.write_case()
+        for bad in (
+            self.fixture.import_root / "report.json",
+            self.fixture.import_root / "sample-vuln" / "report.json",
+            case_path,
+        ):
+            request = PreflightRequest(
+                case_path=str(case_path),
+                repository_import_root=str(self.fixture.import_root),
+                output_path=str(bad),
+            )
+            with self.assertRaises(ValueError, msg=str(bad)):
+                run_competition_preflight(request, environ=dict(MODEL_ENV))
+        distinct = PreflightRequest(
+            case_path=str(case_path),
+            repository_import_root=str(self.fixture.import_root),
+            output_path=str(self.fixture.root / "reports" / "report.json"),
+        )
+        payload = run_competition_preflight(distinct, environ=dict(MODEL_ENV))
+        self.assertEqual(preflight_exit_code(payload), 0)
 
 
 class SidecarProbeTests(unittest.TestCase):
@@ -722,6 +790,85 @@ class PreflightCliTests(unittest.TestCase):
         ], env_extra=MODEL_ENV)
         self.assertEqual(completed.returncode, 3, completed.stderr)
         self.assertFalse(self.output_path.exists())
+
+    def test_output_inside_import_root_rejected_and_inputs_stay_clean(self):
+        # Review #328 (P2-1) repro: the rejected run must leave the
+        # checkout pristine, so a follow-up with a proper output path
+        # still passes instead of failing on an untracked report.
+        inside = self.fixture.import_root / "sample-vuln" / "report.json"
+        rejected = run_cli([
+            "--case", str(self.case_path),
+            "--repository-import-root", str(self.fixture.import_root),
+            "--output", str(inside),
+        ], env_extra=MODEL_ENV)
+        self.assertEqual(rejected.returncode, 3, rejected.stderr)
+        self.assertFalse(inside.exists())
+        clean_run = run_cli([
+            "--case", str(self.case_path),
+            "--repository-import-root", str(self.fixture.import_root),
+            "--output", str(self.output_path),
+        ], env_extra=MODEL_ENV)
+        self.assertEqual(clean_run.returncode, 0, clean_run.stderr)
+        self.assertTrue(self.output_path.exists())
+
+    def test_unknown_argument_value_is_never_echoed(self):
+        # Review #328 (P2-2): argparse echoes unrecognized arguments
+        # (including a mistyped secret) to stderr; the echo is
+        # suppressed and replaced by a fixed message.
+        secret = "sk-toppsecret424242"  # noqa: S105 - synthetic token
+        completed = run_cli([
+            "--case", str(self.case_path),
+            "--repository-import-root", str(self.fixture.import_root),
+            "--output", str(self.output_path),
+            f"--api-key={secret}",
+        ], env_extra=MODEL_ENV)
+        self.assertEqual(completed.returncode, 3)
+        self.assertNotIn(secret, completed.stdout)
+        self.assertNotIn(secret, completed.stderr)
+        self.assertFalse(self.output_path.exists())
+
+
+@unittest.skipUnless(run_competition_preflight, "module not implemented yet")
+@unittest.skipIf(
+    sys.platform != "win32",
+    "Windows ADS streams and device aliases",
+)
+class WindowsOutputPlacementTests(unittest.TestCase):
+    """Review #328 (P2-1): ADS and device-alias outputs on Windows."""
+
+    def setUp(self):
+        if run_competition_preflight is None:
+            self.fail("lima.competition_preflight not implemented yet")
+        self.fixture = PreflightFixture()
+        self.addCleanup(shutil.rmtree, self.fixture.root, ignore_errors=True)
+        self.case_path = self.fixture.write_case()
+
+    def test_ads_onto_manifest_rejected_without_touching_it(self):
+        before = self.case_path.read_bytes()
+        ads_output = f"{self.case_path}:report.json"
+        completed = run_cli([
+            "--case", str(self.case_path),
+            "--repository-import-root", str(self.fixture.import_root),
+            "--output", ads_output,
+        ], env_extra=MODEL_ENV)
+        self.assertEqual(completed.returncode, 3, completed.stderr)
+        self.assertFalse(Path(ads_output).exists())
+        self.assertEqual(self.case_path.read_bytes(), before)
+
+    def test_device_and_alias_component_names_rejected(self):
+        reports = self.fixture.root / "reports"
+        reports.mkdir()
+        rejected = [
+            "NUL", "CON", "com3.txt", "report.json.", " report.json",
+            "CONIN$", "report.json:$DATA",
+        ]
+        for name in rejected:
+            with self.assertRaises(ValueError, msg=name):
+                validate_output_placement(
+                    reports / name,
+                    repository_import_root=str(self.fixture.import_root),
+                    case_path=str(self.case_path),
+                )
 
 
 if __name__ == "__main__":

@@ -8,14 +8,22 @@ validators in :mod:`lima.openharmony_validation`; this module only
 orchestrates them and projects their results onto a stable JSON v1
 report.  Nothing here fetches, checks out, builds or executes target
 code, and no model or auth request is ever sent.
+
+Diagnostic policy (review #328): reports and stdout carry fixed
+reason codes and fixed detail strings only.  Loader and validator
+exception text is never echoed, because manifest content and other
+operator input can carry secret sentinels; the manifest failure
+location is narrowed with a controlled, non-echoing triage instead.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import ntpath
 import os
 import re
+import unicodedata
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -52,9 +60,24 @@ READ_ONLY_NOTE: Final = (
     "read-only preflight: git identify/diff queries only; no fetch, "
     "checkout, build, target execution or model call"
 )
+UNEXPECTED_FAILURE_DETAIL: Final = (
+    "unexpected failure; raw diagnostics are never echoed"
+)
 
-_SECRET_RE: Final = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
-_MAX_DETAIL_CHARS: Final = 200
+# The run entry (scripts/run_openharmony_validation.py) requires the
+# provider URL and model, but accepts an empty API key for local
+# endpoints; the preflight records the key's presence without gating
+# on it (review #328, P2-3).
+MODEL_CONFIG_REQUIRED: Final = ("provider_url", "model")
+
+_MAX_MANIFEST_TRIAGE_BYTES: Final = 256 * 1024  # the loader's cap
+
+_WINDOWS_DEVICE_RE: Final = re.compile(
+    r"(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\..*)?\Z",
+    re.IGNORECASE,
+)
+_WINDOWS_FORBIDDEN_CHARS: Final = ':<>"|?*'
+_WINDOWS_RESERVED_STREAMS: Final = frozenset({"CONIN$", "CONOUT$"})
 
 
 @dataclass(frozen=True)
@@ -65,11 +88,7 @@ class PreflightRequest:
     repository_import_root: str
     check_sidecar: bool = False
     analyzer_url: str = ""
-
-
-def _safe_detail(text: object, limit: int = _MAX_DETAIL_CHARS) -> str:
-    scrubbed = _SECRET_RE.sub("sk-***", str(text))
-    return " ".join(scrubbed.split())[:limit]
+    output_path: str = ""
 
 
 def _record(
@@ -78,13 +97,86 @@ def _record(
     reason_code: str = "",
     detail: str = "",
 ) -> dict:
+    # ``detail`` must always be a fixed, non-input string; callers
+    # never pass exception or manifest text here.
     return {
         "name": name,
         "status": status,
         "reason_code": reason_code,
-        "detail": _safe_detail(detail),
+        "detail": detail,
     }
 
+
+# ---------------------------------------------------------- output guard
+
+def _validate_windows_output_components(raw: str) -> None:
+    """Reject device/stream aliases before Win32 normalization hides them.
+
+    Component rules mirror ``lima.competition_report_materials``: a
+    colon beyond the drive letter is an NTFS alternate data stream, and
+    DOS device names (with extensions and case variants), CONIN$/CONOUT$,
+    trailing dots/spaces and control characters are all refused.
+    """
+
+    drive, tail = ntpath.splitdrive(raw)
+    if drive and re.fullmatch(r"[A-Za-z]:", drive) is None:
+        raise ValueError("invalid_output_path")
+    for component in re.split(r"[\\/]", tail):
+        if component in ("", ".", ".."):
+            continue
+        stem = component.split(".", 1)[0].strip(" ")
+        if (
+            component.startswith(" ")
+            or component.endswith((" ", "."))
+            or any(
+                character in _WINDOWS_FORBIDDEN_CHARS
+                or unicodedata.category(character) in ("Cc", "Cf", "Cs")
+                for character in component
+            )
+            or _WINDOWS_DEVICE_RE.fullmatch(stem) is not None
+            or stem.upper() in _WINDOWS_RESERVED_STREAMS
+        ):
+            raise ValueError("invalid_output_path")
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    child = os.path.normcase(str(candidate))
+    parent = os.path.normcase(str(root))
+    return child == parent or child.startswith(parent + os.sep)
+
+
+def validate_output_placement(
+    output_path: str | Path,
+    *,
+    repository_import_root: str,
+    case_path: str,
+) -> None:
+    """Refuse outputs that would land inside the tested inputs (#328 P2-1).
+
+    A report written below the import root would become an untracked
+    file and fail the next preflight of the same checkout; on Windows,
+    an ADS-style path could attach a stream to the case manifest.  The
+    guard fires before any check runs, so no report is ever written.
+    """
+
+    raw = os.fspath(output_path)
+    if os.name == "nt":
+        _validate_windows_output_components(raw)
+    try:
+        output = Path(raw).expanduser().resolve()
+        import_root = (
+            Path(repository_import_root).expanduser().resolve()
+        )
+        case = Path(case_path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("invalid_output_path") from exc
+    if output == case:
+        raise ValueError("output_is_input")
+    if _is_within(output, import_root):
+        raise ValueError("output_inside_repository_import_root")
+
+
+# ------------------------------------------------------------ input checks
 
 def validate_analyzer_url(url: str) -> str:
     """Accept one plain http(s) origin; refuse everything else.
@@ -171,6 +263,41 @@ def _model_config_presence(environ: Mapping[str, str]) -> dict[str, bool]:
     }
 
 
+def _presence_items(presence: Mapping[str, bool]) -> str:
+    return " ".join(
+        f"{name}={'present' if provided else 'absent'}"
+        for name, provided in presence.items()
+    )
+
+
+def _manifest_failure_bucket(path: str) -> str:
+    """Narrow a manifest failure with controlled, non-echoing triage.
+
+    The loader's exception text can embed raw manifest values, so the
+    failure location is re-derived here from exception kinds alone and
+    reported as one of four fixed strings.
+    """
+
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_MAX_MANIFEST_TRIAGE_BYTES + 1)
+    except OSError:
+        return "case manifest unreadable"
+    if not raw:
+        return "case manifest unreadable"
+    if len(raw) > _MAX_MANIFEST_TRIAGE_BYTES:
+        return "case manifest exceeds the size limit"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "case manifest is not UTF-8"
+    try:
+        json.loads(text)
+    except ValueError:
+        return "case manifest is not valid JSON"
+    return "case manifest violates the frozen schema"
+
+
 def _default_analyzer_client_factory(
     base_url: str, timeout_seconds: int, max_response_bytes: int,
 ):
@@ -213,7 +340,8 @@ def run_competition_preflight(
 ) -> dict:
     """Run every applicable check and return the JSON v1 payload.
 
-    Raises :class:`ValueError` for operator-input problems (malformed
+    Raises :class:`ValueError` with a fixed reason code for
+    operator-input problems (unsafe output placement, malformed
     analyzer URL, unusable budget environment) so callers can map them
     to the usage-error exit code before any report is written.
     """
@@ -223,6 +351,12 @@ def run_competition_preflight(
         analyzer_client_factory or _default_analyzer_client_factory
     )
 
+    if request.output_path:
+        validate_output_placement(
+            request.output_path,
+            repository_import_root=request.repository_import_root,
+            case_path=request.case_path,
+        )
     sidecar_url = (
         _effective_analyzer_url(request.analyzer_url, environment)
         if request.check_sidecar
@@ -239,14 +373,15 @@ def run_competition_preflight(
             request.case_path,
         )
         checks.append(_record(CHECK_CASE_MANIFEST, STATUS_PASS))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError):
         checks.append(_record(
             CHECK_CASE_MANIFEST, STATUS_FAIL, "manifest-invalid",
-            str(exc),
+            _manifest_failure_bucket(request.case_path),
         ))
-    except Exception as exc:  # contained: scrubbed and bounded below
+    except Exception:  # contained: fixed detail, nothing echoed
         checks.append(_record(
-            CHECK_CASE_MANIFEST, STATUS_FAIL, "check-error", str(exc),
+            CHECK_CASE_MANIFEST, STATUS_FAIL, "check-error",
+            UNEXPECTED_FAILURE_DETAIL,
         ))
 
     policy = RepositoryImportPolicy(str(request.repository_import_root))
@@ -270,37 +405,32 @@ def run_competition_preflight(
             )
             checks.append(_record(CHECK_CHECKOUTS, STATUS_PASS))
         except CheckoutPreflightError as exc:
+            # The stable reason category is the contract; the error's
+            # detail text can embed input values and is not echoed.
             checks.append(_record(
                 CHECK_CHECKOUTS, STATUS_FAIL, exc.reason,
-                exc.detail or str(exc),
             ))
-        except Exception as exc:  # contained: scrubbed and bounded below
+        except Exception:  # contained: fixed detail, nothing echoed
             checks.append(_record(
-                CHECK_CHECKOUTS, STATUS_FAIL, "check-error", str(exc),
+                CHECK_CHECKOUTS, STATUS_FAIL, "check-error",
+                UNEXPECTED_FAILURE_DETAIL,
             ))
 
     presence = _model_config_presence(environment)
     missing = sorted(
-        name for name, provided in presence.items() if not provided
+        name for name in MODEL_CONFIG_REQUIRED if not presence[name]
     )
     if missing:
         checks.append(_record(
             CHECK_MODEL_CONFIG, STATUS_FAIL, "model-config-missing",
-            "missing: " + ", ".join(missing),
+            "missing required items: " + ", ".join(missing),
         ))
     else:
         checks.append(_record(
             CHECK_MODEL_CONFIG, STATUS_PASS, "",
-            "provider_url=present model=present api_key=present;"
-            " authentication not verified",
+            f"{_presence_items(presence)}; authentication not verified",
         ))
-    diagnostics.append(
-        "model-config: "
-        + " ".join(
-            f"{name}={'present' if provided else 'absent'}"
-            for name, provided in presence.items()
-        )
-    )
+    diagnostics.append(f"model-config: {_presence_items(presence)}")
 
     if not request.check_sidecar:
         checks.append(_record(
@@ -317,9 +447,10 @@ def run_competition_preflight(
             checks.append(_record(
                 CHECK_SIDECAR_HEALTH, STATUS_FAIL, "sidecar-protocol-error",
             ))
-        except Exception as exc:  # contained: scrubbed and bounded below
+        except Exception:  # contained: fixed detail, nothing echoed
             checks.append(_record(
-                CHECK_SIDECAR_HEALTH, STATUS_FAIL, "check-error", str(exc),
+                CHECK_SIDECAR_HEALTH, STATUS_FAIL, "check-error",
+                UNEXPECTED_FAILURE_DETAIL,
             ))
         else:
             checks.append(_record(
@@ -363,9 +494,7 @@ def write_preflight_report(payload: dict, output_path: str | Path) -> Path:
 
     path = Path(output_path)
     if path.exists():
-        raise ValueError(
-            f"output path already exists, refusing to overwrite: {path}"
-        )
+        raise ValueError("output_already_exists")
     with open(path, "x", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")

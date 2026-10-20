@@ -1,17 +1,24 @@
 """Competition run preflight command (#311).
 
-A thin read-only CLI: it parses arguments, refuses to overwrite the
-output path, then delegates every check to
+A thin read-only CLI: it parses arguments, refuses unsafe or existing
+output paths, then delegates every check to
 ``lima.competition_preflight`` and prints the summary derived from the
 same JSON payload it writes.  Exit codes: 0 = every requested
 prerequisite check passed, 2 = prerequisites not met, 3 = usage or
 output error.  No model, auth or Sidecar request is made unless
 ``--check-sidecar`` is passed, and no target code ever runs.
+
+Error text policy (review #328): usage and output failures print fixed
+reason codes only -- never raw arguments, paths or exception text --
+and argparse's own echo (which would repeat a mistyped secret) is
+suppressed before it reaches stderr.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import pathlib
 import sys
 
@@ -25,6 +32,7 @@ from lima.competition_preflight import (  # noqa: E402 - after sys.path setup
     format_summary,
     preflight_exit_code,
     run_competition_preflight,
+    validate_output_placement,
     write_preflight_report,
 )
 
@@ -55,21 +63,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        arguments = _build_parser().parse_args(argv)
+        with contextlib.redirect_stderr(io.StringIO()):
+            arguments = _build_parser().parse_args(argv)
     except SystemExit as exc:
-        # argparse exits 2 (reserved here for `failed`), so a missing or
-        # malformed argument is re-mapped to the usage-error code.
+        # argparse exits 2 (reserved here for `failed`) and echoes the
+        # raw argument text to stderr -- a mistyped `--api-key=...`
+        # would leak its value -- so the echo is suppressed and a
+        # fixed message printed instead.
         if exc.code == 0:
             raise
         print("configuration error: arguments incomplete or invalid")
         return EXIT_USAGE_ERROR
 
+    try:
+        validate_output_placement(
+            arguments.output,
+            repository_import_root=arguments.repository_import_root,
+            case_path=arguments.case,
+        )
+    except ValueError as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_USAGE_ERROR
+
     output = pathlib.Path(arguments.output)
     if output.exists():
-        print(
-            f"configuration error: output path already exists, refusing "
-            f"to overwrite: {output}"
-        )
+        print("configuration error: output_already_exists")
         return EXIT_USAGE_ERROR
 
     request = PreflightRequest(
@@ -77,17 +95,24 @@ def main(argv: list[str] | None = None) -> int:
         repository_import_root=arguments.repository_import_root,
         check_sidecar=arguments.check_sidecar,
         analyzer_url=arguments.analyzer_url or "",
+        output_path=arguments.output,
     )
     try:
         payload = run_competition_preflight(request)
     except ValueError as exc:
-        print(f"configuration error: {str(exc)[:200]}")
+        print(f"configuration error: {exc}")
+        return EXIT_USAGE_ERROR
+    except OSError:
+        print("configuration error: io_error")
         return EXIT_USAGE_ERROR
 
     try:
         report = write_preflight_report(payload, output)
-    except (OSError, ValueError) as exc:
-        print(f"output error: {str(exc)[:200]}")
+    except ValueError:
+        print("output error: output_already_exists")
+        return EXIT_USAGE_ERROR
+    except OSError:
+        print("output error: report_not_written")
         return EXIT_USAGE_ERROR
 
     print(format_summary(payload, report))

@@ -32,10 +32,28 @@ class SmokeRunner:
             raise ValueError("invalid base image registry")
         if config.debian_mirror:
             mirror = urlsplit(config.debian_mirror)
-            if mirror.scheme != "https" or not mirror.hostname or mirror.username or mirror.password or mirror.query or mirror.fragment:
+            if (mirror.scheme != "https" or not mirror.hostname or mirror.username or mirror.password
+                    or mirror.query or mirror.fragment
+                    or not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", mirror.netloc)
+                    or not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)*/?", mirror.path)):
                 raise ValueError("invalid Debian mirror URL")
         self.commands, self.created, self.secrets = [], False, []
         self.effective_config = None
+
+    @staticmethod
+    def _write_mirror_dockerfile(source: Path, destination: Path, mirror_url: str) -> None:
+        dockerfile_text = source.read_text(encoding="utf-8")
+        apt_update = "RUN apt-get update \\\n"
+        if apt_update not in dockerfile_text:
+            raise RuntimeError("analyzer-dockerfile-contract-unrecognized")
+        generated = dockerfile_text.replace(
+            apt_update,
+            f'RUN sed -i "s|http://deb.debian.org|{mirror_url}|g" '
+            "/etc/apt/sources.list.d/debian.sources \\\n"
+            "    && apt-get update \\\n",
+            1,
+        )
+        destination.write_text(generated, encoding="utf-8")
 
     def command(self, args, timeout=60, *, save_output=True):
         started, record = time.monotonic(), {"argv": [self._scrub(str(arg)) for arg in args]}
@@ -97,10 +115,11 @@ class SmokeRunner:
             build["args"] = args
         if self.config.debian_mirror:
             build = cfg["services"]["cxx-analyzer"].setdefault("build", {})
-            args = build.setdefault("args", {})
-            if isinstance(args, list): args = dict(item.split("=", 1) for item in args if "=" in item)
-            args["DEBIAN_MIRROR"] = self.config.debian_mirror.rstrip("/")
-            build["args"] = args
+            dockerfile = (self.config.repository / build.get("dockerfile", "cxx_analyzer/Dockerfile")).resolve()
+            mirror_url = self.config.debian_mirror.rstrip("/")
+            temporary_dockerfile = temp / "Dockerfile.cxx-analyzer"
+            self._write_mirror_dockerfile(dockerfile, temporary_dockerfile, mirror_url)
+            build["dockerfile"] = str(temporary_dockerfile)
         cfg["services"]["lima"].pop("env_file", None)
         cfg["services"]["lima"]["ports"] = [{"host_ip":"127.0.0.1", "target":8080, "protocol":"tcp"}]
         cfg["services"]["lima"]["volumes"] = [

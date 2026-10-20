@@ -32,8 +32,11 @@ lowercase commit hash.
 `--base-image-registry` temporarily overrides only the pinned Python and Node
 Dockerfile build arguments in the generated Compose file, which is useful when
 Docker Hub is unreachable. It does not edit the Dockerfile or configure Docker
-Desktop. `--debian-mirror` supplies a build argument to the C++ analyzer image;
-the Dockerfile defaults to Debian's official server when it is omitted.
+Desktop. `--debian-mirror` generates a temporary C++ analyzer Dockerfile under
+the system temporary directory with the Debian source URL rewritten for that
+build. The checked-out Dockerfile is never modified and the temporary file is
+removed after the smoke run. When omitted, the analyzer uses Debian's official
+server.
 
 Exit status is `0` only when the runtime and health probes pass; `2` indicates
 failed or unverified. Common report reasons include `docker-not-found`,

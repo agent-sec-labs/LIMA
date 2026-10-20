@@ -8,10 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CC=clang-14 \
     CXX=clang++-14
 
-ARG DEBIAN_MIRROR=https://deb.debian.org
-
-RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
+RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         autoconf \
         automake \

@@ -24,6 +24,9 @@ class SmokeTests(unittest.TestCase):
     def test_success_and_owned_cleanup(self):
         with tempfile.TemporaryDirectory() as d:
             root, fake = Path(d), FakeDocker()
+            dockerfile = root / "cxx_analyzer" / "Dockerfile"
+            dockerfile.parent.mkdir()
+            dockerfile.write_text("FROM pinned AS base\nRUN apt-get update \\\n", encoding="utf-8")
             with patch("lima.competition_deploy_smoke.shutil.which", return_value="docker"), patch("lima.competition_deploy_smoke.urllib.request.urlopen") as urlopen:
                 urlopen.return_value.__enter__.return_value.status=200
                 urlopen.return_value.__enter__.return_value.read.return_value=b'{"status":"ok"}'
@@ -42,9 +45,28 @@ class SmokeTests(unittest.TestCase):
             args=effective["services"]["lima"]["build"]["args"]
             self.assertTrue(args["PYTHON_BASE_IMAGE"].startswith("docker.m.daocloud.io/library/python:3.11-slim@sha256:"))
             self.assertTrue(args["NODE_BASE_IMAGE"].startswith("docker.m.daocloud.io/library/node:22-alpine@sha256:"))
-            self.assertEqual("https://mirrors.tuna.tsinghua.edu.cn", effective["services"]["cxx-analyzer"]["build"]["args"]["DEBIAN_MIRROR"])
+            build = effective["services"]["cxx-analyzer"]["build"]
+            self.assertNotIn("DEBIAN_MIRROR", build.get("args", {}))
+            self.assertTrue(build["dockerfile"].endswith("Dockerfile.cxx-analyzer"))
+            self.assertNotIn("DEBIAN_MIRROR", dockerfile.read_text(encoding="utf-8"))
             source_config_call=next(call for call in fake.calls if "config" in call and "--format" in call)
             self.assertLess(source_config_call.index("--profile"), source_config_call.index("config"))
+
+    def test_mirror_dockerfile_is_temporary_and_keeps_runtime_arg_free(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "Dockerfile"
+            generated = root / "tmp" / "Dockerfile"
+            generated.parent.mkdir()
+            original = "FROM pinned AS base\nRUN apt-get update \\\n"
+            source.write_text(original, encoding="utf-8")
+            SmokeRunner._write_mirror_dockerfile(
+                source, generated, "https://mirrors.tuna.tsinghua.edu.cn",
+            )
+            self.assertEqual(original, source.read_text(encoding="utf-8"))
+            rendered = generated.read_text(encoding="utf-8")
+            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn", rendered)
+            self.assertNotIn("ARG ", rendered)
     def test_start_failure_is_port_conflict_and_has_no_down(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)

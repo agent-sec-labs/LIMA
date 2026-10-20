@@ -45,6 +45,43 @@ class ApiHandler(BaseHTTPRequestHandler):
     settings: Settings
     server_version = "LIMA/%s" % __version__
 
+    _MAX_INVESTIGATE_PATHS = 100
+    _MAX_INVESTIGATE_PATH_LENGTH = 240
+
+    @classmethod
+    def _investigate_paths(cls, value: Any) -> list[str]:
+        """Validate optional snapshot-relative files at the HTTP boundary."""
+
+        if not isinstance(value, list):
+            raise ValueError("investigate_paths must be a list of relative file paths")
+        if len(value) > cls._MAX_INVESTIGATE_PATHS:
+            raise ValueError(
+                f"investigate_paths may contain at most {cls._MAX_INVESTIGATE_PATHS} paths"
+            )
+        paths: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("investigate_paths must contain only strings")
+            path = item.strip()
+            if not path or len(path) > cls._MAX_INVESTIGATE_PATH_LENGTH:
+                raise ValueError(
+                    "investigate_paths entries must be non-empty relative paths no longer than "
+                    f"{cls._MAX_INVESTIGATE_PATH_LENGTH} characters"
+                )
+            segments = path.split("/")
+            if (
+                path.startswith("/")
+                or "\\" in path
+                or ":" in path
+                or "\x00" in path
+                or any(segment in {"", ".", ".."} for segment in segments)
+            ):
+                raise ValueError(
+                    "investigate_paths entries must be safe relative file paths within the snapshot"
+                )
+            paths.append(path)
+        return paths
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print("%s - %s" % (self.address_string(), fmt % args))
 
@@ -489,16 +526,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                     agent_detection, bool
                 ):
                     raise ValueError("agent_detection must be a boolean")
+                investigate_paths = (
+                    self._investigate_paths(payload["investigate_paths"])
+                    if "investigate_paths" in payload else None
+                )
                 if "source" in payload:
                     result = self.service.enqueue_repository_scan_source(
                         payload["source"], principal.tenant_id,
-                        agent_detection,
+                        agent_detection, investigate_paths=investigate_paths,
                     )
                 else:
                     result = self.service.enqueue_repository_scan(
                         str(payload.get("repository_key", "")),
                         principal.tenant_id,
-                        agent_detection,
+                        agent_detection, investigate_paths=investigate_paths,
                     )
                 self.service.store.audit(
                     principal.tenant_id, principal.username,

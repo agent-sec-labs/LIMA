@@ -265,12 +265,26 @@ export interface CxxAgentCapabilities {
 /** POST /v1/repository-scans 请求体（方案 §4.1）。
  * agent_detection 由新前端显式提交 true/false；可选性仅为兼容旧客户端。 */
 export type RepositoryScanRequest =
-  | { repository_key: string; source?: never; agent_detection: boolean }
+  | {
+      repository_key: string;
+      source?: never;
+      agent_detection: boolean;
+      investigate_paths?: string[];
+    }
   | {
       source: { type: "github"; url: string; ref?: string };
       repository_key?: never;
       agent_detection: boolean;
+      investigate_paths?: string[];
     };
+
+export interface CxxMemorySummary {
+  status?: string;
+  mode?: string;
+  diagnostics?: string[];
+  coverage?: { source_files?: number; snapshot_files?: number };
+  tool_runs?: Array<{ tool?: string; status?: string }>;
+}
 
 export interface ScanReport {
   repository?: string;
@@ -287,6 +301,7 @@ export interface ScanReport {
     workspace_truncated?: boolean;
     skipped?: Record<string, number>;
     semantic_triage?: SemanticTriage;
+    cxx_memory?: CxxMemorySummary;
     uaf_v2?: UafV2Summary;
     platform?: PlatformSummary;
     import_policy?: {

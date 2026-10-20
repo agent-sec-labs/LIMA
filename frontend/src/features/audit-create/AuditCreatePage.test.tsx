@@ -4,7 +4,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp, ConfigProvider } from "antd";
 import { RouterProvider } from "react-router-dom";
 import { createAppRouter, type AppRouterInstance } from "@/router";
-import { buildSubmitPayload, clearDraft, saveDraft, type AuditDraft } from "./model";
+import {
+  auditDraftSchema,
+  buildSubmitPayload,
+  clearDraft,
+  saveDraft,
+  type AuditDraft,
+} from "./model";
 
 /**
  * T6 行为规格：三态边界 + 导航恢复 + 草稿保持 + 202 移交任务中心。
@@ -187,8 +193,15 @@ describe("buildSubmitPayload agent_detection placement (§4.1)", () => {
   };
 
   it("sends an explicit agent_detection on both repository sources", () => {
-    const local = buildSubmitPayload(base);
-    expect(local.body).toEqual({ repository_key: "team/project", agent_detection: false });
+    const local = buildSubmitPayload({
+      ...base,
+      investigatePaths: "src/parser.py\ninclude/parser.h\n",
+    });
+    expect(local.body).toEqual({
+      repository_key: "team/project",
+      agent_detection: false,
+      investigate_paths: ["src/parser.py", "include/parser.h"],
+    });
 
     const github = buildSubmitPayload({
       ...base,
@@ -196,11 +209,21 @@ describe("buildSubmitPayload agent_detection placement (§4.1)", () => {
       repository: "https://github.com/team/project",
       githubRef: "main ",
       agentDetection: true,
+      investigatePaths: "src/parser.py",
     });
     expect(github.body).toEqual({
       source: { type: "github", url: "https://github.com/team/project", ref: "main" },
       agent_detection: true,
+      investigate_paths: ["src/parser.py"],
     });
+  });
+
+  it("rejects unsafe investigation paths before either repository source is submitted", () => {
+    const invalid = auditDraftSchema.safeParse({
+      ...base,
+      investigatePaths: "src/parser.py\n../outside.py",
+    });
+    expect(invalid.success).toBe(false);
   });
 
   it("never adds agent_detection to PR/diff reviews", () => {
@@ -221,6 +244,9 @@ describe("AuditCreatePage navigation recovery", () => {
     stubFetch([CAPABILITIES]);
     const router = renderAt("/audit/new");
     await fillTarget("agent-sec-labs/LIMA");
+    fireEvent.change(await screen.findByLabelText(/重点调查文件/), {
+      target: { value: "src/parser.py\ninclude/parser.h" },
+    });
 
     await router.navigate("/tasks");
     await waitFor(() => {
@@ -230,6 +256,9 @@ describe("AuditCreatePage navigation recovery", () => {
     await router.navigate("/audit/new");
     const restored = (await screen.findByLabelText("仓库目标")) as HTMLInputElement;
     expect(restored.value).toBe("agent-sec-labs/LIMA");
+    expect((screen.getByLabelText(/重点调查文件/) as HTMLTextAreaElement).value).toBe(
+      "src/parser.py\ninclude/parser.h",
+    );
     expect(screen.getByText("选择目标")).toBeInTheDocument();
   });
 });
@@ -301,18 +330,18 @@ describe("AuditCreatePage Zod validation", () => {
     await screen.findByText("发起安全审计");
     clickNext();
     expect(
-      await screen.findByText("请输入 GitHub 仓库链接或 owner/project 仓库键。"),
+      await screen.findByText(/请输入导入根目录下的相对仓库键/),
     ).toBeInTheDocument();
   });
 
   it("rejects non-github hosts and malformed refs", async () => {
     stubFetch([CAPABILITIES]);
     renderAt("/audit/new");
+    fireEvent.click(await screen.findByRole("radio", { name: /GitHub 仓库/ }));
     await fillTarget("https://gitlab.com/owner/project");
     clickNext();
     expect(await screen.findByText(/只接受 github.com 链接/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("radio", { name: /GitHub 仓库/ }));
     const refInput = (await screen.findByLabelText(/ref（可选/)) as HTMLInputElement;
     fireEvent.change(refInput, { target: { value: "release/../main" } });
     await fillTarget("owner/project");

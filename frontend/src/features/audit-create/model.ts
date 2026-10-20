@@ -27,6 +27,8 @@ export interface AuditDraft {
   diff: string;
   pullRequest: string;
   agentDetection: boolean | null;
+  /** Optional so drafts created before this field was added still restore. */
+  investigatePaths?: string;
 }
 
 export const EMPTY_DRAFT: AuditDraft = {
@@ -37,6 +39,7 @@ export const EMPTY_DRAFT: AuditDraft = {
   diff: "",
   pullRequest: "",
   agentDetection: null,
+  investigatePaths: "",
 };
 
 // SPA 内模块级草稿缓存：路由卸载/返回不丢数据；202 后显式清空。
@@ -57,6 +60,35 @@ export function clearDraft(): void {
 const SLUG = /^[A-Za-z0-9_.-]+$/;
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+export const MAX_INVESTIGATE_PATHS = 100;
+export const MAX_INVESTIGATE_PATH_LENGTH = 240;
+
+/** Convert the textarea into safe snapshot-relative file paths. */
+export function parseInvestigationPaths(raw: string | undefined): string[] {
+  const paths = (raw ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (paths.length > MAX_INVESTIGATE_PATHS) {
+    throw new Error(`最多填写 ${MAX_INVESTIGATE_PATHS} 个重点调查文件。`);
+  }
+  for (const path of paths) {
+    const segments = path.split("/");
+    if (
+      path.length > MAX_INVESTIGATE_PATH_LENGTH ||
+      path.startsWith("/") ||
+      path.includes("\\") ||
+      path.includes(":") ||
+      path.includes("\0") ||
+      segments.some((segment) => segment === "" || segment === "." || segment === "..")
+    ) {
+      throw new Error(
+        "重点调查文件必须是快照内的相对文件路径；不能使用绝对路径、反斜杠、盘符或目录穿越。",
+      );
+    }
+  }
+  return paths;
+}
 
 export function isMovingRef(ref: string): boolean {
   const value = ref.trim();
@@ -64,7 +96,18 @@ export function isMovingRef(ref: string): boolean {
 }
 
 /** 与 legacy `normalizeRepositoryTarget` 同语义的目标归一化（仅校验，不改写载荷）。 */
-export function normalizeRepositoryTarget(raw: string): string {
+export function normalizeRepositoryTarget(raw: string, localImport = false): string {
+  if (localImport) {
+    const key = String(raw ?? "").trim();
+    const parts = key.split("/");
+    if (
+      !key || key.length > 240 || parts.length > 16 ||
+      parts.some((part) => part.length > 80 || !/^[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u.test(part))
+    ) {
+      throw new Error("请输入导入根目录下的相对仓库键，例如 ResInsight 或 team/project；不能使用绝对路径、链接或目录穿越。");
+    }
+    return key;
+  }
   const value = String(raw ?? "")
     .trim()
     .replace(/\.git$/i, "");
@@ -102,10 +145,11 @@ export const auditDraftSchema = z
     diff: z.string(),
     pullRequest: z.string(),
     agentDetection: z.boolean().nullable(),
+    investigatePaths: z.string().optional(),
   })
   .superRefine((value, ctx) => {
     try {
-      normalizeRepositoryTarget(value.repository);
+      normalizeRepositoryTarget(value.repository, value.mode === "repository" && value.sourceMode === "local");
     } catch (error) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -120,6 +164,17 @@ export const auditDraftSchema = z
           code: z.ZodIssueCode.custom,
           path: ["githubRef"],
           message: "ref 只能包含字母、数字、/、_、.、-，且不能包含 “..” 目录段。",
+        });
+      }
+    }
+    if (value.mode === "repository") {
+      try {
+        parseInvestigationPaths(value.investigatePaths);
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["investigatePaths"],
+          message: (error as Error).message,
         });
       }
     }
@@ -264,6 +319,10 @@ export function buildSubmitPayload(
       },
     };
   }
+  const investigatePaths = parseInvestigationPaths(draft.investigatePaths);
+  const investigationPayload = investigatePaths.length > 0
+    ? { investigate_paths: investigatePaths }
+    : {};
   if (draft.sourceMode === "github") {
     const ref = draft.githubRef.trim();
     return {
@@ -275,11 +334,16 @@ export function buildSubmitPayload(
           ...(ref !== "" ? { ref } : {}),
         },
         agent_detection: agentDetection,
+        ...investigationPayload,
       },
     };
   }
   return {
     path: "/v1/repository-scans",
-    body: { repository_key: repository, agent_detection: agentDetection },
+    body: {
+      repository_key: repository,
+      agent_detection: agentDetection,
+      ...investigationPayload,
+    },
   };
 }

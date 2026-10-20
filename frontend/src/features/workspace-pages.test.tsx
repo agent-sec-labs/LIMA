@@ -88,7 +88,8 @@ describe("workspace pages", () => {
       { url: "/api/skills", body: { llm: { enabled: true, provider: "deepseek", model: "deepseek-v4-flash" } } },
     ]);
     renderAt("/settings");
-    expect(await screen.findByText("规则 + LLM 证据融合")).toBeInTheDocument();
+    expect(await screen.findByText("已配置可选模型")).toBeInTheDocument();
+    expect(screen.getByText(/任务是否调用模型，以报告为准/)).toBeInTheDocument();
     expect(screen.getByText("LIMA_DEEPSEEK_API_KEY")).toBeInTheDocument();
     expect(screen.getByText(/网页不可读取/)).toBeInTheDocument();
   });

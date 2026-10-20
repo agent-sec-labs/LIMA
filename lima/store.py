@@ -400,6 +400,30 @@ class TaskStore:
                 (task_id, event.step, event.state.value, event.message, event.created_at),
             )
 
+    def succeed_unless_cancelled(
+        self, task_id: str, report: ReviewReport, event: TraceEvent,
+    ) -> bool:
+        """Atomically publish a report only while cancellation is absent."""
+
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE tasks SET state=?, report_json=?, error=NULL, failure_json=NULL, "
+                "updated_at=? WHERE id=? AND cancel_requested=0",
+                (
+                    TaskState.SUCCESS.value,
+                    json.dumps(report.to_dict(), ensure_ascii=False),
+                    event.created_at,
+                    task_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO trace_events(task_id, step, state, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                (task_id, event.step, event.state.value, event.message, event.created_at),
+            )
+            return True
+
     def fail(self, task_id: str, error: str, event: TraceEvent) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -1140,6 +1164,26 @@ class TaskStore:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(query, params)
             return cursor.rowcount > 0
+
+    def reset_task_for_resume(self, task_id: str, event: TraceEvent) -> None:
+        """Clear a prior cancellation and make the saved task snapshot runnable."""
+
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE tasks SET state=?, cancel_requested=0, report_json=NULL, error=NULL, "
+                "progress_json=NULL, failure_json=NULL, updated_at=? WHERE id=? "
+                "AND state IN (?, ?)",
+                (
+                    TaskState.PENDING.value, event.created_at, task_id,
+                    TaskState.FAILED.value, TaskState.CANCELLED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("only FAILED or CANCELLED tasks can be resumed")
+            conn.execute(
+                "INSERT INTO trace_events(task_id,step,state,message,created_at) VALUES (?,?,?,?,?)",
+                (task_id, event.step, event.state.value, event.message, event.created_at),
+            )
 
     def is_cancelled(self, task_id: str) -> bool:
         with self._connect() as conn:

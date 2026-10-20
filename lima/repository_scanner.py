@@ -25,6 +25,7 @@ from .cxx_memory import (
     CxxAnalyzerProtocolError,
     CxxAnalyzerUnavailable,
     CxxMemoryAdapter,
+    analysis_evidence_status,
 )
 from .diff_parser import parse_unified_diff
 from .metrics import metrics
@@ -124,6 +125,13 @@ def _full_file_diff(path: str, content: str) -> str:
             lineterm="",
         )
     )
+
+
+class RepositoryScanCancelled(RuntimeError):
+    """Raised when a repository-scan task is cancelled between work units."""
+
+    def __init__(self) -> None:
+        super().__init__("repository scan cancelled")
 
 
 class RepositoryScanner:
@@ -810,8 +818,16 @@ class RepositoryScanner:
             raise ValueError(
                 "cxx_agent_mode must be auto, off or required"
             )
+        cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
+
+        def check_cancelled() -> None:
+            if cancel_probe is not None and cancel_probe():
+                raise RepositoryScanCancelled()
+
+        check_cancelled()
         _report(progress_callback, INVENTORY, "正在盘点工作区文件")
         inventory = workspace.inventory()
+        check_cancelled()
         _report(
             progress_callback, INVENTORY, "工作区盘点完成",
             current=len(inventory.files), total=len(inventory.files), unit="files",
@@ -831,6 +847,7 @@ class RepositoryScanner:
         ambiguous_python_modules = 0
 
         repository_files = list(workspace.iter_text(inventory))
+        check_cancelled()
         project_dataflow = None
         if self.dataflow_enabled:
             _report(progress_callback, DATAFLOW_ANALYSIS, "正在建立跨文件数据流索引")
@@ -838,6 +855,7 @@ class RepositoryScanner:
                 path: content for path, content in repository_files
                 if path.endswith(".py")
             })
+            check_cancelled()
             dataflow_parse_errors = len(project_dataflow.parse_errors)
             dataflow_functions_indexed = project_dataflow.functions_indexed
             interprocedural_call_edges = project_dataflow.interprocedural_edges
@@ -860,6 +878,7 @@ class RepositoryScanner:
             current=0, total=total_files, unit="files",
         )
         for index, (path, content) in enumerate(repository_files, start=1):
+            check_cancelled()
             diff = _full_file_diff(path, content)
             if diff:
                 parsed = parse_unified_diff(diff)
@@ -899,8 +918,10 @@ class RepositoryScanner:
         completed_sast = []
         if self.sast_mode != "off":
             for adapter in self.sast_adapters:
+                check_cancelled()
                 _report(progress_callback, SAST_ANALYSIS, "SAST 引擎运行中")
                 result = adapter.scan(workspace, inventory)
+                check_cancelled()
                 sast_summary[result.engine] = result.summary()
                 if result.status == "completed":
                     completed_sast.append(result.engine)
@@ -932,6 +953,7 @@ class RepositoryScanner:
         )
         if self.cxx_memory_mode != "off" and has_cxx_source:
             try:
+                check_cancelled()
                 if self.cxx_memory_adapter is None:
                     raise CxxAnalyzerUnavailable("C/C++ analyzer is not configured")
                 cxx_result = self.cxx_memory_adapter.analyze(
@@ -940,6 +962,7 @@ class RepositoryScanner:
                     self.cxx_requested_layers,
                     inventory=inventory,
                 )
+                check_cancelled()
             except CxxAnalyzerUnavailable as exc:
                 if self.cxx_memory_mode == "required":
                     raise RuntimeError(
@@ -959,12 +982,15 @@ class RepositoryScanner:
                     "diagnostics": ["C/C++ memory analyzer response was rejected"],
                 })
             else:
+                evidence_status = analysis_evidence_status(cxx_result)
+                if evidence_status == "failed" and self.cxx_memory_mode == "required":
+                    raise RuntimeError("required C/C++ memory analysis failed to produce accepted evidence")
                 cxx_summary.update({
-                    "status": cxx_result.status,
+                    "status": evidence_status,
                     "tool_runs": cxx_result.tool_runs,
                     "coverage": cxx_result.coverage,
                     # Review round 6: sidecar diagnostics are free text too.
-                "diagnostics": [privacy_text(item) for item in cxx_result.diagnostics],
+                    "diagnostics": [privacy_text(item) for item in cxx_result.diagnostics],
                 })
                 for finding in cxx_result.findings:
                     self._merge_cxx_finding(findings, cxx_finding_index, finding)
@@ -972,7 +998,7 @@ class RepositoryScanner:
         # 平台分支是唯一的智能体检测链（设计 §10 单链；retirement Task 1
         # 移除了 legacy 七角色分支）：Scout→假设→实验→修正循环，按
         # (cwe, path, symbol, line) 不可变身份合并进同一份报告。
-        cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
+        check_cancelled()
         platform_summary = self._run_platform_branch(
             workspace,
             inventory,
@@ -984,6 +1010,7 @@ class RepositoryScanner:
             mode_override=cxx_agent_mode,
             progress_callback=progress_callback,
         )
+        check_cancelled()
 
         findings.sort(
             key=lambda item: (

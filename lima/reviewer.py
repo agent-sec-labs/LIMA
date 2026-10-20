@@ -10,6 +10,15 @@ from .diff_parser import ParsedDiff
 from .models import Finding, Severity
 
 
+def _rule_supports_path(rule_id: str, path: str) -> bool:
+    # C/C++ exec-named methods do not imply dynamic code interpretation.
+    return not (
+        rule_id == "SEC-EVAL" and path.lower().endswith(
+            (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".tpp")
+        )
+    )
+
+
 class LLMTransportError(RuntimeError):
     """Network or HTTP failure while posting one chat completion.
 
@@ -260,6 +269,8 @@ class LocalRuleReviewer(Reviewer):
             if line.path.endswith((".lock", ".min.js", ".map")):
                 continue
             for rule_id, severity, pattern, title, explanation, fix, test in self.RULES:
+                if not _rule_supports_path(rule_id, line.path):
+                    continue
                 if pattern.search(line.content) and (rule_id, line.path, line.line) not in seen:
                     seen.add((rule_id, line.path, line.line))
                     findings.append(
@@ -293,6 +304,8 @@ class DomainRuleReviewer(Reviewer):
             if line.path.endswith((".lock", ".min.js", ".map")):
                 continue
             for rule_id, severity, pattern, title, explanation, fix, test in rules:
+                if not _rule_supports_path(rule_id, line.path):
+                    continue
                 identity = (rule_id, line.path, line.line)
                 if pattern.search(line.content) and identity not in seen:
                     seen.add(identity)

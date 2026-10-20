@@ -297,7 +297,26 @@ class CxxRepositoryScannerTests(unittest.TestCase):
                 ],
                 adapter.calls,
             )
-            self.assertEqual("completed", result.report.collaboration["cxx_memory"]["status"])
+            self.assertEqual("partial", result.report.collaboration["cxx_memory"]["status"])
+
+    def test_semgrep_semantic_failure_is_not_a_completed_analysis(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            analysis = cxx_result()
+            analysis.tool_runs[:] = [{"tool": "semgrep", "status": "failed"}]
+            analysis.diagnostics[:] = ["semgrep-reported-errors"]
+            report = self._scanner(FakeCxxAdapter(analysis)).scan(RepositoryWorkspace(root), repository_key="team/project").report
+            self.assertEqual("failed", report.collaboration["cxx_memory"]["status"])
+
+    def test_required_analysis_rejects_failed_tool_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            analysis = cxx_result()
+            analysis.tool_runs[:] = [{"tool": "semgrep", "status": "failed"}]
+            with self.assertRaisesRegex(RuntimeError, "required C/C\\+\\+ memory analysis failed"):
+                self._scanner(FakeCxxAdapter(analysis), mode="required").scan(RepositoryWorkspace(root), repository_key="team/project")
 
     def test_off_mode_never_invokes_sidecar(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -444,7 +463,7 @@ class CxxRepositoryScannerTests(unittest.TestCase):
 
                 metadata = result.report.collaboration["cxx_memory"]
                 self.assertEqual(
-                    "completed",
+                    "partial",
                     metadata["status"],
                 )
                 self.assertEqual(payload["tool_runs"], metadata["tool_runs"])

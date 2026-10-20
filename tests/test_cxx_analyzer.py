@@ -143,7 +143,10 @@ def _validate_sidecar_dockerfile_contract(dockerfile: str) -> None:
     content_instructions = [
         (operation, value) for operation, value in runtime if operation in {"COPY", "ADD"}
     ]
-    if content_instructions != [("COPY", "--chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer")]:
+    if content_instructions != [
+        ("COPY", "--chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer"),
+        ("COPY", "cxx_analyzer/semgrep_targets.py /usr/local/lib/lima-semgrep-targets.py"),
+    ]:
         raise ValueError("runtime COPY/ADD boundary is not analyzer-only")
 
     runtime_users = [value for operation, value in runtime if operation == "USER"]
@@ -1446,7 +1449,7 @@ class SourceScanTests(unittest.TestCase):
             repository.mkdir(parents=True)
             (repository / "src").mkdir()
             (repository / "src" / "buffer.c").write_text(
-                "void write_value(int *values) { values[8] = 1; }\n",
+                "\n" * 6 + "void write_value(int *values) { values[8] = 1; }\n",
                 encoding="utf-8",
             )
             colliding = repository / ".lima-semgrep-rules.yml"
@@ -1468,11 +1471,17 @@ class SourceScanTests(unittest.TestCase):
                 self.assertEqual(
                     (
                         "semgrep",
+                        "scan",
+                        "--experimental",
                         "--json",
                         "--quiet",
                         "--no-rewrite-rule-ids",
+                        "--jobs",
+                        "2",
+                        "--max-target-bytes",
+                        str(self._settings().repository_scan_max_file_bytes),
                         "--config",
-                        call.args[0][5],
+                        call.args[0][11],
                         "--include",
                         "*.c",
                         "--include",
@@ -1489,6 +1498,8 @@ class SourceScanTests(unittest.TestCase):
                         "*.hpp",
                         "--include",
                         "*.hxx",
+                        "--metrics=off",
+                        "--disable-version-check",
                         ".",
                     ),
                     call.args[0],
@@ -1498,7 +1509,7 @@ class SourceScanTests(unittest.TestCase):
                 self.assertEqual(17, call.kwargs["timeout_seconds"])
                 self.assertEqual(8192, call.kwargs["max_output_bytes"])
                 self.assertEqual({}, call.kwargs["env"])
-                self.assertFalse(Path(call.args[0][5]).resolve().is_relative_to(snapshot.root))
+                self.assertFalse(Path(call.args[0][11]).resolve().is_relative_to(snapshot.root))
                 self.assertEqual(1, len(result.findings))
                 self.assertEqual([], list(stage_root.iterdir()))
 
@@ -1554,7 +1565,7 @@ class SourceScanTests(unittest.TestCase):
                         self.assertEqual(1, len(result.tool_runs))
                         expected_status = (
                             "failed"
-                            if not execution.digests_complete
+                            if name in {"parser-failure", "truncated", "digest-incomplete"}
                             else execution.status
                         )
                         self.assertEqual(expected_status, result.tool_runs[0]["status"])
@@ -1563,6 +1574,12 @@ class SourceScanTests(unittest.TestCase):
                             result.tool_runs[0]["digests_complete"],
                         )
                         self.assertEqual([], list(stage_root.iterdir()))
+
+    def test_many_semgrep_errors_are_bounded_diagnostics_without_accepted_findings(self):
+        payload = {"results": [], "errors": [{"type": "Other syntax error", "message": "Unsupported source syntax"}] * 178}
+        findings, diagnostics = parse_semgrep_json(json.dumps(payload), {"src/main.cpp"})
+        self.assertEqual((), findings)
+        self.assertEqual(["semgrep-reported-errors", "semgrep-error-limit-exceeded:178"], diagnostics)
 
     def test_normalized_finding_enforces_the_client_schema_and_bounds_text(self):
         diagnostics = []
@@ -3358,6 +3375,11 @@ class SourceScanContainerTests(unittest.TestCase):
         completed = subprocess.run(  # noqa: S603 - fixed local Semgrep regression tool.
             [
                 semgrep_path,
+                "scan",
+                "--experimental",
+                "--jobs", "2",
+                "--metrics=off",
+                "--disable-version-check",
                 "--json",
                 "--quiet",
                 "--no-rewrite-rule-ids",
@@ -3385,8 +3407,12 @@ class SourceScanContainerTests(unittest.TestCase):
         findings, _ = parse_semgrep_json(
             json.dumps(document),
             {item["path"] for item in manifest},
+            source_reader=lambda path, line: (fixture_root / path).read_text(
+                encoding="utf8"
+            ).splitlines()[line - 1],
         )
         self.assertTrue(all(item.verification_state == "candidate" for item in findings))
+        self.assertTrue(all(item.evidence != "requires login" for item in findings))
         hit_paths = {item.path for item in findings}
         self.assertTrue(all(item["path"] in hit_paths for item in manifest if item["vulnerable"]))
         self.assertTrue(

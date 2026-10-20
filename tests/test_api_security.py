@@ -390,6 +390,44 @@ class AgentDetectionApiTests(unittest.TestCase):
         self.assertEqual(202, status, body)
         self.assertTrue(body["task_id"])
 
+    def test_investigate_paths_are_forwarded_to_the_repository_task(self):
+        """The HTTP boundary preserves safe, explicit investigation files."""
+        token = self.admin_token()
+        paths = ["src/parser.py", "include/parser.h"]
+        status, body = self.request(
+            "POST", "/v1/repository-scans", token=token,
+            body={
+                "repository_key": "team/project",
+                "investigate_paths": paths,
+            },
+        )
+        self.assertEqual(202, status, body)
+        task = self.service.store.get(body["task_id"])
+        self.assertEqual(paths, task["input"]["investigate_paths"])
+
+    def test_investigate_paths_reject_unsafe_or_unbounded_values(self):
+        token = self.admin_token()
+        invalid_values = (
+            "src/parser.py",
+            ["/etc/passwd"],
+            ["../outside.py"],
+            ["src\\parser.py"],
+            ["src", 1],
+            ["src/" + "a" * 241],
+            [f"src/{index}.py" for index in range(101)],
+        )
+        for paths in invalid_values:
+            with self.subTest(paths=paths):
+                status, body = self.request(
+                    "POST", "/v1/repository-scans", token=token,
+                    body={
+                        "repository_key": "team/project",
+                        "investigate_paths": paths,
+                    },
+                )
+                self.assertEqual(400, status, body)
+                self.assertIn("investigate_paths", body["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,12 +92,13 @@ export function SettingsPage(): React.JSX.Element {
       <Row gutter={[16, 16]}>
         <Col xs={24} md={8}>
           <Card size="small">
-            <Typography.Text type="secondary">分析模式</Typography.Text>
+            <Typography.Text type="secondary">模型配置</Typography.Text>
             <Typography.Paragraph style={{ marginBottom: 0 }}>
               <Typography.Text strong>
-                {llm.error ? "状态未知" : llm.enabled ? "规则 + LLM 证据融合" : "确定性本地规则"}
+                {llm.error ? "状态未知" : llm.enabled ? "已配置可选模型" : "确定性本地规则"}
               </Typography.Text>
             </Typography.Paragraph>
+            <Typography.Text type="secondary">任务是否调用模型，以报告为准。</Typography.Text>
           </Card>
         </Col>
         <Col xs={24} md={8}>

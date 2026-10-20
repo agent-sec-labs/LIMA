@@ -39,10 +39,11 @@ export function SkillsPage(): React.JSX.Element {
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space size="large">
           <span>
-            分析模式：
+            模型配置：
             <Typography.Text strong>
-              {llm.error ? "状态未知" : llm.enabled ? "规则 + LLM 证据融合" : "确定性本地规则"}
+              {llm.error ? "状态未知" : llm.enabled ? "已配置可选模型" : "确定性本地规则"}
             </Typography.Text>
+            <Typography.Text type="secondary">任务是否调用模型，以报告为准。</Typography.Text>
           </span>
           <span>
             Provider / Model：

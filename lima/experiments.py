@@ -123,6 +123,9 @@ class ExperimentRunner:
                 relative = resolved.relative_to(self.dataset_root)
                 if not resolved.is_file():
                     continue
+                payload = json.loads(resolved.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
                 dataset = self.dataset_loader(resolved)
                 cases = list(dataset.get("cases") or [])
                 case_ids = [str(item.get("id", "")) for item in cases]

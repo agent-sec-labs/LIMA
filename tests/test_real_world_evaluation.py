@@ -203,7 +203,9 @@ class RealWorldEvaluationTests(unittest.TestCase):
             calibration["baseline_analyzer_sha256"],
         )
         self.assertEqual(
-            analyzer_fingerprint(),
+            # Historical calibration identity must not be relabeled when
+            # later analyzer fixes change the live checkout fingerprint.
+            "dcafbd9fdbe834261ddf0b0714ba2d05f32c08fece12e6d975c29897e3eb8682",
             calibration["calibration_analyzer_sha256"],
         )
         self.assertEqual(
@@ -211,6 +213,14 @@ class RealWorldEvaluationTests(unittest.TestCase):
             [item["id"] for item in calibration["cases"]],
         )
         self.assertTrue(all(item["split"] == "calibration" for item in calibration["cases"]))
+
+    def test_current_identity_is_separate_from_historical_calibration(self):
+        calibration = load_real_world_dataset(CALIBRATION_DATASET_V2)
+        historical = calibration["calibration_analyzer_sha256"]
+        with patch.object(evaluation_module, "analyzer_fingerprint", return_value="f" * 64):
+            identity = evaluation_module._dataset_identity(calibration)
+        self.assertEqual("f" * 64, identity["analyzer"]["sha256"])
+        self.assertEqual(historical, calibration["calibration_analyzer_sha256"])
 
     def test_analyzer_fingerprint_is_portable_across_lf_and_crlf_checkouts(self):
         with tempfile.TemporaryDirectory() as root:

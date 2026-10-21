@@ -561,7 +561,10 @@ describe("AuditCreatePage agent detection switch (#245)", () => {
     ]);
     renderAt("/audit/new");
     // antd 对两字按钮自动加字间距（“重 试”），用正则匹配。
-    expect(await screen.findByRole("button", { name: /重\s*试/ })).toBeInTheDocument();
+    // 覆盖率插桩下的 CI 渲染可能超过默认 1 秒，仍须等待实际错误态。
+    expect(
+      await screen.findByRole("button", { name: /重\s*试/ }, { timeout: 3_000 }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /下一步/ })).toBeDisabled();
     // PR / Diff 审查不受影响。
     fireEvent.click(screen.getByRole("radio", { name: /PR \/ Diff 审查/ }));

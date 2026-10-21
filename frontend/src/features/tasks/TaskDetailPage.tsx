@@ -1,4 +1,6 @@
 import React, { useMemo, useState } from "react";
+import { CxxMemoryCard } from "./CxxMemoryCard";
+import { TaskActions } from "./TaskActions";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -1110,6 +1112,7 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
         <Typography.Paragraph style={{ marginBottom: 0 }}>{summary}</Typography.Paragraph>
         <DispositionBanner adjudication={adjudication} />
         <SemanticTriageCard report={report} />
+        <CxxMemoryCard summary={report.collaboration?.cxx_memory} />
         {uafSummary && <UafV2Card summary={uafSummary} />}
         {platformSummary && <PlatformCard summary={platformSummary} />}
         <Space size="large" wrap aria-label="报告摘要">
@@ -1206,6 +1209,7 @@ export function TaskDetailPage(): React.JSX.Element {
           </Typography.Title>
           <Tag color={stateColor(task.state)}>{STATE_LABELS[task.state] ?? task.state}</Tag>
           {task.pull_request ? <Tag>PR #{task.pull_request}</Tag> : null}
+          <TaskActions task={task} />
         </Space>
         <Descriptions size="small" column={3} bordered>
           <Descriptions.Item label="来源">{sourceSummary(task)}</Descriptions.Item>

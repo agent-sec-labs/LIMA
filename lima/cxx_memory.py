@@ -221,6 +221,26 @@ class CxxAnalysisResult:
     diagnostics: list[str]
 
 
+def analysis_evidence_status(result: CxxAnalysisResult) -> str:
+    """Project wire-envelope completion into actual evidence availability."""
+    failed_runs = any(run.get("status") in {"failed", "timed-out", "build_failed"} for run in result.tool_runs)
+    accepted_layer = any(
+        run.get("status") == "completed" and run.get("tool") in {"semgrep", "clang", "asan-test"}
+        for run in result.tool_runs
+    )
+    failure_markers = (
+        "rejected", "did not complete", "incomplete or truncated",
+        "semgrep-reported-errors", "was unavailable",
+    )
+    if any(any(marker in diagnostic.lower() for marker in failure_markers) for diagnostic in result.diagnostics):
+        return "failed"
+    if failed_runs:
+        return "partial" if accepted_layer else "failed"
+    if result.diagnostics:
+        return "partial"
+    return result.status
+
+
 @dataclass(frozen=True)
 class UafFactsResponse:
     """Strictly validated ``/v1/uaf-facts`` response.

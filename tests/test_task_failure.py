@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import time
 import unittest
 import urllib.error
 
@@ -258,6 +260,129 @@ class QueueRetrySemanticsTests(unittest.TestCase):
             self.assertEqual(("first", 1), seen[0])
         finally:
             queue_ref.close()
+
+    def test_redis_delivery_renews_lease_while_handler_is_running(self):
+        class RecordingRedis:
+            def __init__(self):
+                self.claims = []
+
+            def xclaim(self, stream, group, consumer, min_idle_time, message_ids):
+                self.claims.append(
+                    (stream, group, consumer, min_idle_time, tuple(message_ids))
+                )
+
+        redis = RecordingRedis()
+
+        def handler(_payload):
+            time.sleep(0.38)
+
+        queue_ref = TaskQueue(handler, workers=1, lease_seconds=0.3)
+        queue_ref._redis = redis
+        try:
+            delivered = queue_ref._deliver_with_lease_heartbeat(
+                "123-0",
+                {
+                    "message_id": "task-with-long-handler",
+                    "attempt": 0,
+                    "payload": {"task_id": "task-with-long-handler"},
+                    "submitted_at": time.time(),
+                },
+            )
+
+            self.assertTrue(delivered)
+            self.assertGreaterEqual(len(redis.claims), 2)
+            for stream, group, consumer, min_idle_time, message_ids in redis.claims:
+                self.assertEqual(queue_ref.stream, stream)
+                self.assertEqual(queue_ref.group, group)
+                self.assertEqual(queue_ref.consumer, consumer)
+                self.assertEqual(0, min_idle_time)
+                self.assertEqual(("123-0",), message_ids)
+        finally:
+            queue_ref._redis = None
+            queue_ref.close()
+
+    def test_reclaim_does_not_prefetch_messages_that_cannot_be_heartbeated(self):
+        class LeaseAwareRedis:
+            def __init__(self):
+                self.now_ms = 0
+                self.entries = {
+                    "1-0": {"envelope": json.dumps({
+                        "message_id": "first", "attempt": 0,
+                        "payload": {"task_id": "first"}, "submitted_at": 0,
+                    })},
+                    "2-0": {"envelope": json.dumps({
+                        "message_id": "second", "attempt": 0,
+                        "payload": {"task_id": "second"}, "submitted_at": 0,
+                    })},
+                }
+                self.pending = {
+                    redis_id: ("stalled-worker", -10_000)
+                    for redis_id in self.entries
+                }
+                self.acked = set()
+
+            def advance(self, milliseconds):
+                self.now_ms += milliseconds
+
+            def xautoclaim(
+                self, _stream, _group, consumer, min_idle_time, start_id, count
+            ):
+                del start_id
+                eligible = [
+                    redis_id for redis_id, (_owner, claimed_at) in self.pending.items()
+                    if redis_id not in self.acked
+                    and self.now_ms - claimed_at >= min_idle_time
+                ][:count]
+                for redis_id in eligible:
+                    self.pending[redis_id] = (consumer, self.now_ms)
+                return "0-0", [(redis_id, self.entries[redis_id]) for redis_id in eligible], []
+
+            def xclaim(self, _stream, _group, consumer, min_idle_time, message_ids):
+                del min_idle_time
+                for redis_id in message_ids:
+                    self.pending[redis_id] = (consumer, self.now_ms)
+
+            def xack(self, _stream, _group, redis_id):
+                self.acked.add(redis_id)
+
+        redis = LeaseAwareRedis()
+        executed = []
+        first_worker = TaskQueue(lambda _payload: None, workers=1, lease_seconds=1)
+        second_worker = TaskQueue(lambda _payload: None, workers=1, lease_seconds=1)
+        first_worker.consumer = "first-worker"
+        second_worker.consumer = "second-worker"
+        first_worker._redis = redis
+        second_worker._redis = redis
+
+        def handler(payload):
+            task_id = payload["task_id"]
+            executed.append(task_id)
+            if task_id == "first":
+                # Model the first handler running past its lease while its own
+                # heartbeat remains current. The prefetched second entry has no
+                # heartbeat and is therefore reclaimable by another worker.
+                redis.advance(first_worker.lease_seconds * 1000 + 1)
+                redis.xclaim(
+                    first_worker.stream, first_worker.group, first_worker.consumer,
+                    min_idle_time=0, message_ids=["1-0"],
+                )
+                second_worker._reclaim_stale()
+
+        first_worker.handler = handler
+        second_worker.handler = handler
+        try:
+            first_worker._reclaim_stale()
+
+            self.assertEqual(1, executed.count("first"))
+            self.assertEqual(
+                1, executed.count("second"),
+                "a stale prefetched message must not execute in both workers",
+            )
+        finally:
+            first_worker._redis = None
+            second_worker._redis = None
+            first_worker.close()
+            second_worker.close()
 
 
 if __name__ == "__main__":

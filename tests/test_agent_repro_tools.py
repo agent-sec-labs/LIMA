@@ -194,6 +194,17 @@ class TemplateContractTests(unittest.TestCase):
 
 
 class ReproWorkbenchTests(unittest.TestCase):
+    def test_segv_error_type_keeps_marker_phrase(self):
+        response = canned_repro_response(
+            asan_report=asan_report_payload(error_type="SEGV", access="READ")
+        )
+        observation = workbench_with(FakeAnalyzerClient(response)).run_experiment(
+            REPOSITORY_KEY, SNAPSHOT, SOURCE_FILES, DRIVER_CODE
+        )
+
+        # Bare "SEGV" from the sidecar must reach the runtime-marker phrase.
+        self.assertEqual("'SEGV on unknown address'", observation.error_type)
+
     def test_run_experiment_happy_path_maps_fields(self):
         response = canned_repro_response(
             diagnostics=("repro-run-recorded",),

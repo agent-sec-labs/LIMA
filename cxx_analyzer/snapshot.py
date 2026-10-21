@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
 
@@ -248,6 +250,7 @@ class PreparedSnapshot:
             finalizer = getattr(self._temporary_directory, "_finalizer", None)
             if finalizer is not None:
                 finalizer.detach()
+            _schedule_tree_reclamation(Path(self._temporary_directory.name))
         if deadline is not None and (not completed or deadline.remaining() <= 0):
             raise AnalysisDeadlineExceeded(
                 "snapshot cleanup exceeded its bounded budget"
@@ -322,6 +325,24 @@ def _make_tree_owner_writable(root: Path) -> None:
         root.chmod(0o700)
     except OSError:
         pass
+
+
+def _reclaim_request_tree(root: Path) -> None:
+    """Remove one detached request tree outside the request deadline."""
+
+    _make_tree_owner_writable(root)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _schedule_tree_reclamation(root: Path) -> None:
+    """Reclaim deadline-abandoned snapshots without delaying the response."""
+
+    threading.Thread(
+        target=_reclaim_request_tree,
+        args=(root,),
+        name="lima-cxx-snapshot-reaper",
+        daemon=True,
+    ).start()
 
 
 def _bounded_tree_delete(

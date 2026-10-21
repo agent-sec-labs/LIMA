@@ -196,6 +196,7 @@ class Settings:
     cxx_agent_max_context_files: int = 12
     cxx_agent_max_context_lines: int = 1200
     cxx_agent_max_output_bytes: int = 1048576
+    cxx_agent_max_completion_tokens: int = 4096
     cxx_agent_timeout_seconds: int = 600
     cxx_agent_parallelism: int = 3
     cxx_agent_dialogue_rounds: int = 2
@@ -381,6 +382,7 @@ class Settings:
             self.cxx_agent_max_context_files,
             self.cxx_agent_max_context_lines,
             self.cxx_agent_max_output_bytes,
+            self.cxx_agent_max_completion_tokens,
             self.cxx_agent_timeout_seconds,
             self.cxx_agent_parallelism,
             self.cxx_agent_dialogue_rounds,
@@ -540,6 +542,9 @@ class Settings:
             cxx_agent_max_context_lines=_int("LIMA_CXX_AGENT_MAX_CONTEXT_LINES", 1200),
             cxx_agent_max_output_bytes=_int(
                 "LIMA_CXX_AGENT_MAX_OUTPUT_BYTES", 1048576
+            ),
+            cxx_agent_max_completion_tokens=_int(
+                "LIMA_CXX_AGENT_MAX_COMPLETION_TOKENS", 4096
             ),
             cxx_agent_timeout_seconds=_int("LIMA_CXX_AGENT_TIMEOUT_SECONDS", 600),
             cxx_agent_parallelism=_int("LIMA_CXX_AGENT_PARALLELISM", 3),

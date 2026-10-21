@@ -171,7 +171,17 @@ def _observation_from_response(response: ReproResponse) -> ExperimentObservation
     """Distill one strictly validated ``ReproResponse`` for the agent."""
 
     report = response.asan_report or {}
-    error_type = _escape_text(report.get("error_type"), MAX_ERROR_TYPE_CHARS)
+    raw_error_type = report.get("error_type")
+    if isinstance(raw_error_type, str) and raw_error_type.strip() == "SEGV":
+        # The sidecar parse stops at " on ", so the null-deref class arrives
+        # as bare "SEGV" while every other class keeps its full marker phrase
+        # ("heap-use-after-free", "heap-buffer-overflow", "attempting
+        # double-free").  ASan's complete line for this class is always
+        # "SEGV on unknown address <addr>"; restore the marker phrase (the
+        # address itself is not in the structured report) so runtime-marker
+        # matching treats every sanitizer class the same way.
+        raw_error_type = "SEGV on unknown address"
+    error_type = _escape_text(raw_error_type, MAX_ERROR_TYPE_CHARS)
     diagnostics = tuple(
         _escape_text(item, MAX_DIAGNOSTIC_CHARS) for item in response.diagnostics
     )

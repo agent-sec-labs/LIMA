@@ -55,6 +55,7 @@ from .repair_workspace import RepairWorkspace
 from .repository_materializer import GitHubMaterializer
 from .repository_scanner import (
     RepositoryScanner,
+    RepositoryScanCancelled,
     coverage_warning_counts,
 )
 from .repository_source import (
@@ -309,6 +310,9 @@ class ReviewService:
             override = str(getattr(settings, "cxx_agent_model", "") or "").strip()
             if override:
                 resolved["model"] = override
+            resolved["request_params"] = {
+                "max_tokens": settings.cxx_agent_max_completion_tokens,
+            }
             return resolved
 
         if self.llm_config:
@@ -333,6 +337,9 @@ class ReviewService:
             cxx_agent_mode=settings.cxx_agent_mode,
             cxx_agent_budget_factory=cxx_agent_budget_factory,
             cxx_uaf_llm_factory=cxx_uaf_llm_factory,
+            cxx_agent_timeout_seconds=settings.cxx_agent_timeout_seconds,
+            cxx_agent_parallelism=settings.cxx_agent_parallelism,
+            cxx_agent_dialogue_rounds=settings.cxx_agent_dialogue_rounds,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
         self.repository_investigation = self._build_repository_investigation()
@@ -1003,6 +1010,7 @@ class ReviewService:
     def enqueue_repository_scan_source(
         self, source: RepositorySource | dict[str, str], tenant_id: str = "default",
         agent_detection: bool | None = None,
+        investigate_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Queue a repository scan from a normalized source description.
 
@@ -1020,7 +1028,8 @@ class ReviewService:
                     "LIMA_REPOSITORY_SCAN_SOURCES"
                 )
             return self._enqueue_scan_task(
-                normalized, tenant_id, agent_detection=agent_detection
+                normalized, tenant_id, agent_detection=agent_detection,
+                investigate_paths=investigate_paths,
             )
         if allowed not in {"local-import", "both"}:
             metrics.inc("repository_scan_source_local_import_rejected_total")
@@ -1030,7 +1039,8 @@ class ReviewService:
             )
         self.repository_import.resolve(normalized.repository_key)
         return self._enqueue_scan_task(
-            normalized, tenant_id, agent_detection=agent_detection
+            normalized, tenant_id, agent_detection=agent_detection,
+            investigate_paths=investigate_paths,
         )
 
     def _resolve_cxx_agent_mode(self, agent_detection: bool | None) -> str:
@@ -1161,6 +1171,19 @@ class ReviewService:
         failure = classify_exception(exc, stage)
         self.store.update_task_failure(task_id, failure.to_dict())
 
+    def _cancel_repository_scan(self, task_id: str, message: str) -> None:
+        """Persist cancellation as a terminal outcome without queue retries."""
+
+        task = self.store.get(task_id)
+        step = max(
+            [int(item.get("step", 0)) for item in (task or {}).get("trace", [])]
+            or [0]
+        ) + 1
+        self.store.cancel(
+            task_id,
+            TraceEvent(step, TaskState.CANCELLED, message, utc_now()),
+        )
+
     def _process_repository_scan(
         self, task_id: str, repository_key: str, tenant_id: str,
         scan_source: dict[str, Any] | None = None,
@@ -1169,10 +1192,14 @@ class ReviewService:
     ) -> None:
         tracker = self._scan_progress_tracker(task_id)
         try:
+            if self.store.is_cancelled(task_id):
+                self._cancel_repository_scan(task_id, "Repository scan cancelled before execution.")
+                return
             if scan_source:
                 self._process_github_repository_scan(
                     task_id, scan_source, tenant_id, tracker,
                     cxx_agent_mode=cxx_agent_mode,
+                    investigate_paths=investigate_paths,
                 )
                 return
             tracker.pipeline_event(PREPARING_WORKSPACE, "正在准备本地导入工作区")
@@ -1191,6 +1218,9 @@ class ReviewService:
                 cxx_agent_mode=cxx_agent_mode,
                 investigate_paths=investigate_paths,
             )
+        except RepositoryScanCancelled:
+            self._cancel_repository_scan(task_id, "Repository scan cancelled during execution.")
+            return
         except Exception as exc:
             self._record_task_failure(task_id, exc, tracker)
             raise
@@ -1274,7 +1304,10 @@ class ReviewService:
                 # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
                 # 并发任务各自隔离。
                 cxx_agent_mode=cxx_agent_mode,
+                investigate_paths=investigate_paths or (),
             )
+        if self.store.is_cancelled(task_id):
+            raise RepositoryScanCancelled()
         result.report.repository = repository_label
         result.report.collaboration["import_policy"] = {
             "host_path_exposed": False,
@@ -1284,6 +1317,8 @@ class ReviewService:
             **import_policy_extra,
         }
         if self.repository_semantic_triage is not None:
+            if self.store.is_cancelled(task_id):
+                raise RepositoryScanCancelled()
             if progress is not None:
                 progress.pipeline_event(SEMANTIC_TRIAGE, "正在语义复核候选发现")
             try:
@@ -1294,8 +1329,12 @@ class ReviewService:
                         result.report.findings,
                     )
             except RepositorySemanticTriageError as exc:
+                if self.store.is_cancelled(task_id):
+                    raise RepositoryScanCancelled() from exc
                 metrics.inc("repository_semantic_triage_failed_total")
                 raise PermanentTaskError(str(exc)) from exc
+            if self.store.is_cancelled(task_id):
+                raise RepositoryScanCancelled()
             if triage.findings:
                 result.report.findings.extend(triage.findings)
                 severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
@@ -1338,6 +1377,8 @@ class ReviewService:
         # bounded tool loop; verdicts re-bind to the original fingerprints
         # and fold back into the adjudication/summary the user sees.
         if self.repository_investigation is not None:
+            if self.store.is_cancelled(task_id):
+                raise RepositoryScanCancelled()
             if progress is not None:
                 progress.pipeline_event(
                     SEMANTIC_TRIAGE, "正在模型调查全部候选与指定模块"
@@ -1360,6 +1401,8 @@ class ReviewService:
                         [*targets, *module_targets], snapshot,
                     )
             except InvestigationError as exc:
+                if self.store.is_cancelled(task_id):
+                    raise RepositoryScanCancelled() from exc
                 metrics.inc("repository_investigation_failed_total")
                 if self.settings.repository_investigation_mode == "required":
                     raise PermanentTaskError(str(exc)) from exc
@@ -1375,6 +1418,8 @@ class ReviewService:
                     result.report.findings,
                 )
                 metrics.inc("repository_investigation_completed_total")
+            if self.store.is_cancelled(task_id):
+                raise RepositoryScanCancelled()
         elif self.settings.repository_investigation_mode != "off":
             result.report.collaboration["investigation"] = {
                 "mode": self.settings.repository_investigation_mode,
@@ -1383,6 +1428,25 @@ class ReviewService:
             }
         # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
         warnings_by_reason = coverage_warning_counts(result.inventory)
+        cxx_status = str(
+            (result.report.collaboration.get("cxx_memory") or {}).get("status", "")
+        ).strip().lower()
+        if cxx_status == "partial":
+            warnings_by_reason["cxx-analysis-partial"] = (
+                warnings_by_reason.get("cxx-analysis-partial", 0) + 1
+            )
+        elif cxx_status in {"failed", "unavailable", "invalid-response", "timedout"}:
+            warnings_by_reason["cxx-analysis-failed"] = (
+                warnings_by_reason.get("cxx-analysis-failed", 0) + 1
+            )
+        platform_status = str(
+            (result.report.collaboration.get("platform") or {}).get("status", "")
+        ).strip().lower()
+        if platform_status in {
+            "review-incomplete", "review-failed", "analyzer-unavailable",
+            "analyzer-not-configured", "llm-not-configured",
+        }:
+            warnings_by_reason["cxx-platform-" + platform_status] = 1
         for warning in materializer_warnings or []:
             if warning.get("category") == "coverage":
                 code = str(warning.get("code") or "COVERAGE_SKIPPED")
@@ -1401,7 +1465,9 @@ class ReviewService:
             # 先落 COMPLETED progress 再翻状态：避免轮询方看到
             # SUCCESS + 非 COMPLETED progress 的矛盾快照。
             progress.complete(completion)
-        self.store.succeed(
+        if self.store.is_cancelled(task_id):
+            raise RepositoryScanCancelled()
+        committed = self.store.succeed_unless_cancelled(
             task_id, result.report,
             TraceEvent(
                 3, TaskState.SUCCESS,
@@ -1410,6 +1476,8 @@ class ReviewService:
                 utc_now(),
             ),
         )
+        if not committed:
+            raise RepositoryScanCancelled()
         metrics.inc("repository_scans_total")
 
     def _on_task_retry(
@@ -1439,6 +1507,9 @@ class ReviewService:
         if not task:
             raise PermanentTaskError("task record no longer exists")
         tenant_id = payload.get("tenant_id") or task.get("tenant_id") or "default"
+        if self.store.is_cancelled(task_id):
+            self._cancel_repository_scan(task_id, "Task cancelled before queue execution.")
+            return
         task_type = payload.get("task_type") or (task.get("input") or {}).get(
             "task_type", "review"
         )
@@ -1668,9 +1739,37 @@ class ReviewService:
             raise ValueError("task not found")
         if task["state"] == "SUCCESS":
             return {"task_id": task_id, "state": "SUCCESS", "report": task["report"]}
+        task_type = (task.get("input") or {}).get("task_type", "review")
+        step = max([int(item.get("step", 0)) for item in task.get("trace", [])] or [0]) + 1
+        if task_type == "repository_scan":
+            snapshot = task.get("input") or {}
+            self.store.reset_task_for_resume(
+                task_id,
+                TraceEvent(
+                    step, TaskState.PENDING,
+                    "Task resumed from its saved snapshot.", utc_now(),
+                ),
+            )
+            self.queue.submit({
+                "task_id": task_id,
+                "task_type": "repository_scan",
+                "repository_key": snapshot.get("repository_key", ""),
+                "scan_source": snapshot.get("scan_source"),
+                "tenant_id": task.get("tenant_id", "default"),
+                "effective_cxx_agent_mode": snapshot.get("effective_cxx_agent_mode"),
+                "investigate_paths": snapshot.get("investigate_paths") or [],
+            }, message_id=task_id)
+            return {"task_id": task_id, "state": "PENDING", "resumed": True}
         diff = self.store.get_task_payload(task_id)
         if diff is None:
             raise ValueError("task payload is no longer available")
+        self.store.reset_task_for_resume(
+            task_id,
+            TraceEvent(
+                step, TaskState.PENDING,
+                "Task resumed from its saved snapshot.", utc_now(),
+            ),
+        )
         self.queue.submit({
             "task_id": task_id, "repository": task["repository"],
             "pull_request": task.get("pull_request"),

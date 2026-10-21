@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Callable, Final, Iterable, Optional
+from typing import Callable, Final, Iterable, Optional, Sequence
 
 from .adjudication import adjudicate_findings
 from .agent_orchestrator import (
@@ -25,6 +25,7 @@ from .cxx_memory import (
     CxxAnalyzerProtocolError,
     CxxAnalyzerUnavailable,
     CxxMemoryAdapter,
+    analysis_evidence_status,
 )
 from .diff_parser import parse_unified_diff
 from .metrics import metrics
@@ -126,6 +127,13 @@ def _full_file_diff(path: str, content: str) -> str:
     )
 
 
+class RepositoryScanCancelled(RuntimeError):
+    """Raised when a repository-scan task is cancelled between work units."""
+
+    def __init__(self) -> None:
+        super().__init__("repository scan cancelled")
+
+
 class RepositoryScanner:
     """Run bounded local reviewers across a read-only repository snapshot."""
 
@@ -143,6 +151,9 @@ class RepositoryScanner:
         cxx_agent_budget_factory: Callable[[], CxxAgentBudget] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         cxx_uaf_llm_factory: Callable[[], dict] | None = None,
+        cxx_agent_timeout_seconds: int = 60,
+        cxx_agent_parallelism: int = 1,
+        cxx_agent_dialogue_rounds: int = 1,
     ) -> None:
         self.reviewers = list(
             reviewers or [SecurityRuleReviewer()]
@@ -155,6 +166,12 @@ class RepositoryScanner:
             raise ValueError("cxx_memory_mode must be auto, off or required")
         if cxx_agent_mode not in {"auto", "off", "required"}:
             raise ValueError("cxx_agent_mode must be auto, off or required")
+        if min(
+            cxx_agent_timeout_seconds,
+            cxx_agent_parallelism,
+            cxx_agent_dialogue_rounds,
+        ) < 1:
+            raise ValueError("C/C++ platform runtime controls must be positive")
         self.python_analyzer = PythonAstSecurityAnalyzer()
         self.python_dataflow = PythonDataflowAnalyzer()
         self.dataflow_enabled = bool(dataflow_enabled)
@@ -167,6 +184,9 @@ class RepositoryScanner:
         self.cxx_agent_budget_factory = cxx_agent_budget_factory
         self.should_cancel = should_cancel
         self.cxx_uaf_llm_factory = cxx_uaf_llm_factory
+        self.cxx_agent_timeout_seconds = cxx_agent_timeout_seconds
+        self.cxx_agent_parallelism = cxx_agent_parallelism
+        self.cxx_agent_dialogue_rounds = cxx_agent_dialogue_rounds
 
     @staticmethod
     def _semantic_key(finding: Finding) -> tuple[str, int, str]:
@@ -669,6 +689,7 @@ class RepositoryScanner:
         cancel_probe: Callable[[], bool] | None,
         mode_override: str | None = None,
         progress_callback: ProgressCallback | None = None,
+        investigate_paths: Sequence[str] = (),
     ) -> dict:
         """Run the single agent platform chain for the facts domain.
 
@@ -695,11 +716,9 @@ class RepositoryScanner:
                     "sidecar adapter is constructed"
                 )
             return {"mode": mode, "status": "analyzer-not-configured"}
-        translation_units = tuple(sorted({
-            PurePosixPath(item.path).as_posix()
-            for item in inventory.files
-            if PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
-        }))[:MAX_UAF_TRANSLATION_UNITS]
+        translation_units = self._platform_translation_units(
+            inventory, investigate_paths
+        )
         if not translation_units:
             return {"mode": mode, "status": "no-cxx-sources"}
         budget = (
@@ -739,6 +758,9 @@ class RepositoryScanner:
                 repro_workbench=workbench,
                 tool_analysis=tool_analysis,
                 should_cancel=cancel_probe,
+                timeout=self.cxx_agent_timeout_seconds,
+                parallelism=self.cxx_agent_parallelism,
+                dialogue_rounds=self.cxx_agent_dialogue_rounds,
             )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             if mode == "required":
@@ -787,6 +809,32 @@ class RepositoryScanner:
             mode, status, outcome, v4=v4, unreviewed_units=unreviewed,
         )
 
+    @staticmethod
+    def _platform_translation_units(
+        inventory: WorkspaceInventory,
+        investigate_paths: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        """Select the bounded C/C++ review scope, honoring explicit paths."""
+        available = tuple(sorted({
+            PurePosixPath(item.path).as_posix()
+            for item in inventory.files
+            if PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
+        }))
+        scopes = tuple(
+            PurePosixPath(
+                str(item).strip().strip("/\\").replace("\\", "/")
+            ).as_posix().rstrip("/")
+            for item in investigate_paths
+            if str(item).strip().strip("/\\")
+        )
+        if not scopes:
+            return available[:MAX_UAF_TRANSLATION_UNITS]
+        requested = tuple(
+            unit for unit in available
+            if any(unit == scope or unit.startswith(scope + "/") for scope in scopes)
+        )
+        return requested[:MAX_UAF_TRANSLATION_UNITS]
+
     def scan(
         self,
         workspace: RepositoryWorkspace,
@@ -796,6 +844,7 @@ class RepositoryScanner:
         task_id: str = "",
         should_cancel: Callable[[], bool] | None = None,
         cxx_agent_mode: str | None = None,
+        investigate_paths: Sequence[str] = (),
     ) -> RepositoryScanResult:
         """Scan a materialized workspace.
 
@@ -810,8 +859,16 @@ class RepositoryScanner:
             raise ValueError(
                 "cxx_agent_mode must be auto, off or required"
             )
+        cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
+
+        def check_cancelled() -> None:
+            if cancel_probe is not None and cancel_probe():
+                raise RepositoryScanCancelled()
+
+        check_cancelled()
         _report(progress_callback, INVENTORY, "正在盘点工作区文件")
         inventory = workspace.inventory()
+        check_cancelled()
         _report(
             progress_callback, INVENTORY, "工作区盘点完成",
             current=len(inventory.files), total=len(inventory.files), unit="files",
@@ -831,6 +888,7 @@ class RepositoryScanner:
         ambiguous_python_modules = 0
 
         repository_files = list(workspace.iter_text(inventory))
+        check_cancelled()
         project_dataflow = None
         if self.dataflow_enabled:
             _report(progress_callback, DATAFLOW_ANALYSIS, "正在建立跨文件数据流索引")
@@ -838,6 +896,7 @@ class RepositoryScanner:
                 path: content for path, content in repository_files
                 if path.endswith(".py")
             })
+            check_cancelled()
             dataflow_parse_errors = len(project_dataflow.parse_errors)
             dataflow_functions_indexed = project_dataflow.functions_indexed
             interprocedural_call_edges = project_dataflow.interprocedural_edges
@@ -860,6 +919,7 @@ class RepositoryScanner:
             current=0, total=total_files, unit="files",
         )
         for index, (path, content) in enumerate(repository_files, start=1):
+            check_cancelled()
             diff = _full_file_diff(path, content)
             if diff:
                 parsed = parse_unified_diff(diff)
@@ -899,8 +959,10 @@ class RepositoryScanner:
         completed_sast = []
         if self.sast_mode != "off":
             for adapter in self.sast_adapters:
+                check_cancelled()
                 _report(progress_callback, SAST_ANALYSIS, "SAST 引擎运行中")
                 result = adapter.scan(workspace, inventory)
+                check_cancelled()
                 sast_summary[result.engine] = result.summary()
                 if result.status == "completed":
                     completed_sast.append(result.engine)
@@ -932,6 +994,7 @@ class RepositoryScanner:
         )
         if self.cxx_memory_mode != "off" and has_cxx_source:
             try:
+                check_cancelled()
                 if self.cxx_memory_adapter is None:
                     raise CxxAnalyzerUnavailable("C/C++ analyzer is not configured")
                 cxx_result = self.cxx_memory_adapter.analyze(
@@ -940,6 +1003,7 @@ class RepositoryScanner:
                     self.cxx_requested_layers,
                     inventory=inventory,
                 )
+                check_cancelled()
             except CxxAnalyzerUnavailable as exc:
                 if self.cxx_memory_mode == "required":
                     raise RuntimeError(
@@ -959,12 +1023,15 @@ class RepositoryScanner:
                     "diagnostics": ["C/C++ memory analyzer response was rejected"],
                 })
             else:
+                evidence_status = analysis_evidence_status(cxx_result)
+                if evidence_status == "failed" and self.cxx_memory_mode == "required":
+                    raise RuntimeError("required C/C++ memory analysis failed to produce accepted evidence")
                 cxx_summary.update({
-                    "status": cxx_result.status,
+                    "status": evidence_status,
                     "tool_runs": cxx_result.tool_runs,
                     "coverage": cxx_result.coverage,
                     # Review round 6: sidecar diagnostics are free text too.
-                "diagnostics": [privacy_text(item) for item in cxx_result.diagnostics],
+                    "diagnostics": [privacy_text(item) for item in cxx_result.diagnostics],
                 })
                 for finding in cxx_result.findings:
                     self._merge_cxx_finding(findings, cxx_finding_index, finding)
@@ -972,7 +1039,7 @@ class RepositoryScanner:
         # 平台分支是唯一的智能体检测链（设计 §10 单链；retirement Task 1
         # 移除了 legacy 七角色分支）：Scout→假设→实验→修正循环，按
         # (cwe, path, symbol, line) 不可变身份合并进同一份报告。
-        cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
+        check_cancelled()
         platform_summary = self._run_platform_branch(
             workspace,
             inventory,
@@ -983,7 +1050,9 @@ class RepositoryScanner:
             cancel_probe,
             mode_override=cxx_agent_mode,
             progress_callback=progress_callback,
+            investigate_paths=investigate_paths,
         )
+        check_cancelled()
 
         findings.sort(
             key=lambda item: (

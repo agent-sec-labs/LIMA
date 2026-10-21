@@ -255,7 +255,7 @@ export function AuditCreatePage(): React.JSX.Element {
 
   const target = (() => {
     try {
-      return normalizeRepositoryTarget(draft.repository);
+      return normalizeRepositoryTarget(draft.repository, draft.mode === "repository" && draft.sourceMode === "local");
     } catch {
       return "未确认";
     }
@@ -265,13 +265,13 @@ export function AuditCreatePage(): React.JSX.Element {
     ? "仓库名称或 GitHub 链接"
     : draft.sourceMode === "github"
       ? "GitHub 仓库链接或 owner/project"
-      : "GitHub 仓库链接或仓库键";
+      : "本地仓库键（相对导入根目录）";
 
   const targetHint = draft.mode === "diff"
     ? "只检查粘贴的新增代码，不读取或执行完整仓库。"
     : draft.sourceMode === "github"
       ? "服务端会在后台解析 ref 并钉死快照，浏览器不发起 GitHub 请求。"
-      : "系统不会自动下载任意仓库；链接会转换为 repositories 目录下的安全相对路径。";
+      : "填写管理员配置的导入根目录下的相对路径，例如 ResInsight；目录位置由服务端配置。";
 
   const stepIndex = phase === "editing" ? 0 : phase === "review" ? 1 : 2;
 
@@ -351,7 +351,9 @@ export function AuditCreatePage(): React.JSX.Element {
                 placeholder={
                   draft.mode === "diff"
                     ? "仓库名称或 GitHub 链接"
-                    : "https://github.com/owner/project 或 owner/project"
+                    : draft.sourceMode === "local"
+                      ? "ResInsight 或 team/project"
+                      : "https://github.com/owner/project 或 owner/project"
                 }
                 autoComplete="off"
                 value={draft.repository}
@@ -384,6 +386,25 @@ export function AuditCreatePage(): React.JSX.Element {
                     style={{ marginTop: 8 }}
                   />
                 )}
+              </div>
+            )}
+
+            {draft.mode === "repository" && (
+              <div>
+                <label htmlFor="audit-investigate-paths">
+                  重点调查文件（可选，每行一个快照内相对路径）
+                </label>
+                <Input.TextArea
+                  id="audit-investigate-paths"
+                  rows={4}
+                  placeholder={"例如 src/parser.py\ninclude/parser.h"}
+                  value={draft.investigatePaths ?? ""}
+                  onChange={(event) => setValue("investigatePaths", event.target.value)}
+                />
+                {fieldError(errors.investigatePaths?.message)}
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  仅接受快照内文件的相对路径；调查是否执行取决于服务端模型调查配置，具体状态以报告为准。
+                </Typography.Text>
               </div>
             )}
 
@@ -500,6 +521,13 @@ export function AuditCreatePage(): React.JSX.Element {
               {target}
               {githubScan && draft.githubRef.trim() !== "" ? ` @ ${draft.githubRef.trim()}` : ""}
             </Descriptions.Item>
+            {draft.mode === "repository" && (
+              <Descriptions.Item label="重点调查文件">
+                {draft.investigatePaths?.trim()
+                  ? draft.investigatePaths.trim().split(/\r?\n/).map((item) => item.trim()).filter(Boolean).join("、")
+                  : "未指定（扫描完整快照）"}
+              </Descriptions.Item>
+            )}
             {draft.mode === "repository" && (
               <Descriptions.Item label="智能体检测">
                 {gate.effective ? "开启" : "关闭"}

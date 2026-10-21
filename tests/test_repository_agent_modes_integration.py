@@ -461,6 +461,9 @@ class IndependentToggleTests(_AgentModesTestCase):
                 task = service.store.get(created["task_id"]) or {}
         self.assertEqual("SUCCESS", task.get("state"), task.get("error"))
         self.assertEqual("off", scan.call_args.kwargs["cxx_agent_mode"])
+        self.assertEqual(
+            [MODULE_PATH], scan.call_args.kwargs["investigate_paths"]
+        )
         self.assertEqual("auto", service.repository_scanner.cxx_agent_mode)
         discovered = self._discovered(task["report"])
         self.assertEqual(1, len(discovered))
@@ -612,10 +615,9 @@ class JointWorkerExecutionTests(_AgentModesTestCase):
 class UpstreamCompatSurfaceTests(_AgentModesTestCase):
     """T12-T14: main-side API/capability surfaces survive the merge."""
 
-    def test_github_source_agent_snapshot_no_investigation_surface(self):
-        # IC-9: the source path snapshots the same agent switch and
-        # message, while the source surface never exposes
-        # investigate_paths (the exact union of both delivered states).
+    def test_github_source_snapshots_agent_switch_and_investigation_paths(self):
+        # The source API now carries the same optional investigation scope
+        # as local imports, without changing the third positional argument.
         service = self._service(
             repository_scan_sources="both",
             cxx_memory_mode="auto",
@@ -623,7 +625,7 @@ class UpstreamCompatSurfaceTests(_AgentModesTestCase):
         )
         with mock.patch.object(service.queue, "submit") as submit:
             created = service.enqueue_repository_scan_source(
-                GITHUB_SOURCE, agent_detection=True,
+                GITHUB_SOURCE, agent_detection=True, investigate_paths=[MODULE_PATH],
             )
         task_input = self._task_input(service, created)
         self.assertTrue(task_input["agent_detection"])
@@ -633,11 +635,9 @@ class UpstreamCompatSurfaceTests(_AgentModesTestCase):
         params = inspect.signature(
             ReviewService.enqueue_repository_scan_source
         ).parameters
-        self.assertNotIn("investigate_paths", params)
-        with self.assertRaises(TypeError):
-            service.enqueue_repository_scan_source(
-                GITHUB_SOURCE, investigate_paths=[MODULE_PATH],
-            )
+        self.assertIn("investigate_paths", params)
+        self.assertEqual([MODULE_PATH], task_input["investigate_paths"])
+        self.assertEqual([MODULE_PATH], message["investigate_paths"])
 
     def test_api_positional_third_arg_contract(self):
         # IC-8/IC-1: main api.py passes agent_detection as the THIRD

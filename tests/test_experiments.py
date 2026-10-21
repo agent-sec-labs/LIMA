@@ -123,6 +123,34 @@ class ExperimentRunnerTests(unittest.TestCase):
         self.assertNotIn("cases", catalog[0])
         self.assertNotIn("case_ids", catalog[0])
 
+    def test_catalog_skips_list_root_json_and_keeps_valid_manifest(self):
+        (self.datasets / "ignored-list.json").write_text("[]\n", encoding="utf-8")
+        manifest = {
+            "schema_version": 1,
+            "name": "valid-manifest",
+            "cases": [{
+                "id": "case-a",
+                "cwe": "CWE-22",
+                "repository": "owner/project",
+                "vulnerable_commit": "a" * 40,
+                "fixed_commit": "b" * 40,
+                "ground_truth_paths": ["src/security.py"],
+                "ground_truth_symbols": ["security_boundary"],
+                "expected_repair_policy": "abstain",
+                "sources": ["https://example.test/advisory"],
+            }],
+        }
+        (self.datasets / "valid.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        runner = ExperimentRunner(
+            self.store, self.datasets, self.artifacts, lambda _mode: FakeEvaluator()
+        )
+
+        catalog = runner.catalog()
+
+        self.assertEqual(["valid.json"], [item["path"] for item in catalog])
+
     def test_deterministic_failure_resumes_without_repeating_completed_cases(self):
         evaluator = FakeEvaluator(fail_once="case-b")
         runner = self.runner(evaluator)

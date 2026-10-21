@@ -44,6 +44,7 @@ RUN groupadd --gid 10002 analyzer \
 
 WORKDIR /app
 COPY --chown=analyzer:analyzer cxx_analyzer ./cxx_analyzer
+COPY cxx_analyzer/semgrep_targets.py /usr/local/lib/lima-semgrep-targets.py
 
 FROM base AS runtime
 USER analyzer:analyzer

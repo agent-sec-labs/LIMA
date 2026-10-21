@@ -110,6 +110,12 @@ export const api = {
     }),
   task: (taskId: string, signal?: AbortSignal | undefined) =>
     request<TaskDetail>(`/v1/tasks/${encodeURIComponent(taskId)}`, { method: "GET", signal }),
+  cancelTask: (taskId: string) =>
+    request<{ cancel_requested: boolean }>(`/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} }),
+  resumeTask: (taskId: string) =>
+    request<{ state: string; resumed?: boolean }>(`/v1/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST", body: {} }),
+  taskReport: (taskId: string) =>
+    request<string>(`/v1/tasks/${encodeURIComponent(taskId)}/report`),
   taskFeedback: (taskId: string) =>
     request<{ cases: FeedbackCase[] }>(`/v1/tasks/${encodeURIComponent(taskId)}/feedback`, {
       method: "GET",

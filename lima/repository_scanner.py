@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Callable, Final, Iterable, Optional
+from typing import Callable, Final, Iterable, Optional, Sequence
 
 from .adjudication import adjudicate_findings
 from .agent_orchestrator import (
@@ -151,6 +151,9 @@ class RepositoryScanner:
         cxx_agent_budget_factory: Callable[[], CxxAgentBudget] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         cxx_uaf_llm_factory: Callable[[], dict] | None = None,
+        cxx_agent_timeout_seconds: int = 60,
+        cxx_agent_parallelism: int = 1,
+        cxx_agent_dialogue_rounds: int = 1,
     ) -> None:
         self.reviewers = list(
             reviewers or [SecurityRuleReviewer()]
@@ -163,6 +166,12 @@ class RepositoryScanner:
             raise ValueError("cxx_memory_mode must be auto, off or required")
         if cxx_agent_mode not in {"auto", "off", "required"}:
             raise ValueError("cxx_agent_mode must be auto, off or required")
+        if min(
+            cxx_agent_timeout_seconds,
+            cxx_agent_parallelism,
+            cxx_agent_dialogue_rounds,
+        ) < 1:
+            raise ValueError("C/C++ platform runtime controls must be positive")
         self.python_analyzer = PythonAstSecurityAnalyzer()
         self.python_dataflow = PythonDataflowAnalyzer()
         self.dataflow_enabled = bool(dataflow_enabled)
@@ -175,6 +184,9 @@ class RepositoryScanner:
         self.cxx_agent_budget_factory = cxx_agent_budget_factory
         self.should_cancel = should_cancel
         self.cxx_uaf_llm_factory = cxx_uaf_llm_factory
+        self.cxx_agent_timeout_seconds = cxx_agent_timeout_seconds
+        self.cxx_agent_parallelism = cxx_agent_parallelism
+        self.cxx_agent_dialogue_rounds = cxx_agent_dialogue_rounds
 
     @staticmethod
     def _semantic_key(finding: Finding) -> tuple[str, int, str]:
@@ -677,6 +689,7 @@ class RepositoryScanner:
         cancel_probe: Callable[[], bool] | None,
         mode_override: str | None = None,
         progress_callback: ProgressCallback | None = None,
+        investigate_paths: Sequence[str] = (),
     ) -> dict:
         """Run the single agent platform chain for the facts domain.
 
@@ -703,11 +716,9 @@ class RepositoryScanner:
                     "sidecar adapter is constructed"
                 )
             return {"mode": mode, "status": "analyzer-not-configured"}
-        translation_units = tuple(sorted({
-            PurePosixPath(item.path).as_posix()
-            for item in inventory.files
-            if PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
-        }))[:MAX_UAF_TRANSLATION_UNITS]
+        translation_units = self._platform_translation_units(
+            inventory, investigate_paths
+        )
         if not translation_units:
             return {"mode": mode, "status": "no-cxx-sources"}
         budget = (
@@ -747,6 +758,9 @@ class RepositoryScanner:
                 repro_workbench=workbench,
                 tool_analysis=tool_analysis,
                 should_cancel=cancel_probe,
+                timeout=self.cxx_agent_timeout_seconds,
+                parallelism=self.cxx_agent_parallelism,
+                dialogue_rounds=self.cxx_agent_dialogue_rounds,
             )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             if mode == "required":
@@ -795,6 +809,32 @@ class RepositoryScanner:
             mode, status, outcome, v4=v4, unreviewed_units=unreviewed,
         )
 
+    @staticmethod
+    def _platform_translation_units(
+        inventory: WorkspaceInventory,
+        investigate_paths: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        """Select the bounded C/C++ review scope, honoring explicit paths."""
+        available = tuple(sorted({
+            PurePosixPath(item.path).as_posix()
+            for item in inventory.files
+            if PurePosixPath(item.path).suffix.lower() in CXX_SOURCE_EXTENSIONS
+        }))
+        scopes = tuple(
+            PurePosixPath(
+                str(item).strip().strip("/\\").replace("\\", "/")
+            ).as_posix().rstrip("/")
+            for item in investigate_paths
+            if str(item).strip().strip("/\\")
+        )
+        if not scopes:
+            return available[:MAX_UAF_TRANSLATION_UNITS]
+        requested = tuple(
+            unit for unit in available
+            if any(unit == scope or unit.startswith(scope + "/") for scope in scopes)
+        )
+        return requested[:MAX_UAF_TRANSLATION_UNITS]
+
     def scan(
         self,
         workspace: RepositoryWorkspace,
@@ -804,6 +844,7 @@ class RepositoryScanner:
         task_id: str = "",
         should_cancel: Callable[[], bool] | None = None,
         cxx_agent_mode: str | None = None,
+        investigate_paths: Sequence[str] = (),
     ) -> RepositoryScanResult:
         """Scan a materialized workspace.
 
@@ -1009,6 +1050,7 @@ class RepositoryScanner:
             cancel_probe,
             mode_override=cxx_agent_mode,
             progress_callback=progress_callback,
+            investigate_paths=investigate_paths,
         )
         check_cancelled()
 

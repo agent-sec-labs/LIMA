@@ -86,6 +86,7 @@ class DotenvTests(unittest.TestCase):
                 "LIMA_CXX_AGENT_MAX_CONTEXT_FILES": "6",
                 "LIMA_CXX_AGENT_MAX_CONTEXT_LINES": "600",
                 "LIMA_CXX_AGENT_MAX_OUTPUT_BYTES": "524288",
+                "LIMA_CXX_AGENT_MAX_COMPLETION_TOKENS": "2048",
                 "LIMA_CXX_AGENT_TIMEOUT_SECONDS": "300",
                 "LIMA_CXX_AGENT_PARALLELISM": "2",
                 "LIMA_CXX_AGENT_DIALOGUE_ROUNDS": "1",
@@ -99,6 +100,7 @@ class DotenvTests(unittest.TestCase):
         self.assertEqual(6, settings.cxx_agent_max_context_files)
         self.assertEqual(600, settings.cxx_agent_max_context_lines)
         self.assertEqual(524288, settings.cxx_agent_max_output_bytes)
+        self.assertEqual(2048, settings.cxx_agent_max_completion_tokens)
         self.assertEqual(300, settings.cxx_agent_timeout_seconds)
         self.assertEqual(2, settings.cxx_agent_parallelism)
         self.assertEqual(1, settings.cxx_agent_dialogue_rounds)
@@ -112,6 +114,7 @@ class DotenvTests(unittest.TestCase):
         self.assertEqual(12, settings.cxx_agent_max_context_files)
         self.assertEqual(1200, settings.cxx_agent_max_context_lines)
         self.assertEqual(1048576, settings.cxx_agent_max_output_bytes)
+        self.assertEqual(4096, settings.cxx_agent_max_completion_tokens)
         self.assertEqual(600, settings.cxx_agent_timeout_seconds)
         self.assertEqual(3, settings.cxx_agent_parallelism)
         self.assertEqual(2, settings.cxx_agent_dialogue_rounds)

@@ -310,6 +310,9 @@ class ReviewService:
             override = str(getattr(settings, "cxx_agent_model", "") or "").strip()
             if override:
                 resolved["model"] = override
+            resolved["request_params"] = {
+                "max_tokens": settings.cxx_agent_max_completion_tokens,
+            }
             return resolved
 
         if self.llm_config:
@@ -334,6 +337,9 @@ class ReviewService:
             cxx_agent_mode=settings.cxx_agent_mode,
             cxx_agent_budget_factory=cxx_agent_budget_factory,
             cxx_uaf_llm_factory=cxx_uaf_llm_factory,
+            cxx_agent_timeout_seconds=settings.cxx_agent_timeout_seconds,
+            cxx_agent_parallelism=settings.cxx_agent_parallelism,
+            cxx_agent_dialogue_rounds=settings.cxx_agent_dialogue_rounds,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
         self.repository_investigation = self._build_repository_investigation()
@@ -1298,6 +1304,7 @@ class ReviewService:
                 # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
                 # 并发任务各自隔离。
                 cxx_agent_mode=cxx_agent_mode,
+                investigate_paths=investigate_paths or (),
             )
         if self.store.is_cancelled(task_id):
             raise RepositoryScanCancelled()
@@ -1432,6 +1439,14 @@ class ReviewService:
             warnings_by_reason["cxx-analysis-failed"] = (
                 warnings_by_reason.get("cxx-analysis-failed", 0) + 1
             )
+        platform_status = str(
+            (result.report.collaboration.get("platform") or {}).get("status", "")
+        ).strip().lower()
+        if platform_status in {
+            "review-incomplete", "review-failed", "analyzer-unavailable",
+            "analyzer-not-configured", "llm-not-configured",
+        }:
+            warnings_by_reason["cxx-platform-" + platform_status] = 1
         for warning in materializer_warnings or []:
             if warning.get("category") == "coverage":
                 code = str(warning.get("code") or "COVERAGE_SKIPPED")

@@ -898,7 +898,7 @@ class PostgresTaskStore:
     def cancel(self, task_id: str, event: TraceEvent) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE tasks SET state=%s,updated_at=%s WHERE id=%s",
+                "UPDATE tasks SET state=%s,progress_json=NULL,updated_at=%s WHERE id=%s",
                 (TaskState.CANCELLED.value, event.created_at, task_id),
             )
             conn.execute(

@@ -1193,7 +1193,7 @@ class TaskStore:
     def cancel(self, task_id: str, event: TraceEvent) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE tasks SET state=?,updated_at=? WHERE id=?",
+                "UPDATE tasks SET state=?,progress_json=NULL,updated_at=? WHERE id=?",
                 (TaskState.CANCELLED.value, event.created_at, task_id),
             )
             conn.execute(

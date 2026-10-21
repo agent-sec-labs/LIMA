@@ -399,6 +399,9 @@ class AgentDetectionEnqueueTests(unittest.TestCase):
         resolved = factory()
         self.assertEqual("deepseek-v4-flash", resolved["model"])
         self.assertEqual("deepseek", resolved["provider"])
+        self.assertEqual(
+            4096, resolved["request_params"]["max_tokens"]
+        )
 
         # 显式 LIMA_CXX_AGENT_MODEL 覆盖仍然生效（模型不能被调用方指定，
         # 只由管理员配置决定）。

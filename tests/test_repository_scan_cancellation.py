@@ -47,8 +47,9 @@ class _CapturingQueue:
 
 
 class _StaticScanner:
-    def __init__(self, cxx_status: str) -> None:
+    def __init__(self, cxx_status: str, platform_status: str = "disabled") -> None:
         self.cxx_status = cxx_status
+        self.platform_status = platform_status
 
     def scan(self, workspace, **_kwargs) -> RepositoryScanResult:
         inventory = WorkspaceInventory(root=str(workspace.root))
@@ -58,7 +59,10 @@ class _StaticScanner:
                 pull_request=None,
                 summary="scan",
                 risk="low",
-                collaboration={"cxx_memory": {"status": self.cxx_status}},
+                collaboration={
+                    "cxx_memory": {"status": self.cxx_status},
+                    "platform": {"status": self.platform_status},
+                },
             ),
             inventory=inventory,
         )
@@ -279,6 +283,25 @@ class RepositoryScanCancellationTests(unittest.TestCase):
         self.assertEqual("completed_with_warnings", completion["status"])
         self.assertEqual({"cxx-analysis-failed": 1}, completion["warnings"])
 
+    def test_incomplete_platform_review_marks_completion_with_warnings(self) -> None:
+        for status in (
+            "review-incomplete", "review-failed", "analyzer-unavailable",
+            "analyzer-not-configured", "llm-not-configured",
+        ):
+            with self.subTest(status=status):
+                task_id = "platform-" + status
+                self._create_scan(task_id)
+                self.service.repository_scanner = _StaticScanner("completed", status)
+                self.service._process_queued({
+                    "task_id": task_id, "task_type": "repository_scan",
+                    "repository_key": "demo", "tenant_id": "tenant-a",
+                })
+                task = self.service.store.get(task_id, "tenant-a")
+                self.assertEqual("SUCCESS", task["state"])
+                completion = task["progress"]["detail"]["completion"]
+                self.assertEqual("completed_with_warnings", completion["status"])
+                self.assertEqual({"cxx-platform-" + status: 1}, completion["warnings"])
+
     def test_resume_clears_old_terminal_result_fields_but_keeps_snapshot(self) -> None:
         self._create_scan("failed-scan", TaskState.FAILED)
         self.service.store.succeed(
@@ -330,6 +353,16 @@ class RepositoryScanCancellationTests(unittest.TestCase):
         task = self.service.store.get("commit-race", "tenant-a")
         self.assertEqual("CANCELLED", task["state"])
         self.assertIsNone(task["report"])
+        self.assertIsNone(task["progress"])
+
+    def test_postgres_cancel_clears_completed_progress(self) -> None:
+        store = PostgresTaskStore.__new__(PostgresTaskStore)
+        connection = _PostgresConnection()
+        store._connect = lambda: connection
+        store.cancel(
+            "task", TraceEvent(3, TaskState.CANCELLED, "cancelled", "2026-01-01T00:00:00Z")
+        )
+        self.assertIn("progress_json=NULL", connection.calls[0][0])
 
     def test_postgres_atomic_commit_and_resume_sql(self) -> None:
         store = PostgresTaskStore.__new__(PostgresTaskStore)

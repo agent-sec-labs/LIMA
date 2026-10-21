@@ -2734,6 +2734,67 @@ class DiffOnlyTests(unittest.TestCase):
 class ScannerSingleChainTests(unittest.TestCase):
     """The scanner runs exactly one agent chain: the platform branch."""
 
+    def test_requested_cxx_file_is_the_platform_review_scope(self):
+        root = tempfile.mkdtemp(suffix="-requested-cxx-scope")
+        self.addCleanup(lambda: _rmtree(root))
+        for index in range(20):
+            _write_cxx_repo(root, f"src/a{index:02d}.cpp", "int f() { return 0; }\n")
+        requested = "services/bluetooth/avrcp_ct_profile.cpp"
+        workspace = _write_cxx_repo(
+            root, requested, "int target() { return 0; }\n"
+        )
+        scanner = RepositoryScanner(sast_mode="off", dataflow_enabled=False)
+
+        units = scanner._platform_translation_units(
+            workspace.inventory(), [requested]
+        )
+
+        self.assertEqual((requested,), units)
+        self.assertEqual(
+            (requested,),
+            scanner._platform_translation_units(
+                workspace.inventory(), [requested.replace("/", "\\")]
+            ),
+        )
+
+    def test_scanner_passes_configured_platform_runtime_controls(self):
+        import lima.repository_scanner as scanner_module
+        from lima.agent_orchestrator import PlatformReviewOutcome, PlatformReviewStats
+
+        root = tempfile.mkdtemp(suffix="-platform-runtime-controls")
+        self.addCleanup(lambda: _rmtree(root))
+        workspace = _write_cxx_repo(root)
+        scanner = RepositoryScanner(
+            sast_mode="off",
+            dataflow_enabled=False,
+            cxx_memory_adapter=FakeUafAnalyzer(),
+            cxx_agent_mode="auto",
+            cxx_agent_timeout_seconds=321,
+            cxx_agent_parallelism=2,
+            cxx_agent_dialogue_rounds=3,
+            cxx_uaf_llm_factory=lambda: {
+                "provider": "openai",
+                "model": "fake",
+            },
+        )
+        outcome = PlatformReviewOutcome(
+            findings=(),
+            targets=(),
+            stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 0),
+            diagnostics=(),
+            leads_considered=0,
+            translation_units=("src/example.c",),
+        )
+
+        with patch.object(
+            scanner_module, "run_platform_review", return_value=outcome
+        ) as review:
+            scanner.scan(workspace)
+
+        self.assertEqual(321, review.call_args.kwargs["timeout"])
+        self.assertEqual(2, review.call_args.kwargs["parallelism"])
+        self.assertEqual(3, review.call_args.kwargs["dialogue_rounds"])
+
     def test_scanner_runs_single_agent_chain(self):
         import lima.repository_scanner as scanner_module
 

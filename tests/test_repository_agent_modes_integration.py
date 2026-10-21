@@ -461,6 +461,9 @@ class IndependentToggleTests(_AgentModesTestCase):
                 task = service.store.get(created["task_id"]) or {}
         self.assertEqual("SUCCESS", task.get("state"), task.get("error"))
         self.assertEqual("off", scan.call_args.kwargs["cxx_agent_mode"])
+        self.assertEqual(
+            [MODULE_PATH], scan.call_args.kwargs["investigate_paths"]
+        )
         self.assertEqual("auto", service.repository_scanner.cxx_agent_mode)
         discovered = self._discovered(task["report"])
         self.assertEqual(1, len(discovered))

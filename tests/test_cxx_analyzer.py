@@ -1352,6 +1352,7 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
             "LIMA_CXX_MAX_RESPONSE_BYTES",
         }
         sidecar_configuration = {
+            "LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION",
             "LIMA_CXX_AUTO_CMAKE",
             "LIMA_CXX_BUILD_STEPS_JSON",
             "LIMA_CXX_TEST_STEPS_JSON",
@@ -1369,6 +1370,10 @@ class AnalyzerComposeSecurityTests(unittest.TestCase):
         self.assertEqual(
             sidecar_configuration | snapshot_limits,
             set(analyzer["environment"]),
+        )
+        self.assertEqual(
+            "${LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION:-false}",
+            analyzer["environment"]["LIMA_CXX_TRUSTED_BUILD_CONTEXT_GENERATION"],
         )
         self.assertFalse(
             any(

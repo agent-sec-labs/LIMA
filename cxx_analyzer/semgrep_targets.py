@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -18,9 +19,38 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 
 
+def _read_manifest(manifest: Path) -> bytes:
+    if manifest.name != "targets.json":
+        raise ValueError("target manifest name is invalid")
+    try:
+        canonical = manifest.resolve(strict=True)
+        metadata = manifest.lstat()
+    except OSError as exc:
+        raise ValueError("target manifest is unavailable") from exc
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        manifest.absolute() != canonical
+        or stat.S_ISLNK(metadata.st_mode)
+        or attributes & reparse_flag
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise ValueError("target manifest must be a canonical regular file without links")
+    try:
+        with canonical.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise ValueError("target manifest changed type while opening")
+            return stream.read(MAX_MANIFEST_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("target manifest is unavailable") from exc
+
+
 def load_targets(manifest: Path) -> list[str]:
-    with manifest.open("rb") as stream:
-        raw = stream.read(MAX_MANIFEST_BYTES + 1)
+    raw = _read_manifest(manifest)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError("target manifest exceeds budget")
     targets = json.loads(raw)

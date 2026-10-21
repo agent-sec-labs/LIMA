@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from cxx_analyzer.execution import ToolExecution, _validate_argv
 from cxx_analyzer.semgrep_targets import load_targets
 from cxx_analyzer.snapshot import prepare_snapshot
 from cxx_analyzer.source_scan import run_source_scan
+from lima.python_dataflow import PythonDataflowAnalyzer
 from lima.workspace import RepositoryWorkspace
 
 
@@ -201,6 +203,55 @@ class SemgrepRecoveryTests(unittest.TestCase):
                     else:
                         with self.assertRaises((ValueError, OSError)):
                             load_targets(manifest)
+
+    def test_manifest_loader_rejects_an_unexpected_file_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "good.cpp").write_text("int value;", encoding="utf8")
+            manifest = root / "unexpected.json"
+            manifest.write_text(json.dumps(["good.cpp"]), encoding="utf8")
+            with patch("cxx_analyzer.semgrep_targets.Path.cwd", return_value=root):
+                with self.assertRaises(ValueError):
+                    load_targets(manifest)
+
+    def test_manifest_loader_rejects_a_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "good.cpp").write_text("int value;", encoding="utf8")
+            target = root / "manifest-payload.json"
+            target.write_text(json.dumps(["good.cpp"]), encoding="utf8")
+            manifest = root / "targets.json"
+            try:
+                os.symlink(target, manifest)
+            except OSError as exc:
+                self.skipTest(f"symbolic links are unavailable: {exc}")
+
+            with patch("cxx_analyzer.semgrep_targets.Path.cwd", return_value=root):
+                with self.assertRaises(ValueError):
+                    load_targets(manifest)
+
+    def test_manifest_loader_rejects_a_symbolic_linked_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "good.cpp").write_text("int value;", encoding="utf8")
+            real_stage = root / "real-stage"
+            real_stage.mkdir()
+            (real_stage / "targets.json").write_text(json.dumps(["good.cpp"]), encoding="utf8")
+            staged_alias = root / "staged-alias"
+            try:
+                os.symlink(real_stage, staged_alias, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symbolic links are unavailable: {exc}")
+
+            with patch("cxx_analyzer.semgrep_targets.Path.cwd", return_value=root):
+                with self.assertRaises(ValueError):
+                    load_targets(staged_alias / "targets.json")
+
+    def test_manifest_helper_has_no_verified_path_flow(self):
+        source = Path("cxx_analyzer/semgrep_targets.py").read_text(encoding="utf8")
+        result = PythonDataflowAnalyzer().analyze("cxx_analyzer/semgrep_targets.py", source)
+
+        self.assertEqual([], [item for item in result.findings if item.rule_id == "FLOW-PATH"])
 
     def test_redacted_tool_evidence_is_replaced_by_verified_snapshot_source(self):
         error = {"type": "Syntax error", "message": "unsupported syntax", "path": "bad.cpp"}

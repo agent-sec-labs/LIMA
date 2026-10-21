@@ -191,7 +191,7 @@ class TaskQueue:
         try:
             result = self._redis.xautoclaim(
                 self.stream, self.group, self.consumer,
-                min_idle_time=self.lease_seconds * 1000, start_id="0-0", count=10,
+                min_idle_time=self.lease_seconds * 1000, start_id="0-0", count=1,
             )
             entries = result[1] if len(result) > 1 else []
             for redis_id, fields in entries:

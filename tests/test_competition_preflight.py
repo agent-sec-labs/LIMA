@@ -71,7 +71,7 @@ def _git(path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def run_cli(arguments, env_extra=None):
+def run_cli(arguments, env_extra=None, cwd=REPO_ROOT):
     env = {
         name: value for name, value in os.environ.items()
         if not name.startswith("LIMA_")
@@ -80,7 +80,7 @@ def run_cli(arguments, env_extra=None):
         env.update(env_extra)
     return subprocess.run(  # noqa: S603
         [sys.executable, str(CLI_PATH), *arguments],  # noqa: S607
-        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT),
+        capture_output=True, text=True, env=env, cwd=str(cwd),
     )
 
 
@@ -810,6 +810,34 @@ class PreflightCliTests(unittest.TestCase):
         ], env_extra=MODEL_ENV)
         self.assertEqual(clean_run.returncode, 0, clean_run.stderr)
         self.assertTrue(self.output_path.exists())
+
+    def test_tilde_output_uses_the_validated_home_path(self):
+        checkout = self.fixture.vulnerable_repo
+        literal_tilde = checkout / "~"
+        literal_tilde.mkdir()
+        home = self.fixture.root / "external-home"
+        home.mkdir()
+        output = home / "preflight-report.json"
+        checkout_status = _git(checkout, "status", "--porcelain")
+        completed = run_cli([
+            "--case", str(self.case_path),
+            "--repository-import-root", str(self.fixture.import_root),
+            "--output", "~/preflight-report.json",
+        ], env_extra={**MODEL_ENV, "HOME": str(home), "USERPROFILE": str(home)},
+            cwd=checkout)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertTrue(output.is_file())
+        self.assertFalse((literal_tilde / "preflight-report.json").exists())
+        self.assertEqual(_git(checkout, "status", "--porcelain"), checkout_status)
+
+        next_output = self.fixture.root / "second-report.json"
+        second = run_cli([
+            "--case", str(self.case_path),
+            "--repository-import-root", str(self.fixture.import_root),
+            "--output", str(next_output),
+        ], env_extra=MODEL_ENV, cwd=checkout)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertTrue(next_output.is_file())
 
     def test_unknown_argument_value_is_never_echoed(self):
         # Review #328 (P2-2): argparse echoes unrecognized arguments

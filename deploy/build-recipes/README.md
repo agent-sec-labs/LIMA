@@ -1,5 +1,9 @@
 # Build Recipes (`deploy/build-recipes/`)
 
+本目录说明 configure-only 的分析上下文协议。完整构建使用另一套
+`full-build.json` 协议和通用 CLI，见 [容器完整构建指南](../../docs/CONTAINER_BUILD_GUIDE.md)。
+具体仓库的 Dockerfile 和配方应存放在 LIMA 仓库之外的本地目录，不提交到 GitHub。
+
 A build recipe is the declaration of how one repository's compilation
 context is produced **once, inside a per-repository build container**, and
 exported as a dependency-free "analysis context package" that the LIMA
@@ -8,10 +12,10 @@ need network access and root-installed dependencies.  The analysis sandbox
 stays the *sterile room*: it never installs anything and only reads the
 package.
 
-Each recipe is a directory:
+Local recipes are directories outside the LIMA checkout:
 
 ```
-deploy/build-recipes/<name>/
+<local-recipe-root>/<name>/
     Dockerfile      # the build container image
     recipe.yaml     # how to configure the repo and what to export
 ```
@@ -24,7 +28,7 @@ deploy/build-recipes/<name>/
    The image **must ship `python3`** -- the recipe executor lists container
    files with an in-container python3 glob helper.  Build it locally and
    never push it to a registry: `docker build -t lima-builder-<name>:latest
-   deploy/build-recipes/<name>`.
+   <local-recipe-root>/<name>`.
 
 2. **Write the `recipe.yaml`** (schema v1, all keys required unless noted):
 
@@ -54,7 +58,7 @@ deploy/build-recipes/<name>/
    from pathlib import Path
    from lima.build_recipe import BuildRecipe, run_recipe_in_container
 
-   recipe = BuildRecipe.from_file(Path("deploy/build-recipes/<name>/recipe.yaml"))
+   recipe = BuildRecipe.from_file(Path("<local-recipe-root>/<name>/recipe.yaml"))
    manifest = run_recipe_in_container(
        recipe,
        Path("<repository source tree>"),

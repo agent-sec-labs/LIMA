@@ -29,6 +29,8 @@ repositories/*
 .vscode/
 .idea/
 .worktrees/
+# Repository-specific build recipes stay local; only the protocol README is public.
+deploy/build-recipes/*/
 .DS_Store
 Thumbs.db
 

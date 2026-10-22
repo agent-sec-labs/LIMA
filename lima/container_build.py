@@ -293,6 +293,7 @@ def container_command(
     command = [
         "docker",
         "run",
+        "--rm",
         "--name",
         name,
         "--init",

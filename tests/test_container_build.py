@@ -150,6 +150,7 @@ class ContainerBuildTests(unittest.TestCase):
         self.assertTrue(source_mount.endswith(",readonly"))
         self.assertNotIn("--privileged", command)
         self.assertNotIn("docker.sock", " ".join(command))
+        self.assertIn("--rm", command)
 
     def test_nonempty_output_is_rejected_before_any_artifact_is_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:

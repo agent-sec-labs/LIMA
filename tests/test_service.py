@@ -424,6 +424,33 @@ class AgentDetectionEnqueueTests(unittest.TestCase):
         caps = visible.repository_scan_capabilities()["cxx_agent"]
         self.assertEqual("deepseek-v4-flash", caps["model"])
 
+    def test_platform_llm_factory_thinking_toggle(self):
+        # 混合思考模型（deepseek-flash/v4-pro）默认开思考且思考 token 与
+        # max_tokens 共享预算：难窗口思考吃满预算时 content 为空串
+        # （2026-10-21 实测 reasoning_tokens=8192、content=""）。默认不下发
+        # thinking 参数保持 provider 原状；操作员显式开启后必须原样注入。
+        service = self._service(
+            llm_provider="deepseek", deepseek_api_key="unit-test-key",
+        )
+        resolved = service.repository_scanner.cxx_uaf_llm_factory()
+        self.assertNotIn("thinking", resolved["request_params"])
+        self.assertEqual(
+            4096, resolved["request_params"]["max_tokens"]
+        )
+
+        disabled = self._service(
+            llm_provider="deepseek",
+            deepseek_api_key="unit-test-key",
+            cxx_agent_disable_thinking=True,
+        )
+        resolved = disabled.repository_scanner.cxx_uaf_llm_factory()
+        self.assertEqual(
+            {"type": "disabled"}, resolved["request_params"]["thinking"]
+        )
+        self.assertEqual(
+            4096, resolved["request_params"]["max_tokens"]
+        )
+
     def test_capabilities_expose_per_request_contract(self):
         service = self._service(
             cxx_agent_mode="auto", cxx_memory_mode="auto", **self._llm_overrides()

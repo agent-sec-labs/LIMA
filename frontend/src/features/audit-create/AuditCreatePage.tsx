@@ -352,7 +352,7 @@ export function AuditCreatePage(): React.JSX.Element {
                   draft.mode === "diff"
                     ? "仓库名称或 GitHub 链接"
                     : draft.sourceMode === "local"
-                      ? "ResInsight 或 team/project"
+                      ? "仓库目录名或 team/project"
                       : "https://github.com/owner/project 或 owner/project"
                 }
                 autoComplete="off"

@@ -4,6 +4,7 @@
 
 import importlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,9 @@ class ContainerBuildTests(unittest.TestCase):
 
     def test_standard_project_catalog_resolves_both_full_builds(self):
         mod = self.module()
+        recipe_root = Path(mod.__file__).resolve().parent.parent / "deploy/build-recipes"
+        if not recipe_root.is_dir():
+            self.skipTest("the slim runtime test image does not include project recipes")
         self.assertEqual(set(mod.project_catalog()), {"resinsight", "opm-common"})
         for name in mod.project_catalog():
             value = json.loads(mod.resolve_project(name).read_text())
@@ -228,6 +232,8 @@ class ContainerBuildTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_dirty_or_incomplete_cached_checkout_is_rejected(self):
+        if shutil.which("git") is None:
+            self.skipTest("Git is not installed in the slim runtime test image")
         mod = self.module()
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

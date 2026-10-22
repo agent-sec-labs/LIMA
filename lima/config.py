@@ -200,6 +200,12 @@ class Settings:
     cxx_agent_timeout_seconds: int = 600
     cxx_agent_parallelism: int = 3
     cxx_agent_dialogue_rounds: int = 2
+    # Hybrid reasoning models (deepseek-flash / deepseek-v4-pro) default to
+    # thinking on with effort=high, and reasoning tokens share the
+    # max_completion_tokens budget: a hard window thinks past the cap and the
+    # visible content comes back empty. Operators on such providers can
+    # disable thinking per request.
+    cxx_agent_disable_thinking: bool = False
     repository_scan_llm_mode: str = "off"
     repository_scan_llm_timeout_seconds: int = 60
     repository_scan_llm_max_candidates: int = 6
@@ -549,6 +555,7 @@ class Settings:
             cxx_agent_timeout_seconds=_int("LIMA_CXX_AGENT_TIMEOUT_SECONDS", 600),
             cxx_agent_parallelism=_int("LIMA_CXX_AGENT_PARALLELISM", 3),
             cxx_agent_dialogue_rounds=_int("LIMA_CXX_AGENT_DIALOGUE_ROUNDS", 2),
+            cxx_agent_disable_thinking=_bool("LIMA_CXX_AGENT_DISABLE_THINKING"),
             repository_scan_llm_mode=os.getenv(
                 "LIMA_REPOSITORY_SCAN_LLM_MODE", "off"
             ).strip().lower(),

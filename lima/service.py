@@ -313,6 +313,12 @@ class ReviewService:
             resolved["request_params"] = {
                 "max_tokens": settings.cxx_agent_max_completion_tokens,
             }
+            if settings.cxx_agent_disable_thinking:
+                # DeepSeek 式混合思考模型默认开思考且 effort=high，思考
+                # token 与 max_tokens 共享预算：难窗口思考超限时 content
+                # 为空串（实测 2026-10-21，reasoning_tokens=8192 吃满）。
+                # 开关默认关，仅操作员显式配置时下发。
+                resolved["request_params"]["thinking"] = {"type": "disabled"}
             return resolved
 
         if self.llm_config:

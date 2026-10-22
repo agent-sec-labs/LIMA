@@ -90,6 +90,7 @@ class DotenvTests(unittest.TestCase):
                 "LIMA_CXX_AGENT_TIMEOUT_SECONDS": "300",
                 "LIMA_CXX_AGENT_PARALLELISM": "2",
                 "LIMA_CXX_AGENT_DIALOGUE_ROUNDS": "1",
+                "LIMA_CXX_AGENT_DISABLE_THINKING": "true",
             },
             clear=True,
         ):
@@ -104,6 +105,7 @@ class DotenvTests(unittest.TestCase):
         self.assertEqual(300, settings.cxx_agent_timeout_seconds)
         self.assertEqual(2, settings.cxx_agent_parallelism)
         self.assertEqual(1, settings.cxx_agent_dialogue_rounds)
+        self.assertTrue(settings.cxx_agent_disable_thinking)
 
     def test_cxx_agent_defaults_and_strict_mode(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -118,6 +120,7 @@ class DotenvTests(unittest.TestCase):
         self.assertEqual(600, settings.cxx_agent_timeout_seconds)
         self.assertEqual(3, settings.cxx_agent_parallelism)
         self.assertEqual(2, settings.cxx_agent_dialogue_rounds)
+        self.assertFalse(settings.cxx_agent_disable_thinking)
         for mode in ("maybe", "on"):
             with patch.dict(
                 os.environ, {"LIMA_CXX_AGENT_MODE": mode}, clear=True

@@ -11,6 +11,19 @@ REGISTRY_RE = re.compile(r"^[a-z0-9.-]+(?::[0-9]+)?$")
 BUILD_TIMEOUT_GRACE_SECONDS = 900
 PYTHON_IMAGE_DIGEST = "sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
 NODE_IMAGE_DIGEST = "sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
+RUN_LABEL = "io.lima.deploy-smoke.run"
+OFFLINE_MODEL_ENV = {
+    "LIMA_LLM_PROVIDER": "local",
+    "LIMA_LLM_BASE_URL": "",
+    "LIMA_LLM_API_KEY": "",
+    "LIMA_LLM_MODEL": "",
+    "LIMA_DEEPSEEK_API_KEY": "",
+    "LIMA_OPENROUTER_API_KEY": "",
+    "LIMA_CXX_AGENT_MODEL": "",
+    "LIMA_CXX_AGENT_MODE": "off",
+    "LIMA_REPOSITORY_SCAN_LLM_MODE": "off",
+    "LIMA_REPOSITORY_INVESTIGATION_MODE": "off",
+}
 
 @dataclass(frozen=True)
 class RunConfig:
@@ -38,6 +51,8 @@ class SmokeRunner:
                     or not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)*/?", mirror.path)):
                 raise ValueError("invalid Debian mirror URL")
         self.commands, self.created, self.secrets = [], False, []
+        self.run_id = secrets.token_hex(16)
+        self.owned_resources = []
         self.effective_config = None
 
     @staticmethod
@@ -59,7 +74,7 @@ class SmokeRunner:
         started, record = time.monotonic(), {"argv": [self._scrub(str(arg)) for arg in args]}
         try:
             child_env = {key:value for key,value in os.environ.items()
-                         if not key.startswith(("LIMA_", "EVOAGENT_"))}
+                         if not key.startswith(("LIMA_", "EVOAGENT_", "COMPOSE_"))}
             result = self.run(args, cwd=self.config.repository, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout, check=False, env=child_env)
             record.update(returncode=result.returncode)
@@ -97,10 +112,12 @@ class SmokeRunner:
                "LIMA_REPOSITORY_INVESTIGATION_MODE": "off",
                "LIMA_REPOSITORY_IMPORT_PATH": str(import_root),
                "LIMA_EXPERIMENT_OUTPUT_PATH": str(output_root)}
+        env.update(OFFLINE_MODEL_ENV)
         self.secrets = list(env.values())
         self.env_file.write_text("".join(f"{k}={v}\n" for k,v in env.items()), encoding="utf-8")
         raw = self.command(["docker", "compose", "--env-file", str(self.env_file), "-p", self.project,
-                            "-f", str(self.config.compose_file), "--profile", "cxx", "config", "--format", "json"], 45, save_output=False)
+                            "-f", str(self.config.compose_file), "--profile", "cxx",
+                            "config", "--no-env-resolution", "--format", "json"], 45, save_output=False)
         if raw.returncode: raise RuntimeError("compose-config-failed")
         cfg = json.loads(raw.stdout)
         cfg["name"] = self.project
@@ -120,7 +137,13 @@ class SmokeRunner:
             temporary_dockerfile = temp / "Dockerfile.cxx-analyzer"
             self._write_mirror_dockerfile(dockerfile, temporary_dockerfile, mirror_url)
             build["dockerfile"] = str(temporary_dockerfile)
-        cfg["services"]["lima"].pop("env_file", None)
+        for service in cfg["services"].values():
+            service.pop("env_file", None)
+            service.setdefault("labels", {})[RUN_LABEL] = self.run_id
+        for name, service in cfg["services"].items():
+            if service.get("build"):
+                service["image"] = f"{self.project}-{name}:smoke-{self.run_id}"
+        cfg["services"]["lima"].setdefault("environment", {}).update(OFFLINE_MODEL_ENV)
         cfg["services"]["lima"]["ports"] = [{"host_ip":"127.0.0.1", "target":8080, "protocol":"tcp"}]
         cfg["services"]["lima"]["volumes"] = [
             {"type":"bind", "source":str(import_root), "target":"/repositories", "read_only":True},
@@ -136,10 +159,13 @@ class SmokeRunner:
             volume = cfg["volumes"][name]
             volume.pop("external", None); volume.pop("name", None)
             volume["name"] = f"{self.project}-{name}"
-        for service in cfg.get("services", {}).values():
-            for mount in service.get("volumes", []):
-                if mount.get("type") == "volume" and mount.get("source") in cfg["volumes"]:
-                    mount["source"] = mount["source"]
+        for volume in cfg["volumes"].values():
+            volume.setdefault("labels", {})[RUN_LABEL] = self.run_id
+        cfg.setdefault("networks", {}).setdefault("default", {})
+        for name, network in cfg["networks"].items():
+            network.pop("external", None)
+            network["name"] = f"{self.project}-{name}"
+            network.setdefault("labels", {})[RUN_LABEL] = self.run_id
         cfg["services"]["postgres"].setdefault("volumes", [])[0]["source"] = "postgres_data"
         cfg["services"]["redis"].setdefault("volumes", [])[0]["source"] = "redis_data"
         self._assert_isolated_volumes(cfg)
@@ -148,7 +174,20 @@ class SmokeRunner:
         return temp
 
     def _existing_resources(self):
-        return self._resources_absent()
+        if not self._resources_absent():
+            return False
+        # A volume/network can have the expected name without Compose labels.
+        # Query names as well; label-only lookups cannot establish ownership.
+        for kind, key in (("volume", "volumes"), ("network", "networks")):
+            result = self.command(["docker", kind, "ls", "--format", "{{.Name}}"],
+                                  20, save_output=False)
+            if result.returncode:
+                raise RuntimeError("resource-inventory-failed")
+            existing = set(result.stdout.splitlines())
+            expected = {item["name"] for item in self.effective_config[key].values()}
+            if existing & expected:
+                return False
+        return True
 
     def _resources_absent(self):
         checks = (("container", ["ps", "-a"]), ("volume", ["volume", "ls"]), ("network", ["network", "ls"]))
@@ -163,6 +202,99 @@ class SmokeRunner:
             if volume.get("external") or not str(volume.get("name", "")).startswith(self.project + "-"):
                 raise RuntimeError("compose-volume-isolation-failed")
 
+    def _inspect_resource(self, kind, identity):
+        result = self.command(["docker", kind, "inspect", identity], 20, save_output=False)
+        if result.returncode:
+            raise RuntimeError("resource-inspection-failed")
+        documents = json.loads(result.stdout)
+        if not isinstance(documents, list) or len(documents) != 1:
+            raise RuntimeError("resource-inspection-invalid")
+        return documents[0]
+
+    def _resource_record(self, kind, document):
+        labels = document.get("Config", document).get("Labels") or {}
+        if (labels.get(RUN_LABEL) != self.run_id
+                or labels.get("com.docker.compose.project") != self.project):
+            raise RuntimeError("resource-ownership-mismatch")
+        identity = document["Name"] if kind == "volume" else document["Id"]
+        return {
+            "kind": kind, "identity": identity, "name": document["Name"],
+            # Docker volumes have names, not immutable IDs. Pin creation time
+            # as well as the unpredictable per-run label before removal.
+            "created_at": document.get("CreatedAt") if kind == "volume" else None,
+        }
+
+    def _owned_inventory(self):
+        records = []
+        for kind, sub in (("container", ["ps", "-a"]),
+                          ("network", ["network", "ls"]), ("volume", ["volume", "ls"])):
+            result = self.command([
+                "docker", *sub, "--filter", f"label=com.docker.compose.project={self.project}",
+                "--filter", f"label={RUN_LABEL}={self.run_id}", "-q",
+            ], 20, save_output=False)
+            if result.returncode:
+                raise RuntimeError("resource-inventory-failed")
+            for identity in result.stdout.split():
+                records.append(self._resource_record(kind, self._inspect_resource(kind, identity)))
+        return records
+
+    def _remember_owned_resources(self):
+        known = {(item["kind"], item["identity"]) for item in self.owned_resources}
+        for item in self._owned_inventory():
+            if (item["kind"], item["identity"]) not in known:
+                self.owned_resources.append(item)
+
+    def _verify_named_resource_ownership(self):
+        for kind, key in (("volume", "volumes"), ("network", "networks")):
+            for spec in self.effective_config[key].values():
+                self._resource_record(kind, self._inspect_resource(kind, spec["name"]))
+
+    def _capture_images(self):
+        items = []
+        for record in self.owned_resources:
+            if record["kind"] != "container":
+                continue
+            container = self._inspect_resource("container", record["identity"])
+            self._resource_record("container", container)
+            service = container["Config"]["Labels"].get("com.docker.compose.service")
+            image = self._inspect_resource("image", container["Image"])
+            if not image.get("Id") or image["Id"] != container["Image"]:
+                raise RuntimeError("image-evidence-incomplete")
+            items.append({"service": service, "id": image["Id"],
+                          "reference": container["Config"]["Image"],
+                          "repo_digests": image.get("RepoDigests") or []})
+        if ({item["service"] for item in items} != set(self.effective_config["services"])
+                or len(items) != len(self.effective_config["services"])):
+            raise RuntimeError("image-evidence-incomplete")
+        return {"status": "passed", "items": items}
+
+    def _cleanup_owned_resources(self):
+        # Never use Compose down: it removes resources by project/name and can
+        # delete a foreign same-name volume. Remove only manifest identities.
+        self._remember_owned_resources()
+        failures = []
+        for kind in ("container", "network", "volume"):
+            for record in self.owned_resources:
+                if record["kind"] != kind:
+                    continue
+                try:
+                    current = self._resource_record(
+                        kind, self._inspect_resource(kind, record["identity"]))
+                    if current != record:
+                        raise RuntimeError("resource-identity-changed")
+                    args = ["docker", kind, "rm"]
+                    if kind == "container":
+                        args.append("--force")
+                    result = self.command([*args, record["identity"]], 30, save_output=False)
+                    if result.returncode:
+                        raise RuntimeError("resource-removal-failed")
+                except (RuntimeError, ValueError, OSError):
+                    failures.append({"kind": kind, "name": record["name"],
+                                     "reason": "resource-not-removed"})
+        cleaned = not failures and self._existing_resources()
+        return {"status": "passed" if cleaned else "failed", "project": self.project,
+                "failures": failures, "resources": list(self.owned_resources)}
+
     def _health(self):
         port=self.compose("port", "lima", "8080", timeout=20).stdout.strip().rsplit(":",1)[-1]
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=8) as response:
@@ -176,6 +308,7 @@ class SmokeRunner:
                   "output_directory": str(self.config.output), "cleanup": {"status":"not-needed"},
                   "base_image_registry": self.config.base_image_registry or "docker.io",
                   "debian_mirror": self.config.debian_mirror or "deb.debian.org"}
+        report["images"] = {"status": "not-verified", "items": []}
         tempdir = tempfile.TemporaryDirectory(prefix=f"{self.project}-")
         temp=Path(tempdir.name); self.temp_path=str(temp)
         try:
@@ -196,6 +329,13 @@ class SmokeRunner:
                 report["checks"].append({"name":"start","status":"failed", **diagnostics})
                 return report
             report["checks"].append({"name":"start","status":"passed"})
+            self._remember_owned_resources()
+            self._verify_named_resource_ownership()
+            try:
+                report["images"] = self._capture_images()
+            except (RuntimeError, ValueError, KeyError):
+                report["images"] = {"status": "failed", "items": []}
+                raise RuntimeError("image-evidence-incomplete") from None
             ps = self.compose("--profile", "cxx", "ps", "--all", timeout=30)
             report["checks"].append({"name":"service-status","status":"passed" if ps.returncode == 0 else "failed"})
             health=self._health(); report["checks"].append({"name":"app-health","status":"passed","response":health})
@@ -213,25 +353,10 @@ class SmokeRunner:
         finally:
             if self.created:
                 try:
-                    cleanup = self.compose("--profile", "cxx", "down", "--remove-orphans", "--volumes", timeout=60)
-                    cleaned = cleanup.returncode == 0 and self._resources_absent()
-                    for _ in range(3):
-                        if cleaned: break
-                        self.compose("--profile", "cxx", "down", "--remove-orphans", "--volumes", timeout=60)
-                        time.sleep(2)
-                        cleaned = self._resources_absent()
-                    report["cleanup"]={"status":"passed" if cleaned else "failed", "project":self.project, "command":"compose down --remove-orphans --volumes; verified generated project resources are absent"}
+                    report["cleanup"] = self._cleanup_owned_resources()
                 except Exception as exc: report["cleanup"]={"status":"failed", "error":type(exc).__name__, "project":self.project}
             report["commands"] = self.commands
             report["source"]={"commit":self.config.source_sha or self._source_sha(), "dirty":self._dirty()}
-            report["images"]={"status":"unknown","items":[]}
-            try:
-                image_result=self.compose("--profile", "cxx", "images","--format","json",timeout=30)
-                if image_result.returncode == 0:
-                    report["images"]={"status":"passed","items":json.loads(image_result.stdout) if image_result.stdout.strip() else []}
-                else:
-                    report["images"]={"status":"failed","items":[]}
-            except Exception as exc: report["images"]={"status":"unknown","items":[],"error":type(exc).__name__}
             for command in report["commands"]:
                 for secret in self.secrets:
                     if secret:

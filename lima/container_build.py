@@ -25,6 +25,8 @@ PHASES = ("prepare", "setup", "configure", "build", "test", "install", "verify")
 OUTPUT_FILES = {
     "build-result.json",
     "build-result.tmp",
+    "worker-result.json",
+    "worker-result.tmp",
     "invocation.json",
     "image-build.log",
     "container-stop.log",
@@ -103,17 +105,19 @@ def validate_recipe(value: dict) -> dict:
     return value
 
 
-def save_record(output: Path, record: dict) -> None:
-    if (output / "cancel-requested.json").exists() and record.get("status") in {
-        "running", "exporting", "completed"
-    }:
-        record.update(
-            status="failed",
-            error="Cancellation requested; container stop was not confirmed",
-        )
-    temporary = output / "build-result.tmp"
+def save_record(output: Path, record: dict, *, filename: str = "build-result.json") -> None:
+    temporary = output / filename.replace(".json", ".tmp")
     temporary.write_text(json.dumps(record, indent=2), encoding="utf8")
-    temporary.replace(output / "build-result.json")
+    temporary.replace(output / filename)
+
+
+def publish_worker_record(output: Path) -> dict:
+    """Only the host publishes a worker result after docker run has exited."""
+    if (output / "cancel-requested.json").exists():
+        raise ValueError("Cannot publish a result after cancellation")
+    record = json.loads((output / "worker-result.json").read_text(encoding="utf8"))
+    save_record(output, record)
+    return record
 
 
 def record_image_failure(output: Path, recipe: dict, revision: str, returncode: int) -> None:
@@ -149,6 +153,8 @@ def mark_interrupted(output: Path) -> None:
 
 def mark_container_failure(output: Path, returncode: int, error: str | None = None) -> None:
     path = output / "build-result.json"
+    if not path.exists():
+        path = output / "worker-result.json"
     record = json.loads(path.read_text(encoding="utf8")) if path.exists() else {"steps": []}
     status = "interrupted" if returncode == 130 else "failed"
     record.update(status=status, returncode=returncode)
@@ -182,25 +188,34 @@ def validate_cached_checkout(source: Path) -> None:
         )
         # status/diff omit changes to paths marked skip-worktree or assume-unchanged.
         # A reused volume must not silently build those bytes under the old HEAD.
-        indexed = subprocess.check_output(
-            ["git", "-C", str(source), "ls-files", "-v", "-z"]
-        )
     except subprocess.CalledProcessError as exc:
         raise ValueError("Cached checkout is incomplete; use a new volume") from exc
     if dirty.strip():
         raise ValueError("Cached source has modifications or extra files; use a new volume")
-    for entry in indexed.split(b"\0"):
-        if entry and (entry[:1] == b"S" or entry[:1].islower()):
-            raise ValueError("Cached checkout has hidden index flags; use a new volume")
+    try:
+        validate_source_index(source)
+    except ValueError as exc:
+        raise ValueError("Cached checkout has hidden index flags; use a new volume") from exc
 
 
 def validate_source_index(source: Path) -> None:
-    indexed = subprocess.check_output(["git", "-C", str(source), "ls-files", "-v", "-z"])
+    try:
+        indexes = (
+            subprocess.check_output(["git", "-C", str(source), "ls-files", "-v", "-z"]),
+            subprocess.check_output(
+                [
+                    "git", "-C", str(source), "submodule", "foreach", "--quiet",
+                    "--recursive", "git ls-files -v -z",
+                ]
+            ),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ValueError("Could not inspect source and submodule indexes") from exc
     if any(
         entry and (entry[:1] == b"S" or entry[:1].islower())
-        for entry in indexed.split(b"\0")
+        for indexed in indexes for entry in indexed.split(b"\0")
     ):
-        raise ValueError("Source has hidden index flags; restore a complete checkout")
+        raise ValueError("Source or submodule has hidden index flags; restore a complete checkout")
 
 
 def validate_installation(work: Path, output: Path, reports: list[str] | None = None) -> dict:
@@ -265,6 +280,7 @@ def execute_phases(
     execute=subprocess.run,
     record: dict | None = None,
     completed_status: str = "completed",
+    record_file: str = "build-result.json",
 ) -> dict:
     """Run argv phases in order. A failed phase prevents all following work."""
     output.mkdir(parents=True, exist_ok=True)
@@ -273,7 +289,7 @@ def execute_phases(
     if record is None:
         record = {}
     record.update(status="running", steps=[])
-    save_record(output, record)
+    save_record(output, record, filename=record_file)
     for phase in PHASES:
         for index, raw_command in enumerate(recipe.get(phase, [])):
             command = [arg.replace("{jobs}", str(jobs)) for arg in raw_command]
@@ -284,7 +300,7 @@ def execute_phases(
                 "log": f"logs/{phase}-{index}.log",
             }
             record["steps"].append(step)
-            save_record(output, record)
+            save_record(output, record, filename=record_file)
             print(f"LIMA {phase}: {command}", flush=True)
             started = time.monotonic()
             try:
@@ -303,12 +319,12 @@ def execute_phases(
             step["seconds"] = round(time.monotonic() - started, 2)
             if step["status"] == "failed":
                 record["status"] = "failed"
-                save_record(output, record)
+                save_record(output, record, filename=record_file)
                 print((output / step["log"]).read_text(errors="replace")[-12000:], flush=True)
                 return record
-            save_record(output, record)
+            save_record(output, record, filename=record_file)
     record["status"] = completed_status
-    save_record(output, record)
+    save_record(output, record, filename=record_file)
     return record
 
 
@@ -439,7 +455,8 @@ def worker_main(args) -> int:
         ]
         recipe = dict(recipe, prepare=prepare)
         record = execute_phases(
-            recipe, output, jobs=args.jobs, record=record, completed_status="exporting"
+            recipe, output, jobs=args.jobs, record=record, completed_status="exporting",
+            record_file="worker-result.json",
         )
         if record["status"] != "exporting":
             return 1
@@ -471,7 +488,7 @@ def worker_main(args) -> int:
     except Exception as exc:
         record.update(status="failed", error=str(exc))
         print(f"LIMA build failed: {exc}", flush=True)
-    save_record(output, record)
+    save_record(output, record, filename="worker-result.json")
     return 0 if record["status"] == "completed" else 1
 
 
@@ -596,11 +613,11 @@ def main(argv=None) -> int:
             output, 1, "Container stop could not be confirmed; see container-stop.log"
         )
         return 1
-    result_path = output / "build-result.json"
+    result_path = output / "worker-result.json"
     if result.returncode or not result_path.is_file():
         mark_container_failure(output, result.returncode or 1)
         return result.returncode or 1
-    record = json.loads(result_path.read_text(encoding="utf8"))
+    record = publish_worker_record(output)
     print(f"LIMA build status={record['status']}", flush=True)
     return 0 if record["status"] == "completed" else 1
 

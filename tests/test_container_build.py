@@ -109,6 +109,8 @@ class ContainerBuildTests(unittest.TestCase):
             "build-result.json",
             "build-result.json/report.xml",
             "build-result.tmp",
+            "worker-result.json",
+            "worker-result.tmp",
             "invocation.json",
             "image-build.log",
             "container-stop.log",
@@ -125,16 +127,51 @@ class ContainerBuildTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 mod.validate_recipe(dict(self.recipe(), test_reports=[path]))
 
-    def test_pending_cancellation_prevents_late_completed_record(self):
+    def test_pending_cancellation_blocks_worker_result_publication(self):
         mod = self.module()
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             (output / "cancel-requested.json").write_text("{}")
-            record = {"status": "completed", "steps": []}
-            mod.save_record(output, record)
-            saved = json.loads((output / "build-result.json").read_text())
-            self.assertEqual(saved["status"], "failed")
-            self.assertIn("stop was not confirmed", saved["error"])
+            mod.save_record(
+                output, {"status": "completed", "steps": []}, filename="worker-result.json"
+            )
+            with self.assertRaises(ValueError):
+                mod.publish_worker_record(output)
+            self.assertFalse((output / "build-result.json").exists())
+
+    def test_late_worker_completion_cannot_replace_cancelled_host_result(self):
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "cancel-requested.json").write_text("{}")
+            mod.save_record(output, {"status": "failed", "error": "host stopped container"})
+
+            # This models the worker reaching its previous final-result write
+            # after the host has confirmed cancellation and persisted failure.
+            mod.save_record(
+                output,
+                {"status": "completed", "steps": []},
+                filename="worker-result.json",
+            )
+
+            canonical = json.loads((output / "build-result.json").read_text())
+            worker = json.loads((output / "worker-result.json").read_text())
+            self.assertEqual(canonical["status"], "failed")
+            self.assertEqual(worker["status"], "completed")
+            with self.assertRaises(ValueError):
+                mod.publish_worker_record(output)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            mod.save_record(
+                output,
+                {"status": "completed", "steps": []},
+                filename="worker-result.json",
+            )
+            mod.publish_worker_record(output)
+            self.assertEqual(
+                json.loads((output / "build-result.json").read_text())["status"], "completed"
+            )
 
     def test_recipe_requires_real_build_and_tests(self):
         mod = self.module()
@@ -256,7 +293,7 @@ class ContainerBuildTests(unittest.TestCase):
             output = root / "output"
 
             def check_output(argv, **kwargs):
-                if argv[-1] == "-z":
+                if argv[-1] == "-z" or "ls-files" in argv[-1]:
                     return b""
                 if argv[-1] == "HEAD":
                     return "a" * 40 + "\n"
@@ -295,7 +332,7 @@ class ContainerBuildTests(unittest.TestCase):
             output = root / "output"
 
             def check_output(argv, **kwargs):
-                if argv[-1] == "-z":
+                if argv[-1] == "-z" or "ls-files" in argv[-1]:
                     return b""
                 if argv[-1] == "HEAD":
                     return "a" * 40 + "\n"
@@ -339,7 +376,7 @@ class ContainerBuildTests(unittest.TestCase):
             output = root / "output"
 
             def check_output(argv, **kwargs):
-                if argv[-1] == "-z":
+                if argv[-1] == "-z" or "ls-files" in argv[-1]:
                     return b""
                 if argv[-1] == "HEAD":
                     return "a" * 40 + "\n"
@@ -471,6 +508,74 @@ class ContainerBuildTests(unittest.TestCase):
                 check=True,
             )
             (source / "tracked").write_text("hidden change")
+            with self.assertRaises(ValueError):
+                mod.validate_cached_checkout(source)
+            with self.assertRaises(ValueError):
+                mod.validate_source_index(source)
+
+    def test_hidden_skip_worktree_change_inside_real_submodule_is_rejected(self):
+        if shutil.which("git") is None:
+            self.skipTest("Git is not installed in the slim runtime test image")
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            submodule = root / "submodule"
+            source = root / "source"
+            subprocess.run(["git", "init", "-q", str(submodule)], check=True)
+            (submodule / "tracked").write_text("original")
+            subprocess.run(["git", "-C", str(submodule), "add", "tracked"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(submodule),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture submodule",
+                ],
+                check=True,
+            )
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    str(submodule),
+                    "vendor/submodule",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture source",
+                ],
+                check=True,
+            )
+            nested = source / "vendor/submodule"
+            subprocess.run(
+                ["git", "-C", str(nested), "update-index", "--skip-worktree", "tracked"],
+                check=True,
+            )
+            (nested / "tracked").write_text("hidden change")
+
             with self.assertRaises(ValueError):
                 mod.validate_cached_checkout(source)
             with self.assertRaises(ValueError):

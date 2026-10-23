@@ -38,7 +38,7 @@ Dockerfile 应提供 Linux 上的 Git、Python 3、编译器、构建工具和�
 python -m lima.container_build --source 'D:\src\target-a' --recipe 'D:\local-build-recipes\target-a\full-build.json' --output 'D:\build-output\target-a-run-1' --jobs 6
 ```
 
-入口固定源码提交，只读挂载原仓库为 `/input`，在 Docker 卷的 `/work/src` 创建工作副本。阶段按 `prepare → setup → configure → build → test → install → verify` 执行；任一阶段失败即停止。运行日志和 `build-result.json` 写入宿主输出目录。容器结束后删除，构建卷保留，卷名记在 `invocation.json`。
+入口固定源码提交，只读挂载原仓库为 `/input`，在 Docker 卷的 `/work/src` 创建工作副本。阶段按 `prepare → setup → configure → build → test → install → verify` 执行；任一阶段失败即停止。worker 将阶段结果写入 `worker-result.json`；容器正常退出后，宿主才发布最终的 `build-result.json`。容器结束后删除，构建卷保留，卷名记在 `invocation.json`。
 
 成功还要求非空 `compile_commands.json`、安装清单及通过的 JUnit 报告。报告中出现 `<failure>`、`<error>` 或父套件的失败计数都会使构建失败。`test_reports` 路径不能占用 `compile_commands.json`、`build-result.json` 等构建产物名称，也不能放在 `logs/` 或 `Testing/` 下。输出包含原始编译数据库、安装归档、测试报告和文件哈希。`build-result.json` 的 `status=completed` 才表示此构建任务完成；它不证明漏洞存在，也不表示编译数据库已接入 LIMA 的审计任务。
 
@@ -48,6 +48,6 @@ python -m lima.container_build --source 'D:\src\target-a' --recipe 'D:\local-bui
 python -m lima.container_build --source 'D:\src\target-a' --recipe 'D:\local-build-recipes\target-a\full-build.json' --output 'D:\build-output\target-a-run-2' --jobs 6 --volume lima-build-example --skip-image-build
 ```
 
-复用前会检查卷中的源码是否干净，包括 Git `skip-worktree`、`assume-unchanged` 标志；失败时改用新卷。按 Ctrl+C 中断时，入口会停止容器并记录 `interrupted`；若停止和强制终止都无法确认，则记录失败及取消标记，不能把之后的 worker 结果视为完成。`--skip-image-build` 只适用于已经审阅并确认标识的本地镜像。容器构建可能需要拉取镜像或安装依赖，配方的网络和资源使用须按部署环境控制。
+复用前会检查卷中的源码和已初始化子模块是否干净，包括 Git `skip-worktree`、`assume-unchanged` 标志；失败时改用新卷。按 Ctrl+C 中断时，入口会停止容器并记录 `interrupted`；若停止和强制终止都无法确认，则记录失败及取消标记，worker 后续写入也不能覆盖宿主的最终结果。`--skip-image-build` 只适用于已经审阅并确认标识的本地镜像。容器构建可能需要拉取镜像或安装依赖，配方的网络和资源使用须按部署环境控制。
 
 现有 `recipe.yaml` 是另一种只导出分析上下文的 configure-only 协议，见 [配方协议说明](../deploy/build-recipes/README.md)。完整构建的 `full-build.json` 与它不共用 schema，也不会自动转换成下游分析上下文包。

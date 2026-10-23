@@ -15,6 +15,8 @@ Audit、Mining、Repair 具有独立信任边界，只通过版本化 Artifact �
 Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_BRAND_ASSETS.md)。
 首次接手项目开发时，请先阅读 [项目定位与 Coding Agent 开发交接标准](docs/LIMA_CODING_AGENT_DEVELOPMENT_AND_HANDOFF_STANDARD.md)；旧入口 [DEVELOPER_HANDOFF.md](docs/DEVELOPER_HANDOFF.md) 仅保留兼容跳转。
 
+需要在 Docker 中完整构建 C/C++ 目标仓库时，请使用 [容器完整构建指南](docs/CONTAINER_BUILD_GUIDE.md)：统一入口为 `python -m lima.container_build`，具体仓库的配方由使用者在本机维护。
+
 > 以证据审代码，以闭环修漏洞。Audit with evidence. Repair with confidence.
 
 以下功能清单描述当前版本能力，不代表目标三阶段平台已经完成：

@@ -513,7 +513,7 @@ class ContainerBuildTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 mod.validate_source_index(source)
 
-    def test_hidden_skip_worktree_change_inside_real_submodule_is_rejected(self):
+    def test_dirty_real_submodule_is_rejected_despite_git_ignore_settings(self):
         if shutil.which("git") is None:
             self.skipTest("Git is not installed in the slim runtime test image")
         mod = self.module()
@@ -580,6 +580,39 @@ class ContainerBuildTests(unittest.TestCase):
                 mod.validate_cached_checkout(source)
             with self.assertRaises(ValueError):
                 mod.validate_source_index(source)
+
+            subprocess.run(
+                ["git", "-C", str(nested), "update-index", "--no-skip-worktree", "tracked"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "submodule.vendor/submodule.ignore", "all"],
+                check=True,
+            )
+            self.assertFalse(
+                subprocess.check_output(
+                    ["git", "-C", str(source), "status", "--porcelain"], text=True
+                ).strip()
+            )
+            self.assertTrue(
+                subprocess.check_output(
+                    ["git", "-C", str(source), "status", "--porcelain", "--ignore-submodules=none"],
+                    text=True,
+                ).strip()
+            )
+            mod.validate_source_index(source)
+            recipe_path = root / "full-build.json"
+            recipe_path.write_text(json.dumps(self.recipe()))
+            with self.assertRaises(SystemExit) as raised:
+                mod.main(
+                    [
+                        "--source", str(source),
+                        "--recipe", str(recipe_path),
+                        "--output", str(root / "output"),
+                    ]
+                )
+            self.assertEqual(raised.exception.code, 2)
+            self.assertFalse((root / "output").exists())
 
 
 if __name__ == "__main__":

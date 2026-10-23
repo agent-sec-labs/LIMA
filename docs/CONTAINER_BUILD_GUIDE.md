@@ -32,7 +32,7 @@ Dockerfile 应提供 Linux 上的 Git、Python 3、编译器、构建工具和�
 
 ## 执行
 
-使用带 `.git` 元数据且没有未提交变更的目标源码。`--source`、`--recipe` 和 `--output` 都使用绝对路径，输出目录须为空且不能包含源码目录：
+使用带 `.git` 元数据且没有未提交变更的目标源码；入口会强制检查子模块修改，即使 Git 配置了 `submodule.*.ignore=all`。`--source`、`--recipe` 和 `--output` 都使用绝对路径，输出目录须为空且不能包含源码目录：
 
 ```powershell
 python -m lima.container_build --source 'D:\src\target-a' --recipe 'D:\local-build-recipes\target-a\full-build.json' --output 'D:\build-output\target-a-run-1' --jobs 6

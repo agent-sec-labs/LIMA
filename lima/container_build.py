@@ -521,7 +521,8 @@ def main(argv=None) -> int:
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
     ).strip()
     if subprocess.check_output(
-        ["git", "-C", str(source), "status", "--porcelain"], text=True
+        ["git", "-C", str(source), "status", "--porcelain", "--ignore-submodules=none"],
+        text=True,
     ).strip():
         parser.error(
             "Source is dirty; refusing to silently omit uncommitted files from the pinned build"

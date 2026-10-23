@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 class ContainerBuildTests(unittest.TestCase):
@@ -76,6 +77,64 @@ class ContainerBuildTests(unittest.TestCase):
             (output / "second.xml").write_text('<testsuite tests="1" failures="1"/>')
             with self.assertRaises(ValueError):
                 mod.summarize_reports(output, ["first.xml", "second.xml"])
+
+    def test_junit_failure_elements_and_parent_suite_failures_are_rejected(self):
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            cases = {
+                "failure-element.xml": (
+                    '<testsuite tests="1"><testcase name="fixture">'
+                    "<failure message=\"boom\"/></testcase></testsuite>"
+                ),
+                "error-element.xml": (
+                    '<testsuite tests="1"><testcase name="fixture">'
+                    "<error message=\"boom\"/></testcase></testsuite>"
+                ),
+                "parent-failure.xml": (
+                    '<testsuites><testsuite name="parent" tests="1" failures="1">'
+                    '<testsuite name="child" tests="1"><testcase name="fixture"/>'
+                    "</testsuite></testsuite></testsuites>"
+                ),
+            }
+            for name, report in cases.items():
+                with self.subTest(report=name):
+                    (output / name).write_text(report)
+                    with self.assertRaises(ValueError):
+                        mod.summarize_reports(output, [name])
+
+    def test_junit_reports_cannot_overlap_reserved_output_artifacts(self):
+        mod = self.module()
+        reserved = (
+            "build-result.json",
+            "build-result.json/report.xml",
+            "build-result.tmp",
+            "invocation.json",
+            "image-build.log",
+            "container-stop.log",
+            "cancel-requested.json",
+            "compile_commands.json",
+            "install_manifest.txt",
+            "install-linux-x64.tar.gz",
+            "logs",
+            "logs/test-0.log",
+            "Testing",
+            "Testing/report.xml",
+        )
+        for path in reserved:
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                mod.validate_recipe(dict(self.recipe(), test_reports=[path]))
+
+    def test_pending_cancellation_prevents_late_completed_record(self):
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "cancel-requested.json").write_text("{}")
+            record = {"status": "completed", "steps": []}
+            mod.save_record(output, record)
+            saved = json.loads((output / "build-result.json").read_text())
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn("stop was not confirmed", saved["error"])
 
     def test_recipe_requires_real_build_and_tests(self):
         mod = self.module()
@@ -186,6 +245,135 @@ class ContainerBuildTests(unittest.TestCase):
             self.assertEqual(record["steps"][0]["phase"], "image")
             self.assertEqual(record["steps"][0]["returncode"], 1)
 
+    def test_interrupted_image_build_records_terminal_image_step(self):
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            recipe_path = root / "full-build.json"
+            recipe_path.write_text(json.dumps(self.recipe()))
+            output = root / "output"
+
+            def check_output(argv, **kwargs):
+                if argv[-1] == "-z":
+                    return b""
+                if argv[-1] == "HEAD":
+                    return "a" * 40 + "\n"
+                return ""
+
+            with mock.patch.object(mod.subprocess, "check_output", side_effect=check_output):
+                with mock.patch.object(mod.subprocess, "run", side_effect=KeyboardInterrupt):
+                    try:
+                        result = mod.main(
+                            [
+                                "--source",
+                                str(source),
+                                "--recipe",
+                                str(recipe_path),
+                                "--output",
+                                str(output),
+                            ]
+                        )
+                    except KeyboardInterrupt:
+                        self.fail("Image-build interruption must produce a terminal result")
+            self.assertEqual(result, 130)
+            record = json.loads((output / "build-result.json").read_text())
+            self.assertEqual(record["status"], "interrupted")
+            self.assertEqual(record["returncode"], 130)
+            self.assertEqual(record["steps"][0]["phase"], "image")
+            self.assertEqual(record["steps"][0]["status"], "interrupted")
+
+    def test_unconfirmed_docker_stop_does_not_report_interrupted(self):
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            recipe_path = root / "full-build.json"
+            recipe_path.write_text(json.dumps(self.recipe()))
+            output = root / "output"
+
+            def check_output(argv, **kwargs):
+                if argv[-1] == "-z":
+                    return b""
+                if argv[-1] == "HEAD":
+                    return "a" * 40 + "\n"
+                if argv[1:3] == ["image", "inspect"]:
+                    return "sha256:fixture\n"
+                return ""
+
+            def run(argv, **kwargs):
+                if argv[:2] == ["docker", "run"]:
+                    raise KeyboardInterrupt
+                if argv[:2] in (["docker", "stop"], ["docker", "kill"]):
+                    return subprocess.CompletedProcess(argv, 1)
+                return subprocess.CompletedProcess(argv, 0)
+
+            with mock.patch.object(mod.subprocess, "check_output", side_effect=check_output):
+                with mock.patch.object(mod.subprocess, "run", side_effect=run):
+                    result = mod.main(
+                        [
+                            "--source",
+                            str(source),
+                            "--recipe",
+                            str(recipe_path),
+                            "--output",
+                            str(output),
+                            "--skip-image-build",
+                        ]
+                    )
+            record = json.loads((output / "build-result.json").read_text())
+            self.assertIn(result, (1, 130))
+            self.assertIn(record["status"], ("failed", "stop_unconfirmed"))
+            self.assertRegex(json.dumps(record), r"(?i)(stop.*confirm|confirm.*stop)")
+
+    def test_failed_docker_stop_with_successful_kill_is_interrupted(self):
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            recipe_path = root / "full-build.json"
+            recipe_path.write_text(json.dumps(self.recipe()))
+            output = root / "output"
+
+            def check_output(argv, **kwargs):
+                if argv[-1] == "-z":
+                    return b""
+                if argv[-1] == "HEAD":
+                    return "a" * 40 + "\n"
+                if argv[1:3] == ["image", "inspect"]:
+                    return "sha256:fixture\n"
+                return ""
+
+            def run(argv, **kwargs):
+                if argv[:2] == ["docker", "run"]:
+                    raise KeyboardInterrupt
+                if argv[:2] == ["docker", "stop"]:
+                    return subprocess.CompletedProcess(argv, 1)
+                return subprocess.CompletedProcess(argv, 0)
+
+            with mock.patch.object(mod.subprocess, "check_output", side_effect=check_output):
+                with mock.patch.object(mod.subprocess, "run", side_effect=run):
+                    self.assertEqual(
+                        mod.main(
+                            [
+                                "--source",
+                                str(source),
+                                "--recipe",
+                                str(recipe_path),
+                                "--output",
+                                str(output),
+                                "--skip-image-build",
+                            ]
+                        ),
+                        130,
+                    )
+            record = json.loads((output / "build-result.json").read_text())
+            self.assertEqual(record["status"], "interrupted")
+            self.assertEqual(record["returncode"], 130)
+
     def test_partial_install_or_missing_test_report_is_not_accepted(self):
         mod = self.module()
         with tempfile.TemporaryDirectory() as directory:
@@ -253,6 +441,40 @@ class ContainerBuildTests(unittest.TestCase):
             (source / "extra").write_text("untracked")
             with self.assertRaises(ValueError):
                 mod.validate_cached_checkout(source)
+
+    def test_skip_worktree_hidden_cached_checkout_change_is_rejected(self):
+        if shutil.which("git") is None:
+            self.skipTest("Git is not installed in the slim runtime test image")
+        mod = self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            (source / "tracked").write_text("original")
+            subprocess.run(["git", "-C", str(source), "add", "tracked"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "update-index", "--skip-worktree", "tracked"],
+                check=True,
+            )
+            (source / "tracked").write_text("hidden change")
+            with self.assertRaises(ValueError):
+                mod.validate_cached_checkout(source)
+            with self.assertRaises(ValueError):
+                mod.validate_source_index(source)
 
 
 if __name__ == "__main__":

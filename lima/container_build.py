@@ -22,6 +22,18 @@ import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 PHASES = ("prepare", "setup", "configure", "build", "test", "install", "verify")
+OUTPUT_FILES = {
+    "build-result.json",
+    "build-result.tmp",
+    "invocation.json",
+    "image-build.log",
+    "container-stop.log",
+    "cancel-requested.json",
+    "compile_commands.json",
+    "install_manifest.txt",
+    "install-linux-x64.tar.gz",
+}
+OUTPUT_DIRECTORIES = {"logs", "Testing"}
 
 
 def report_paths(value: dict) -> list[str]:
@@ -35,10 +47,12 @@ def report_paths(value: dict) -> list[str]:
             or "\\" in path
             or ":" in path
             or PurePosixPath(path).is_absolute()
-            or ".." in path.split("/")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
             or any(ord(c) < 32 for c in path)
         ):
             raise ValueError("Unsafe JUnit report path")
+        if path.split("/", 1)[0] in OUTPUT_FILES | OUTPUT_DIRECTORIES:
+            raise ValueError("JUnit report path conflicts with a build output")
     if len(set(paths)) != len(paths):
         raise ValueError("Duplicate JUnit report path")
     return paths
@@ -90,23 +104,31 @@ def validate_recipe(value: dict) -> dict:
 
 
 def save_record(output: Path, record: dict) -> None:
+    if (output / "cancel-requested.json").exists() and record.get("status") in {
+        "running", "exporting", "completed"
+    }:
+        record.update(
+            status="failed",
+            error="Cancellation requested; container stop was not confirmed",
+        )
     temporary = output / "build-result.tmp"
     temporary.write_text(json.dumps(record, indent=2), encoding="utf8")
     temporary.replace(output / "build-result.json")
 
 
 def record_image_failure(output: Path, recipe: dict, revision: str, returncode: int) -> None:
+    status = "interrupted" if returncode == 130 else "failed"
     save_record(
         output,
         {
-            "status": "failed",
+            "status": status,
             "revision": revision,
             "image": recipe["image"],
             "returncode": returncode,
             "steps": [
                 {
                     "phase": "image",
-                    "status": "failed",
+                    "status": status,
                     "returncode": returncode,
                     "log": "image-build.log",
                 }
@@ -125,11 +147,13 @@ def mark_interrupted(output: Path) -> None:
     mark_container_failure(output, 130)
 
 
-def mark_container_failure(output: Path, returncode: int) -> None:
+def mark_container_failure(output: Path, returncode: int, error: str | None = None) -> None:
     path = output / "build-result.json"
     record = json.loads(path.read_text(encoding="utf8")) if path.exists() else {"steps": []}
     status = "interrupted" if returncode == 130 else "failed"
     record.update(status=status, returncode=returncode)
+    if error is not None:
+        record["error"] = error
     for step in record["steps"]:
         if step["status"] == "running":
             step.update(status=status, returncode=returncode)
@@ -156,10 +180,27 @@ def validate_cached_checkout(source: Path) -> None:
                 "--untracked-files=all",
             ]
         )
+        # status/diff omit changes to paths marked skip-worktree or assume-unchanged.
+        # A reused volume must not silently build those bytes under the old HEAD.
+        indexed = subprocess.check_output(
+            ["git", "-C", str(source), "ls-files", "-v", "-z"]
+        )
     except subprocess.CalledProcessError as exc:
         raise ValueError("Cached checkout is incomplete; use a new volume") from exc
     if dirty.strip():
         raise ValueError("Cached source has modifications or extra files; use a new volume")
+    for entry in indexed.split(b"\0"):
+        if entry and (entry[:1] == b"S" or entry[:1].islower()):
+            raise ValueError("Cached checkout has hidden index flags; use a new volume")
+
+
+def validate_source_index(source: Path) -> None:
+    indexed = subprocess.check_output(["git", "-C", str(source), "ls-files", "-v", "-z"])
+    if any(
+        entry and (entry[:1] == b"S" or entry[:1].islower())
+        for entry in indexed.split(b"\0")
+    ):
+        raise ValueError("Source has hidden index flags; restore a complete checkout")
 
 
 def validate_installation(work: Path, output: Path, reports: list[str] | None = None) -> dict:
@@ -191,6 +232,11 @@ def summarize_reports(output: Path, reports: list[str]) -> dict:
             raise ValueError("Unsafe or oversized JUnit report")
         root = ET.fromstring(data)  # noqa: S314 - bounded UTF-8, DTD/entities rejected above
         suites = [suite for suite in root.iter("testsuite") if suite.find("testsuite") is None]
+        if root.find(".//failure") is not None or root.find(".//error") is not None:
+            raise ValueError(f"Unsuccessful test report: {relative}")
+        for node in [root, *root.iter("testsuite")]:
+            if any(int(node.attrib.get(field, 0)) > 0 for field in ("failures", "errors")):
+                raise ValueError(f"Unsuccessful test report: {relative}")
         count = dict.fromkeys(totals, 0)
         for suite in suites:
             for field in count:
@@ -464,17 +510,25 @@ def main(argv=None) -> int:
             "Source is dirty; refusing to silently omit uncommitted files from the pinned build"
         )
     try:
+        validate_source_index(source)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
         prepare_output(output)
     except ValueError as exc:
         parser.error(str(exc))
     if not args.skip_image_build:
-        with (output / "image-build.log").open("w", encoding="utf8") as log:
-            result = subprocess.run(
-                ["docker", "build", "-t", recipe["image"], str(recipe_path.parent)],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
+        try:
+            with (output / "image-build.log").open("w", encoding="utf8") as log:
+                result = subprocess.run(
+                    ["docker", "build", "-t", recipe["image"], str(recipe_path.parent)],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+        except KeyboardInterrupt:
+            record_image_failure(output, recipe, revision, 130)
+            return 130
         if result.returncode:
             record_image_failure(output, recipe, revision, result.returncode)
             print(f"Image build failed; see {output / 'image-build.log'}", flush=True)
@@ -513,9 +567,35 @@ def main(argv=None) -> int:
     try:
         result = subprocess.run(command, check=False)
     except KeyboardInterrupt:
-        subprocess.run(["docker", "stop", "--timeout", "10", name], check=False)
-        mark_interrupted(output)
-        return 130
+        (output / "cancel-requested.json").write_text(
+            json.dumps({"container": name, "reason": "KeyboardInterrupt"}), encoding="utf8"
+        )
+        with (output / "container-stop.log").open("w", encoding="utf8") as log:
+            try:
+                stopped = subprocess.run(
+                    ["docker", "stop", "--timeout", "10", name],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                ).returncode == 0
+                if not stopped:
+                    stopped = subprocess.run(
+                        ["docker", "kill", name],
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                    ).returncode == 0
+            except OSError as exc:
+                log.write(f"Docker stop/kill could not run: {exc}\n")
+                stopped = False
+        if stopped:
+            (output / "cancel-requested.json").unlink()
+            mark_interrupted(output)
+            return 130
+        mark_container_failure(
+            output, 1, "Container stop could not be confirmed; see container-stop.log"
+        )
+        return 1
     result_path = output / "build-result.json"
     if result.returncode or not result_path.is_file():
         mark_container_failure(output, result.returncode or 1)

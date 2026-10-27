@@ -19,6 +19,7 @@ from lima.build_executor import (
     BuildExecutor,
     BuildExecutorError,
     BuildLimits,
+    _read_tail,
 )
 from lima.build_recipe import BuildRecipe
 from lima.container_execution import publish_verified_worker_record
@@ -363,6 +364,17 @@ class BuildExecutorTest(unittest.TestCase):
             self.assertTrue(result.ok)
             # Step 1 gets the whole remaining budget, step 2 only what is left.
             self.assertEqual(factory.sessions[0].step_timeouts, [5.0, 2.0])
+
+    def test_read_tail_is_bounded(self) -> None:
+        # Raw step logs are written unbounded to disk; the host must take the
+        # tail by seek so memory never scales with the log size.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "big.log"
+            payload = bytes(range(256)) * 128  # 32 KiB
+            path.write_bytes(payload)
+            self.assertEqual(_read_tail(path, 1024), payload[-1024:])
+            self.assertEqual(_read_tail(path, 100_000), payload)
+            self.assertEqual(_read_tail(path, 0), b"")
 
     def test_argument_contract_is_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

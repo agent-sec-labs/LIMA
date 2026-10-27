@@ -117,7 +117,12 @@ class BuildStepResult:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class BuildExecutionResult:
-    """Outcome of one attempt; ``ok`` never claims downstream usability."""
+    """Outcome of one attempt; ``ok`` never claims downstream usability.
+
+    ``package_path`` is a host-absolute path meant for in-process consumers
+    only: it must never be copied into task records, evidence JSON or model
+    context, which only hold attempt-relative references.
+    """
 
     ok: bool
     steps: tuple[BuildStepResult, ...]
@@ -219,9 +224,14 @@ class DockerIsolatedSession:
         )
 
     def _run(
-        self, argv: Sequence[str], *, timeout_seconds: float
+        self,
+        argv: Sequence[str],
+        *,
+        name: str,
+        stdout_path: Path,
+        stderr_path: Path,
+        timeout_seconds: float,
     ) -> tuple[ContainerRunResult, bytes, bytes]:
-        name = "lima-agent-" + uuid.uuid4().hex[:12]
         mount = (
             "type=bind,"
             f"source={self.work_dir.resolve().as_posix()},"
@@ -235,8 +245,6 @@ class DockerIsolatedSession:
             argv=list(argv),
             limits=self._container_limits(),
         )
-        stdout_path = self._io_dir / f"{name}.stdout.log"
-        stderr_path = self._io_dir / f"{name}.stderr.log"
         result = run_isolated_worker(
             command,
             name=name,
@@ -250,65 +258,55 @@ class DockerIsolatedSession:
             raise ContainerExecutionError(
                 f"isolated-interaction-interrupted:{argv[0]}"
             )
-        # Keep at most a few evidence budgets in memory for text consumers.
+        # Keep at most a few evidence budgets in memory for text consumers,
+        # reading the tail by seek so host memory never scales with the log.
         head_room = max(1, self.limits.max_output_bytes * 4)
-        stdout = stdout_path.read_bytes()[-head_room:]
-        stderr = stderr_path.read_bytes()[-head_room:]
-        return result, stdout, stderr
+        return (
+            result,
+            _read_tail(stdout_path, head_room),
+            _read_tail(stderr_path, head_room),
+        )
 
     def run_step(
         self, argv: Sequence[str], *, step_id: str, timeout_seconds: float
     ) -> IsolatedStepOutcome:
         name = "lima-agent-step-" + uuid.uuid4().hex[:12]
-        mount = (
-            "type=bind,"
-            f"source={self.work_dir.resolve().as_posix()},"
-            f"target={self.source_mount}"
-        )
-        command = docker_run_argv(
-            image=self.image,
+        result, stdout, stderr = self._run(
+            list(argv),
             name=name,
-            mounts=[mount],
-            workdir=self.source_mount,
-            argv=list(argv),
-            limits=self._container_limits(),
-        )
-        stdout_path = self._io_dir / f"{step_id}.stdout.log"
-        stderr_path = self._io_dir / f"{step_id}.stderr.log"
-        result = run_isolated_worker(
-            command,
-            name=name,
+            stdout_path=self._io_dir / f"{step_id}.stdout.log",
+            stderr_path=self._io_dir / f"{step_id}.stderr.log",
             timeout_seconds=timeout_seconds,
-            cancel=self.cancel,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            stop_log_path=self._stop_log,
         )
-        head_room = max(1, self.limits.max_output_bytes * 4)
         return IsolatedStepOutcome(
             returncode=result.returncode,
-            stdout=stdout_path.read_bytes()[-head_room:].decode(
-                "utf8", errors="replace"
-            ),
-            stderr=stderr_path.read_bytes()[-head_room:].decode(
-                "utf8", errors="replace"
-            ),
+            stdout=stdout.decode("utf8", errors="replace"),
+            stderr=stderr.decode("utf8", errors="replace"),
             elapsed_seconds=result.elapsed_seconds,
             timed_out=result.timed_out,
             cancelled=result.cancelled,
         )
 
     def read_file(self, container_path: str) -> bytes:
+        name = "lima-agent-" + uuid.uuid4().hex[:12]
         result, stdout, _stderr = self._run(
-            ["cat", container_path], timeout_seconds=_IO_TIMEOUT_SECONDS
+            ["cat", container_path],
+            name=name,
+            stdout_path=self._io_dir / f"{name}.stdout.log",
+            stderr_path=self._io_dir / f"{name}.stderr.log",
+            timeout_seconds=_IO_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             raise BuildRecipeError(f"container-read-failed:{container_path}")
         return stdout
 
     def list_globs(self, pattern: str) -> list[str]:
+        name = "lima-agent-" + uuid.uuid4().hex[:12]
         result, stdout, _stderr = self._run(
             ["python3", "-c", LIST_GLOBS_SCRIPT, pattern],
+            name=name,
+            stdout_path=self._io_dir / f"{name}.stdout.log",
+            stderr_path=self._io_dir / f"{name}.stderr.log",
             timeout_seconds=_IO_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
@@ -342,6 +340,20 @@ class DockerIsolatedSessionFactory:
             cancel=cancel,
             attempt_dir=attempt_dir,
         )
+
+
+def _read_tail(path: Path, limit: int) -> bytes:
+    """Read at most the last ``limit`` bytes without loading the file.
+
+    A step log is written unbounded straight to disk, so the host must seek
+    near the end instead of materializing a potentially huge stream just to
+    slice its tail.
+    """
+
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - limit))
+        return handle.read()
 
 
 def _sanitize(text: str, tmp_root: Path) -> str:

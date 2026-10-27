@@ -251,11 +251,15 @@ class DockerIsolatedSession:
     ) -> None:
         self.image = image
         self.image_digest: str | None = None
-        self.work_dir = Path(work_dir)
+        # Resolve to absolute paths: sanitization replaces these exact
+        # strings in diagnostic copies, and a relative output directory
+        # name would otherwise become an accidental generic substring
+        # rewrite (review round 3, F7).
+        self.work_dir = Path(work_dir).resolve()
         self.source_mount = source_mount
         self.limits = limits
         self.cancel = cancel
-        self.attempt_dir = Path(attempt_dir)
+        self.attempt_dir = Path(attempt_dir).resolve()
         self._deadline = deadline
         self._io_dir = self.attempt_dir / "io"
         self._stop_log = self._io_dir / "container-stop.log"
@@ -291,6 +295,7 @@ class DockerIsolatedSession:
         stderr_path: Path,
         timeout_seconds: float,
         capture_limit: int,
+        sanitize: bool = True,
     ) -> ContainerRunResult:
         command = docker_run_argv(
             image=self.image,
@@ -310,8 +315,12 @@ class DockerIsolatedSession:
             stop_log_path=self._stop_log,
             capture_limit_bytes=capture_limit,
         )
-        self._sanitize_capture(stdout_path)
-        self._sanitize_capture(stderr_path)
+        # Sanitization is for diagnostic copies only: product transfers
+        # (cat/glob payloads consumed as package members) must keep their
+        # exact original bytes (review round 3, F7).
+        if sanitize:
+            self._sanitize_capture(stdout_path)
+            self._sanitize_capture(stderr_path)
         if not result.stop_confirmed:
             self._unconfirmed_containers.add(name)
         return result
@@ -376,7 +385,11 @@ class DockerIsolatedSession:
     def _transfer(
         self, argv: Sequence[str], *, error_label: str
     ) -> tuple[ContainerRunResult, bytes]:
-        """Full transfer of a product read; oversize is rejected, not cut."""
+        """Full transfer of a product read; oversize is rejected, not cut.
+
+        The payload is consumed verbatim as package members, so the capture
+        copy must never be sanitized.
+        """
 
         name = "lima-agent-" + uuid.uuid4().hex[:12]
         stdout_path = self._io_dir / f"{name}.stdout.log"
@@ -388,6 +401,7 @@ class DockerIsolatedSession:
             stderr_path=stderr_path,
             timeout_seconds=self._io_timeout_remaining(),
             capture_limit=_FILE_READ_LIMIT_BYTES,
+            sanitize=False,
         )
         if result.timed_out or result.cancelled:
             raise ContainerExecutionError(
@@ -611,15 +625,31 @@ class BuildExecutor:
                         )
                     else:
                         package_rel = "package"
-                        # Cancellation wins over a finished export: a
-                        # cancelled attempt never publishes success.
+                        # A finished export still has to beat cancellation
+                        # and the deadline (review round 3, F8): parsing,
+                        # manifest and package writes consume wall clock
+                        # after the last container io.
                         if cancel():
                             package_rel = None
                             failure_code = FAILURE_CANCELLED
+                        elif time.monotonic() >= deadline:
+                            package_rel = None
+                            failure_code = FAILURE_BUDGET_EXHAUSTED
         finally:
             if session is not None:
                 session.close()
             shutil.rmtree(tmp_root, ignore_errors=True)
+
+        # Final publication gate (review round 3, F9): cleanup (stop retries,
+        # large copy removal) opens a window where cancellation or the
+        # deadline can land after the last check; both outrank any
+        # not-yet-published result, and cancellation wins over everything.
+        if failure_code != FAILURE_CANCELLED and cancel():
+            failure_code = FAILURE_CANCELLED
+            package_rel = None
+        if failure_code is None and time.monotonic() >= deadline:
+            failure_code = FAILURE_BUDGET_EXHAUSTED
+            package_rel = None
 
         if failure_code == FAILURE_CANCELLED:
             # The shared rule: a cancelled attempt never publishes a result

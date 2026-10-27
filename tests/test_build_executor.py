@@ -573,6 +573,114 @@ class BuildExecutorTest(unittest.TestCase):
             self.assertIn(b"capture-truncated", data)
             self.assertLessEqual(len(data), 1024 + 200)
 
+    def test_product_transfer_bytes_are_never_sanitized(self) -> None:
+        # Product reads keep exact original bytes: sanitization is for
+        # diagnostic copies only, and a relative attempt directory must not
+        # turn into a generic substring rewrite (review round 3, F7).
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "work"
+            payload = (
+                b"/* without this header the target fails */\n"
+                + str(work).encode("utf8")
+            )
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                session = DockerIsolatedSession(
+                    image="img",
+                    work_dir=work,
+                    source_mount="/src",
+                    limits=BuildLimits(),
+                    cancel=lambda: False,
+                    attempt_dir=Path("out"),
+                )
+                self.assertTrue(session.attempt_dir.is_absolute())
+                self.assertTrue(session.work_dir.is_absolute())
+
+                def raw_worker(command, **kwargs):
+                    kwargs["stdout_path"].parent.mkdir(parents=True, exist_ok=True)
+                    kwargs["stdout_path"].write_bytes(payload)
+                    kwargs["stderr_path"].write_bytes(b"")
+                    return ContainerRunResult(
+                        returncode=0,
+                        timed_out=False,
+                        cancelled=False,
+                        elapsed_seconds=0.1,
+                    )
+
+                with mock.patch(
+                    "lima.build_executor.run_isolated_worker",
+                    side_effect=raw_worker,
+                ):
+                    data = session.read_file("/src/include/header.h")
+                self.assertEqual(data, payload)
+                io_copy = next((session.attempt_dir / "io").glob("*.stdout.log"))
+                self.assertEqual(io_copy.read_bytes(), payload)
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_budget_exhausted_during_export_blocks_publication(self) -> None:
+        # Wall clock spent inside the export itself must downgrade an
+        # otherwise finished attempt (review round 3, F8).
+        clock = {"now": 100.0}
+
+        class ClockBurningSession(FakeSession):
+            def read_file(self, container_path: str) -> bytes:
+                clock["now"] += 10.0
+                return super().read_file(container_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp)
+            factory = FakeSessionFactory(session_cls=ClockBurningSession)
+            attempt = Path(tmp) / "attempt"
+
+            with mock.patch(
+                "lima.build_executor.time.monotonic",
+                lambda: clock["now"],
+            ):
+                result = self.execute(
+                    factory, snapshot, attempt, limits=BuildLimits(total_seconds=10.0)
+                )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.failure_code, "budget-exhausted")
+            self.assertIsNone(result.package_path)
+            summary = json.loads(
+                (attempt / "attempt.json").read_text(encoding="utf8")
+            )
+            self.assertEqual(summary["failure_code"], "budget-exhausted")
+            self.assertIsNone(summary["package"])
+
+    def test_cancel_during_cleanup_never_publishes(self) -> None:
+        # A cancellation landing while cleanup runs still suppresses the
+        # publication of an already-finished result (review round 3, F9).
+        flags = {"cancel": False}
+
+        class CloseCancellingSession(FakeSession):
+            def close(self):
+                flags["cancel"] = True
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp)
+            factory = FakeSessionFactory(session_cls=CloseCancellingSession)
+            attempt = Path(tmp) / "attempt"
+
+            result = self.execute(
+                factory,
+                snapshot,
+                attempt,
+                cancel=lambda: flags["cancel"],
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.failure_code, "cancelled")
+            self.assertIsNone(result.package_path)
+            self.assertFalse((attempt / "attempt.json").exists())
+            self.assertTrue((attempt / "cancel-requested.json").exists())
+
     def test_argument_contract_is_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             snapshot = write_snapshot(tmp)

@@ -59,8 +59,10 @@ __all__ = [
     "ContainerRunner",
     "DockerContainerRunner",
     "IncludeRoot",
+    "LIST_GLOBS_SCRIPT",
     "MountSpec",
     "collect_referenced_headers",
+    "export_context_package",
     "run_recipe_in_container",
 ]
 
@@ -92,7 +94,9 @@ _DOCKER_RUN_TIMEOUT_SECONDS: Final = 3600.0
 _DOCKER_IO_TIMEOUT_SECONDS: Final = 300.0
 
 # In-container file listing helper; requires python3 in the build image.
-_LIST_GLOBS_SCRIPT: Final = (
+# Public so the agent-side isolated session (lima.build_executor) reuses the
+# exact same listing semantics as DockerContainerRunner.
+LIST_GLOBS_SCRIPT: Final = (
     "import glob, os, sys\n"
     "for path in sorted(glob.glob(sys.argv[1], recursive=True)):\n"
     "    if os.path.isfile(path):\n"
@@ -497,7 +501,7 @@ class DockerContainerRunner:
 
     def list_globs(self, pattern: str) -> list[str]:
         completed = self._run(
-            ["python3", "-c", _LIST_GLOBS_SCRIPT, pattern],
+            ["python3", "-c", LIST_GLOBS_SCRIPT, pattern],
             self.mounts,
             timeout=_DOCKER_IO_TIMEOUT_SECONDS,
         )
@@ -747,53 +751,23 @@ def _container_relative(container_path: object, root: str) -> str | None:
     return relative
 
 
-def run_recipe_in_container(
+def export_context_package(
     recipe: BuildRecipe,
-    source_dir: Path,
-    *,
+    runner: ContainerRunner,
     work_dir: Path,
+    *,
     revision: str = "unknown",
-    docker_image: str | None = None,
-    container_runner: ContainerRunner | None = None,
 ) -> ContextManifest:
-    """Execute one recipe against ``source_dir`` and write a context package.
+    """Export one context package from a configured container workspace.
 
-    The source tree is mounted at ``recipe.source_mount`` (the container's
-    working directory), each configure command runs in order and any
-    non-zero exit aborts without writing a package.  ``work_dir`` is the
-    package output directory (A1's ``pkg_dir``); ``revision`` becomes the
-    manifest revision (pass the repository git SHA for provenance).  Tests
-    inject ``container_runner``; production defaults to
-    :class:`DockerContainerRunner` with ``docker_image`` overriding
-    ``recipe.image``.  Returns the finalized manifest, exactly what A1's
-    ``read_package`` verifies.
+    Runs the read/relativize/rewrite/collect/manifest stages (steps 2-6 of
+    :func:`run_recipe_in_container`) against ``runner`` and writes the package
+    atomically into ``work_dir``.  The bounded build executor
+    (:mod:`lima.build_executor`) drives its own configure steps with step
+    evidence and then hands the same session to this function, so the manual
+    recipe path and the agent path export identical packages.  A ``runner``
+    only needs ``read_file`` and ``list_globs`` here.
     """
-
-    if not isinstance(recipe, BuildRecipe):
-        raise BuildRecipeError("recipe-invalid")
-    source = Path(source_dir)
-    if not source.is_dir():
-        raise BuildRecipeError("source-directory-missing")
-    mounts = (
-        MountSpec(str(source.resolve()).replace("\\", "/"), recipe.source_mount),
-    )
-    runner = (
-        container_runner
-        if container_runner is not None
-        else DockerContainerRunner(
-            image=docker_image or recipe.image,
-            mounts=mounts,
-            workdir=recipe.source_mount,
-        )
-    )
-
-    # 1. configure (fail closed: no package on any non-zero exit)
-    for argv in recipe.configure:
-        returncode, _stdout = runner.run(list(argv), mounts)
-        if returncode != 0:
-            raise BuildRecipeError(
-                f"configure-command-failed:{argv[0]}:rc={returncode}"
-            )
 
     # 2. read the exported compilation database
     compdb_container_path = recipe.source_mount + "/" + recipe.compdb_path
@@ -865,3 +839,54 @@ def run_recipe_in_container(
         generated_files,
         header_files,
     )
+
+
+def run_recipe_in_container(
+    recipe: BuildRecipe,
+    source_dir: Path,
+    *,
+    work_dir: Path,
+    revision: str = "unknown",
+    docker_image: str | None = None,
+    container_runner: ContainerRunner | None = None,
+) -> ContextManifest:
+    """Execute one recipe against ``source_dir`` and write a context package.
+
+    The source tree is mounted at ``recipe.source_mount`` (the container's
+    working directory), each configure command runs in order and any
+    non-zero exit aborts without writing a package.  ``work_dir`` is the
+    package output directory (A1's ``pkg_dir``); ``revision`` becomes the
+    manifest revision (pass the repository git SHA for provenance).  Tests
+    inject ``container_runner``; production defaults to
+    :class:`DockerContainerRunner` with ``docker_image`` overriding
+    ``recipe.image``.  Returns the finalized manifest, exactly what A1's
+    ``read_package`` verifies.
+    """
+
+    if not isinstance(recipe, BuildRecipe):
+        raise BuildRecipeError("recipe-invalid")
+    source = Path(source_dir)
+    if not source.is_dir():
+        raise BuildRecipeError("source-directory-missing")
+    mounts = (
+        MountSpec(str(source.resolve()).replace("\\", "/"), recipe.source_mount),
+    )
+    runner = (
+        container_runner
+        if container_runner is not None
+        else DockerContainerRunner(
+            image=docker_image or recipe.image,
+            mounts=mounts,
+            workdir=recipe.source_mount,
+        )
+    )
+
+    # 1. configure (fail closed: no package on any non-zero exit)
+    for argv in recipe.configure:
+        returncode, _stdout = runner.run(list(argv), mounts)
+        if returncode != 0:
+            raise BuildRecipeError(
+                f"configure-command-failed:{argv[0]}:rc={returncode}"
+            )
+
+    return export_context_package(recipe, runner, work_dir, revision=revision)

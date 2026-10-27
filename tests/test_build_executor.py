@@ -11,18 +11,28 @@ the executor contract the build agent (slice 3) will consume.
 
 import json
 import re
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lima.build_executor import (
     BuildExecutor,
     BuildExecutorError,
     BuildLimits,
+    DockerIsolatedSession,
     _read_tail,
 )
 from lima.build_recipe import BuildRecipe
-from lima.container_execution import publish_verified_worker_record
+from lima.container_execution import (
+    ContainerExecutionError,
+    ContainerRunResult,
+    _TailBuffer,
+    publish_verified_worker_record,
+    run_isolated_worker,
+)
 from lima.context_package import read_package
 
 RECIPE_YAML = """\
@@ -176,12 +186,23 @@ class FakeSession:
 
 
 class FakeSessionFactory:
-    def __init__(self, script=None):
+    def __init__(self, script=None, session_cls=FakeSession):
         self.script = script if script is not None else default_script()
+        self.session_cls = session_cls
         self.sessions: list[FakeSession] = []
 
-    def open(self, *, image, work_dir, source_mount, limits, cancel, attempt_dir):
-        session = FakeSession(
+    def open(
+        self,
+        *,
+        image,
+        work_dir,
+        source_mount,
+        limits,
+        cancel,
+        attempt_dir,
+        deadline=None,
+    ):
+        session = self.session_cls(
             work_dir=work_dir,
             source_mount=source_mount,
             script=self.script,
@@ -344,17 +365,20 @@ class BuildExecutorTest(unittest.TestCase):
             self.assertEqual(record["status"], "completed")
 
     def test_remaining_budget_bounds_each_step_timeout(self) -> None:
+        # The deadline is a real monotonic clock covering the whole attempt
+        # (review F5): a step that really spends time shrinks what the next
+        # step gets, regardless of what runtimes report.
         with tempfile.TemporaryDirectory() as tmp:
             snapshot = write_snapshot(tmp)
             script = dict(default_script())
 
             def slow_configure(session, argv, timeout_seconds):
                 outcome = fake_configure(session, argv, timeout_seconds)
-                outcome.elapsed_seconds = 3.0
+                time.sleep(0.35)
                 return outcome
 
             script[CONFIGURE_ARGV] = slow_configure
-            limits = BuildLimits(total_seconds=5.0, step_seconds=300.0)
+            limits = BuildLimits(total_seconds=0.5, step_seconds=300.0)
             factory = FakeSessionFactory(script)
 
             result = self.execute(
@@ -362,8 +386,9 @@ class BuildExecutorTest(unittest.TestCase):
             )
 
             self.assertTrue(result.ok)
-            # Step 1 gets the whole remaining budget, step 2 only what is left.
-            self.assertEqual(factory.sessions[0].step_timeouts, [5.0, 2.0])
+            timeouts = factory.sessions[0].step_timeouts
+            self.assertAlmostEqual(timeouts[0], 0.5, delta=0.1)
+            self.assertAlmostEqual(timeouts[1], 0.15, delta=0.1)
 
     def test_read_tail_is_bounded(self) -> None:
         # Raw step logs are written unbounded to disk; the host must take the
@@ -375,6 +400,178 @@ class BuildExecutorTest(unittest.TestCase):
             self.assertEqual(_read_tail(path, 1024), payload[-1024:])
             self.assertEqual(_read_tail(path, 100_000), payload)
             self.assertEqual(_read_tail(path, 0), b"")
+
+    def test_run_step_surfaces_real_timeout_without_raising(self) -> None:
+        # The production session must deliver timeouts and cancellations as
+        # data (review F1): an interrupted step still reaches evidence.
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = Path(tmp) / "attempt"
+            session = DockerIsolatedSession(
+                image="img",
+                work_dir=Path(tmp) / "work",
+                source_mount="/src",
+                limits=BuildLimits(),
+                cancel=lambda: False,
+                attempt_dir=attempt,
+            )
+
+            def interrupted_worker(command, **kwargs):
+                kwargs["stdout_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["stdout_path"].write_bytes(b"halfway output")
+                kwargs["stderr_path"].write_bytes(b"boom")
+                return ContainerRunResult(
+                    returncode=None,
+                    timed_out=True,
+                    cancelled=False,
+                    elapsed_seconds=5.0,
+                    stop_confirmed=False,
+                    stdout_truncated=True,
+                )
+
+            with mock.patch(
+                "lima.build_executor.run_isolated_worker",
+                side_effect=interrupted_worker,
+            ):
+                outcome = session.run_step(
+                    ("cmake",), step_id="step-000", timeout_seconds=5.0
+                )
+            self.assertTrue(outcome.timed_out)
+            self.assertIsNone(outcome.returncode)
+            self.assertFalse(outcome.stop_confirmed)
+            self.assertTrue(outcome.stdout_truncated)
+            self.assertEqual(outcome.stdout, "halfway output")
+
+    def test_cancel_after_last_step_never_publishes(self) -> None:
+        # Cancellation landing between the last step and publication must
+        # still suppress the success record (review F6).
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp)
+            flags = {"cancel": False}
+            script = dict(default_script())
+
+            def codegen_then_cancel(session, argv, timeout_seconds):
+                outcome = fake_codegen(session, argv, timeout_seconds)
+                flags["cancel"] = True
+                return outcome
+
+            script[CODEGEN_ARGV] = codegen_then_cancel
+            factory = FakeSessionFactory(script)
+            attempt = Path(tmp) / "attempt"
+
+            result = self.execute(
+                factory,
+                snapshot,
+                attempt,
+                cancel=lambda: flags["cancel"],
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.failure_code, "cancelled")
+            self.assertFalse((attempt / "attempt.json").exists())
+            self.assertTrue((attempt / "cancel-requested.json").exists())
+
+    def test_export_interruption_is_terminal(self) -> None:
+        # An interrupted container read during export is a terminal outcome,
+        # not an escaping exception (review F1).
+        class InterruptingSession(FakeSession):
+            def read_file(self, container_path: str) -> bytes:
+                raise ContainerExecutionError(
+                    f"isolated-io-interrupted:cat:{container_path}"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp)
+            factory = FakeSessionFactory(session_cls=InterruptingSession)
+            attempt = Path(tmp) / "attempt"
+
+            result = self.execute(factory, snapshot, attempt)
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.failure_code, "export-interrupted")
+            summary = json.loads(
+                (attempt / "attempt.json").read_text(encoding="utf8")
+            )
+            self.assertEqual(summary["failure_code"], "export-interrupted")
+            self.assertIsNone(summary["package"])
+
+    def test_budget_deadline_blocks_export(self) -> None:
+        # The entry deadline covers every phase: a spent budget must stop
+        # the export from ever starting (review F5).
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp)
+            factory = FakeSessionFactory()
+            attempt = Path(tmp) / "attempt"
+
+            result = self.execute(
+                factory,
+                snapshot,
+                attempt,
+                limits=BuildLimits(total_seconds=0.0),
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.failure_code, "budget-exhausted")
+            self.assertIsNone(result.package_path)
+            self.assertFalse((attempt / "package").exists())
+
+    def test_tail_buffer_keeps_tail_within_limit(self) -> None:
+        buffer = _TailBuffer(10)
+        buffer.write(b"1234567890")
+        buffer.write(b"abcdef")
+        self.assertEqual(buffer.data(), b"7890abcdef")
+        self.assertTrue(buffer.truncated)
+        self.assertEqual(buffer.total, 16)
+        small = _TailBuffer(10)
+        small.write(b"short")
+        self.assertEqual(small.data(), b"short")
+        self.assertFalse(small.truncated)
+
+    def test_run_isolated_worker_unconfirmed_stop_is_visible(self) -> None:
+        # A stop that cannot be confirmed is reported, not assumed clean
+        # (review F2).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stop_log = root / "stop.log"
+            with mock.patch(
+                "lima.container_execution."
+                "stop_container_with_confirmation",
+                return_value=False,
+            ):
+                result = run_isolated_worker(
+                    [sys.executable, "-c", "import time; time.sleep(1)"],
+                    name="probe",
+                    timeout_seconds=60.0,
+                    cancel=lambda: True,
+                    stdout_path=root / "out.log",
+                    stderr_path=root / "err.log",
+                    stop_log_path=stop_log,
+                )
+            self.assertTrue(result.cancelled)
+            self.assertFalse(result.stop_confirmed)
+            self.assertIn(
+                "stop-unconfirmed",
+                stop_log.read_text(encoding="utf8"),
+            )
+
+    def test_run_isolated_worker_capture_limit_marks_truncation(self) -> None:
+        # Raw streams are captured into bounded tail buffers with an
+        # explicit marker (review F3): host disk never scales with output.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = run_isolated_worker(
+                [sys.executable, "-c", "print('A' * 200_000)"],
+                name="probe",
+                timeout_seconds=60.0,
+                cancel=lambda: False,
+                stdout_path=root / "out.log",
+                stderr_path=root / "err.log",
+                stop_log_path=root / "stop.log",
+                capture_limit_bytes=1024,
+            )
+            self.assertTrue(result.stdout_truncated)
+            data = (root / "out.log").read_bytes()
+            self.assertIn(b"capture-truncated", data)
+            self.assertLessEqual(len(data), 1024 + 200)
 
     def test_argument_contract_is_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

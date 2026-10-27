@@ -9,11 +9,15 @@ dropped), and records every step as bounded sanitized evidence under the
 attempt directory.  Step output references are relative paths inside that
 directory, so host paths never leak into task or model context.
 
-Retry semantics live with the caller: a new ``execute`` call always starts
-from a fresh copy, so a previous attempt's generated files can never leak
-into the next one.  A successful ``BuildExecutionResult`` means the configure
-steps ran and a package was exported; whether the package is usable by
-downstream consumers is decided elsewhere (slice 4A).
+A single monotonic deadline set at entry bounds the whole attempt - copy,
+steps, io and export all consume the same remaining time.  Interruptions are
+results, not exceptions: a step that times out or is cancelled reaches the
+evidence pipeline as a structured outcome, an unconfirmed container stop is
+recorded on the result instead of assumed clean, and cancellation is
+re-checked before the export and before the final publication, so a
+cancelled attempt never publishes a success record.  Retry semantics live
+with the caller: a new ``execute`` call always starts from a fresh copy.
+Whether an exported package is usable downstream is slice 4A's job.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -41,6 +46,7 @@ from lima.container_execution import (
     docker_run_argv,
     run_isolated_worker,
     save_record,
+    stop_container_with_confirmation,
 )
 
 __all__ = [
@@ -58,6 +64,9 @@ __all__ = [
 
 _MAX_STEP_BYTES: Final = 1024 * 1024
 _IO_TIMEOUT_SECONDS: Final = 300.0
+# Product transfers (cat/glob) must never be silently trimmed: anything
+# larger than this hard cap is rejected loudly instead of truncated.
+_FILE_READ_LIMIT_BYTES: Final = 64 * 1024 * 1024
 _HOST_PATH_PLACEHOLDER: Final = "<attempt>"
 
 FAILURE_CANCELLED: Final = "cancelled"
@@ -65,6 +74,7 @@ FAILURE_STEP_TIMEOUT: Final = "step-timeout"
 FAILURE_STEP_FAILED: Final = "configure-step-failed"
 FAILURE_BUDGET_EXHAUSTED: Final = "budget-exhausted"
 FAILURE_EXPORT_FAILED: Final = "export-failed"
+FAILURE_EXPORT_INTERRUPTED: Final = "export-interrupted"
 
 
 class BuildExecutorError(ValueError):
@@ -83,10 +93,11 @@ class BuildExecutorError(ValueError):
 class BuildLimits:
     """Time, output and container budgets for one attempt.
 
-    ``total_seconds`` bounds the whole attempt wall clock; each step gets at
-    most ``step_seconds`` and never more than the remaining total, so a long
-    step cannot silently eat the budget of the next one.  ``max_output_bytes``
-    bounds each captured stdout/stderr stream kept as evidence.
+    ``total_seconds`` bounds the whole attempt wall clock from entry -
+    copy, configure steps, container io and export all consume the same
+    deadline, and each step additionally gets at most ``step_seconds``.
+    ``max_output_bytes`` bounds each captured stdout/stderr stream kept as
+    evidence.
     """
 
     total_seconds: float = 1800.0
@@ -121,7 +132,9 @@ class BuildExecutionResult:
 
     ``package_path`` is a host-absolute path meant for in-process consumers
     only: it must never be copied into task records, evidence JSON or model
-    context, which only hold attempt-relative references.
+    context, which only hold attempt-relative references.  ``stop_unconfirmed``
+    lists steps whose container teardown could not be confirmed and may still
+    hold the work copy.
     """
 
     ok: bool
@@ -130,10 +143,17 @@ class BuildExecutionResult:
     image_digest: str | None
     package_path: str | None
     failure_code: str | None
+    stop_unconfirmed: tuple[str, ...] = ()
 
 
 class IsolatedStepOutcome:
-    """What one session step reports back to the executor."""
+    """What one session step reports back to the executor.
+
+    Timeouts and cancellations are delivered as data (``timed_out``/
+    ``cancelled`` with ``exit_code=None``) so the evidence pipeline can
+    record them; ``stop_confirmed=False`` means the container teardown
+    could not be verified and the container may still be alive.
+    """
 
     def __init__(
         self,
@@ -144,6 +164,9 @@ class IsolatedStepOutcome:
         elapsed_seconds: float,
         timed_out: bool = False,
         cancelled: bool = False,
+        stop_confirmed: bool = True,
+        stdout_truncated: bool = False,
+        stderr_truncated: bool = False,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
@@ -151,6 +174,9 @@ class IsolatedStepOutcome:
         self.elapsed_seconds = elapsed_seconds
         self.timed_out = timed_out
         self.cancelled = cancelled
+        self.stop_confirmed = stop_confirmed
+        self.stdout_truncated = stdout_truncated
+        self.stderr_truncated = stderr_truncated
 
 
 class IsolatedSession(Protocol):
@@ -181,7 +207,21 @@ class IsolatedSessionFactory(Protocol):
         limits: BuildLimits,
         cancel: Callable[[], bool],
         attempt_dir: Path,
+        deadline: float | None = None,
     ) -> IsolatedSession: ...
+
+
+def _read_tail(path: Path, limit: int) -> bytes:
+    """Read at most the last ``limit`` bytes without loading the file.
+
+    Captured streams on disk are bounded by the capture limit, but the tail
+    read still seeks instead of materializing the whole file.
+    """
+
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - limit))
+        return handle.read()
 
 
 class DockerIsolatedSession:
@@ -189,9 +229,13 @@ class DockerIsolatedSession:
 
     The disposable work copy is the only host directory mounted (writable, at
     the recipe's source mount); the network is off and resources are bounded
-    by :class:`BuildLimits`.  Raw container output lands under
-    ``<attempt>/io/`` and the confirmed stop/kill teardown handles timeout
-    and cancellation.
+    by :class:`BuildLimits`.  Step log capture is bounded per stream and
+    sanitized (host work-copy and attempt paths are replaced before the raw
+    copies land under ``<attempt>/io/``); product reads (``cat``/glob) use a
+    separate full-transfer path that rejects oversized payloads instead of
+    trimming them.  ``deadline`` (a ``time.monotonic()`` instant) bounds
+    every io interaction together with the steps.  Containers whose stop
+    could not be confirmed are retried on :meth:`close`.
     """
 
     def __init__(
@@ -203,6 +247,7 @@ class DockerIsolatedSession:
         limits: BuildLimits,
         cancel: Callable[[], bool],
         attempt_dir: Path,
+        deadline: float | None = None,
     ) -> None:
         self.image = image
         self.image_digest: str | None = None
@@ -211,9 +256,11 @@ class DockerIsolatedSession:
         self.limits = limits
         self.cancel = cancel
         self.attempt_dir = Path(attempt_dir)
+        self._deadline = deadline
         self._io_dir = self.attempt_dir / "io"
         self._stop_log = self._io_dir / "container-stop.log"
         self._io_dir.mkdir(parents=True, exist_ok=True)
+        self._unconfirmed_containers: set[str] = set()
 
     def _container_limits(self) -> ContainerLimits:
         return ContainerLimits(
@@ -223,7 +270,19 @@ class DockerIsolatedSession:
             network=False,
         )
 
-    def _run(
+    def _capture_head_room(self) -> int:
+        # A few evidence budgets of raw capture per stream; the evidence copy
+        # is bounded again by max_output_bytes when written to logs/.
+        return max(1, self.limits.max_output_bytes * 4)
+
+    def _mount(self) -> str:
+        return (
+            "type=bind,"
+            f"source={self.work_dir.resolve().as_posix()},"
+            f"target={self.source_mount}"
+        )
+
+    def _spawn(
         self,
         argv: Sequence[str],
         *,
@@ -231,16 +290,12 @@ class DockerIsolatedSession:
         stdout_path: Path,
         stderr_path: Path,
         timeout_seconds: float,
-    ) -> tuple[ContainerRunResult, bytes, bytes]:
-        mount = (
-            "type=bind,"
-            f"source={self.work_dir.resolve().as_posix()},"
-            f"target={self.source_mount}"
-        )
+        capture_limit: int,
+    ) -> ContainerRunResult:
         command = docker_run_argv(
             image=self.image,
             name=name,
-            mounts=[mount],
+            mounts=[self._mount()],
             workdir=self.source_mount,
             argv=list(argv),
             limits=self._container_limits(),
@@ -253,61 +308,110 @@ class DockerIsolatedSession:
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             stop_log_path=self._stop_log,
+            capture_limit_bytes=capture_limit,
         )
-        if result.timed_out or result.cancelled:
-            raise ContainerExecutionError(
-                f"isolated-interaction-interrupted:{argv[0]}"
-            )
-        # Keep at most a few evidence budgets in memory for text consumers,
-        # reading the tail by seek so host memory never scales with the log.
-        head_room = max(1, self.limits.max_output_bytes * 4)
-        return (
-            result,
-            _read_tail(stdout_path, head_room),
-            _read_tail(stderr_path, head_room),
+        self._sanitize_capture(stdout_path)
+        self._sanitize_capture(stderr_path)
+        if not result.stop_confirmed:
+            self._unconfirmed_containers.add(name)
+        return result
+
+    def _sanitize_capture(self, path: Path) -> None:
+        """Replace host paths in a raw captured stream before it rests."""
+
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return
+        replacements = (
+            (str(self.work_dir).encode("utf8"), b"<work-copy>"),
+            (self.work_dir.as_posix().encode("utf8"), b"<work-copy>"),
+            (str(self.attempt_dir).encode("utf8"), b"<attempt>"),
         )
+        for old, new in replacements:
+            data = data.replace(old, new)
+        path.write_bytes(data)
+
+    def _io_timeout_remaining(self) -> float:
+        """Remaining shared-deadline time for one io interaction."""
+
+        if self._deadline is None:
+            return _IO_TIMEOUT_SECONDS
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise BuildRecipeError("io-deadline-exceeded")
+        return min(_IO_TIMEOUT_SECONDS, remaining)
 
     def run_step(
         self, argv: Sequence[str], *, step_id: str, timeout_seconds: float
     ) -> IsolatedStepOutcome:
         name = "lima-agent-step-" + uuid.uuid4().hex[:12]
-        result, stdout, stderr = self._run(
+        stdout_path = self._io_dir / f"{step_id}.stdout.log"
+        stderr_path = self._io_dir / f"{step_id}.stderr.log"
+        result = self._spawn(
             list(argv),
             name=name,
-            stdout_path=self._io_dir / f"{step_id}.stdout.log",
-            stderr_path=self._io_dir / f"{step_id}.stderr.log",
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
             timeout_seconds=timeout_seconds,
+            capture_limit=self._capture_head_room(),
         )
+        head_room = self._capture_head_room()
         return IsolatedStepOutcome(
             returncode=result.returncode,
-            stdout=stdout.decode("utf8", errors="replace"),
-            stderr=stderr.decode("utf8", errors="replace"),
+            stdout=_read_tail(stdout_path, head_room).decode(
+                "utf8", errors="replace"
+            ),
+            stderr=_read_tail(stderr_path, head_room).decode(
+                "utf8", errors="replace"
+            ),
             elapsed_seconds=result.elapsed_seconds,
             timed_out=result.timed_out,
             cancelled=result.cancelled,
+            stop_confirmed=result.stop_confirmed,
+            stdout_truncated=result.stdout_truncated,
+            stderr_truncated=result.stderr_truncated,
         )
 
-    def read_file(self, container_path: str) -> bytes:
+    def _transfer(
+        self, argv: Sequence[str], *, error_label: str
+    ) -> tuple[ContainerRunResult, bytes]:
+        """Full transfer of a product read; oversize is rejected, not cut."""
+
         name = "lima-agent-" + uuid.uuid4().hex[:12]
-        result, stdout, _stderr = self._run(
-            ["cat", container_path],
+        stdout_path = self._io_dir / f"{name}.stdout.log"
+        stderr_path = self._io_dir / f"{name}.stderr.log"
+        result = self._spawn(
+            list(argv),
             name=name,
-            stdout_path=self._io_dir / f"{name}.stdout.log",
-            stderr_path=self._io_dir / f"{name}.stderr.log",
-            timeout_seconds=_IO_TIMEOUT_SECONDS,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout_seconds=self._io_timeout_remaining(),
+            capture_limit=_FILE_READ_LIMIT_BYTES,
+        )
+        if result.timed_out or result.cancelled:
+            raise ContainerExecutionError(
+                f"isolated-io-interrupted:{argv[0]}"
+            )
+        data = stdout_path.read_bytes()
+        if result.stdout_truncated:
+            raise BuildRecipeError(
+                f"{error_label}-too-large:{argv[-1]}"
+            )
+        return result, data
+
+    def read_file(self, container_path: str) -> bytes:
+        result, stdout = self._transfer(
+            ["cat", container_path], error_label="container-read"
         )
         if result.returncode != 0:
             raise BuildRecipeError(f"container-read-failed:{container_path}")
         return stdout
 
     def list_globs(self, pattern: str) -> list[str]:
-        name = "lima-agent-" + uuid.uuid4().hex[:12]
-        result, stdout, _stderr = self._run(
+        result, stdout = self._transfer(
             ["python3", "-c", LIST_GLOBS_SCRIPT, pattern],
-            name=name,
-            stdout_path=self._io_dir / f"{name}.stdout.log",
-            stderr_path=self._io_dir / f"{name}.stderr.log",
-            timeout_seconds=_IO_TIMEOUT_SECONDS,
+            error_label="container-glob",
         )
         if result.returncode != 0:
             raise BuildRecipeError(f"container-glob-failed:{pattern}")
@@ -318,7 +422,11 @@ class DockerIsolatedSession:
         ]
 
     def close(self) -> None:
-        return None
+        """Retry teardown for containers whose stop was never confirmed."""
+
+        while self._unconfirmed_containers:
+            name = self._unconfirmed_containers.pop()
+            stop_container_with_confirmation(name, self._stop_log)
 
 
 class DockerIsolatedSessionFactory:
@@ -331,6 +439,7 @@ class DockerIsolatedSessionFactory:
         limits: BuildLimits,
         cancel: Callable[[], bool],
         attempt_dir: Path,
+        deadline: float | None = None,
     ) -> DockerIsolatedSession:
         return DockerIsolatedSession(
             image=image,
@@ -339,21 +448,8 @@ class DockerIsolatedSessionFactory:
             limits=limits,
             cancel=cancel,
             attempt_dir=attempt_dir,
+            deadline=deadline,
         )
-
-
-def _read_tail(path: Path, limit: int) -> bytes:
-    """Read at most the last ``limit`` bytes without loading the file.
-
-    A step log is written unbounded straight to disk, so the host must seek
-    near the end instead of materializing a potentially huge stream just to
-    slice its tail.
-    """
-
-    size = path.stat().st_size
-    with path.open("rb") as handle:
-        handle.seek(max(0, size - limit))
-        return handle.read()
 
 
 def _sanitize(text: str, tmp_root: Path) -> str:
@@ -398,6 +494,8 @@ class BuildExecutor:
         if not isinstance(revision, str):
             raise BuildExecutorError("revision-invalid")
 
+        # One deadline for the whole attempt: copy, steps, io and export.
+        deadline = time.monotonic() + limits.total_seconds
         logs_dir = attempt / "logs"
         steps_dir = attempt / "steps"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -407,9 +505,9 @@ class BuildExecutor:
         shutil.copytree(snapshot, work_copy)
 
         steps: list[BuildStepResult] = []
+        stop_unconfirmed: list[str] = []
         failure_code: str | None = None
         package_rel: str | None = None
-        elapsed_total = 0.0
         factory = self._session_factory or DockerIsolatedSessionFactory()
         session: IsolatedSession | None = None
         try:
@@ -420,12 +518,13 @@ class BuildExecutor:
                 limits=limits,
                 cancel=cancel,
                 attempt_dir=attempt,
+                deadline=deadline,
             )
             for index, argv in enumerate(recipe.configure):
                 if cancel():
                     failure_code = FAILURE_CANCELLED
                     break
-                remaining = limits.total_seconds - elapsed_total
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     failure_code = FAILURE_BUDGET_EXHAUSTED
                     break
@@ -436,7 +535,8 @@ class BuildExecutor:
                     step_id=step_id,
                     timeout_seconds=step_timeout,
                 )
-                elapsed_total += outcome.elapsed_seconds
+                if not getattr(outcome, "stop_confirmed", True):
+                    stop_unconfirmed.append(step_id)
                 stdout_text, stdout_cut = bounded_text(
                     _sanitize(outcome.stdout, tmp_root), limits.max_output_bytes
                 )
@@ -469,8 +569,13 @@ class BuildExecutor:
                         "elapsed_seconds": step.elapsed_seconds,
                         "timed_out": step.timed_out,
                         "cancelled": step.cancelled,
-                        "stdout_truncated": stdout_cut,
-                        "stderr_truncated": stderr_cut,
+                        "stdout_truncated": stdout_cut
+                        or bool(getattr(outcome, "stdout_truncated", False)),
+                        "stderr_truncated": stderr_cut
+                        or bool(getattr(outcome, "stderr_truncated", False)),
+                        "stop_unconfirmed": not getattr(
+                            outcome, "stop_confirmed", True
+                        ),
                     },
                     filename=f"{step.step_id}.json",
                 )
@@ -484,15 +589,33 @@ class BuildExecutor:
                     failure_code = FAILURE_STEP_FAILED
                     break
             if failure_code is None:
-                pkg_dir = attempt / "package"
-                try:
-                    export_context_package(
-                        recipe, session, pkg_dir, revision=revision
-                    )
-                except BuildRecipeError:
-                    failure_code = FAILURE_EXPORT_FAILED
+                # Export only while uncancelled and inside the deadline; the
+                # deadline also bounds the export's own container io.
+                if cancel():
+                    failure_code = FAILURE_CANCELLED
+                elif time.monotonic() >= deadline:
+                    failure_code = FAILURE_BUDGET_EXHAUSTED
                 else:
-                    package_rel = "package"
+                    pkg_dir = attempt / "package"
+                    try:
+                        export_context_package(
+                            recipe, session, pkg_dir, revision=revision
+                        )
+                    except BuildRecipeError:
+                        failure_code = FAILURE_EXPORT_FAILED
+                    except ContainerExecutionError:
+                        failure_code = (
+                            FAILURE_CANCELLED
+                            if cancel()
+                            else FAILURE_EXPORT_INTERRUPTED
+                        )
+                    else:
+                        package_rel = "package"
+                        # Cancellation wins over a finished export: a
+                        # cancelled attempt never publishes success.
+                        if cancel():
+                            package_rel = None
+                            failure_code = FAILURE_CANCELLED
         finally:
             if session is not None:
                 session.close()
@@ -521,7 +644,9 @@ class BuildExecutor:
                         }
                         for step in steps
                     ],
-                    "elapsed_seconds": elapsed_total,
+                    "stop_unconfirmed": stop_unconfirmed,
+                    "elapsed_seconds": time.monotonic()
+                    - (deadline - limits.total_seconds),
                 },
                 filename="attempt.json",
             )
@@ -532,4 +657,5 @@ class BuildExecutor:
             image_digest=getattr(session, "image_digest", None),
             package_path=str(attempt / package_rel) if package_rel else None,
             failure_code=failure_code,
+            stop_unconfirmed=tuple(stop_unconfirmed),
         )

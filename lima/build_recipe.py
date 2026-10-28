@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import posixpath
 import re
 import shlex
 import subprocess
@@ -546,12 +547,85 @@ def _relativize_entry_path(value: object, source_mount: str, field: str) -> str:
     return stripped
 
 
+def _resolve_include_value(
+    value: str, source_mount: str, original_directory: str | None
+) -> str:
+    """Relativize one include value against its true base.
+
+    A relative include is spelled against the entry's original (container
+    absolute) compile directory, so it must be resolved there before the
+    source-mount prefix is stripped.  Without this, ``-I../include`` and
+    ``-Iapp/include`` under ``/src/build`` would survive as ambiguous
+    repository-relative-looking values that actually point elsewhere.
+    """
+
+    if not value.startswith("/"):
+        if original_directory and original_directory.startswith("/"):
+            value = posixpath.normpath(
+                posixpath.join(original_directory, value)
+            )
+    return _strip_source_prefix(value, source_mount)
+
+
+def _relativize_argv_tokens(
+    tokens: Sequence[object], source_mount: str, original_directory: str | None
+) -> list[object]:
+    """Relativize one argv list, resolving include values by their base.
+
+    Non-string tokens (if any) pass through untouched.  The whole list is
+    processed together so separate-form include options keep track of
+    their value token.
+    """
+
+    result: list[object] = []
+    expect_include = False
+    for token in tokens:
+        if not isinstance(token, str):
+            result.append(token)
+            continue
+        if expect_include:
+            result.append(
+                _resolve_include_value(token, source_mount, original_directory)
+            )
+            expect_include = False
+            continue
+        if token in _DIR_INCLUDE_OPTIONS or token in _FILE_INCLUDE_OPTIONS:
+            expect_include = True
+            result.append(token)
+            continue
+        head, separator, tail = token.partition("=")
+        if separator and tail and (
+            head in _DIR_INCLUDE_OPTIONS or head in _FILE_INCLUDE_OPTIONS
+        ):
+            result.append(
+                head
+                + "="
+                + _resolve_include_value(
+                    tail, source_mount, original_directory
+                )
+            )
+            continue
+        if token.startswith("-I") and len(token) > 2:
+            result.append(
+                "-I"
+                + _resolve_include_value(
+                    token[2:], source_mount, original_directory
+                )
+            )
+            continue
+        result.append(_strip_source_prefix(token, source_mount))
+    return result
+
+
 def _relativize_source_paths(compdb_text: str, source_mount: str) -> str:
-    """Rewrite container-absolute repository paths to repository-relative ones.
+    """Rewrite container paths to unambiguous repository-relative ones.
 
     CMake exports absolute ``directory``/``file``/``output`` paths and
     absolute include flags rooted at the source mount; A1 requires
-    repository-relative ``directory``/``file`` values.  Both the
+    repository-relative ``directory``/``file`` values.  Include values
+    are resolved against the entry's original compile directory first,
+    so directory-relative spellings (``-I../include``) and absolute ones
+    both land on one unambiguous repository-relative base.  Both the
     ``arguments`` array form and the ``command`` shell-string form are
     handled token-wise; absolute paths outside the source mount are
     rejected fail-closed.
@@ -566,6 +640,9 @@ def _relativize_source_paths(compdb_text: str, source_mount: str) -> str:
     for entry in document:
         if not isinstance(entry, dict):
             raise BuildRecipeError("compdb-entry-not-object")
+        original_directory = entry.get("directory")
+        if not isinstance(original_directory, str):
+            original_directory = None
         for field in ("directory", "file"):
             if field in entry:
                 entry[field] = _relativize_entry_path(
@@ -575,14 +652,9 @@ def _relativize_source_paths(compdb_text: str, source_mount: str) -> str:
             entry["output"] = _strip_source_prefix(entry["output"], source_mount)
         arguments = entry.get("arguments")
         if isinstance(arguments, list):
-            entry["arguments"] = [
-                (
-                    _strip_source_prefix(argument, source_mount)
-                    if isinstance(argument, str)
-                    else argument
-                )
-                for argument in arguments
-            ]
+            entry["arguments"] = _relativize_argv_tokens(
+                arguments, source_mount, original_directory
+            )
         command = entry.get("command")
         if isinstance(command, str) and command:
             try:
@@ -590,7 +662,7 @@ def _relativize_source_paths(compdb_text: str, source_mount: str) -> str:
             except ValueError as exc:
                 raise BuildRecipeError("compdb-command-invalid") from exc
             entry["command"] = shlex.join(
-                [_strip_source_prefix(argument, source_mount) for argument in argv]
+                _relativize_argv_tokens(argv, source_mount, original_directory)
             )
     return json.dumps(document, ensure_ascii=False, indent=2)
 

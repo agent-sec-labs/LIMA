@@ -328,6 +328,60 @@ class CollectReferencedHeadersTest(unittest.TestCase):
         self.assertEqual(sorted(collected), ["headers/qt5/QtGui/qwidget.h"])
 
 
+class RelativizePathBaseTest(unittest.TestCase):
+    """Include values land on one unambiguous repository-relative base."""
+
+    def test_include_values_resolve_against_original_directory(self) -> None:
+        from lima.build_recipe import _relativize_source_paths
+
+        compdb = [
+            {
+                "directory": "/src/build",
+                "arguments": [
+                    "/usr/bin/c++",
+                    "-I/src/app/include",
+                    "-Iapp/include",
+                    "-I",
+                    "../include",
+                    "-isystem=../third_party",
+                    "-c",
+                    "/src/app/main.cpp",
+                ],
+                "file": "/src/app/main.cpp",
+            }
+        ]
+        relativized = json.loads(
+            _relativize_source_paths(json.dumps(compdb), "/src")
+        )[0]
+        arguments = relativized["arguments"]
+        # Absolute source-mount path, directory-relative path and
+        # directory-relative parent path each resolve to their true
+        # repository-relative target - and the first two stay distinct
+        # instead of colliding into one ambiguous value.
+        self.assertEqual(arguments[1], "-Iapp/include")
+        self.assertEqual(arguments[2], "-Ibuild/app/include")
+        self.assertEqual(arguments[4], "include")
+        self.assertEqual(arguments[5], "-isystem=third_party")
+        self.assertEqual(relativized["directory"], "build")
+
+    def test_command_form_resolves_directory_relative_includes(self) -> None:
+        from lima.build_recipe import _relativize_source_paths
+
+        compdb = [
+            {
+                "directory": "/src/build",
+                "command": (
+                    "/usr/bin/c++ -I../include -c /src/app/main.cpp"
+                ),
+                "file": "/src/app/main.cpp",
+            }
+        ]
+        relativized = json.loads(
+            _relativize_source_paths(json.dumps(compdb), "/src")
+        )[0]
+        self.assertIn("-Iinclude", relativized["command"])
+
+
 class RunRecipeTest(unittest.TestCase):
     def _write_source_tree(self, tmp: str) -> Path:
         source = Path(tmp) / "repo"

@@ -320,6 +320,60 @@ class CreateAnalysisViewTest(unittest.TestCase):
             )
             self.assertEqual(view.working_directory_for_tu("app/main.cpp"), "app")
 
+    def test_slice1_directory_relative_include_resolves(self) -> None:
+        # End to end with the real slice-1 relativizer: a directory-
+        # relative -I../include resolves to the repository include root
+        # in the package, and the view consumes it unambiguously
+        # (review round 3).
+        from lima.build_recipe import _relativize_source_paths
+        from lima.context_package import rewrite_compdb_paths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = write_snapshot(root)
+            fingerprint = snapshot_fingerprint(snapshot)
+            compdb = [
+                {
+                    "directory": "/src/build",
+                    "arguments": [
+                        "/usr/bin/c++",
+                        "-I../include",
+                        "-c",
+                        "/src/app/main.cpp",
+                    ],
+                    "file": "/src/app/main.cpp",
+                }
+            ]
+            relativized = json.loads(
+                _relativize_source_paths(json.dumps(compdb), "/src")
+            )
+            rewritten = rewrite_compdb_paths(
+                json.dumps(relativized),
+                {"/usr/include/fixture": "headers/fixture"},
+            )
+            entry = json.loads(rewritten)[0]
+            pkg = root / "package"
+            write_package_fixture(pkg, revision=fingerprint, entry=entry)
+            artifact = verify_build_artifact(
+                pkg, fingerprint, compute_artifact_digest(pkg)
+            )
+            view = create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+            self.assertEqual(view.flags_for_tu("app/main.cpp"), ("-Iinclude",))
+
+    def test_include_escape_refuses_view(self) -> None:
+        # A value that still escapes the repository root after
+        # normalization is refused rather than consumed.
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = {
+                "directory": "app",
+                "arguments": ["c++", "-I", "../outside", "-c", "main.cpp"],
+                "file": "app/main.cpp",
+            }
+            snapshot, _pkg, artifact, _ = make_verified(tmp, entry=entry)
+            with self.assertRaises(BuildContextViewError) as caught:
+                create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+            self.assertIn("compdb-include-escape", caught.exception.reason)
+
     def test_separated_option_values_are_preserved(self) -> None:
         # -x, -D, -target and friends take a separate operand; dropping it
         # as a "bare positional" would corrupt the command (round 2 F3).

@@ -306,14 +306,18 @@ def _project_entry(
             pass
 
     def map_path(value: str) -> str:
-        # Slice-1 producers relativize source-tree paths to repository
-        # roots, so a non-absolute, non-package value is already
-        # repository-relative: normalize only, never re-prefix it with
-        # the working directory.
+        # Slice-1 producers resolve include values against the original
+        # compile directory before relativizing, so a non-absolute,
+        # non-package value is already repository-relative: normalize
+        # only, never re-prefix it with the working directory - and a
+        # value that still escapes the repository root is refused.
         for root in package_roots:
             if value == root or value.startswith(root + "/"):
                 return value
-        return posixpath.normpath(value)
+        normalized = posixpath.normpath(value)
+        if normalized == ".." or normalized.startswith("../"):
+            raise BuildContextViewError(f"compdb-include-escape:{value}")
+        return normalized
 
     projected: list[str] = []
     index = 1  # the compiler token is not a flag

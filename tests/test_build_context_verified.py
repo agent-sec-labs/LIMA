@@ -56,10 +56,16 @@ def make_settings() -> AnalyzerSettings:
     )
 
 
-def write_two_unit_package(pkg_dir: Path, revision: str, arguments) -> None:
+def write_two_unit_package(
+    pkg_dir: Path, revision: str, arguments, util_arguments=None
+) -> None:
     compdb = []
     for unit in ("app/main.cpp", "app/util.cpp"):
-        entry_arguments = list(arguments) + [unit.rsplit("/", 1)[-1]]
+        unit_arguments = (
+            arguments if unit.endswith("main.cpp") or util_arguments is None
+            else util_arguments
+        )
+        entry_arguments = list(unit_arguments) + [unit.rsplit("/", 1)[-1]]
         compdb.append(
             {
                 "directory": "app",
@@ -94,6 +100,7 @@ def make_view(
         "-Iheaders/fixture",
         "-c",
     ),
+    util_arguments: tuple[str, ...] | None = None,
 ):
     root = Path(tmp)
     snapshot = root / "snapshot"
@@ -102,7 +109,9 @@ def make_view(
     (snapshot / "app" / "util.cpp").write_text("int util(void){return 1;}\n")
     fingerprint = snapshot_fingerprint(snapshot)
     pkg = root / "package"
-    write_two_unit_package(pkg, fingerprint, arguments)
+    write_two_unit_package(
+        pkg, fingerprint, arguments, util_arguments
+    )
     artifact = verify_build_artifact(
         pkg, fingerprint, compute_artifact_digest(pkg)
     )
@@ -394,8 +403,6 @@ class Round1ReviewTests(unittest.TestCase):
     def test_members_are_laid_out_and_argv_executes(self) -> None:
         # Sealed members become readable files and the emitted argv/cwd
         # actually resolves on disk (review F2); real Clang when present.
-        import shutil
-        import subprocess
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -407,13 +414,24 @@ class Round1ReviewTests(unittest.TestCase):
                 encoding="utf8",
             )
             (snapshot / "build").mkdir(exist_ok=True)
-            frozen_root = None
-            if sys.platform != "win32":
-                frozen_root = snapshot
+            frozen_root = sys.platform != "win32"
+            if frozen_root:
                 snapshot.chmod(0o555)
-            self.addCleanup(
-                lambda: frozen_root is not None and frozen_root.chmod(0o755)
-            )
+            try:
+                self._layout_and_compile(snapshot, frozen_root)
+            finally:
+                # Restore permissions while the directory still exists;
+                # a cleanup callback would run after TemporaryDirectory
+                # has already removed it.
+                if frozen_root:
+                    snapshot.chmod(0o755)
+
+    def _layout_and_compile(self, snapshot: Path, frozen_root: bool) -> None:
+        import shutil
+        import subprocess
+
+        if True:
+            root = snapshot.parent
             fingerprint = snapshot_fingerprint(snapshot)
             compdb = [
                 {
@@ -577,6 +595,126 @@ class Round2ReviewTests(unittest.TestCase):
             )
             self.assertIs(resolved, view)
             self.assertIsNone(analyzer_server.lookup_verified_build_view("e" * 64, None))
+
+
+class Round3ReviewTests(unittest.TestCase):
+    """Targeted regressions for the PR #347 round-3 review."""
+
+    def test_std_reaches_the_command_builder(self) -> None:
+        # The verified -std survives the real command constructor, not
+        # just the flag helper (review round 3 F1).
+        from cxx_analyzer.repro import _context_flags, build_compile_argv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(
+                tmp,
+                arguments=(
+                    "/usr/bin/c++",
+                    "-std=c++20",
+                    "-DVERIFIED=1",
+                    "-Iheaders/fixture",
+                    "-c",
+                ),
+            )
+            prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
+            flags = _context_flags(
+                prepared, ("app/main.cpp",), make_settings(), view
+            )
+            argv = build_compile_argv(
+                ["app/main.cpp"],
+                "build/repro_driver_x.cpp",
+                "build/repro_x",
+                context_flags=flags,
+                allowed_std=True,
+            )
+            self.assertIn("-std=c++20", argv)
+            # The legacy channel still refuses a standard.
+            with self.assertRaises(ValueError):
+                build_compile_argv(
+                    ["app/main.cpp"],
+                    "build/repro_driver_x.cpp",
+                    "build/repro_x",
+                    context_flags=flags,
+                )
+
+    def test_divergent_unit_macros_fall_back_to_bare_argv(self) -> None:
+        # Units carrying different macros cannot ride one argv; the
+        # verified path returns the bare environment instead of an
+        # intersection that leaves a value-less option behind (review
+        # round 3 F2).
+        from cxx_analyzer.repro import _context_flags, build_compile_argv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(
+                tmp,
+                arguments=("/usr/bin/c++", "-D", "ONE=1", "-Iheaders/fixture", "-c"),
+                util_arguments=("/usr/bin/c++", "-D", "TWO=1", "-Iheaders/fixture", "-c"),
+            )
+            prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
+            flags = _context_flags(
+                prepared, ("app/main.cpp", "app/util.cpp"), make_settings(), view
+            )
+            self.assertEqual(flags, ())
+            # And the empty projection still builds a valid command.
+            argv = build_compile_argv(
+                ["app/main.cpp", "app/util.cpp"],
+                "build/repro_driver_x.cpp",
+                "build/repro_x",
+            )
+            self.assertNotIn("-D", argv)
+
+    def test_c_target_with_standard_falls_back(self) -> None:
+        # A -std riding a command that also hosts the C++ driver is only
+        # safe when every unit is C++; a C target falls back to the bare
+        # environment.
+        from cxx_analyzer.repro import _context_flags
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            (snapshot / "app").mkdir(parents=True)
+            (snapshot / "app" / "legacy.c").write_text(
+                "int legacy(void){return 0;}\n", encoding="utf8"
+            )
+            fingerprint = snapshot_fingerprint(snapshot)
+            compdb = [
+                {
+                    "directory": "app",
+                    "arguments": [
+                        "/usr/bin/clang",
+                        "-std=c99",
+                        "-c",
+                        "legacy.c",
+                    ],
+                    "file": "app/legacy.c",
+                }
+            ]
+            manifest = build_manifest(
+                repository="Fixtures/AgentRepo",
+                revision=fingerprint,
+                compdb=compdb,
+                generated=[],
+                header_roots=[],
+                rewrites={},
+                created_by="s4b-test",
+            )
+            pkg = root / "package"
+            write_package(
+                pkg,
+                manifest,
+                json.dumps(compdb).encode("utf8"),
+                {},
+                {},
+            )
+            artifact = verify_build_artifact(
+                pkg, fingerprint, compute_artifact_digest(pkg)
+            )
+            view = create_analysis_view(snapshot, artifact, ("app/legacy.c",))
+            prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
+            flags = _context_flags(
+                prepared, ("app/legacy.c",), make_settings(), view
+            )
+            self.assertEqual(flags, ())
 
 
 if __name__ == "__main__":

@@ -59,9 +59,11 @@ REPRO_STEP_OUTPUT_BYTES: Final = 1024 * 1024
 _C_SOURCE_SUFFIX: Final = ".c"
 _C_LANGUAGE: Final = "c"
 _CPP_LANGUAGE: Final = "c++"
-# Semantic options the experiment argv may carry.  ``-std`` is excluded:
-# one argv hosts the C target and the C++ driver, and a per-language
-# standard flag would be applied to both.
+# Semantic options the experiment argv may carry.  ``-std`` stays
+# excluded from the legacy whitelist: one argv hosts the C target and
+# the C++ driver, and a per-language standard flag would be applied to
+# both.  The verified-package path may carry a shared C++ standard via
+# the explicit ``allowed_std`` channel after its own language gate.
 _REPRO_CONTEXT_OPTIONS: Final = SEMANTIC_ARG_OPTIONS - {"-std"}
 # Joined spellings of the value-taking context options (-DFOO, -Ilib, ...).
 _SEMANTIC_JOINED: Final = ("-I", "-D", "-U", "-isystem")
@@ -147,13 +149,17 @@ def _safe_relative_path(value: object) -> str:
     return value
 
 
-def _validated_context_flags(flags: object) -> tuple[str, ...]:
+def _validated_context_flags(
+    flags: object, *, allowed_std: bool = False
+) -> tuple[str, ...]:
     """Accept only semantic compile-context tokens, fail-closed otherwise.
 
-    The whitelist mirrors the semantic context options minus ``-std``
-    (option-plus-value or joined spelling); any other token could smuggle
-    inputs, outputs or behavior changes into the pinned experiment argv
-    and is rejected.
+    The whitelist mirrors the semantic context options (option-plus-value
+    or joined spelling); any other token could smuggle inputs, outputs or
+    behavior changes into the pinned experiment argv and is rejected.
+    ``allowed_std`` opens the ``-std`` channel for the verified-package
+    path only, after its language gate decided a shared C++ standard may
+    ride the single command.
     """
     if isinstance(flags, str | bytes) or not isinstance(flags, list | tuple):
         raise ValueError("repro context flags must be a sequence of strings")
@@ -166,12 +172,15 @@ def _validated_context_flags(flags: object) -> tuple[str, ...]:
             validated.append(flag)
             expect_value = False
             continue
-        if flag in _REPRO_CONTEXT_OPTIONS:
+        if flag in _REPRO_CONTEXT_OPTIONS or (allowed_std and flag == "-std"):
             validated.append(flag)
             expect_value = True
             continue
         option, separator, _ = flag.partition("=")
-        if separator and option in _REPRO_CONTEXT_OPTIONS:
+        if separator and (
+            option in _REPRO_CONTEXT_OPTIONS
+            or (allowed_std and option == "-std")
+        ):
             validated.append(flag)
             continue
         if any(
@@ -194,6 +203,7 @@ def build_compile_argv(
     output_path: str,
     *,
     context_flags: Sequence[str] = (),
+    allowed_std: bool = False,
 ) -> list[str]:
     """Return the pinned, deterministic ASan compile argv for one experiment.
 
@@ -217,7 +227,11 @@ def build_compile_argv(
         raise ValueError("repro source files must be unique")
     driver = _safe_relative_path(driver_path)
     output = _safe_relative_path(output_path)
-    argv = [COMPILE_DRIVER, *COMPILE_FLAGS, *_validated_context_flags(context_flags)]
+    argv = [
+        COMPILE_DRIVER,
+        *COMPILE_FLAGS,
+        *_validated_context_flags(context_flags, allowed_std=allowed_std),
+    ]
     language = _CPP_LANGUAGE
     for source in sources:
         target_language = (
@@ -617,11 +631,14 @@ def _context_flags(
     if settings is None:
         return ()
     if verified_view is not None:
-        # The verified-package projection is consumed verbatim: the
-        # per-unit flags the facts resolver validated (standards,
-        # language modes and forced includes included) are intersected
-        # across the requested sources; any unresolved source keeps the
-        # bare pinned argv rather than a silently trimmed environment.
+        # The verified-package projection is consumed as one consistent
+        # environment: the per-unit flags the facts resolver validated
+        # are used verbatim only when every requested unit carries the
+        # exact same projection.  Divergent macros, includes or language
+        # standards cannot ride one experiment argv, so they fall back to
+        # the bare pinned argv instead of being silently trimmed - and a
+        # ``-std`` is only carried while every unit and the C++ driver
+        # share the same language.
         per_unit: list[tuple[str, ...]] = []
         for source in sources:
             context = resolve_build_context_execution(
@@ -631,12 +648,20 @@ def _context_flags(
                 return ()
             # argv is (compiler, *flags, "-fsyntax-only", unit).
             per_unit.append(tuple(context.arguments[1:-2]))
-        if not per_unit:
+        if not per_unit or any(
+            unit != per_unit[0] for unit in per_unit[1:]
+        ):
             return ()
-        first = per_unit[0]
-        return tuple(
-            flag for flag in first if all(flag in unit for unit in per_unit[1:])
+        flags = per_unit[0]
+        carries_std = any(
+            flag == "-std" or flag.startswith("-std=") for flag in flags
         )
+        if carries_std and any(
+            not source.endswith((".cpp", ".cc", ".cxx", ".cxx0x", ".hpp"))
+            for source in sources
+        ):
+            return ()
+        return flags
     shared: frozenset[tuple[str, str]] | None = None
     order: tuple[tuple[str, str], ...] = ()
     for source in sources:
@@ -742,6 +767,10 @@ def run_repro(
             context_flags=_context_flags(
                 snapshot, sources, settings, verified_view
             ),
+            # A -std only ever comes from the verified path, which already
+            # refused to carry one unless every unit shares the C++
+            # language with the driver.
+            allowed_std=verified_view is not None,
         ),
         snapshot,
         ".",

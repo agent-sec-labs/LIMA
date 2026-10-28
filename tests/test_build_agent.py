@@ -131,8 +131,14 @@ class ScriptedModel:
 class FakeExecutor:
     """Succeeds on chosen attempts; writes a real minimal package."""
 
-    def __init__(self, *, fail_first_attempts: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        fail_first_attempts: int = 0,
+        failure_code: str = "configure-step-failed",
+    ) -> None:
         self.fail_first_attempts = fail_first_attempts
+        self.failure_code = failure_code
         self.calls = 0
 
     def execute(self, recipe, snapshot_dir, output_dir, *, limits, cancel,
@@ -147,7 +153,7 @@ class FakeExecutor:
             image=recipe.image,
             image_digest=None,
             package_path=str(Path(output_dir) / "package") if ok else None,
-            failure_code=None if ok else "configure-step-failed",
+            failure_code=None if ok else self.failure_code,
         )
 
     @staticmethod
@@ -636,6 +642,60 @@ class Round1ReviewTests(unittest.TestCase):
         self.assertEqual(result.status, "FAILED")
         self.assertIn("fingerprint", result.failure_code or "")
         self.assertEqual(executor.calls, 1)
+
+    def test_precondition_error_allows_first_real_attempt(self) -> None:
+        # A dependencies-not-prepared refusal never started the executor,
+        # so completing the precondition and executing for real is a first
+        # attempt, not a fingerprint repeat (review round 2).
+        model = ScriptedModel(
+            [
+                plan_action(),
+                tool("execute_configure"),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                final(),
+            ]
+        )
+        executor = FakeExecutor()
+        result = self.run_agent(model, executor=executor)
+
+        self.assertEqual(result.status, SUCCEEDED)
+        self.assertEqual(executor.calls, 1)
+        self.assertEqual(result.attempts, 1)
+
+    def test_export_failure_allows_export_field_revision(self) -> None:
+        # An export-stage failure fingerprints on the whole plan digest:
+        # fixing expected_compdb (with the configure argv untouched) is the
+        # effective change and must reach the executor (review round 2).
+        def plan_with_compdb(compdb: str) -> dict:
+            mapping = json.loads(
+                json.dumps(plan_action(feature="ON")["arguments"]["plan"])
+            )
+            mapping["expected_compdb"] = compdb
+            return {
+                "action": "tool",
+                "tool": "propose_build_plan",
+                "arguments": {"plan": mapping},
+            }
+
+        model = ScriptedModel(
+            [
+                plan_with_compdb("build/wrong-compdb.json"),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                plan_with_compdb("build/compile_commands.json"),
+                tool("execute_configure"),
+                final(),
+            ]
+        )
+        executor = FakeExecutor(
+            fail_first_attempts=1, failure_code="export-failed"
+        )
+        result = self.run_agent(model, executor=executor)
+
+        self.assertEqual(result.status, SUCCEEDED)
+        self.assertEqual(executor.calls, 2)
+        self.assertEqual(result.attempts, 2)
 
     def test_model_receives_request_and_tool_catalog(self) -> None:
         # A generic adapter must be able to plan from the run state alone;

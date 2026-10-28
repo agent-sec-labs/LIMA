@@ -77,6 +77,17 @@ _TOOL_PHASES: Final = {
     "validate_context": "VALIDATING",
 }
 
+# Failure stages of a real executor attempt.  Configure-stage failures
+# fingerprint on the execution identity (configure argv, dependency set,
+# image); export-stage failures fingerprint on the whole plan digest,
+# because the export fields they failed on are the effective fix.
+_CONFIGURE_FAILURE_CODES: Final = frozenset(
+    {"configure-step-failed", "step-timeout"}
+)
+_EXPORT_FAILURE_CODES: Final = frozenset(
+    {"export-failed", "export-interrupted"}
+)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class BuildProgress:
@@ -136,7 +147,9 @@ class _GuardedTools:
         self._progress = progress
         self.last_plan_digest: str | None = None
         self.last_execution_digest: str | None = None
-        self.failed_execution_digest: str | None = None
+        # (stage, digest) of the last real execution failure: the stage
+        # decides which identity a retry must change.
+        self.failed_identity: tuple[str, str] | None = None
         self.last_failure_code: str | None = None
         self.fingerprint_stop: str | None = None
         self.cancelled: bool = False
@@ -186,13 +199,19 @@ class _GuardedTools:
         return result
 
     def _fingerprint_refusal(self) -> dict[str, Any] | None:
-        """Refuse retries that would repeat the last failing execution.
+        """Refuse retries that would repeat the last real failure.
 
-        The identity is what an attempt actually executes (configure argv,
-        dependency set, image) - not the whole plan digest, so editing
-        export-only metadata such as generated-header globs cannot reset the
-        discipline.  Once fired, the stop is locked: later plans and tool
-        results cannot clear it.
+        The identity is stage-specific (review round 2): a configure-stage
+        failure (configure-step-failed, step-timeout) compares what the
+        attempt executes - configure argv, dependency set, image - so
+        editing export-only metadata cannot reset the discipline; an
+        export-stage failure (export-failed, export-interrupted) compares
+        the whole plan digest, because the export fields it failed on are
+        exactly the effective change to make.  Precondition errors
+        (dependencies not prepared, spent deadline, ...) never start a
+        fingerprint: completing the precondition and executing for real is
+        a first attempt, not a repeat.  Once fired, the stop is locked:
+        later plans and tool results cannot clear it.
         """
 
         if self.fingerprint_stop is not None:
@@ -202,10 +221,15 @@ class _GuardedTools:
                 "attempt": self.attempts,
                 "steps": [],
             }
-        if (
-            self.failed_execution_digest is not None
-            and self.failed_execution_digest == self.last_execution_digest
-        ):
+        if self.failed_identity is None:
+            return None
+        stage, digest = self.failed_identity
+        repeated = (
+            digest == self.last_execution_digest
+            if stage == "configure"
+            else digest == self.last_plan_digest
+        )
+        if repeated:
             self.fingerprint_stop = (
                 "failure-fingerprint-unchanged:"
                 f"{self.last_failure_code or 'unknown'}"
@@ -227,6 +251,11 @@ class _GuardedTools:
         elif name == "prepare_dependencies" and result.get("ok"):
             self.prepared_ref = result.get("dependency_set_ref")
         elif name == "execute_configure":
+            if "attempt" not in result:
+                # A precondition error: the executor never started, so no
+                # failure fingerprint - completing the precondition and
+                # executing for real is a first attempt.
+                return
             self.executed_once = True
             self.attempts = max(self.attempts, int(result.get("attempt") or 0))
             self.last_image_digest = result.get("image_digest")
@@ -237,15 +266,29 @@ class _GuardedTools:
             if result.get("ok"):
                 # A success opens a new failure cycle; the locked stop is
                 # deliberately not cleared here.
-                self.failed_execution_digest = None
+                self.failed_identity = None
                 self.last_failure_code = None
+                return
+            failure_code = (
+                result.get("failure_code") or result.get("error") or "failed"
+            )
+            self.last_failure_code = failure_code
+            if failure_code in _CONFIGURE_FAILURE_CODES:
+                self.failed_identity = (
+                    "configure",
+                    result.get("execution_digest")
+                    or self.last_execution_digest
+                    or "",
+                )
+            elif failure_code in _EXPORT_FAILURE_CODES:
+                self.failed_identity = (
+                    "export",
+                    result.get("plan_digest") or self.last_plan_digest or "",
+                )
             else:
-                self.failed_execution_digest = (
-                    result.get("execution_digest") or self.last_execution_digest
-                )
-                self.last_failure_code = (
-                    result.get("failure_code") or result.get("error") or "failed"
-                )
+                # Interruptions and budget outcomes carry no plan identity:
+                # retrying after they are resolved is legitimate.
+                self.failed_identity = None
         elif name == "export_context_package" and result.get("ok"):
             ref = result.get("package_ref")
             if ref and ref not in self.evidence:

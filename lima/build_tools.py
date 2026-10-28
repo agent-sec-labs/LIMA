@@ -247,6 +247,7 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
         "failure_code": result.failure_code,
         "image_digest": result.image_digest,
         "execution_digest": _execution_digest(validated),
+        "plan_digest": plan_digest(validated.plan),
         "package_ref": f"{attempt_ref}/package" if result.ok else None,
         "steps": [
             {

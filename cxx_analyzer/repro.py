@@ -600,6 +600,7 @@ def _context_flags(
     snapshot: PreparedSnapshot,
     sources: tuple[str, ...],
     settings: object,
+    verified_view: object | None = None,
 ) -> tuple[str, ...]:
     """Semantic flags shared by every source, from trusted compdb entries.
 
@@ -618,7 +619,9 @@ def _context_flags(
     shared: frozenset[tuple[str, str]] | None = None
     order: tuple[tuple[str, str], ...] = ()
     for source in sources:
-        context = resolve_build_context_execution(snapshot.root, source, settings)
+        context = resolve_build_context_execution(
+            snapshot.root, source, settings, verified_view=verified_view
+        )
         if context.status != "resolved":
             return ()
         semantic = _repro_context_projection(semantic_arguments(context.arguments))
@@ -648,6 +651,7 @@ def run_repro(
     deadline: AnalysisDeadline,
     timeout_seconds: int = 60,
     settings: AnalyzerSettings | None = None,
+    verified_view: object | None = None,
     source_overrides: dict[str, str] | None = None,
 ) -> ReproExecution:
     """Compile verified sources plus one untrusted driver and run it.
@@ -714,7 +718,9 @@ def run_repro(
             sources,
             driver_relative,
             binary_relative,
-            context_flags=_context_flags(snapshot, sources, settings),
+            context_flags=_context_flags(
+                snapshot, sources, settings, verified_view
+            ),
         ),
         snapshot,
         ".",

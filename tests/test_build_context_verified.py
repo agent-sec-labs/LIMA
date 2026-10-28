@@ -13,8 +13,11 @@ units outside the view.
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from cxx_analyzer.build_context import (
     WIRE_SOURCE_KINDS,
@@ -124,7 +127,8 @@ class VerifiedPackageResolutionTest(unittest.TestCase):
                 self.assertEqual(len(context.context_hash), 64)
                 hashes.add(context.context_hash)
                 self.assertIn("-DVERIFIED=1", context.arguments)
-                self.assertEqual(context.relative_directory, "app")
+                # One repository-root working directory for every path.
+                self.assertEqual(context.relative_directory, ".")
             self.assertEqual(len(hashes), 2)
 
     def test_view_takes_priority_over_snapshot_compdb(self) -> None:
@@ -222,6 +226,255 @@ class SharedProjectionTest(unittest.TestCase):
             self.assertIn("-DVERIFIED=1", contract)
             legacy = _driver_contract(workspace, "app/main.cpp")
             self.assertNotIn("-DVERIFIED=1", legacy)
+
+
+class Round1ReviewTests(unittest.TestCase):
+    """Targeted regressions for the PR #347 review findings."""
+
+    def test_repro_entry_consumes_the_view(self) -> None:
+        # The real repro parameter path (_context_flags, called by
+        # run_repro) consumes the verified view (review F1).
+        from cxx_analyzer.repro import _context_flags
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(tmp)
+            prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
+            flags = _context_flags(
+                prepared, ("app/main.cpp",), make_settings(), view
+            )
+            self.assertIn("-DVERIFIED=1", flags)
+            legacy = _context_flags(prepared, ("app/main.cpp",), make_settings())
+            self.assertNotIn("-DVERIFIED=1", legacy)
+
+    def test_specialist_entry_consumes_the_view(self) -> None:
+        # _process_target (the real Specialist loop entry called by
+        # run_platform_review) threads the view into the driver contract
+        # (review F1): patch the contract recorder and run one mocked
+        # target.
+
+        import lima.agent_orchestrator as orchestrator
+        from lima.agent_scout import ScoutTarget
+        from lima.cxx_agent_tools import CxxAgentBudget
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(tmp)
+            workspace = RepositoryWorkspace(str(snapshot))
+            captured: dict[str, object] = {}
+
+            def recording_contract(workspace, unit_path, verified_view=None):
+                captured["verified_view"] = verified_view
+                return "contract"
+
+            target = ScoutTarget(
+                lead_id="L1",
+                path="app/main.cpp",
+                line=1,
+                reason="test",
+                confidence="medium",
+            )
+            with mock.patch.object(
+                orchestrator, "_driver_contract", recording_contract
+            ), mock.patch.object(
+                orchestrator,
+                "_platform_round",
+                side_effect=RuntimeError("stop-after-contract"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    orchestrator._process_target(
+                        target,
+                        workspace=workspace,
+                        repository_key="Fixtures/AgentRepo",
+                        snapshot_hash="a" * 64,
+                        bundle=None,
+                        candidate=None,
+                        resolved_llm={},
+                        budget=CxxAgentBudget(),
+                        mode="auto",
+                        dialogue_rounds=1,
+                        timeout=1,
+                        deadline=None,
+                        source_mode="repository",
+                        repro_workbench=None,
+                        tool_analysis=None,
+                        verified_view=view,
+                        diagnostics=[],
+                        specialist_calls=[0],
+                        critic_calls=[0],
+                    )
+            self.assertIs(captured["verified_view"], view)
+
+    def test_specialist_projection_keeps_standards(self) -> None:
+        # The verified Specialist projection is the full flags projection
+        # - a -std flag survives instead of being filtered away (F4).
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(
+                tmp,
+                arguments=(
+                    "/usr/bin/c++",
+                    "-std=c++20",
+                    "-DVERIFIED=1",
+                    "-Iheaders/fixture",
+                    "-c",
+                ),
+            )
+            workspace = RepositoryWorkspace(str(snapshot))
+            contract = _driver_contract(
+                workspace, "app/main.cpp", verified_view=view
+            )
+            self.assertIn("-std=c++20", contract)
+            self.assertIn("-DVERIFIED=1", contract)
+
+    def test_mode_gating_and_missing_view(self) -> None:
+        # Only mode=verified-package consults the registry; a missing view
+        # is an explicit incomplete, and legacy modes ignore whatever is
+        # registered (review F3).
+        from cxx_analyzer import server as analyzer_server
+        from cxx_analyzer.deadline import AnalysisDeadline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(tmp)
+            prepared = SimpleNamespace(root=snapshot, sha256="b" * 64)
+            deadline = AnalysisDeadline(expires_at=time.time() + 60)
+            analyzer_server.clear_verified_build_views()
+
+            missing = analyzer_server._extract_uaf_unit(
+                prepared,
+                "app/main.cpp",
+                make_settings(),
+                deadline,
+                build_context_mode="verified-package",
+            )
+            self.assertEqual(missing["extraction"], "unavailable")
+            self.assertIn(
+                "verified-view-not-registered",
+                missing["coverage"]["semantic_gaps"],
+            )
+
+            analyzer_server.register_verified_build_view("b" * 64, view)
+            legacy = analyzer_server._extract_uaf_unit(
+                prepared,
+                "app/main.cpp",
+                make_settings(),
+                deadline,
+                build_context_mode="snapshot-compdb",
+            )
+            self.assertEqual(
+                legacy["build_context"]["source_kind"], "heuristic"
+            )
+            analyzer_server.clear_verified_build_views()
+
+    def test_view_digest_slots_select_identity(self) -> None:
+        from cxx_analyzer import server as analyzer_server
+
+        analyzer_server.clear_verified_build_views()
+        try:
+            analyzer_server.register_verified_build_view("c" * 64, "view-a")
+            analyzer_server.register_verified_build_view(
+                "c" * 64, "view-b", artifact_digest="d" * 64
+            )
+            self.assertIs(
+                analyzer_server.lookup_verified_build_view("c" * 64, None),
+                "view-a",
+            )
+            self.assertIs(
+                analyzer_server.lookup_verified_build_view(
+                    "c" * 64, "d" * 64
+                ),
+                "view-b",
+            )
+            self.assertIsNone(
+                analyzer_server.lookup_verified_build_view(
+                    "c" * 64, "e" * 64
+                )
+            )
+        finally:
+            analyzer_server.clear_verified_build_views()
+
+    def test_members_are_laid_out_and_argv_executes(self) -> None:
+        # Sealed members become readable files and the emitted argv/cwd
+        # actually resolves on disk (review F2); real Clang when present.
+        import shutil
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            (snapshot / "app").mkdir(parents=True)
+            (snapshot / "app" / "main.cpp").write_text(
+                '#include "lib.h"\n#include "config.h"\n'
+                "int main(void) { return FIXTURE_VALUE; }\n",
+                encoding="utf8",
+            )
+            fingerprint = snapshot_fingerprint(snapshot)
+            compdb = [
+                {
+                    "directory": "app",
+                    "arguments": [
+                        "/usr/bin/c++",
+                        "-Iheaders/fixture",
+                        "-Ibuild",
+                        "-c",
+                        "main.cpp",
+                    ],
+                    "file": "app/main.cpp",
+                }
+            ]
+            manifest = build_manifest(
+                repository="Fixtures/AgentRepo",
+                revision=fingerprint,
+                compdb=compdb,
+                generated=["build/config.h"],
+                header_roots=["headers/fixture"],
+                rewrites={"/usr/include/fixture": "headers/fixture"},
+                created_by="s4b-test",
+            )
+            pkg = root / "package"
+            write_package(
+                pkg,
+                manifest,
+                json.dumps(compdb).encode("utf8"),
+                {"build/config.h": b"#define FIXTURE_VALUE 0\n"},
+                {"headers/fixture/lib.h": b"#define LIB_H\n"},
+            )
+            artifact = verify_build_artifact(
+                pkg, fingerprint, compute_artifact_digest(pkg)
+            )
+            view = create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+
+            context = resolve_build_context_execution(
+                snapshot, "app/main.cpp", make_settings(), verified_view=view
+            )
+            self.assertEqual(context.status, "resolved")
+            self.assertTrue(
+                (snapshot / "headers" / "fixture" / "lib.h").is_file()
+            )
+            self.assertTrue((snapshot / "build" / "config.h").is_file())
+
+            compiler = shutil.which("clang++-14") or shutil.which("clang++")
+            if compiler is None:
+                self.skipTest("a clang++ compiler is required for this fixture")
+            argv = [compiler, *context.arguments[1:]]
+            completed = subprocess.run(  # noqa: S603 - fixed clang fixture argv
+                argv,
+                cwd=snapshot,
+                capture_output=True,
+                check=False,
+                timeout=90,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr.decode("utf8", errors="replace")[-2000:],
+            )
+            # Without the laid-out context the same unit must not compile.
+            broken = subprocess.run(  # noqa: S603 - fixed clang fixture argv
+                [compiler, "-fsyntax-only", "app/main.cpp"],
+                cwd=snapshot,
+                capture_output=True,
+                check=False,
+                timeout=90,
+            )
+            self.assertNotEqual(broken.returncode, 0)
 
 
 if __name__ == "__main__":

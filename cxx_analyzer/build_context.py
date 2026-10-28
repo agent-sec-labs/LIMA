@@ -789,20 +789,68 @@ def _canonical_unit(root: Path, translation_unit: object) -> str | None:
     return relative_text
 
 
+def _materialize_view_members(root: Path, view: object) -> tuple[str, ...]:
+    """Lay the sealed package members into the snapshot as readable files.
+
+    Vendored header roots keep their package-relative location and
+    generated files return to their repository-relative build location,
+    so the repository-root-based argv the resolver emits actually resolves
+    on disk.  The layout is idempotent: a member whose target already
+    exists with the same bytes is left alone, a different-bytes collision
+    is reported as a diagnostic and nothing is written for it.
+    """
+
+    try:
+        members: dict[str, bytes] = {
+            str(path): bytes(view.read_member(path))
+            for path in view.member_paths
+        }
+    except Exception:  # noqa: BLE001 - a broken view is a failed layout
+        return ("verified-view-members-unreadable",)
+    diagnostics: list[str] = []
+    for relative, data in sorted(members.items()):
+        if relative == "context_manifest.json" or relative == "compile_commands.json":
+            continue
+        if relative.startswith("generated/"):
+            target_relative = relative[len("generated/") :]
+        else:
+            target_relative = relative
+        if not target_relative or target_relative.startswith(("..", "/")):
+            diagnostics.append(f"verified-package-member-unsafe:{relative}")
+            continue
+        target = root / target_relative
+        try:
+            if target.exists():
+                if target.is_file() and target.read_bytes() == data:
+                    continue
+                diagnostics.append(
+                    f"verified-package-member-conflict:{target_relative}"
+                )
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except OSError:
+            diagnostics.append(f"verified-package-member-unwritable:{target_relative}")
+    return tuple(diagnostics)
+
+
 def _resolve_from_verified_view(
     root: Path, unit: str, view: object
 ) -> UnitBuildContext | None:
     """Resolve one unit from an injected verified-package view.
 
     The view is a duck-typed :class:`lima.build_context_view.AnalysisContextView`
-    (this module stays lima-free): ``target_units``, ``flags_for_tu`` and
-    ``working_directory_for_tu`` are the consumed surface.  A unit outside
-    the view's declared targets returns ``None`` so the frozen existing
-    tiers keep answering for it.  The projected flags go through the same
-    fail-closed validator as every other source (response files, plugin
-    loaders and escaping paths degrade to ``incomplete``), and the
-    TU-level ``context_hash`` is computed here - it never borrows the
-    package-level hashes.
+    (this module stays lima-free): ``target_units``, ``flags_for_tu``,
+    ``member_paths`` and ``read_member`` are the consumed surface.  A unit
+    outside the view's declared targets returns ``None`` so the frozen
+    existing tiers keep answering for it.  The sealed package members are
+    laid into the snapshot first (vendored roots in place, generated files
+    back at their build locations), the argv is rebased onto the snapshot
+    root - one working directory for every path - and the projected flags
+    go through the same fail-closed validator as every other source
+    (response files, plugin loaders and escaping paths degrade to
+    ``incomplete``).  The TU-level ``context_hash`` is computed here; it
+    never borrows the package-level hashes.
     """
 
     target_units = tuple(getattr(view, "target_units", ()) or ())
@@ -810,14 +858,16 @@ def _resolve_from_verified_view(
         return None
     try:
         flags = tuple(view.flags_for_tu(unit))
-        directory = str(view.working_directory_for_tu(unit))
     except Exception:  # noqa: BLE001 - a broken view is an incomplete unit
         return _resolve_incomplete("verified-package", ("verified-view-invalid",))
+    layout_diagnostics = _materialize_view_members(root, view)
+    if layout_diagnostics:
+        return _resolve_incomplete("verified-package", layout_diagnostics)
     compiler = (
         "clang++-14" if language_for_path(unit) == "c++" else "clang-14"
     )
     argv = (compiler, *flags, "-fsyntax-only", unit)
-    working_directory, relative_directory = inside_snapshot(root, root / directory)
+    working_directory, relative_directory = inside_snapshot(root, root)
     _unused, rejections = validate_compiler_argv(
         argv, root=root, working_directory=working_directory
     )

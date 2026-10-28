@@ -754,18 +754,20 @@ def _extract_driver_flags(tokens: Sequence[str]) -> list[str]:
 
 
 def _semantic_flags_from_view(view: object, unit_path: str) -> tuple[str, ...]:
-    """The semantic flags of one unit's verified-package projection.
+    """The full flags of one unit's verified-package projection.
 
     Consumes the same sealed per-TU projection the facts and repro
-    resolvers use (``flags_for_tu``), so the Specialist driver contract
-    and the downstream stages can never disagree on the compile
-    environment.
+    resolvers use (``flags_for_tu``) verbatim - standards, language
+    modes, forced includes and targets included.  The legacy compdb
+    filter (with its token budget) stays on the legacy path only; a
+    lossy re-filtering of the verified projection would put the
+    Specialist in a different compile environment than the stages it
+    must agree with.
     """
     try:
-        projected = tuple(view.flags_for_tu(unit_path))
+        return tuple(view.flags_for_tu(unit_path))
     except Exception:  # noqa: BLE001 - a broken view yields no flags
         return ()
-    return tuple(_extract_driver_flags(projected))
 
 
 def _driver_contract(
@@ -1860,6 +1862,7 @@ def _process_target(
     source_mode: str,
     repro_workbench: Any,
     tool_analysis: Any,
+    verified_view: object | None = None,
     diagnostics: list[str],
     specialist_calls: list[int],
     critic_calls: list[int],
@@ -1879,7 +1882,9 @@ def _process_target(
         line=target.line,
         fact_lines=fact_lines,
         snippet=snippet,
-        driver_contract=_driver_contract(workspace, target.path),
+        driver_contract=_driver_contract(
+            workspace, target.path, verified_view=verified_view
+        ),
     )
     step_timeout = _bounded_step_timeout(timeout, deadline)
     if step_timeout is None:
@@ -2090,6 +2095,7 @@ def run_platform_review(
     dialogue_rounds: int = 1,
     timeout: int = 60,
     source_mode: str = MODE_REPOSITORY,
+    verified_view: object | None = None,
     should_cancel: Any = None,
     tool_analysis: Any = None,
     cache: ResultCache | None = None,
@@ -2390,6 +2396,7 @@ def run_platform_review(
                 source_mode=source_mode,
                 repro_workbench=repro_workbench,
                 tool_analysis=tool_analysis,
+                verified_view=verified_view,
                 diagnostics=worker_diagnostics,
                 specialist_calls=specialist_calls,
                 critic_calls=critic_calls,

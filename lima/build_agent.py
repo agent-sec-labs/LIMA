@@ -5,23 +5,31 @@ The agent drives the seven controlled tools (slice 2) through the shared
 only ever proposes tool calls; every discipline that matters is code:
 
 - the shared attempt budget is enforced by the tools, the model-call budget
-  and the wall clock by the loop, both set from the request's frozen
-  :class:`~lima.build_contracts.BuildBudget`;
-- a retry of the same failing configuration without a new accepted plan is
-  refused before the executor is touched (failure-fingerprint discipline);
-- cancellation is checked between tool calls, and the final terminal state
-  is decided by re-validating the package through the tool chain, never by
-  trusting the model's own ``final`` announcement.
+  by the loop, and one wall-clock deadline set at :meth:`BuildAgent.run`
+  entry bounds the loop, every container side effect (the executor receives
+  the remaining time, never a fresh budget) and the final publication;
+- a retry whose execution identity - configure argv, dependency set, image -
+- matches the last failure is refused before the executor is touched, and
+  once that stop condition fires it is locked: later tool results and model
+  output cannot clear it;
+- cancellation is checked between model calls and tool calls, and the
+  publication gate lets cancellation and the deadline override every
+  candidate terminal state (the AgentLoop turns tool exceptions into
+  observations, so nothing is trusted to propagate);
+- the final terminal verdict comes from the tool chain's own
+  ``validate_context`` - package reference, plan digest and context hash are
+  read from that same objective verdict, never from model announcements or
+  parallel caches.
 
-Progress callbacks receive the frozen phases
-(``INSPECTING/PLANNING/PREPARING/EXECUTING/VALIDATING``, ``REPLANNING``
-after a first execution) with the current attempt and plan digest; every
-result carries attempt evidence as artifacts-root-relative references.
+The model receives a serializable projection of the request, the policy and
+the tool catalog in its initial state, so an adapter can plan from the
+actual run context alone (no host paths, no secrets).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -84,10 +92,11 @@ class BuildProgress:
 class BuildResult:
     """Terminal outcome of one build-agent run.
 
-    ``package_ref``/``evidence_refs`` are artifacts-root-relative; the
-    per-file ``artifact_digest`` lands with slice 4A's verifier and
-    ``coverage`` with the downstream TU consumers, so both stay ``None``
-    in this slice rather than being approximated.
+    ``package_ref``/``evidence_refs`` are artifacts-root-relative and, on
+    success, come from the same objective ``validate_context`` verdict as
+    the plan digest; the per-file ``artifact_digest`` lands with slice 4A's
+    verifier and ``coverage`` with the downstream TU consumers, so both
+    stay ``None`` in this slice rather than being approximated.
     """
 
     run_id: str
@@ -105,15 +114,14 @@ class BuildResult:
 
 
 class _GuardedTools:
-    """Tool-invocation guard: phases, fingerprint discipline, cancellation.
+    """Tool-invocation guard: phases, fingerprint lock, cancellation.
 
     The AgentLoop converts tool exceptions into failure observations, so the
-    guard's disciplines are delivered as data: a refused identical retry
-    returns an error observation and sets ``fingerprint_stop``, and
-    cancellation surfaces through the agent's final publication gate.  The
-    AgentLoop calls ``get(name)(**arguments)``; this wrapper forwards to the
-    real registry while enforcing the code-side rules the model cannot waive
-    and reporting progress.
+    guard's disciplines are delivered as data and re-checked at the agent's
+    publication gate: a refused identical retry returns an error observation
+    and locks ``fingerprint_stop`` (which no later success clears), and a
+    pending cancellation makes every tool call fail-fast while the agent's
+    stepper wrapper stops the model loop itself.
     """
 
     def __init__(
@@ -127,15 +135,16 @@ class _GuardedTools:
         self._cancel = cancel
         self._progress = progress
         self.last_plan_digest: str | None = None
-        self.failed_plan_digest: str | None = None
+        self.last_execution_digest: str | None = None
+        self.failed_execution_digest: str | None = None
         self.last_failure_code: str | None = None
         self.fingerprint_stop: str | None = None
+        self.cancelled: bool = False
         self.prepared_ref: str | None = None
         self.last_image_digest: str | None = None
         self.attempts: int = 0
         self.executed_once = False
         self.evidence: list[str] = []
-        self.package_ref: str | None = None
 
     def get(self, name: str) -> Callable[..., Any]:
         def invoke(**arguments: Any) -> Any:
@@ -147,25 +156,22 @@ class _GuardedTools:
         return self._inner.names()
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> Any:
-        phase = _TOOL_PHASES.get(name)
-        if phase == "PLANNING" and self.executed_once:
-            phase = "REPLANNING"
-        if (
-            name == "execute_configure"
-            and self.failed_plan_digest is not None
-            and self.failed_plan_digest == self.last_plan_digest
-        ):
-            # Identical failing plan, no effective change: refuse the retry
-            # before the executor is touched and flag the stop condition.
-            self.fingerprint_stop = (
-                f"failure-fingerprint-unchanged:{self.last_failure_code or 'unknown'}"
-            )
+        if self._cancel():
+            self.cancelled = True
             return {
                 "ok": False,
-                "error": self.fingerprint_stop,
+                "error": "cancelled",
+                "cancelled": True,
                 "attempt": self.attempts,
                 "steps": [],
             }
+        phase = _TOOL_PHASES.get(name)
+        if phase == "PLANNING" and self.executed_once:
+            phase = "REPLANNING"
+        if name == "execute_configure":
+            refusal = self._fingerprint_refusal()
+            if refusal is not None:
+                return refusal
         result = self._inner.invoke(name, arguments)
         self._record(name, result)
         if phase is not None:
@@ -179,11 +185,45 @@ class _GuardedTools:
             )
         return result
 
+    def _fingerprint_refusal(self) -> dict[str, Any] | None:
+        """Refuse retries that would repeat the last failing execution.
+
+        The identity is what an attempt actually executes (configure argv,
+        dependency set, image) - not the whole plan digest, so editing
+        export-only metadata such as generated-header globs cannot reset the
+        discipline.  Once fired, the stop is locked: later plans and tool
+        results cannot clear it.
+        """
+
+        if self.fingerprint_stop is not None:
+            return {
+                "ok": False,
+                "error": self.fingerprint_stop,
+                "attempt": self.attempts,
+                "steps": [],
+            }
+        if (
+            self.failed_execution_digest is not None
+            and self.failed_execution_digest == self.last_execution_digest
+        ):
+            self.fingerprint_stop = (
+                "failure-fingerprint-unchanged:"
+                f"{self.last_failure_code or 'unknown'}"
+            )
+            return {
+                "ok": False,
+                "error": self.fingerprint_stop,
+                "attempt": self.attempts,
+                "steps": [],
+            }
+        return None
+
     def _record(self, name: str, result: Any) -> None:
         if not isinstance(result, dict):
             return
         if name == "propose_build_plan" and result.get("ok"):
             self.last_plan_digest = result.get("plan_digest")
+            self.last_execution_digest = result.get("execution_digest")
         elif name == "prepare_dependencies" and result.get("ok"):
             self.prepared_ref = result.get("dependency_set_ref")
         elif name == "execute_configure":
@@ -195,18 +235,21 @@ class _GuardedTools:
                 if ref:
                     self.evidence.append(ref)
             if result.get("ok"):
-                self.failed_plan_digest = None
+                # A success opens a new failure cycle; the locked stop is
+                # deliberately not cleared here.
+                self.failed_execution_digest = None
                 self.last_failure_code = None
-                self.fingerprint_stop = None
             else:
-                self.failed_plan_digest = self.last_plan_digest
+                self.failed_execution_digest = (
+                    result.get("execution_digest") or self.last_execution_digest
+                )
                 self.last_failure_code = (
                     result.get("failure_code") or result.get("error") or "failed"
                 )
         elif name == "export_context_package" and result.get("ok"):
-            self.package_ref = result.get("package_ref")
-            if self.package_ref:
-                self.evidence.append(self.package_ref)
+            ref = result.get("package_ref")
+            if ref and ref not in self.evidence:
+                self.evidence.append(ref)
 
 
 class BuildAgent:
@@ -227,6 +270,45 @@ class BuildAgent:
         self._snapshot_dir = Path(snapshot_dir)
         self._artifacts_root = Path(artifacts_root)
 
+    def _initial_state(
+        self, run_id: str, request: BuildRequest, registry: ToolRegistry
+    ) -> dict[str, Any]:
+        """A serializable, host-path-free projection for the model."""
+
+        budget = request.budget
+        return {
+            "run_id": run_id,
+            "request": {
+                "repository_ref": request.repository_ref,
+                "snapshot_hash": request.snapshot_hash,
+                "goal": request.goal,
+                "component_scope": list(request.component_scope),
+                "target_units": list(request.target_units),
+                "budget": {
+                    "max_attempts": budget.max_attempts,
+                    "max_model_calls": budget.max_model_calls,
+                    "total_seconds": budget.total_seconds,
+                    "step_seconds": budget.step_seconds,
+                    "max_output_bytes": budget.max_output_bytes,
+                },
+            },
+            "policy": {
+                "adapters": sorted(self._policy.adapters),
+                "allowed_executables": sorted(self._policy.allowed_executables),
+                "dependency_sets": {
+                    ref: {
+                        "image": dep.image,
+                        "image_digest": dep.image_digest,
+                    }
+                    for ref, dep in self._policy.dependency_sets.items()
+                },
+                "allow_repository_root_configure": (
+                    self._policy.allow_repository_root_configure
+                ),
+            },
+            "tools": registry.catalog(),
+        }
+
     def run(
         self,
         request: BuildRequest,
@@ -235,6 +317,10 @@ class BuildAgent:
         progress: Callable[[BuildProgress], None] = lambda update: None,
     ) -> BuildResult:
         run_id = "build-" + uuid.uuid4().hex[:16]
+        budget = request.budget
+        # One wall clock for the whole run: loop, tool side effects, export
+        # validation and the final publication all share this deadline.
+        deadline = time.monotonic() + budget.total_seconds
         registry = ToolRegistry()
         register_build_tools(
             registry,
@@ -244,13 +330,22 @@ class BuildAgent:
             snapshot_dir=self._snapshot_dir,
             artifacts_root=self._artifacts_root,
             cancel=cancel,
+            deadline=deadline,
         )
         guarded = _GuardedTools(registry, cancel=cancel, progress=progress)
-        budget = request.budget
         loop = AgentLoop(
             max_steps=budget.max_model_calls,
             timeout_seconds=max(1, int(budget.total_seconds)),
         )
+
+        def stepper(state: dict[str, Any]) -> dict[str, Any]:
+            # The model call itself honors cancellation between rounds; the
+            # AgentLoop runs stepper calls outside its observation trap, so
+            # this exception escapes the loop instead of becoming an
+            # observation.
+            if cancel():
+                raise RuntimeCancelled("build agent cancelled")
+            return self._model(state)
 
         status: str | None = None
         failure_code: str | None = None
@@ -260,7 +355,7 @@ class BuildAgent:
         else:
             try:
                 loop_result = loop.run(
-                    self._model, guarded, {"run_id": run_id}
+                    stepper, guarded, self._initial_state(run_id, request, registry)
                 )
                 final_output = loop_result.output
             except RuntimeBudgetExceeded as exc:
@@ -273,13 +368,7 @@ class BuildAgent:
 
         verdict: dict[str, Any] | None = None
         if status is None and failure_code is None:
-            # Publication gate: cancellation and an unanswered fingerprint
-            # stop outrank everything the loop concluded (the AgentLoop turns
-            # tool exceptions into observations, so both are re-checked here
-            # rather than trusted to propagate).
-            if cancel():
-                status, failure_code = CANCELLED, "cancelled"
-            elif guarded.fingerprint_stop:
+            if guarded.fingerprint_stop:
                 status = FAILED
                 failure_code = guarded.fingerprint_stop
             else:
@@ -296,13 +385,24 @@ class BuildAgent:
                     )
                 else:
                     # The terminal verdict is the tool chain's own
-                    # validation, never the model's success announcement.
+                    # validation, never the model's success announcement;
+                    # package identity is read from this same verdict.
                     verdict = registry.invoke("validate_context", {})
-                    if verdict.get("ok"):
+                    if verdict.get("ok") and verdict.get("package_ref"):
                         status = SUCCEEDED
                     else:
                         status = FAILED
                         failure_code = "no-validated-package"
+
+        # Publication gate: cancellation and the shared deadline override
+        # every candidate terminal state, including a just-earned success.
+        if status != CANCELLED and cancel():
+            status, failure_code = CANCELLED, "cancelled"
+        if (
+            status not in {CANCELLED, TIMED_OUT}
+            and time.monotonic() >= deadline
+        ):
+            status, failure_code = TIMED_OUT, "timed-out"
         if status is None:
             status = FAILED
 
@@ -313,17 +413,20 @@ class BuildAgent:
                 approved.image_digest if approved is not None else None
             )
         package_ref = (
-            guarded.package_ref if status == SUCCEEDED else None
+            verdict.get("package_ref") if status == SUCCEEDED and verdict else None
         )
-        evidence = tuple(
-            ref for ref in guarded.evidence
-            if package_ref is None or ref != package_ref or status == SUCCEEDED
-        )
+        evidence = list(guarded.evidence)
+        if package_ref and package_ref not in evidence:
+            evidence.append(package_ref)
         return BuildResult(
             run_id=run_id,
             status=status,
             snapshot_hash=request.snapshot_hash,
-            plan_digest=guarded.last_plan_digest,
+            plan_digest=(
+                verdict.get("plan_digest")
+                if verdict and verdict.get("ok")
+                else guarded.last_plan_digest
+            ),
             image_digest=guarded.last_image_digest,
             dependency_digest=dependency_digest,
             package_ref=package_ref,
@@ -331,5 +434,5 @@ class BuildAgent:
             attempts=guarded.attempts,
             coverage=None,
             failure_code=failure_code,
-            evidence_refs=evidence,
+            evidence_refs=tuple(evidence),
         )

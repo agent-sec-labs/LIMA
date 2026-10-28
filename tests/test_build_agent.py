@@ -13,6 +13,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lima.build_agent import (
     NEEDS_ATTENTION,
@@ -27,6 +28,7 @@ from lima.build_contracts import (
     BuildRequest,
 )
 from lima.build_executor import BuildExecutionResult
+from lima.build_tools import BUILD_TOOL_NAMES
 from lima.context_package import build_manifest, write_package
 
 SNAPSHOT = "a" * 64
@@ -350,6 +352,320 @@ class BuildAgentTest(unittest.TestCase):
 
         self.assertEqual(result.status, "CANCELLED")
         self.assertEqual(result.failure_code, "cancelled")
+
+
+class ContextReadingModel:
+    """Plans from the run state itself instead of replaying fixed data."""
+
+    def __init__(self):
+        self.seen_states: list[dict] = []
+
+    def __call__(self, state: dict) -> dict:
+        self.seen_states.append(state)
+        step = len(self.seen_states)
+        if step == 1:
+            return tool("inspect_build_files")
+        if step == 2:
+            request, policy = state["request"], state["policy"]
+            ref = sorted(policy["dependency_sets"])[0]
+            return {
+                "action": "tool",
+                "tool": "propose_build_plan",
+                "arguments": {
+                    "plan": {
+                        "snapshot_hash": request["snapshot_hash"],
+                        "adapter": sorted(policy["adapters"])[0],
+                        "component_scope": list(request["component_scope"]),
+                        "configure_argv": [["cmake", "-S", ".", "-B", "build"]],
+                        "expected_compdb": "build/compile_commands.json",
+                        "generated_headers": ["build/*.h"],
+                        "include_roots": [
+                            {
+                                "container": "/usr/include/fixture",
+                                "package": "headers/fixture",
+                            }
+                        ],
+                        "dependency_set_ref": ref,
+                    }
+                },
+            }
+        if step == 3:
+            ref = sorted(state["policy"]["dependency_sets"])[0]
+            return tool("prepare_dependencies", dependency_set_ref=ref)
+        if step == 4:
+            return tool("execute_configure")
+        if step == 5:
+            return tool("validate_context")
+        return final()
+
+
+class Round1ReviewTests(unittest.TestCase):
+    """Targeted regressions for the PR #345 review findings."""
+
+    def run_agent(self, model, *, executor=None, cancel=lambda: False,
+                  request=None, policy=None, tmp=None):
+        tmp = tmp or tempfile.mkdtemp()
+        snapshot = Path(tmp) / "snapshot"
+        snapshot.mkdir(parents=True, exist_ok=True)
+        (snapshot / "app").mkdir(exist_ok=True)
+        (snapshot / "app" / "main.cpp").write_text("int main(void){return 0;}\n")
+        agent = BuildAgent(
+            model=model,
+            executor=executor or FakeExecutor(),
+            policy=policy or make_policy(),
+            snapshot_dir=snapshot,
+            artifacts_root=Path(tmp) / "artifacts",
+        )
+        return agent.run(
+            request or make_request(),
+            cancel=cancel,
+            progress=lambda update: None,
+        )
+
+    def test_final_without_export_binds_current_package(self) -> None:
+        # The package identity must come from the objective validate
+        # verdict, so a run that never calls export after a newer plan
+        # still reports the current attempt's package (review F1).
+        model = ScriptedModel(
+            [
+                plan_action(feature="ON"),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                tool("export_context_package"),
+                plan_action(feature="OFF"),
+                tool("execute_configure"),
+                final(),
+            ]
+        )
+        ceiling = BuildBudget(max_model_calls=12)
+        request = BuildRequest(
+            repository_ref="Fixtures/AgentRepo",
+            snapshot_hash=SNAPSHOT,
+            component_scope=("app",),
+            target_units=("app/main.cpp",),
+            toolchain_profile="clang16",
+            policy_ref="default",
+            budget=ceiling,
+        )
+        policy = BuildPolicy(
+            dependency_sets=make_policy().dependency_sets,
+            allow_repository_root_configure=True,
+            budget_ceiling=ceiling,
+        )
+        result = self.run_agent(model, request=request, policy=policy)
+
+        self.assertEqual(result.status, SUCCEEDED)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(result.package_ref, "attempt-2/package")
+        ScriptedModel([plan_action(feature="OFF")])
+        from lima.build_contracts import BuildPlan, plan_digest, validate_build_plan
+
+        plan_b = BuildPlan.from_mapping(plan_action(feature="OFF")["arguments"]["plan"])
+        validated = validate_build_plan(request, plan_b, policy)
+        self.assertEqual(result.plan_digest, plan_digest(validated.plan))
+
+    def test_wall_clock_gate_blocks_stale_success(self) -> None:
+        # A final landing after the total budget must not publish success
+        # (review F2).
+        clock = {"now": 100.0}
+        budget = BuildBudget(total_seconds=10.0)
+        request = BuildRequest(
+            repository_ref="Fixtures/AgentRepo",
+            snapshot_hash=SNAPSHOT,
+            component_scope=("app",),
+            target_units=("app/main.cpp",),
+            toolchain_profile="clang16",
+            policy_ref="default",
+            budget=budget,
+        )
+        policy = BuildPolicy(
+            dependency_sets=make_policy().dependency_sets,
+            allow_repository_root_configure=True,
+            budget_ceiling=budget,
+        )
+        model = ScriptedModel(
+            [
+                plan_action(),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                tool("validate_context"),
+                final(),
+            ],
+            before_step=lambda m: clock.__setitem__(
+                "now", 111.0
+            )
+            if len(m.states_seen) >= 4
+            else None,
+        )
+        with mock.patch(
+            "lima.build_agent.time.monotonic", lambda: clock["now"]
+        ), mock.patch(
+            "lima.build_tools.time.monotonic", lambda: clock["now"]
+        ):
+            result = self.run_agent(model, request=request, policy=policy)
+        self.assertEqual(result.status, "TIMED_OUT")
+        self.assertEqual(result.failure_code, "timed-out")
+
+    def test_executor_receives_remaining_budget(self) -> None:
+        # Time spent planning shrinks what the executor is authorized to
+        # spend (review F2).
+        clock = {"now": 100.0}
+        budget = BuildBudget(total_seconds=10.0)
+        request = BuildRequest(
+            repository_ref="Fixtures/AgentRepo",
+            snapshot_hash=SNAPSHOT,
+            component_scope=("app",),
+            target_units=("app/main.cpp",),
+            toolchain_profile="clang16",
+            policy_ref="default",
+            budget=budget,
+        )
+        policy = BuildPolicy(
+            dependency_sets=make_policy().dependency_sets,
+            allow_repository_root_configure=True,
+            budget_ceiling=budget,
+        )
+        FakeExecutor()
+        model = ScriptedModel(
+            [
+                plan_action(),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                final(),
+            ],
+            before_step=lambda m: clock.__setitem__(
+                "now", 109.0
+            )
+            if len(m.states_seen) >= 3
+            else None,
+        )
+        captured = {}
+
+        class RecordingExecutor(FakeExecutor):
+            def execute(self, recipe, snapshot_dir, output_dir, *, limits,
+                        cancel, revision="unknown"):
+                captured["limits"] = limits
+                return super().execute(
+                    recipe, snapshot_dir, output_dir,
+                    limits=limits, cancel=cancel, revision=revision,
+                )
+
+        with mock.patch(
+            "lima.build_agent.time.monotonic", lambda: clock["now"]
+        ), mock.patch(
+            "lima.build_tools.time.monotonic", lambda: clock["now"]
+        ):
+            result = self.run_agent(
+                model, executor=RecordingExecutor(), request=request, policy=policy
+            )
+        self.assertEqual(result.status, SUCCEEDED)
+        self.assertAlmostEqual(
+            captured["limits"].total_seconds, 1.0, delta=0.5
+        )
+
+    def test_cancellation_between_rounds_beats_budget_exhaustion(self) -> None:
+        # A cancellation during the run outranks a later step-budget
+        # exhaustion, and stops calling the model at all (review F3).
+        flags = {"cancel": False}
+        model = ScriptedModel(
+            [
+                plan_action(),
+                tool("inspect_build_files"),
+                tool("inspect_build_files"),
+                tool("inspect_build_files"),
+                tool("inspect_build_files"),
+                final(),
+            ],
+            before_step=lambda m: flags.__setitem__("cancel", True)
+            if m.states_seen
+            else None,
+        )
+        result = self.run_agent(model, cancel=lambda: flags["cancel"])
+        self.assertEqual(result.status, "CANCELLED")
+        self.assertEqual(result.failure_code, "cancelled")
+        self.assertEqual(len(model.states_seen), 1)
+
+    def test_irrelevant_change_cannot_reset_fingerprint(self) -> None:
+        # Editing export-only metadata keeps the execution identity, so the
+        # identical failing configure is not retried (review F4).
+        first = plan_action(feature="ON")
+
+        def only_glob_changed() -> dict:
+            edited = json.loads(json.dumps(first["arguments"]["plan"]))
+            edited["generated_headers"] = ["build/config.h"]
+            return {
+                "action": "tool",
+                "tool": "propose_build_plan",
+                "arguments": {"plan": edited},
+            }
+
+        model = ScriptedModel(
+            [
+                first,
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                only_glob_changed(),
+                tool("execute_configure"),
+                final(),
+            ]
+        )
+        executor = FakeExecutor(fail_first_attempts=99)
+        result = self.run_agent(model, executor=executor)
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertIn("fingerprint", result.failure_code or "")
+        self.assertEqual(executor.calls, 1)
+
+    def test_fingerprint_stop_locks_terminal(self) -> None:
+        # Once the stop fires, even a genuinely new plan cannot continue:
+        # the terminal is locked against later model output (review F4).
+        model = ScriptedModel(
+            [
+                plan_action(feature="ON"),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                tool("execute_configure"),
+                plan_action(feature="OFF"),
+                tool("execute_configure"),
+                final(),
+            ]
+        )
+        executor = FakeExecutor(fail_first_attempts=99)
+        result = self.run_agent(model, executor=executor)
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertIn("fingerprint", result.failure_code or "")
+        self.assertEqual(executor.calls, 1)
+
+    def test_model_receives_request_and_tool_catalog(self) -> None:
+        # A generic adapter must be able to plan from the run state alone;
+        # two different snapshots both succeed with the same model class
+        # (review F5).
+        for snapshot_hash in (SNAPSHOT, "c" * 64):
+            with self.subTest(snapshot_hash[:8]):
+                tmp = tempfile.mkdtemp()
+                model = ContextReadingModel()
+                request = BuildRequest(
+                    repository_ref="Fixtures/AgentRepo",
+                    snapshot_hash=snapshot_hash,
+                    component_scope=("app",),
+                    target_units=("app/main.cpp",),
+                    toolchain_profile="clang16",
+                    policy_ref="default",
+                    budget=BuildBudget(),
+                )
+                result = self.run_agent(model, request=request, tmp=tmp)
+                self.assertEqual(result.status, SUCCEEDED)
+                first_state = model.seen_states[0]
+                self.assertEqual(
+                    first_state["request"]["snapshot_hash"], snapshot_hash
+                )
+                self.assertEqual(
+                    sorted(t["name"] for t in first_state["tools"]),
+                    sorted(BUILD_TOOL_NAMES),
+                )
+                # No host paths leak into the model-facing projection.
+                self.assertNotIn(str(tmp), json.dumps(first_state))
 
 
 if __name__ == "__main__":

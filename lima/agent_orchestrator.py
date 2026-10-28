@@ -753,21 +753,44 @@ def _extract_driver_flags(tokens: Sequence[str]) -> list[str]:
     return flags
 
 
-def _semantic_flags_from_view(view: object, unit_path: str) -> tuple[str, ...]:
-    """The full flags of one unit's verified-package projection.
+def _semantic_flags_from_view(
+    view: object, unit_path: str, workspace: RepositoryWorkspace
+) -> tuple[str, ...] | None:
+    """The validated flags of one unit's verified-package projection.
 
-    Consumes the same sealed per-TU projection the facts and repro
-    resolvers use (``flags_for_tu``) verbatim - standards, language
-    modes, forced includes and targets included.  The legacy compdb
-    filter (with its token budget) stays on the legacy path only; a
-    lossy re-filtering of the verified projection would put the
-    Specialist in a different compile environment than the stages it
-    must agree with.
+    Goes through the same shared resolver as the facts and repro stages
+    (fail-closed validation included), so a view whose projection the
+    resolver rejects never produces a usable Specialist compile contract:
+    ``None`` means rejected and the driver contract says so instead of
+    describing an environment the platform itself would refuse.  The
+    returned flags are exactly the resolver's projected argv tail -
+    standards, language modes and forced includes included, no
+    Specialist-side re-filtering.
     """
-    try:
-        return tuple(view.flags_for_tu(unit_path))
-    except Exception:  # noqa: BLE001 - a broken view yields no flags
-        return ()
+    from cxx_analyzer.build_context import resolve_build_context_execution
+    from cxx_analyzer.config import AnalyzerSettings
+
+    settings = AnalyzerSettings(
+        auto_cmake=True,
+        build_steps=(),
+        test_steps=(),
+        max_memory_mb=1024,
+        max_processes=32,
+        max_output_bytes=8192,
+        step_timeout_seconds=17,
+        total_timeout_seconds=90,
+        repository_scan_max_files=100,
+        repository_scan_max_file_bytes=4096,
+        repository_scan_max_total_bytes=16384,
+        trusted_build_context_generation=False,
+    )
+    context = resolve_build_context_execution(
+        workspace.root, unit_path, settings, verified_view=view
+    )
+    if context.status != "resolved":
+        return None
+    # argv is (compiler, *flags, "-fsyntax-only", unit).
+    return tuple(context.arguments[1:-2])
 
 
 def _driver_contract(
@@ -783,7 +806,14 @@ def _driver_contract(
     """
 
     if verified_view is not None:
-        flags = _semantic_flags_from_view(verified_view, unit_path)
+        flags = _semantic_flags_from_view(verified_view, unit_path, workspace)
+        if flags is None:
+            return (
+                "Driver contract (verified context rejected):\n"
+                "- The verified build context for this unit failed the "
+                "shared fail-closed validation; state no compile "
+                "environment and request a corrected build context."
+            )
     else:
         flags = _semantic_flags_from_compdb(workspace, unit_path)
     flags_text = " ".join(flags) if flags else "(no extra flags)"

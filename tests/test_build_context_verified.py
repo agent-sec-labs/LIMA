@@ -12,6 +12,7 @@ units outside the view.
 """
 
 import json
+import sys
 import tempfile
 import time
 import unittest
@@ -405,6 +406,14 @@ class Round1ReviewTests(unittest.TestCase):
                 "int main(void) { return FIXTURE_VALUE; }\n",
                 encoding="utf8",
             )
+            (snapshot / "build").mkdir(exist_ok=True)
+            frozen_root = None
+            if sys.platform != "win32":
+                frozen_root = snapshot
+                snapshot.chmod(0o555)
+            self.addCleanup(
+                lambda: frozen_root is not None and frozen_root.chmod(0o755)
+            )
             fingerprint = snapshot_fingerprint(snapshot)
             compdb = [
                 {
@@ -445,10 +454,23 @@ class Round1ReviewTests(unittest.TestCase):
                 snapshot, "app/main.cpp", make_settings(), verified_view=view
             )
             self.assertEqual(context.status, "resolved")
+            # Vendored roots land in the writable layout directory, never
+            # next to the frozen sources; generated files return to their
+            # build location.
             self.assertTrue(
-                (snapshot / "headers" / "fixture" / "lib.h").is_file()
+                (
+                    snapshot
+                    / "build"
+                    / "lima-verified"
+                    / "headers"
+                    / "fixture"
+                    / "lib.h"
+                ).is_file()
             )
             self.assertTrue((snapshot / "build" / "config.h").is_file())
+            self.assertIn(
+                "-Ibuild/lima-verified/headers/fixture", context.arguments
+            )
 
             compiler = shutil.which("clang++-14") or shutil.which("clang++")
             if compiler is None:
@@ -475,6 +497,86 @@ class Round1ReviewTests(unittest.TestCase):
                 timeout=90,
             )
             self.assertNotEqual(broken.returncode, 0)
+
+
+class Round2ReviewTests(unittest.TestCase):
+    """Targeted regressions for the PR #347 round-2 review."""
+
+    def test_repro_keeps_language_standard(self) -> None:
+        # The verified repro path intersects the validated per-unit
+        # projections verbatim: a shared -std survives instead of being
+        # dropped by the legacy language-neutral subset (review round 2
+        # F3).
+        from cxx_analyzer.repro import _context_flags
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(
+                tmp,
+                arguments=(
+                    "/usr/bin/c++",
+                    "-std=c++20",
+                    "-DVERIFIED=1",
+                    "-Iheaders/fixture",
+                    "-c",
+                ),
+            )
+            prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
+            flags = _context_flags(
+                prepared, ("app/main.cpp", "app/util.cpp"), make_settings(), view
+            )
+            self.assertIn("-std=c++20", flags)
+            self.assertIn("-DVERIFIED=1", flags)
+
+    def test_specialist_rejects_unsafe_view(self) -> None:
+        # A view whose projection fails the shared fail-closed validation
+        # never produces a usable Specialist compile contract (review
+        # round 2 F4).
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(
+                tmp,
+                arguments=("/usr/bin/c++", "-fplugin=evil.so", "-c"),
+            )
+            workspace = RepositoryWorkspace(str(snapshot))
+            contract = _driver_contract(
+                workspace, "app/main.cpp", verified_view=view
+            )
+            self.assertIn("verified context rejected", contract)
+            self.assertNotIn("fplugin", contract)
+
+    def test_repro_request_wire_accepts_view_identity(self) -> None:
+        # The repro wire contract carries the verified view identity and
+        # the handler threads it into run_repro (review round 2 F1).
+        from cxx_analyzer import server as analyzer_server
+
+        payload = {
+            "schema_version": analyzer_server.SCHEMA_VERSION,
+            "request_id": "123e4567-e89b-42d3-a456-426614174000",
+            "repository_key": "acme/widgets",
+            "snapshot_sha256": "a" * 64,
+            "source_files": ["app/main.cpp"],
+            "driver_code": "int main(void){return 0;}",
+            "verified_artifact_digest": "d" * 64,
+        }
+        request = analyzer_server._validate_repro_payload(payload)
+        self.assertEqual(request["verified_artifact_digest"], "d" * 64)
+
+    def test_repro_entry_threads_registered_view(self) -> None:
+        # The default-slot view registered for the snapshot reaches
+        # run_repro when the request names its artifact digest.
+        from cxx_analyzer import server as analyzer_server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(tmp)
+            analyzer_server.clear_verified_build_views()
+            analyzer_server.register_verified_build_view(
+                "f" * 64, view, artifact_digest="d" * 64
+            )
+            self.addCleanup(analyzer_server.clear_verified_build_views)
+            resolved = analyzer_server.lookup_verified_build_view(
+                "f" * 64, "d" * 64
+            )
+            self.assertIs(resolved, view)
+            self.assertIsNone(analyzer_server.lookup_verified_build_view("e" * 64, None))
 
 
 if __name__ == "__main__":

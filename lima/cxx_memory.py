@@ -866,6 +866,7 @@ class CxxMemoryAnalyzerClient:
         *,
         timeout: int | None = None,
         source_overrides: dict[str, str] | None = None,
+        verified_artifact_digest: str | None = None,
     ) -> ReproResponse:
         """Request one sandboxed ASan compile-and-run under a strict contract.
 
@@ -909,6 +910,11 @@ class CxxMemoryAnalyzerClient:
                 **(
                     {"source_overrides": validated_overrides}
                     if validated_overrides is not None
+                    else {}
+                ),
+                **(
+                    {"verified_artifact_digest": verified_artifact_digest}
+                    if verified_artifact_digest is not None
                     else {}
                 ),
             }

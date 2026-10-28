@@ -789,15 +789,22 @@ def _canonical_unit(root: Path, translation_unit: object) -> str | None:
     return relative_text
 
 
-def _materialize_view_members(root: Path, view: object) -> tuple[str, ...]:
-    """Lay the sealed package members into the snapshot as readable files.
+_VERIFIED_LAYOUT_DIR: Final = "build/lima-verified"
 
-    Vendored header roots keep their package-relative location and
-    generated files return to their repository-relative build location,
-    so the repository-root-based argv the resolver emits actually resolves
-    on disk.  The layout is idempotent: a member whose target already
-    exists with the same bytes is left alone, a different-bytes collision
-    is reported as a diagnostic and nothing is written for it.
+
+def _materialize_view_members(
+    root: Path, view: object
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Lay the sealed package members into the writable build tree.
+
+    Production snapshots freeze the source tree read-only and keep only
+    ``build/`` writable, so nothing is ever written next to the sources:
+    vendored package roots land under ``build/lima-verified/`` (the
+    returned rewrite map re-points include values there) and generated
+    files return to their build locations, which are inside the writable
+    tree by construction.  The layout is idempotent (same bytes are
+    skipped) and byte conflicts or unwritable targets are reported as
+    diagnostics instead of partially mutating anything.
     """
 
     try:
@@ -806,32 +813,74 @@ def _materialize_view_members(root: Path, view: object) -> tuple[str, ...]:
             for path in view.member_paths
         }
     except Exception:  # noqa: BLE001 - a broken view is a failed layout
-        return ("verified-view-members-unreadable",)
+        return ("verified-view-members-unreadable",), {}
     diagnostics: list[str] = []
+    rewrites: dict[str, str] = {}
     for relative, data in sorted(members.items()):
-        if relative == "context_manifest.json" or relative == "compile_commands.json":
+        if relative in ("context_manifest.json", "compile_commands.json"):
             continue
         if relative.startswith("generated/"):
             target_relative = relative[len("generated/") :]
+            if not target_relative or target_relative.startswith(("..", "/")):
+                diagnostics.append(f"verified-package-member-unsafe:{relative}")
+                continue
+            target = root / target_relative
         else:
-            target_relative = relative
-        if not target_relative or target_relative.startswith(("..", "/")):
-            diagnostics.append(f"verified-package-member-unsafe:{relative}")
-            continue
-        target = root / target_relative
+            package_root = relative.split("/", 1)[0]
+            rewrites.setdefault(
+                package_root, f"{_VERIFIED_LAYOUT_DIR}/{package_root}"
+            )
+            target = root / _VERIFIED_LAYOUT_DIR / relative
         try:
             if target.exists():
                 if target.is_file() and target.read_bytes() == data:
                     continue
                 diagnostics.append(
-                    f"verified-package-member-conflict:{target_relative}"
+                    f"verified-package-member-conflict:{relative}"
                 )
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
         except OSError:
-            diagnostics.append(f"verified-package-member-unwritable:{target_relative}")
-    return tuple(diagnostics)
+            diagnostics.append(f"verified-package-member-unwritable:{relative}")
+    return tuple(diagnostics), rewrites
+
+
+def _rewrite_include_values(
+    flags: Sequence[str], rewrites: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Re-point package-relative include values at the layout location."""
+
+    if not rewrites:
+        return tuple(flags)
+
+    def rewrite(value: str) -> str:
+        for package_root, layout in rewrites.items():
+            if value == package_root or value.startswith(package_root + "/"):
+                return layout + value[len(package_root) :]
+        return value
+
+    result: list[str] = []
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in _SUPPORTED_PATH_OPTIONS and index + 1 < len(flags):
+            result.append(flag)
+            result.append(rewrite(flags[index + 1]))
+            index += 2
+            continue
+        option, separator, tail = flag.partition("=")
+        if separator and tail and option in _SUPPORTED_PATH_OPTIONS:
+            result.append(option + "=" + rewrite(tail))
+            index += 1
+            continue
+        if flag.startswith("-I") and len(flag) > 2:
+            result.append("-I" + rewrite(flag[2:]))
+            index += 1
+            continue
+        result.append(flag)
+        index += 1
+    return tuple(result)
 
 
 def _resolve_from_verified_view(
@@ -860,9 +909,10 @@ def _resolve_from_verified_view(
         flags = tuple(view.flags_for_tu(unit))
     except Exception:  # noqa: BLE001 - a broken view is an incomplete unit
         return _resolve_incomplete("verified-package", ("verified-view-invalid",))
-    layout_diagnostics = _materialize_view_members(root, view)
+    layout_diagnostics, rewrites = _materialize_view_members(root, view)
     if layout_diagnostics:
         return _resolve_incomplete("verified-package", layout_diagnostics)
+    flags = _rewrite_include_values(flags, rewrites)
     compiler = (
         "clang++-14" if language_for_path(unit) == "c++" else "clang-14"
     )

@@ -616,6 +616,27 @@ def _context_flags(
     """
     if settings is None:
         return ()
+    if verified_view is not None:
+        # The verified-package projection is consumed verbatim: the
+        # per-unit flags the facts resolver validated (standards,
+        # language modes and forced includes included) are intersected
+        # across the requested sources; any unresolved source keeps the
+        # bare pinned argv rather than a silently trimmed environment.
+        per_unit: list[tuple[str, ...]] = []
+        for source in sources:
+            context = resolve_build_context_execution(
+                snapshot.root, source, settings, verified_view=verified_view
+            )
+            if context.status != "resolved":
+                return ()
+            # argv is (compiler, *flags, "-fsyntax-only", unit).
+            per_unit.append(tuple(context.arguments[1:-2]))
+        if not per_unit:
+            return ()
+        first = per_unit[0]
+        return tuple(
+            flag for flag in first if all(flag in unit for unit in per_unit[1:])
+        )
     shared: frozenset[tuple[str, str]] | None = None
     order: tuple[tuple[str, str], ...] = ()
     for source in sources:

@@ -113,7 +113,9 @@ _REPRO_REQUEST_FIELDS: Final = frozenset(
         "driver_code",
     }
 )
-_REPRO_OPTIONAL_FIELDS: Final = frozenset({"source_overrides"})
+_REPRO_OPTIONAL_FIELDS: Final = frozenset(
+    {"source_overrides", "verified_artifact_digest"}
+)
 _MAX_REPRO_SOURCE_OVERRIDES: Final = 4
 _MAX_REPRO_SOURCE_OVERRIDE_BYTES: Final = 512 * 1024
 # A JSON string can expand each input byte into six escape bytes. Cover
@@ -776,6 +778,13 @@ def _validate_repro_payload(payload: object) -> dict[str, object]:
                     "invalid_request", request_id=request_id
                 )
 
+    verified_artifact_digest = payload.get("verified_artifact_digest")
+    if verified_artifact_digest is not None and (
+        not isinstance(verified_artifact_digest, str)
+        or not verified_artifact_digest
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+
     return {
         "request_id": request_id,
         "repository_key": normalized_key,
@@ -783,6 +792,7 @@ def _validate_repro_payload(payload: object) -> dict[str, object]:
         "source_files": source_files,
         "driver_code": driver_code,
         "source_overrides": source_overrides,
+        "verified_artifact_digest": verified_artifact_digest,
     }
 
 
@@ -819,6 +829,16 @@ def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, obje
     snapshot = prepared.__enter__()
     try:
         snapshot.verify_inventory(deadline)
+        verified_artifact_digest = request.get("verified_artifact_digest")
+        verified_view = None
+        if verified_artifact_digest is not None:
+            verified_view = lookup_verified_build_view(
+                snapshot.sha256, verified_artifact_digest
+            )
+            if verified_view is None:
+                raise RequestError("invalid_request", request_id=request_id)
+        elif lookup_verified_build_view(snapshot.sha256, None) is not None:
+            verified_view = lookup_verified_build_view(snapshot.sha256, None)
         execution = run_repro(
             snapshot,
             request["source_files"],
@@ -827,6 +847,7 @@ def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, obje
             timeout_seconds=settings.step_timeout_seconds,
             settings=settings,
             source_overrides=request["source_overrides"],
+            verified_view=verified_view,
         )
         snapshot.verify_inventory(deadline)
     except AnalysisDeadlineExceeded as exc:

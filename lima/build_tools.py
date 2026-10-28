@@ -12,6 +12,9 @@ references handed back to the model are relative to the artifacts root.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
+import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -63,6 +66,9 @@ class _ToolContext:
     artifacts_root: Path
     executor: BuildExecutor
     cancel: Callable[[], bool]
+    # A time.monotonic() instant bounding every side effect together with
+    # the agent's own loop (set by BuildAgent.run from the request budget).
+    deadline: float | None = None
     pending_plan: ValidatedBuildPlan | None = None
     prepared_ref: str | None = None
     attempts: int = 0
@@ -71,6 +77,26 @@ class _ToolContext:
     # The plan identity the current package was produced by; a new plan or a
     # failed attempt invalidates the package reference.
     package_plan_digest: str | None = None
+
+
+def _execution_digest(validated: ValidatedBuildPlan) -> str:
+    """Identity of what an attempt actually executes.
+
+    Only the configure argv, the dependency set and its image count: the
+    fingerprint discipline must not be resettable by edits to export-only
+    metadata such as generated-header globs.
+    """
+
+    material = json.dumps(
+        {
+            "configure_argv": [list(argv) for argv in validated.plan.configure_argv],
+            "dependency_set_ref": validated.plan.dependency_set_ref,
+            "image": validated.dependency_set.image,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(material.encode("utf8")).hexdigest()
 
 
 def _no_arguments_schema() -> dict[str, Any]:
@@ -137,6 +163,7 @@ def _tool_propose_build_plan(
         "dependency_set_ref": validated.plan.dependency_set_ref,
         "image": validated.dependency_set.image,
         "plan_digest": plan_digest(validated.plan),
+        "execution_digest": _execution_digest(validated),
     }
 
 
@@ -147,7 +174,11 @@ def _tool_prepare_dependencies(
     if approved is None:
         return {"ok": False, "error": f"dependency-set-not-approved:{dependency_set_ref}"}
     context.prepared_ref = dependency_set_ref
-    return {"ok": True, "image": approved.image}
+    return {
+        "ok": True,
+        "dependency_set_ref": dependency_set_ref,
+        "image": approved.image,
+    }
 
 
 def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
@@ -159,6 +190,14 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
     budget = validated.budget
     if context.attempts >= budget.max_attempts:
         return {"ok": False, "error": "budget-exhausted-attempts"}
+    # The shared wall clock: a spent deadline refuses the side effect before
+    # an attempt is even counted, and the executor only ever receives the
+    # remaining time, never a fresh copy of the total budget.
+    remaining = budget.total_seconds
+    if context.deadline is not None:
+        remaining = min(remaining, context.deadline - time.monotonic())
+        if remaining <= 0:
+            return {"ok": False, "error": "budget-exhausted"}
     try:
         recipe = _recipe_from(validated, context.policy)
     except BuildPlanError as exc:
@@ -170,7 +209,7 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
         context.snapshot_dir,
         context.artifacts_root / attempt_ref,
         limits=BuildLimits(
-            total_seconds=budget.total_seconds,
+            total_seconds=remaining,
             step_seconds=budget.step_seconds,
             max_output_bytes=budget.max_output_bytes,
         ),
@@ -206,6 +245,9 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
         "ok": result.ok,
         "attempt": context.attempts,
         "failure_code": result.failure_code,
+        "image_digest": result.image_digest,
+        "execution_digest": _execution_digest(validated),
+        "plan_digest": plan_digest(validated.plan),
         "package_ref": f"{attempt_ref}/package" if result.ok else None,
         "steps": [
             {
@@ -311,6 +353,7 @@ def _tool_validate_context(context: _ToolContext) -> dict[str, Any]:
         "ok": True,
         "snapshot_hash": context.request.snapshot_hash,
         "context_hash": package.manifest.context_hash,
+        "package_ref": context.package_ref,
         "plan_digest": context.package_plan_digest,
     }
 
@@ -324,13 +367,17 @@ def register_build_tools(
     snapshot_dir: Path,
     artifacts_root: Path,
     cancel: Callable[[], bool] = lambda: False,
+    deadline: float | None = None,
 ) -> None:
     """Register the seven controlled build tools bound to one run.
 
     ``executor`` and ``policy`` are run-independent; ``request``,
     ``snapshot_dir`` and ``artifacts_root`` bind the tools to exactly one
     trusted snapshot and evidence root, so the model can never name a host
-    path, an image, or a budget of its own.
+    path, an image, or a budget of its own.  ``deadline`` (a
+    ``time.monotonic()`` instant) shares one wall clock between the agent
+    loop and every side effect: attempts only start inside it and the
+    executor receives the remaining time, never a fresh budget.
     """
 
     context = _ToolContext(
@@ -340,6 +387,7 @@ def register_build_tools(
         artifacts_root=Path(artifacts_root),
         executor=executor,
         cancel=cancel,
+        deadline=deadline,
     )
     registry.register(
         AgentTool(

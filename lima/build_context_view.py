@@ -2,15 +2,18 @@
 
 This module is the downstream trust boundary for build-agent context
 packages.  :func:`verify_build_artifact` re-reads the package through the
-fail-crozen package reader and adds the two checks it does not cover: a
+fail-closed package reader and adds the two checks it does not cover: a
 per-file byte digest (``artifact_digest`` over every member's canonical
 path, length and SHA-256, so a same-length header swap is caught even
 though the structural ``context_hash`` is not) and the binding to the
-requesting snapshot.  Only a verified artifact can feed
-:func:`create_analysis_view`, which lays the package over a fixed snapshot
-directory as a read-only projection: overlay conflicts, path escapes and
-undeclared target units refuse to create a view at all, and the snapshot
-bytes are never written through the view.
+requesting snapshot.  :func:`create_analysis_view` then re-verifies every
+identity at view-construction time - a package directory is mutable
+between the two calls, so the artifact digest, manifest revision and
+context hash are re-checked, and the snapshot directory itself must
+re-fingerprint to the bound identity.  The resulting view is a read-only
+projection: overlay conflicts, path escapes, undeclared or missing target
+units and unparseable compile commands all refuse to create a view, and
+the snapshot bytes are never written through the view.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import dataclasses
 import hashlib
 import hmac
 import json
+import posixpath
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -30,6 +34,7 @@ from lima.context_package import (
     JSONValue,
     read_package,
 )
+from lima.workspace import RepositoryWorkspace
 
 __all__ = [
     "AnalysisContextView",
@@ -37,10 +42,17 @@ __all__ = [
     "VerifiedBuildArtifact",
     "compute_artifact_digest",
     "create_analysis_view",
+    "snapshot_fingerprint",
     "verify_build_artifact",
 ]
 
-_OUTPUT_FLAG: Final = "-o"
+# Options whose (separate) value is a path that participates in the
+# working-directory semantics of the compile command.
+_DIR_VALUE_OPTIONS: Final = frozenset(
+    {"-I", "-isystem", "-iquote", "-idirafter", "-stdlib++-isystem"}
+)
+_FILE_VALUE_OPTIONS: Final = frozenset({"-include", "-imacros"})
+_GENERATED_PACKAGE_ROOT: Final = "generated"
 
 
 class BuildContextViewError(ValueError):
@@ -110,6 +122,21 @@ def compute_artifact_digest(package_dir: Path) -> str:
     return hashlib.sha256(payload.encode("utf8")).hexdigest()
 
 
+def snapshot_fingerprint(snapshot_dir: Path) -> str:
+    """The control-plane snapshot identity of a source directory.
+
+    Uses the same rule the repository workspace inventory defines
+    (per-file path, size and SHA-256 over the deterministic inventory), so
+    the hash a build request was bound to is reproducible here.
+    """
+
+    try:
+        workspace = RepositoryWorkspace(str(snapshot_dir))
+    except (ValueError, OSError) as exc:
+        raise BuildContextViewError("snapshot-directory-missing") from exc
+    return workspace.inventory().fingerprint()
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class VerifiedBuildArtifact:
     """A package whose structure, bytes and snapshot binding all verified."""
@@ -156,11 +183,11 @@ def verify_build_artifact(
 class AnalysisContextView:
     """A read-only projection of one verified package over one snapshot.
 
-    Exposes the declared target units, the package identity hashes and the
-    per-TU projected compiler arguments; it never writes the snapshot or
-    the package.  Downstream TU resolution records its own TU-level hash
-    separately - the package ``context_hash`` and ``artifact_digest``
-    never masquerade as it.
+    Exposes the declared target units, the package identity hashes, the
+    per-TU working directory and the per-TU projected compiler arguments;
+    it never writes the snapshot or the package.  Downstream TU resolution
+    records its own TU-level hash separately - the package
+    ``context_hash`` and ``artifact_digest`` never masquerade as it.
     """
 
     snapshot_dir: Path
@@ -169,13 +196,26 @@ class AnalysisContextView:
     artifact_digest: str
     package_dir: Path
     _tu_flags: Mapping[str, tuple[str, ...]]
+    _tu_directories: Mapping[str, str]
+
+    def working_directory_for_tu(self, tu: str) -> str:
+        """The compile command's working directory, repository-relative."""
+
+        try:
+            return self._tu_directories[tu]
+        except KeyError:
+            raise BuildContextViewError(f"tu-not-declared:{tu}") from None
 
     def flags_for_tu(self, tu: str) -> tuple[str, ...]:
         """Projected arguments for one declared target unit.
 
-        The compiler token and the non-semantic ``-c``/``-o <output>``
-        arguments are stripped; everything else (include paths, macros,
-        language standard) reaches the consumer in package-relative form.
+        The compiler token, the ``-c`` flag, the ``-o`` output (separate or
+        joined) and the source file (``file`` or its working-directory
+        spelling) are stripped.  Path-valued include and forced-include
+        options are normalized to repository-relative paths unless they
+        point into the package roots (vendored headers, generated files),
+        which stay package-relative so consumers resolve them inside the
+        read-only view.
         """
 
         try:
@@ -184,35 +224,76 @@ class AnalysisContextView:
             raise BuildContextViewError(f"tu-not-declared:{tu}") from None
 
 
-def _project_flags(entry: Mapping[str, JSONValue]) -> tuple[str, ...]:
+def _normjoin(directory: str, value: str) -> str:
+    return posixpath.normpath(posixpath.join(directory, value))
+
+
+def _project_entry(
+    entry: Mapping[str, JSONValue],
+    package_roots: frozenset[str],
+) -> tuple[tuple[str, ...], str]:
+    """Project one compdb entry to ``(flags, working directory)``.
+
+    An unparseable compile command is a hard error, never an empty flag
+    list: a TU whose context cannot be parsed must not masquerade as one
+    that simply has no extra arguments.
+    """
+
+    directory = entry.get("directory")
+    if not isinstance(directory, str) or not directory:
+        directory = "."
     arguments = entry.get("arguments")
     if isinstance(arguments, list):
         argv = [item for item in arguments if isinstance(item, str)]
     else:
         command = entry.get("command")
         if not isinstance(command, str) or not command:
-            return ()
+            raise BuildContextViewError("compdb-command-missing")
         try:
             argv = shlex.split(command, posix=True)
-        except ValueError:
-            return ()
-    source_file = entry.get("file")
-    arguments_tail = argv[1:]  # the compiler token is not a flag
+        except ValueError as exc:
+            raise BuildContextViewError("compdb-command-unparseable") from exc
+    if not argv:
+        raise BuildContextViewError("compdb-command-empty")
+
+    def map_path(value: str) -> str:
+        for root in package_roots:
+            if value == root or value.startswith(root + "/"):
+                return value
+        return _normjoin(directory, value)
+
     projected: list[str] = []
-    index = 0
-    while index < len(arguments_tail):
-        argument = arguments_tail[index]
-        if argument == _OUTPUT_FLAG:
+    index = 1  # the compiler token is not a flag
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "-o":
             index += 2
             continue
-        if argument == "-c" or (
-            isinstance(source_file, str) and argument == source_file
-        ):
+        if argument.startswith("-o") and len(argument) > 2:
+            index += 1
+            continue
+        if argument == "-c":
+            index += 1
+            continue
+        if not argument.startswith("-"):
+            # A bare positional in a compile command is the source file
+            # spelled relative to the working directory; it is not a flag.
+            index += 1
+            continue
+        if argument in _DIR_VALUE_OPTIONS or argument in _FILE_VALUE_OPTIONS:
+            if index + 1 >= len(argv):
+                raise BuildContextViewError("compdb-command-malformed-option")
+            projected.append(argument)
+            projected.append(map_path(argv[index + 1]))
+            index += 2
+            continue
+        if argument.startswith("-I") and len(argument) > 2:
+            projected.append("-I" + map_path(argument[2:]))
             index += 1
             continue
         projected.append(argument)
         index += 1
-    return tuple(projected)
+    return tuple(projected), directory
 
 
 def create_analysis_view(
@@ -222,10 +303,15 @@ def create_analysis_view(
 ) -> AnalysisContextView:
     """Lay one verified artifact over a fixed snapshot, read-only.
 
-    The package's generated headers must not collide with files already in
-    the snapshot, and every requested target unit must be declared in the
-    package's compilation database; anything else refuses to create a
-    view.  The snapshot directory is only ever read.
+    Nothing between :func:`verify_build_artifact` and this call is
+    trusted: the package directory is re-read, its current artifact
+    digest, manifest revision and context hash must all still match the
+    verified artifact, and the snapshot directory must re-fingerprint to
+    the bound snapshot identity.  The package's generated headers must
+    not collide with existing snapshot files, every requested target unit
+    must be declared in the compilation database and present as a source
+    file inside the snapshot, and every compile command must parse.
+    Anything else refuses to create a view; the snapshot is only read.
     """
 
     snapshot = Path(snapshot_dir)
@@ -235,27 +321,49 @@ def create_analysis_view(
         raise BuildContextViewError("artifact-invalid")
     if not target_units:
         raise BuildContextViewError("target-units-empty")
-    for generated in artifact.manifest.generated_headers:
-        if (snapshot / generated).exists():
-            raise BuildContextViewError(f"overlay-conflict:{generated}")
+    if snapshot_fingerprint(snapshot) != artifact.snapshot_hash:
+        raise BuildContextViewError("snapshot-directory-mismatch")
+
+    # Re-verify the mutable package directory at view-construction time.
     try:
         package = read_package(artifact.package_dir)
     except ContextPackageError as exc:
         raise BuildContextViewError(f"package-invalid:{exc}") from exc
-    entries = {}
+    if package.manifest.revision != artifact.snapshot_hash:
+        raise BuildContextViewError("snapshot-mismatch")
+    if not hmac.compare_digest(
+        package.manifest.context_hash, artifact.context_hash
+    ):
+        raise BuildContextViewError("context-hash-mismatch")
+    current_digest = compute_artifact_digest(artifact.package_dir)
+    if not hmac.compare_digest(current_digest, artifact.artifact_digest):
+        raise BuildContextViewError("artifact-digest-mismatch")
+
+    for generated in package.manifest.generated_headers:
+        if (snapshot / generated).exists():
+            raise BuildContextViewError(f"overlay-conflict:{generated}")
+
+    package_roots = frozenset(package.manifest.header_roots) | {
+        _GENERATED_PACKAGE_ROOT
+    }
+    entries: dict[str, tuple[tuple[str, ...], str]] = {}
     for entry in package.compdb:
         file_value = entry.get("file")
         if isinstance(file_value, str) and file_value not in entries:
-            entries[file_value] = _project_flags(entry)
+            entries[file_value] = _project_entry(entry, package_roots)
     declared = set(entries)
     for tu in target_units:
         if tu not in declared:
             raise BuildContextViewError(f"target-tu-missing:{tu}")
+        source = snapshot / tu
+        if not source.is_file():
+            raise BuildContextViewError(f"target-tu-missing-in-snapshot:{tu}")
     return AnalysisContextView(
         snapshot_dir=snapshot,
         target_units=tuple(target_units),
         context_hash=artifact.context_hash,
         artifact_digest=artifact.artifact_digest,
         package_dir=artifact.package_dir,
-        _tu_flags={tu: entries[tu] for tu in target_units},
+        _tu_flags={tu: entries[tu][0] for tu in target_units},
+        _tu_directories={tu: entries[tu][1] for tu in target_units},
     )

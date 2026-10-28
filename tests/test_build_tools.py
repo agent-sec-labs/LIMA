@@ -18,7 +18,11 @@ from lima.build_contracts import (
     BuildPolicy,
     BuildRequest,
 )
-from lima.build_executor import BuildExecutionResult, BuildLimits
+from lima.build_executor import (
+    BuildExecutionResult,
+    BuildLimits,
+    BuildStepResult,
+)
 from lima.build_tools import register_build_tools
 from lima.context_package import build_manifest, write_package
 from lima.runtime import ToolRegistry
@@ -41,7 +45,8 @@ def make_policy() -> BuildPolicy:
             "clang16-cmake": ApprovedDependencySet(
                 image="lima-builder-clang16:2026-10"
             )
-        }
+        },
+        allow_repository_root_configure=True,
     )
 
 
@@ -101,9 +106,18 @@ def write_minimal_package(pkg_dir: Path, revision: str) -> None:
 class FakeExecutor:
     """Records execute() calls; a successful call writes a real package."""
 
-    def __init__(self, *, ok: bool = True, forced_revision: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        forced_revision: str | None = None,
+        image_digest: str | None = None,
+        failure_steps: tuple = (),
+    ) -> None:
         self.ok = ok
         self.forced_revision = forced_revision
+        self.image_digest = image_digest
+        self.failure_steps = failure_steps
         self.calls: list[dict] = []
 
     def execute(self, recipe, snapshot_dir, output_dir, *, limits, cancel,
@@ -121,11 +135,16 @@ class FakeExecutor:
             write_minimal_package(
                 Path(output_dir) / "package", self.forced_revision or revision
             )
+        if not self.ok:
+            for step in self.failure_steps:
+                log = Path(output_dir) / step.stderr_ref
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text("configure error: boom\n", encoding="utf8")
         return BuildExecutionResult(
             ok=self.ok,
-            steps=(),
+            steps=tuple(self.failure_steps),
             image=recipe.image,
-            image_digest=None,
+            image_digest=self.image_digest,
             package_path=str(Path(output_dir) / "package") if self.ok else None,
             failure_code=None if self.ok else "configure-step-failed",
         )
@@ -267,6 +286,147 @@ class BuildToolsTest(unittest.TestCase):
                     )
                     self.assertFalse(denied["ok"])
                     self.assertEqual(denied["error"], "step-ref-invalid")
+
+    def test_tool_rejects_indirect_execution_with_zero_executor_calls(
+        self,
+    ) -> None:
+        # Direct shell and cmake -E indirection are refused at the plan
+        # gate; the executor is never reached (review F1).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "snapshot" / "app").mkdir(parents=True)
+            executor = FakeExecutor()
+            registry = self.make_registry(executor, root=root)
+
+            smuggled = make_plan_mapping()
+            smuggled["configure_argv"] = [
+                ["cmake", "-E", "env", "sh", "-c", "echo policy-bypass"]
+            ]
+            result = registry.invoke(
+                "propose_build_plan", {"plan": smuggled}
+            )
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "configure-argument-not-allowed:-E", result["error"]
+            )
+
+            shell = make_plan_mapping()
+            shell["configure_argv"] = [["sh", "-c", "echo policy-bypass"]]
+            result = registry.invoke("propose_build_plan", {"plan": shell})
+            self.assertFalse(result["ok"])
+            self.assertIn("executable-not-approved:sh", result["error"])
+            self.assertEqual(executor.calls, [])
+
+    def test_approved_digest_pins_image_and_runtime(self) -> None:
+        # The approved digest is pinned into the immutable image reference
+        # and a diverging runtime digest refuses the package (review F3).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "snapshot" / "app").mkdir(parents=True)
+            digest = "sha256:" + "b" * 64
+            policy = make_policy()
+            policy = BuildPolicy(
+                dependency_sets={
+                    "clang16-cmake": ApprovedDependencySet(
+                        image="lima-builder-clang16:2026-10",
+                        image_digest=digest,
+                    )
+                },
+                allow_repository_root_configure=True,
+            )
+            executor = FakeExecutor(image_digest=digest)
+            registry = self.make_registry(executor, policy=policy, root=root)
+            registry.invoke("propose_build_plan", {"plan": make_plan_mapping()})
+            registry.invoke(
+                "prepare_dependencies", {"dependency_set_ref": "clang16-cmake"}
+            )
+            result = registry.invoke("execute_configure", {})
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                executor.calls[0]["recipe"].image,
+                "lima-builder-clang16:2026-10@" + digest,
+            )
+
+            drifted = FakeExecutor(image_digest="sha256:" + "c" * 64)
+            registry = self.make_registry(drifted, policy=policy, root=root)
+            registry.invoke("propose_build_plan", {"plan": make_plan_mapping()})
+            registry.invoke(
+                "prepare_dependencies", {"dependency_set_ref": "clang16-cmake"}
+            )
+            result = registry.invoke("execute_configure", {})
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "image-digest-mismatch")
+            denied = registry.invoke("export_context_package", {})
+            self.assertEqual(denied["error"], "no-exported-package")
+
+    def test_new_plan_or_failed_attempt_invalidates_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "snapshot" / "app").mkdir(parents=True)
+            executor = FakeExecutor()
+            registry = self.make_registry(executor, root=root)
+
+            registry.invoke("propose_build_plan", {"plan": make_plan_mapping()})
+            registry.invoke(
+                "prepare_dependencies", {"dependency_set_ref": "clang16-cmake"}
+            )
+            self.assertTrue(registry.invoke("execute_configure", {})["ok"])
+            first = registry.invoke("export_context_package", {})
+            self.assertTrue(first["ok"])
+            first_digest = first["plan_digest"]
+
+            # Accepting a different plan invalidates the old package.
+            revised = make_plan_mapping()
+            revised["configure_argv"] = [
+                ["cmake", "-S", ".", "-B", "build", "-DFEATURE=OFF"]
+            ]
+            accepted = registry.invoke(
+                "propose_build_plan", {"plan": revised}
+            )
+            self.assertNotEqual(accepted["plan_digest"], first_digest)
+            stale = registry.invoke("export_context_package", {})
+            self.assertEqual(stale["error"], "no-exported-package")
+
+            # A failed attempt under the new plan keeps it invalidated.
+            executor.ok = False
+            registry.invoke(
+                "prepare_dependencies", {"dependency_set_ref": "clang16-cmake"}
+            )
+            self.assertFalse(registry.invoke("execute_configure", {})["ok"])
+            still_stale = registry.invoke("validate_context", {})
+            self.assertEqual(still_stale["error"], "no-exported-package")
+
+    def test_failure_ref_round_trips_to_inspect(self) -> None:
+        # The stderr reference returned by a failed execute resolves
+        # against the artifacts root unchanged (review F5).
+        step = BuildStepResult(
+            step_id="step-000",
+            argv=("cmake",),
+            exit_code=2,
+            stdout_ref="logs/step-000.stdout.log",
+            stderr_ref="logs/step-000.stderr.log",
+            elapsed_seconds=0.5,
+            timed_out=False,
+            cancelled=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "snapshot" / "app").mkdir(parents=True)
+            executor = FakeExecutor(ok=False, failure_steps=(step,))
+            registry = self.make_registry(executor, root=root)
+            registry.invoke("propose_build_plan", {"plan": make_plan_mapping()})
+            registry.invoke(
+                "prepare_dependencies", {"dependency_set_ref": "clang16-cmake"}
+            )
+            failed = registry.invoke("execute_configure", {})
+            self.assertFalse(failed["ok"])
+            ref = failed["steps"][0]["stderr_ref"]
+            self.assertEqual(ref, "attempt-1/logs/step-000.stderr.log")
+            inspected = registry.invoke(
+                "inspect_build_failure", {"step_ref": ref}
+            )
+            self.assertTrue(inspected["ok"])
+            self.assertIn("configure error: boom", inspected["tail"])
 
     def test_validate_context_binds_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

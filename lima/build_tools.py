@@ -22,6 +22,7 @@ from lima.build_contracts import (
     BuildPolicy,
     BuildRequest,
     ValidatedBuildPlan,
+    plan_digest,
     validate_build_plan,
 )
 from lima.build_executor import BuildExecutionResult, BuildExecutor, BuildLimits
@@ -67,6 +68,9 @@ class _ToolContext:
     attempts: int = 0
     last_result: BuildExecutionResult | None = None
     package_ref: str | None = None
+    # The plan identity the current package was produced by; a new plan or a
+    # failed attempt invalidates the package reference.
+    package_plan_digest: str | None = None
 
 
 def _no_arguments_schema() -> dict[str, Any]:
@@ -123,11 +127,16 @@ def _tool_propose_build_plan(
     except BuildPlanError as exc:
         return {"ok": False, "error": exc.reason}
     context.pending_plan = validated
+    # Accepting a new plan invalidates any package produced under an older
+    # one: it must never be exported as this plan's result.
+    context.package_ref = None
+    context.package_plan_digest = None
     return {
         "ok": True,
         "adapter": validated.plan.adapter,
         "dependency_set_ref": validated.plan.dependency_set_ref,
         "image": validated.dependency_set.image,
+        "plan_digest": plan_digest(validated.plan),
     }
 
 
@@ -169,8 +178,30 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
         revision=context.request.snapshot_hash,
     )
     context.last_result = result
+    if not result.ok:
+        # A failed attempt invalidates the current package reference too:
+        # stale success must not survive as an exportable result.
+        context.package_ref = None
+        context.package_plan_digest = None
+    approved_digest = validated.dependency_set.image_digest
+    if (
+        result.ok
+        and approved_digest is not None
+        and result.image_digest is not None
+        and result.image_digest != approved_digest
+    ):
+        context.package_ref = None
+        context.package_plan_digest = None
+        return {
+            "ok": False,
+            "attempt": context.attempts,
+            "error": "image-digest-mismatch",
+            "approved": approved_digest,
+            "executed": result.image_digest,
+        }
     if result.ok:
         context.package_ref = f"{attempt_ref}/package"
+        context.package_plan_digest = plan_digest(validated.plan)
     return {
         "ok": result.ok,
         "attempt": context.attempts,
@@ -181,7 +212,9 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
                 "step_id": step.step_id,
                 "exit_code": step.exit_code,
                 "timed_out": step.timed_out,
-                "stderr_ref": step.stderr_ref,
+                # Root-relative so the reference round-trips through
+                # inspect_build_failure unchanged.
+                "stderr_ref": f"{attempt_ref}/{step.stderr_ref}",
             }
             for step in result.steps
         ],
@@ -190,10 +223,18 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
 
 def _recipe_from(validated: ValidatedBuildPlan, policy: BuildPolicy) -> BuildRecipe:
     plan = validated.plan
+    dependency_set = validated.dependency_set
+    # Pin the approved digest when one exists: a mutable tag must never
+    # decide which offline dependency image actually runs.
+    image = (
+        dependency_set.image
+        if dependency_set.image_digest is None
+        else f"{dependency_set.image}@{dependency_set.image_digest}"
+    )
     return BuildRecipe(
         schema_version=1,
         name=f"build-agent-{validated.request.snapshot_hash[:12]}",
-        image=validated.dependency_set.image,
+        image=image,
         repository=validated.request.repository_ref,
         source_mount=policy.source_mount,
         configure=plan.configure_argv,
@@ -252,6 +293,7 @@ def _tool_export_context_package(context: _ToolContext) -> dict[str, Any]:
         "ok": True,
         "package_ref": context.package_ref,
         "revision": context.request.snapshot_hash,
+        "plan_digest": context.package_plan_digest,
     }
 
 
@@ -269,6 +311,7 @@ def _tool_validate_context(context: _ToolContext) -> dict[str, Any]:
         "ok": True,
         "snapshot_hash": context.request.snapshot_hash,
         "context_hash": package.manifest.context_hash,
+        "plan_digest": context.package_plan_digest,
     }
 
 

@@ -12,6 +12,8 @@ start.  Budgets are frozen data too: nothing in a plan can raise them.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -27,6 +29,7 @@ __all__ = [
     "BuildRequest",
     "IncludeRootSpec",
     "ValidatedBuildPlan",
+    "plan_digest",
     "validate_build_plan",
 ]
 
@@ -52,6 +55,17 @@ _WINDOWS_DRIVE_PATTERN: Final = re.compile(r"^[A-Za-z]:")
 # Shell splices are inert once argv lists reach execve, but a model that
 # emits them is telling us it thinks it is writing a shell command; refuse.
 _UNSAFE_ARGUMENT_TOKENS: Final = ("&&", "|", "$(", "`")
+
+# Configure-only argument surface for the cmake-linux adapter.  Tool-mode
+# (-E), script (-P), build (--build) and install entry points are refused:
+# the slice-1 goal is analysis-context configure, not arbitrary execution.
+_CMAKE_VALUE_OPTIONS: Final = frozenset(
+    {"-S", "-B", "-G", "-C", "--toolchain", "--preset", "--log-level"}
+)
+_CMAKE_FLAG_OPTIONS: Final = frozenset(
+    {"--fresh", "--no-warn-unused-cli", "-Wdev", "-Wno-dev"}
+)
+_CMAKE_JOINED_PREFIXES: Final = ("-D", "-U", "-W", "-S", "-B")
 
 
 class BuildPlanError(ValueError):
@@ -355,6 +369,81 @@ def _as_sequence(value: object, field: str) -> Sequence[str]:
     return value
 
 
+def _check_repo_relative_directive(value: str, label: str) -> None:
+    if (
+        not value
+        or value.startswith("/")
+        or "\\" in value
+        or ":" in value
+        or any(segment in {"", ".", ".."} for segment in value.split("/"))
+    ):
+        raise BuildPlanError(f"{label}-invalid:{value}")
+
+
+def _validate_cmake_linux_configure(
+    argv: tuple[str, ...], request: BuildRequest, policy: BuildPolicy
+) -> None:
+    """Adapter rules binding one cmake argv to the requested scope.
+
+    Only the configure-only argument surface is accepted, the source and
+    build directories must be explicit and repository-relative, and the
+    actual source directory must fall inside the requested component scope
+    (the repository root needs an explicit policy approval).
+    """
+
+    if argv[0] != "cmake":
+        raise BuildPlanError(f"adapter-executable-invalid:{argv[0]}")
+    source: str | None = None
+    build_dir: str | None = None
+    expect_value: str | None = None
+    for token in argv[1:]:
+        if expect_value is not None:
+            if expect_value == "-S":
+                source = token
+            elif expect_value == "-B":
+                build_dir = token
+            expect_value = None
+            continue
+        if not token.startswith("-"):
+            raise BuildPlanError(f"configure-argument-not-allowed:{token}")
+        if token in _CMAKE_VALUE_OPTIONS:
+            expect_value = token
+            continue
+        if token in _CMAKE_FLAG_OPTIONS or token.startswith(
+            ("-D", "-U", "-W")
+        ):
+            continue
+        if len(token) > 2 and token.startswith(_CMAKE_JOINED_PREFIXES):
+            if token.startswith("-S"):
+                source = token[2:]
+            elif token.startswith("-B"):
+                build_dir = token[2:]
+            continue
+        raise BuildPlanError(f"configure-argument-not-allowed:{token}")
+    if expect_value is not None:
+        raise BuildPlanError(f"configure-argument-not-allowed:{expect_value}")
+    if source is None:
+        raise BuildPlanError("configure-source-missing")
+    if build_dir is None:
+        raise BuildPlanError("configure-build-dir-missing")
+    _check_repo_relative_directive(build_dir, "configure-build-dir")
+    if source == ".":
+        if not policy.allow_repository_root_configure:
+            raise BuildPlanError("configure-source-out-of-scope:.")
+        return
+    _check_repo_relative_directive(source, "configure-source")
+    if not any(
+        source == component or source.startswith(component + "/")
+        for component in request.component_scope
+    ):
+        raise BuildPlanError(f"configure-source-out-of-scope:{source}")
+
+
+_ADAPTER_CONFIGURE_VALIDATORS: Final = {
+    "cmake-linux": _validate_cmake_linux_configure,
+}
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ApprovedDependencySet:
     """A deployment-approved offline dependency set bound to one image."""
@@ -364,14 +453,22 @@ class ApprovedDependencySet:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "image", _nfc_text(self.image, "image"))
-        if self.image_digest is not None and (
-            not isinstance(self.image_digest, str)
-            or _HEX64_PATTERN.fullmatch(
-                self.image_digest.removeprefix("sha256:")
+        if self.image_digest is not None:
+            if (
+                not isinstance(self.image_digest, str)
+                or _HEX64_PATTERN.fullmatch(
+                    self.image_digest.removeprefix("sha256:")
+                )
+                is None
+            ):
+                raise BuildPlanError("image-digest-invalid")
+            # Normalize to the immutable reference form so the executor can
+            # pin name@digest instead of trusting a mutable tag.
+            object.__setattr__(
+                self,
+                "image_digest",
+                "sha256:" + self.image_digest.removeprefix("sha256:"),
             )
-            is None
-        ):
-            raise BuildPlanError("image-digest-invalid")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -383,6 +480,9 @@ class BuildPolicy:
     allowed_executables: frozenset[str] = frozenset({"cmake"})
     budget_ceiling: BuildBudget = BuildBudget()
     source_mount: str = "/src"
+    # Configuring the repository root touches every component at once; only
+    # an explicit deployment approval allows plans to use -S .
+    allow_repository_root_configure: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.dependency_sets, Mapping) or not all(
@@ -409,6 +509,15 @@ class ValidatedBuildPlan:
     budget: BuildBudget
 
 
+def plan_digest(plan: BuildPlan) -> str:
+    """A stable digest over the plan identity, used to bind packages."""
+
+    material = json.dumps(
+        dataclasses.asdict(plan), sort_keys=True, ensure_ascii=False
+    )
+    return hashlib.sha256(material.encode("utf8")).hexdigest()
+
+
 def validate_build_plan(
     request: BuildRequest, plan: BuildPlan, policy: BuildPolicy
 ) -> ValidatedBuildPlan:
@@ -416,9 +525,12 @@ def validate_build_plan(
 
     A plan must target the requesting snapshot, exactly the requested
     component scope, a policy-approved adapter and a policy-approved
-    dependency set; the request budget must stay under the deployment
-    ceiling.  Any mismatch raises :class:`BuildPlanError` with a stable
-    reason before a container is ever started.
+    dependency set; every configure argv must run a policy-approved
+    executable under the adapter's configure-only argument rules, with its
+    actual source directory bound to the requested scope; the request
+    budget must stay under the deployment ceiling.  Any violation raises
+    :class:`BuildPlanError` with a stable reason before a container is
+    ever started.
     """
 
     if not isinstance(request, BuildRequest):
@@ -438,6 +550,12 @@ def validate_build_plan(
         raise BuildPlanError(f"dependency-set-not-approved:{plan.dependency_set_ref}")
     if not request.budget.within_ceiling(policy.budget_ceiling):
         raise BuildPlanError("budget-exceeds-policy")
+    adapter_validator = _ADAPTER_CONFIGURE_VALIDATORS.get(plan.adapter)
+    for argv in plan.configure_argv:
+        if argv[0] not in policy.allowed_executables:
+            raise BuildPlanError(f"executable-not-approved:{argv[0]}")
+        if adapter_validator is not None:
+            adapter_validator(argv, request, policy)
     return ValidatedBuildPlan(
         request=request,
         plan=plan,

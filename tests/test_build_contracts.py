@@ -30,7 +30,10 @@ def make_policy() -> BuildPolicy:
             "clang16-cmake": ApprovedDependencySet(
                 image="lima-builder-clang16:2026-10"
             )
-        }
+        },
+        # The fixture plans configure the repository root; scope-bound
+        # sources are covered by the dedicated tests below.
+        allow_repository_root_configure=True,
     )
 
 
@@ -157,6 +160,87 @@ class BuildPlanTest(unittest.TestCase):
                 mapping.update(patch)
                 with self.assertRaises(BuildPlanError):
                     BuildPlan.from_mapping(mapping)
+
+
+class AdapterSurfaceTest(unittest.TestCase):
+    def _reject(self, configure, reason_part):
+        mapping = make_plan_mapping()
+        mapping["configure_argv"] = configure
+        with self.assertRaises(BuildPlanError) as caught:
+            validate_build_plan(
+                make_request(), BuildPlan.from_mapping(mapping), make_policy()
+            )
+        self.assertIn(reason_part, caught.exception.reason)
+
+    def test_plan_rejects_unapproved_executable_and_tool_modes(self) -> None:
+        # Direct and indirect execution entries stay closed: the model may
+        # only propose configure-mode cmake argv (review F1).
+        self._reject(
+            [["sh", "-c", "echo policy-bypass"]],
+            "executable-not-approved:sh",
+        )
+        self._reject(
+            [["cmake", "-E", "env", "sh", "-c", "echo policy-bypass"]],
+            "configure-argument-not-allowed:-E",
+        )
+        self._reject(
+            [["cmake", "--build", "build"]],
+            "configure-argument-not-allowed:--build",
+        )
+        self._reject(
+            [["cmake", "-P", "evil.cmake"]],
+            "configure-argument-not-allowed:-P",
+        )
+        self._reject(
+            [["cmake", "."]],
+            "configure-argument-not-allowed:.",
+        )
+        self._reject(
+            [["cmake", "--install", "build"]],
+            "configure-argument-not-allowed:--install",
+        )
+
+    def test_plan_binds_configure_source_to_scope(self) -> None:
+        # The actual -S source must fall inside the requested component
+        # scope; the repository root needs explicit policy approval
+        # (review F2).
+        self._reject(
+            [["cmake", "-S", "other_component", "-B", "build"]],
+            "configure-source-out-of-scope:other_component",
+        )
+        self._reject(
+            [["cmake", "-B", "build"]],
+            "configure-source-missing",
+        )
+        self._reject(
+            [["cmake", "-S", "app"]],
+            "configure-build-dir-missing",
+        )
+        self._reject(
+            [["cmake", "-S", "app", "-B", "../escape"]],
+            "configure-build-dir-invalid",
+        )
+        root_policy = BuildPolicy(
+            dependency_sets=make_policy().dependency_sets,
+            allow_repository_root_configure=False,
+        )
+        mapping = make_plan_mapping()
+        with self.assertRaises(BuildPlanError) as caught:
+            validate_build_plan(
+                make_request(),
+                BuildPlan.from_mapping(mapping),
+                root_policy,
+            )
+        self.assertIn("configure-source-out-of-scope:.", caught.exception.reason)
+        # In-scope subdirectories and the approved root both validate.
+        for source in ("app", "app/sub", "."):
+            mapping = make_plan_mapping()
+            mapping["configure_argv"] = [
+                ["cmake", "-S", source, "-B", "build", "-DCMAKE_X=ON"]
+            ]
+            validate_build_plan(
+                make_request(), BuildPlan.from_mapping(mapping), make_policy()
+            )
 
 
 class ValidateBuildPlanTest(unittest.TestCase):

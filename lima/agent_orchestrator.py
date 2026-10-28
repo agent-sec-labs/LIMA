@@ -728,26 +728,51 @@ def _semantic_flags_from_compdb(
                 if not isinstance(command, str):
                     continue
                 arguments = command.split()
-            flags: list[str] = []
-            expect_value = False
-            for token in arguments[1:]:
-                text = str(token)
-                if expect_value:
-                    flags.append(text)
-                    expect_value = False
-                elif text in _DRIVER_CONTRACT_VALUE_OPTIONS:
-                    flags.append(text)
-                    expect_value = True
-                elif text.startswith(("-I", "-D", "-U", "-isystem", "-target")):
-                    flags.append(text)
-                if len(flags) >= _DRIVER_CONTRACT_FLAGS_LIMIT:
-                    break
+            flags = _extract_driver_flags(arguments[1:])
             if flags:
                 return tuple(flags)
     return ()
 
 
-def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
+def _extract_driver_flags(tokens: Sequence[str]) -> list[str]:
+    """The semantic include/define tokens of one compiler argv tail."""
+    flags: list[str] = []
+    expect_value = False
+    for token in tokens:
+        text = str(token)
+        if expect_value:
+            flags.append(text)
+            expect_value = False
+        elif text in _DRIVER_CONTRACT_VALUE_OPTIONS:
+            flags.append(text)
+            expect_value = True
+        elif text.startswith(("-I", "-D", "-U", "-isystem", "-target")):
+            flags.append(text)
+        if len(flags) >= _DRIVER_CONTRACT_FLAGS_LIMIT:
+            break
+    return flags
+
+
+def _semantic_flags_from_view(view: object, unit_path: str) -> tuple[str, ...]:
+    """The semantic flags of one unit's verified-package projection.
+
+    Consumes the same sealed per-TU projection the facts and repro
+    resolvers use (``flags_for_tu``), so the Specialist driver contract
+    and the downstream stages can never disagree on the compile
+    environment.
+    """
+    try:
+        projected = tuple(view.flags_for_tu(unit_path))
+    except Exception:  # noqa: BLE001 - a broken view yields no flags
+        return ()
+    return tuple(_extract_driver_flags(projected))
+
+
+def _driver_contract(
+    workspace: RepositoryWorkspace,
+    unit_path: str,
+    verified_view: object | None = None,
+) -> str:
     """The exact experiment compile command the driver author must target.
 
     Models hallucinate headers and include the C target unit itself when
@@ -755,7 +780,10 @@ def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
     snapshot's own include/define flags) removes that guesswork.
     """
 
-    flags = _semantic_flags_from_compdb(workspace, unit_path)
+    if verified_view is not None:
+        flags = _semantic_flags_from_view(verified_view, unit_path)
+    else:
+        flags = _semantic_flags_from_compdb(workspace, unit_path)
     flags_text = " ".join(flags) if flags else "(no extra flags)"
     if unit_path.endswith(".c"):
         sources_text = f"-x c {unit_path} -x c++ <your driver>"

@@ -148,7 +148,9 @@ HEALTH_TIMEOUT_SECONDS = 2.0
 UAF_FACTS_SCHEMA_VERSION = 1
 UAF_FACTS_PATH = "/v1/uaf-facts"
 UAF_FACTS_TOOL = "uaf-facts"
-UAF_FACTS_BUILD_CONTEXT_MODES = frozenset({"snapshot-compdb", "heuristic"})
+UAF_FACTS_BUILD_CONTEXT_MODES = frozenset(
+    {"snapshot-compdb", "heuristic", "verified-package"}
+)
 UAF_FACTS_TOOL_RUN_STATUSES = frozenset({"completed", "unavailable"})
 UAF_FACTS_EXTRACTIONS = frozenset({"completed", "unavailable"})
 # The eleven frozen first-phase fact kinds (design section 7.2); the client

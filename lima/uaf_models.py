@@ -113,7 +113,13 @@ OBLIGATION_VERDICTS: Final = frozenset({"satisfied", "refuted", "unknown"})
 PROOF_VERDICTS: Final = frozenset({"PASS", "REFUTED", "UNKNOWN"})
 RESOLUTION_STATUSES: Final = frozenset({"resolved", "incomplete", "unavailable"})
 RESOLUTION_SOURCE_KINDS: Final = frozenset(
-    {"repository-compdb", "cmake-export", "build-adapter", "heuristic"}
+    {
+        "repository-compdb",
+        "cmake-export",
+        "build-adapter",
+        "heuristic",
+        "verified-package",
+    }
 )
 
 

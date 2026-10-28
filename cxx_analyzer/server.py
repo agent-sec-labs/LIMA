@@ -55,7 +55,32 @@ _UAF_FACTS_REQUEST_FIELDS: Final = frozenset(
 )
 _UAF_FACTS_TOOL: Final = "uaf-facts"
 _UAF_FACTS_BUILD_CONTEXT_FIELDS: Final = frozenset({"mode"})
-_UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset({"snapshot-compdb", "heuristic"})
+_UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset(
+    {"snapshot-compdb", "heuristic", "verified-package"}
+)
+
+# Verified-package views registered by the host process that owns the
+# sidecar (built with lima.build_context_view; this package stays
+# lima-free and consumes the duck-typed surface only).
+_VERIFIED_BUILD_VIEWS: dict[str, object] = {}
+
+
+def register_verified_build_view(snapshot_sha256: str, view: object) -> None:
+    """Register one sealed analysis view for a snapshot's uaf-facts run."""
+
+    if (
+        not isinstance(snapshot_sha256, str)
+        or len(snapshot_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in snapshot_sha256)
+    ):
+        raise ValueError("invalid snapshot digest for verified view registration")
+    _VERIFIED_BUILD_VIEWS[snapshot_sha256] = view
+
+
+def clear_verified_build_views() -> None:
+    """Drop every registered verified-package view (test isolation)."""
+
+    _VERIFIED_BUILD_VIEWS.clear()
 MAX_UAF_TRANSLATION_UNITS: Final = 16
 MAX_REPRO_SOURCES: Final = 16
 MAX_REPRO_DRIVER_BYTES: Final = 256 * 1024
@@ -472,7 +497,12 @@ def _extract_uaf_unit(
     because a heuristic context can never contribute to ``fact-verified``.
     """
 
-    context = resolve_build_context_execution(snapshot.root, translation_unit, settings)
+    context = resolve_build_context_execution(
+        snapshot.root,
+        translation_unit,
+        settings,
+        verified_view=_VERIFIED_BUILD_VIEWS.get(getattr(snapshot, "sha256", "")),
+    )
     wire = context.wire
     if context.status != "resolved":
         return _uaf_unit_entry(

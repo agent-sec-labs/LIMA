@@ -147,7 +147,11 @@ def _tool_prepare_dependencies(
     if approved is None:
         return {"ok": False, "error": f"dependency-set-not-approved:{dependency_set_ref}"}
     context.prepared_ref = dependency_set_ref
-    return {"ok": True, "image": approved.image}
+    return {
+        "ok": True,
+        "dependency_set_ref": dependency_set_ref,
+        "image": approved.image,
+    }
 
 
 def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
@@ -206,6 +210,7 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
         "ok": result.ok,
         "attempt": context.attempts,
         "failure_code": result.failure_code,
+        "image_digest": result.image_digest,
         "package_ref": f"{attempt_ref}/package" if result.ok else None,
         "steps": [
             {

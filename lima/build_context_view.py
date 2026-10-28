@@ -47,12 +47,22 @@ __all__ = [
 ]
 
 # Options whose (separate) value is a path that participates in the
-# working-directory semantics of the compile command.
+# include semantics of the compile command.
 _DIR_VALUE_OPTIONS: Final = frozenset(
     {"-I", "-isystem", "-iquote", "-idirafter", "-stdlib++-isystem"}
 )
 _FILE_VALUE_OPTIONS: Final = frozenset({"-include", "-imacros"})
+# Options whose separate value is a plain operand (language, macro,
+# target triple, dependency file): the value belongs to the command and
+# must never be mistaken for the source file.
+_TAKES_VALUE_OPTIONS: Final = frozenset(
+    {"-x", "-D", "-U", "-target", "-arch", "-isysroot", "--sysroot", "-B",
+     "-MF", "-MT", "-MQ"}
+)
 _GENERATED_PACKAGE_ROOT: Final = "generated"
+# Sealing bound: the view holds package member bytes in memory so the
+# original mutable directory stops being the authoritative source.
+_MAX_SEALED_BYTES: Final = 64 * 1024 * 1024
 
 
 class BuildContextViewError(ValueError):
@@ -122,19 +132,26 @@ def compute_artifact_digest(package_dir: Path) -> str:
     return hashlib.sha256(payload.encode("utf8")).hexdigest()
 
 
-def snapshot_fingerprint(snapshot_dir: Path) -> str:
-    """The control-plane snapshot identity of a source directory.
-
-    Uses the same rule the repository workspace inventory defines
-    (per-file path, size and SHA-256 over the deterministic inventory), so
-    the hash a build request was bound to is reproducible here.
-    """
+def _snapshot_inventory(snapshot_dir: Path):
+    """The deterministic workspace inventory of a source directory."""
 
     try:
         workspace = RepositoryWorkspace(str(snapshot_dir))
     except (ValueError, OSError) as exc:
         raise BuildContextViewError("snapshot-directory-missing") from exc
-    return workspace.inventory().fingerprint()
+    return workspace.inventory()
+
+
+def snapshot_fingerprint(snapshot_dir: Path) -> str:
+    """The control-plane snapshot identity of a source directory.
+
+    Uses the same rule the repository workspace inventory defines
+    (per-file path, size and SHA-256 over the deterministic inventory).
+    The inventory is filtered and bounded, so this identity covers exactly
+    the files it lists - consumers must check coverage, not assume it.
+    """
+
+    return _snapshot_inventory(snapshot_dir).fingerprint()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -183,20 +200,38 @@ def verify_build_artifact(
 class AnalysisContextView:
     """A read-only projection of one verified package over one snapshot.
 
-    Exposes the declared target units, the package identity hashes, the
-    per-TU working directory and the per-TU projected compiler arguments;
-    it never writes the snapshot or the package.  Downstream TU resolution
-    records its own TU-level hash separately - the package
-    ``context_hash`` and ``artifact_digest`` never masquerade as it.
+    The package members are sealed into the view at construction: package
+    bytes are consumed through :meth:`read_member`, never through a
+    mutable package directory, so the verified ``artifact_digest`` keeps
+    constraining the bytes a consumer actually sees.  The view also
+    exposes the declared target units, the package identity hashes and
+    the per-TU working directory and projected arguments; it never writes
+    the snapshot or the package.  Downstream TU resolution records its
+    own TU-level hash separately - the package ``context_hash`` and
+    ``artifact_digest`` never masquerade as it.
     """
 
     snapshot_dir: Path
     target_units: tuple[str, ...]
     context_hash: str
     artifact_digest: str
-    package_dir: Path
     _tu_flags: Mapping[str, tuple[str, ...]]
     _tu_directories: Mapping[str, str]
+    _sealed_members: Mapping[str, bytes]
+
+    @property
+    def member_paths(self) -> tuple[str, ...]:
+        """The sealed package members, in canonical posix order."""
+
+        return tuple(sorted(self._sealed_members))
+
+    def read_member(self, path: str) -> bytes:
+        """Read one package member from the sealed, verified copy."""
+
+        try:
+            return self._sealed_members[path]
+        except KeyError:
+            raise BuildContextViewError(f"member-not-sealed:{path}") from None
 
     def working_directory_for_tu(self, tu: str) -> str:
         """The compile command's working directory, repository-relative."""
@@ -210,12 +245,15 @@ class AnalysisContextView:
         """Projected arguments for one declared target unit.
 
         The compiler token, the ``-c`` flag, the ``-o`` output (separate or
-        joined) and the source file (``file`` or its working-directory
-        spelling) are stripped.  Path-valued include and forced-include
-        options are normalized to repository-relative paths unless they
-        point into the package roots (vendored headers, generated files),
-        which stay package-relative so consumers resolve them inside the
-        read-only view.
+        joined) and the source file are stripped.  Values of known
+        operand-taking options are preserved; a bare token that does not
+        match the entry's source file under directory semantics refuses
+        the view instead of being silently dropped.  Include and
+        forced-include paths stay package-relative when they point into
+        the package roots (vendored headers, generated files); other
+        non-absolute paths are already repository-relative - the slice-1
+        producer relativizes them - and are only normalized, never
+        re-prefixed with the working directory.
         """
 
         try:
@@ -235,8 +273,9 @@ def _project_entry(
     """Project one compdb entry to ``(flags, working directory)``.
 
     An unparseable compile command is a hard error, never an empty flag
-    list: a TU whose context cannot be parsed must not masquerade as one
-    that simply has no extra arguments.
+    list, and a bare token that is neither a known option operand nor the
+    entry's source file (under directory semantics) refuses the view
+    rather than being dropped silently.
     """
 
     directory = entry.get("directory")
@@ -256,11 +295,25 @@ def _project_entry(
     if not argv:
         raise BuildContextViewError("compdb-command-empty")
 
+    file_value = entry.get("file")
+    source_candidates: set[str] = set()
+    if isinstance(file_value, str) and file_value:
+        source_candidates.add(file_value)
+        source_candidates.add(_normjoin(directory, file_value))
+        try:
+            source_candidates.add(posixpath.relpath(file_value, directory))
+        except ValueError:
+            pass
+
     def map_path(value: str) -> str:
+        # Slice-1 producers relativize source-tree paths to repository
+        # roots, so a non-absolute, non-package value is already
+        # repository-relative: normalize only, never re-prefix it with
+        # the working directory.
         for root in package_roots:
             if value == root or value.startswith(root + "/"):
                 return value
-        return _normjoin(directory, value)
+        return posixpath.normpath(value)
 
     projected: list[str] = []
     index = 1  # the compiler token is not a flag
@@ -276,15 +329,24 @@ def _project_entry(
             index += 1
             continue
         if not argument.startswith("-"):
-            # A bare positional in a compile command is the source file
-            # spelled relative to the working directory; it is not a flag.
-            index += 1
-            continue
+            if argument in source_candidates:
+                index += 1
+                continue
+            raise BuildContextViewError(
+                f"compdb-unexpected-positional:{argument}"
+            )
         if argument in _DIR_VALUE_OPTIONS or argument in _FILE_VALUE_OPTIONS:
             if index + 1 >= len(argv):
                 raise BuildContextViewError("compdb-command-malformed-option")
             projected.append(argument)
             projected.append(map_path(argv[index + 1]))
+            index += 2
+            continue
+        if argument in _TAKES_VALUE_OPTIONS:
+            if index + 1 >= len(argv):
+                raise BuildContextViewError("compdb-command-malformed-option")
+            projected.append(argument)
+            projected.append(argv[index + 1])
             index += 2
             continue
         if argument.startswith("-I") and len(argument) > 2:
@@ -321,8 +383,10 @@ def create_analysis_view(
         raise BuildContextViewError("artifact-invalid")
     if not target_units:
         raise BuildContextViewError("target-units-empty")
-    if snapshot_fingerprint(snapshot) != artifact.snapshot_hash:
+    inventory = _snapshot_inventory(snapshot)
+    if inventory.fingerprint() != artifact.snapshot_hash:
         raise BuildContextViewError("snapshot-directory-mismatch")
+    covered = {item.path for item in inventory.files}
 
     # Re-verify the mutable package directory at view-construction time.
     try:
@@ -335,9 +399,25 @@ def create_analysis_view(
         package.manifest.context_hash, artifact.context_hash
     ):
         raise BuildContextViewError("context-hash-mismatch")
-    current_digest = compute_artifact_digest(artifact.package_dir)
+    sealed_members = dict(_member_files(artifact.package_dir))
+    sealed_bytes = sum(len(data) for data in sealed_members.values())
+    digest_material = [
+        {
+            "path": relative,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for relative, data in sorted(sealed_members.items())
+    ]
+    current_digest = hashlib.sha256(
+        json.dumps(digest_material, sort_keys=True, ensure_ascii=False).encode(
+            "utf8"
+        )
+    ).hexdigest()
     if not hmac.compare_digest(current_digest, artifact.artifact_digest):
         raise BuildContextViewError("artifact-digest-mismatch")
+    if sealed_bytes > _MAX_SEALED_BYTES:
+        raise BuildContextViewError("package-too-large-to-seal")
 
     for generated in package.manifest.generated_headers:
         if (snapshot / generated).exists():
@@ -355,15 +435,19 @@ def create_analysis_view(
     for tu in target_units:
         if tu not in declared:
             raise BuildContextViewError(f"target-tu-missing:{tu}")
-        source = snapshot / tu
-        if not source.is_file():
+        if tu not in covered:
+            # The fingerprint only covers the deterministic inventory; a
+            # target outside it could change without changing the bound
+            # identity, so it is refused rather than waved through.
+            raise BuildContextViewError(f"target-tu-not-covered:{tu}")
+        if not (snapshot / tu).is_file():
             raise BuildContextViewError(f"target-tu-missing-in-snapshot:{tu}")
     return AnalysisContextView(
         snapshot_dir=snapshot,
         target_units=tuple(target_units),
         context_hash=artifact.context_hash,
         artifact_digest=artifact.artifact_digest,
-        package_dir=artifact.package_dir,
         _tu_flags={tu: entries[tu][0] for tu in target_units},
         _tu_directories={tu: entries[tu][1] for tu in target_units},
+        _sealed_members=sealed_members,
     )

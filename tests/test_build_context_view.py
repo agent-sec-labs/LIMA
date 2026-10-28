@@ -293,8 +293,11 @@ class CreateAnalysisViewTest(unittest.TestCase):
             )
 
     def test_projection_preserves_directory_semantics(self) -> None:
-        # Relative file spellings, joined -o and working-directory include
-        # paths must project correctly (review F3).
+        # Slice-1 producers relativize source-tree paths to repository
+        # roots, so include values stay repository-relative (normalized,
+        # never re-prefixed with the working directory); joined -o and the
+        # working-directory spelling of the source file are stripped
+        # (review round 1 F3 + round 2 F4).
         with tempfile.TemporaryDirectory() as tmp:
             entry = {
                 "directory": "app",
@@ -313,9 +316,144 @@ class CreateAnalysisViewTest(unittest.TestCase):
             view = create_analysis_view(snapshot, artifact, ("app/main.cpp",))
             self.assertEqual(
                 view.flags_for_tu("app/main.cpp"),
-                ("-Iapp/include", "-isystem", "app/third_party"),
+                ("-Iinclude", "-isystem", "third_party"),
             )
             self.assertEqual(view.working_directory_for_tu("app/main.cpp"), "app")
+
+    def test_separated_option_values_are_preserved(self) -> None:
+        # -x, -D, -target and friends take a separate operand; dropping it
+        # as a "bare positional" would corrupt the command (round 2 F3).
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = {
+                "directory": "app",
+                "arguments": [
+                    "c++",
+                    "-x",
+                    "c++",
+                    "-D",
+                    "FEATURE=1",
+                    "-target",
+                    "x86_64-linux-gnu",
+                    "-c",
+                    "main.cpp",
+                ],
+                "file": "app/main.cpp",
+            }
+            snapshot, _pkg, artifact, _ = make_verified(tmp, entry=entry)
+            view = create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+            self.assertEqual(
+                view.flags_for_tu("app/main.cpp"),
+                (
+                    "-x",
+                    "c++",
+                    "-D",
+                    "FEATURE=1",
+                    "-target",
+                    "x86_64-linux-gnu",
+                ),
+            )
+
+    def test_unknown_bare_positional_refuses_view(self) -> None:
+        # A bare token that is neither a known operand nor the source file
+        # must refuse the view, not vanish silently (round 2 F3).
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = {
+                "directory": "app",
+                "arguments": ["c++", "-c", "main.cpp", "surprise.o"],
+                "file": "app/main.cpp",
+            }
+            snapshot, _pkg, artifact, _ = make_verified(tmp, entry=entry)
+            with self.assertRaises(BuildContextViewError) as caught:
+                create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+            self.assertIn(
+                "compdb-unexpected-positional", caught.exception.reason
+            )
+
+    def test_slice1_relativized_paths_are_not_re_prefixed(self) -> None:
+        # End-to-end with the real slice-1 relativizer: a container-
+        # absolute compdb becomes repository-relative in the package, and
+        # the view must keep those values instead of re-joining the
+        # working directory (round 2 F4).
+        from lima.build_recipe import _relativize_source_paths
+        from lima.context_package import rewrite_compdb_paths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = write_snapshot(root)
+            fingerprint = snapshot_fingerprint(snapshot)
+            compdb = [
+                {
+                    "directory": "/src/build",
+                    "arguments": [
+                        "/usr/bin/c++",
+                        "-I/src/app/include",
+                        "-c",
+                        "/src/app/main.cpp",
+                        "-o",
+                        "main.o",
+                    ],
+                    "file": "/src/app/main.cpp",
+                }
+            ]
+            relativized = json.loads(
+                _relativize_source_paths(json.dumps(compdb), "/src")
+            )
+            rewritten = rewrite_compdb_paths(
+                json.dumps(relativized), {"/usr/include/fixture": "headers/fixture"}
+            )
+            entry = json.loads(rewritten)[0]
+            pkg = root / "package"
+            write_package_fixture(pkg, revision=fingerprint, entry=entry)
+            artifact = verify_build_artifact(
+                pkg, fingerprint, compute_artifact_digest(pkg)
+            )
+            view = create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+            self.assertEqual(
+                view.flags_for_tu("app/main.cpp"), ("-Iapp/include",)
+            )
+            self.assertEqual(view.working_directory_for_tu("app/main.cpp"), "build")
+
+    def test_view_seals_members_against_later_mutation(self) -> None:
+        # Package bytes are consumed through the sealed copy; mutating the
+        # original directory after creation changes nothing the view
+        # serves (round 2 F1).
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, pkg, artifact, _ = make_verified(tmp)
+            view = create_analysis_view(snapshot, artifact, ("app/main.cpp",))
+            self.assertIn("headers/fixture/lib.h", view.member_paths)
+            self.assertEqual(view.read_member("headers/fixture/lib.h"), b"// lib\n")
+            with self.assertRaises(BuildContextViewError):
+                view.read_member("headers/fixture/absent.h")
+
+            (pkg / "headers" / "fixture" / "lib.h").write_bytes(b"// evl\n")
+            self.assertEqual(view.read_member("headers/fixture/lib.h"), b"// lib\n")
+            self.assertTrue(view.flags_for_tu("app/main.cpp"))
+
+    def test_target_outside_inventory_coverage_is_refused(self) -> None:
+        # The fingerprint covers only the deterministic inventory; a TU
+        # under an ignored directory could change without changing the
+        # bound identity, so it is refused (round 2 F2).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = write_snapshot(root)
+            (snapshot / "vendor").mkdir()
+            (snapshot / "vendor" / "unit.cpp").write_text(
+                "int unit(void) { return 9; }\n", encoding="utf8"
+            )
+            fingerprint = snapshot_fingerprint(snapshot)
+            entry = {
+                "directory": "vendor",
+                "arguments": ["c++", "-c", "unit.cpp"],
+                "file": "vendor/unit.cpp",
+            }
+            pkg = root / "package"
+            write_package_fixture(pkg, revision=fingerprint, entry=entry)
+            artifact = verify_build_artifact(
+                pkg, fingerprint, compute_artifact_digest(pkg)
+            )
+            with self.assertRaises(BuildContextViewError) as caught:
+                create_analysis_view(snapshot, artifact, ("vendor/unit.cpp",))
+            self.assertIn("target-tu-not-covered", caught.exception.reason)
 
     def test_unparseable_command_refuses_view(self) -> None:
         # An unparseable compile command refuses the view instead of

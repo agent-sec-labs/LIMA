@@ -4,10 +4,21 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .agents import MultiAgentCoordinator
 from .auth import AuthManager
+from .build_agent import NEEDS_ATTENTION, SUCCEEDED, BuildAgent
+from .build_agent import BuildResult as BuildAgentResult
+from .build_contracts import (
+    ApprovedDependencySet,
+    BuildBudget,
+    BuildPolicy,
+)
+from .build_contracts import (
+    BuildRequest as BuildAgentRequestBody,
+)
+from .build_executor import BuildExecutor
 from .config import Settings
 from .context_manager import ContextManager
 from .cxx_agent_tools import CxxAgentBudget
@@ -21,6 +32,7 @@ from .cxx_memory import (
 )
 from .diff_parser import parse_unified_diff
 from .evolution import EvolutionEngine
+from .experiments import LLM_MODES, ExperimentRunner
 from .fixer import SafeFixer
 from .github import GitHubAppAuthenticator, GitHubClient, pull_request_commit_shas
 from .harness import ReviewHarness
@@ -29,46 +41,16 @@ from .metrics import metrics
 from .models import TaskState, TraceEvent
 from .observability import AlertManager, Observability
 from .postgres_store import create_store
+from .real_world_evaluation import (
+    LLMSecurityTriageClient,
+    RealWorldSecurityEvaluator,
+    SnapshotStore,
+)
 from .repair_preview import RepositoryRepairPreviewer
-from .report import to_markdown
-from .reviewer import (
-    OpenAICompatibleReviewer, ReliabilityRuleReviewer, SecurityRuleReviewer,
-)
-from .skills import SkillRegistry
-from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
-from .store import utc_now
-from .task_queue import PermanentTaskError, TaskQueue
-from .task_failure import classify_exception
-from .task_progress import (
-    COMPLETED,
-    FINALIZING,
-    PREPARING_WORKSPACE,
-    QUEUED,
-    SEMANTIC_TRIAGE,
-    TaskProgress,
-)
-from .rollout import ReleaseManager
-from .verifier import RepairVerifier
-from .repository_import import RepositoryImportPolicy
-from .repository_cache import RepositoryCache
 from .repair_workspace import RepairWorkspace
-from .repository_materializer import GitHubMaterializer
-from .repository_scanner import (
-    RepositoryScanner,
-    RepositoryScanCancelled,
-    coverage_warning_counts,
-)
-from .repository_source import (
-    GITHUB_SOURCE_TYPE,
-    LOCAL_IMPORT_SOURCE_TYPE,
-    RepositorySource,
-    parse_repository_source,
-)
-from .uaf_orchestrator import UAF_FINDING_STATES
-from .repository_triage import (
-    RepositorySemanticTriage,
-    RepositorySemanticTriageError,
-)
+from .report import to_markdown
+from .repository_cache import RepositoryCache
+from .repository_import import RepositoryImportPolicy
 from .repository_investigation import (
     FindingInvestigator,
     InvestigationBudget,
@@ -79,12 +61,43 @@ from .repository_investigation import (
     build_module_targets,
     merge_investigation_into_report,
 )
-from .experiments import ExperimentRunner, LLM_MODES
-from .real_world_evaluation import (
-    LLMSecurityTriageClient,
-    RealWorldSecurityEvaluator,
-    SnapshotStore,
+from .repository_materializer import GitHubMaterializer
+from .repository_scanner import (
+    RepositoryScanCancelled,
+    RepositoryScanner,
+    coverage_warning_counts,
 )
+from .repository_source import (
+    GITHUB_SOURCE_TYPE,
+    LOCAL_IMPORT_SOURCE_TYPE,
+    RepositorySource,
+    parse_repository_source,
+)
+from .repository_triage import (
+    RepositorySemanticTriage,
+    RepositorySemanticTriageError,
+)
+from .reviewer import (
+    OpenAICompatibleReviewer,
+    ReliabilityRuleReviewer,
+    SecurityRuleReviewer,
+)
+from .rollout import ReleaseManager
+from .skill_evolution import DeclarativeSkillReviewer, SkillEvolutionEngine
+from .skills import SkillRegistry
+from .store import utc_now
+from .task_failure import classify_exception
+from .task_progress import (
+    COMPLETED,
+    FINALIZING,
+    PREPARING_WORKSPACE,
+    QUEUED,
+    SEMANTIC_TRIAGE,
+    TaskProgress,
+)
+from .task_queue import PermanentTaskError, TaskQueue
+from .uaf_orchestrator import UAF_FINDING_STATES
+from .verifier import RepairVerifier
 from .workspace import (
     CXX_BUILD_EXTENSIONS,
     CXX_SOURCE_EXTENSIONS,
@@ -194,6 +207,58 @@ class ScanProgressTracker:
 
     def _flush(self) -> None:
         self._store.update_task_progress(self._task_id, self.progress.to_dict())
+
+
+def _deterministic_build_model(state: dict) -> dict:
+    """A planner without an LLM: the standard CMake configure pipeline.
+
+    Reads the run contract from the loop state (request and policy
+    projections) and drives the seven tools with fixed actions; a real
+    model adapter can replace it later without service-side changes.
+    """
+
+    step = int(state.get("loop_step") or 0)
+    if step == 1:
+        return {"action": "tool", "tool": "inspect_build_files", "arguments": {}}
+    if step == 2:
+        request = state.get("request") or {}
+        policy = state.get("policy") or {}
+        ref = sorted(policy.get("dependency_sets") or {"default": {}})[0]
+        allow_root = bool(policy.get("allow_repository_root_configure"))
+        source = "." if allow_root else (request.get("component_scope") or ["."])[0]
+        return {
+            "action": "tool",
+            "tool": "propose_build_plan",
+            "arguments": {
+                "plan": {
+                    "snapshot_hash": request.get("snapshot_hash", ""),
+                    "adapter": sorted(policy.get("adapters") or ["cmake-linux"])[0],
+                    "component_scope": list(request.get("component_scope") or ()),
+                    "configure_argv": [
+                        ["cmake", "-S", source, "-B", "build",
+                         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+                    ],
+                    "expected_compdb": "build/compile_commands.json",
+                    "generated_headers": ["build/*.h"],
+                    "include_roots": [],
+                    "dependency_set_ref": ref,
+                }
+            },
+        }
+    if step == 3:
+        ref = sorted((state.get("policy") or {}).get("dependency_sets") or {"default": {}})[0]
+        return {
+            "action": "tool",
+            "tool": "prepare_dependencies",
+            "arguments": {"dependency_set_ref": ref},
+        }
+    if step == 4:
+        return {"action": "tool", "tool": "execute_configure", "arguments": {}}
+    if step == 5:
+        return {"action": "tool", "tool": "export_context_package", "arguments": {}}
+    if step == 6:
+        return {"action": "tool", "tool": "validate_context", "arguments": {}}
+    return {"action": "final", "output": {"status": "done"}}
 
 
 class ReviewService:
@@ -478,8 +543,8 @@ class ReviewService:
 
     def create_experiment(
         self, dataset: str, mode: str, tenant_id: str,
-        *, max_llm_calls: Optional[int] = None,
-        max_total_tokens: Optional[int] = None,
+        *, max_llm_calls: int | None = None,
+        max_total_tokens: int | None = None,
     ) -> dict:
         record = self.experiment_runner.create(
             dataset, mode, tenant_id,
@@ -495,7 +560,7 @@ class ReviewService:
             "mode": record["mode"], "queue": self.experiment_queue.backend,
         }
 
-    def get_experiment(self, run_id: str, tenant_id: str) -> Optional[dict]:
+    def get_experiment(self, run_id: str, tenant_id: str) -> dict | None:
         return self.store.get_experiment(run_id, tenant_id)
 
     def list_experiments(self, tenant_id: str, limit: int = 50) -> list:
@@ -522,14 +587,14 @@ class ReviewService:
             }, message_id="%s:%s" % (run_id, uuid.uuid4().hex[:8]))
         return {"run_id": run_id, "state": record["state"], "resumed": True}
 
-    def _process_experiment_queued(self, payload: Dict[str, Any]) -> None:
+    def _process_experiment_queued(self, payload: dict[str, Any]) -> None:
         self.experiment_runner.run(
             str(payload["run_id"]),
             allow_ambiguous_retry=bool(payload.get("allow_ambiguous_retry")),
         )
 
     def _on_experiment_dead_letter(
-        self, payload: Dict[str, Any], error: str,
+        self, payload: dict[str, Any], error: str,
     ) -> None:
         run_id = str(payload.get("run_id", ""))
         record = self.store.get_experiment(run_id) if run_id else None
@@ -567,7 +632,7 @@ class ReviewService:
         return self._build_llm_reviewer(candidate["prompt"]) if candidate else None
 
     def _run_review(
-        self, task_id: str, repository: str, pull_request: Optional[int],
+        self, task_id: str, repository: str, pull_request: int | None,
         diff: str, tenant_id: str,
     ):
         task = self.store.get(task_id, tenant_id) or {}
@@ -693,7 +758,7 @@ class ReviewService:
             raise ValueError("diff exceeds maximum size of %d bytes" % self.settings.max_diff_bytes)
 
     def _create_task(
-        self, repository: str, diff: str, pull_request: Optional[int], source: str,
+        self, repository: str, diff: str, pull_request: int | None, source: str,
         tenant_id: str = "default",
     ) -> str:
         task_id = str(uuid.uuid4())
@@ -707,8 +772,8 @@ class ReviewService:
         return task_id
 
     def _create_deferred_task(
-        self, repository: str, pull_request: Optional[int], source: str,
-        tenant_id: str, payload: Dict[str, Any],
+        self, repository: str, pull_request: int | None, source: str,
+        tenant_id: str, payload: dict[str, Any],
     ) -> str:
         task_id = str(uuid.uuid4())
         assignment = self.releases.assignment(tenant_id, "llm-review", task_id)
@@ -720,9 +785,9 @@ class ReviewService:
         return task_id
 
     def create_review(
-        self, repository: str, diff: str, pull_request: Optional[int] = None,
+        self, repository: str, diff: str, pull_request: int | None = None,
         source: str = "api", tenant_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         self._validate_review(repository, diff)
         self._authorize_repository(tenant_id, repository)
         task_id = self._create_task(repository, diff, pull_request, source, tenant_id)
@@ -749,10 +814,10 @@ class ReviewService:
             raise
 
     def enqueue_review(
-        self, repository: str, diff: str, pull_request: Optional[int] = None,
-        source: str = "api", github_issue_url: str = "", installation_id: Optional[int] = None,
+        self, repository: str, diff: str, pull_request: int | None = None,
+        source: str = "api", github_issue_url: str = "", installation_id: int | None = None,
         tenant_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         self._validate_review(repository, diff)
         self._authorize_repository(tenant_id, repository)
         task_id = self._create_task(repository, diff, pull_request, source, tenant_id)
@@ -764,7 +829,7 @@ class ReviewService:
         metrics.inc("reviews_enqueued_total")
         return {"task_id": task_id, "state": "PENDING", "queue": self.queue.backend}
 
-    def repository_scan_capabilities(self) -> Dict[str, Any]:
+    def repository_scan_capabilities(self) -> dict[str, Any]:
         result = self.repository_import.capabilities()
         health_status = "disabled"
         health_schema_version = None
@@ -957,13 +1022,15 @@ class ReviewService:
         self, repository_key: str, tenant_id: str = "default",
         agent_detection: bool | None = None,
         investigate_paths: list[str] | None = None,
-    ) -> Dict[str, Any]:
+        build_agent_mode: str | None = None,
+    ) -> dict[str, Any]:
         key = self.repository_import.normalize_key(repository_key)
         self.repository_import.resolve(key)
         return self._enqueue_scan_task(
             RepositorySource.local_import(key), tenant_id, label=key,
             agent_detection=agent_detection,
             investigate_paths=investigate_paths,
+            build_agent_mode=build_agent_mode,
         )
 
     def _ensure_repository_cache(self) -> RepositoryCache:
@@ -1017,6 +1084,7 @@ class ReviewService:
         self, source: RepositorySource | dict[str, str], tenant_id: str = "default",
         agent_detection: bool | None = None,
         investigate_paths: list[str] | None = None,
+        build_agent_mode: str | None = None,
     ) -> dict[str, Any]:
         """Queue a repository scan from a normalized source description.
 
@@ -1036,6 +1104,7 @@ class ReviewService:
             return self._enqueue_scan_task(
                 normalized, tenant_id, agent_detection=agent_detection,
                 investigate_paths=investigate_paths,
+                build_agent_mode=build_agent_mode,
             )
         if allowed not in {"local-import", "both"}:
             metrics.inc("repository_scan_source_local_import_rejected_total")
@@ -1047,6 +1116,7 @@ class ReviewService:
         return self._enqueue_scan_task(
             normalized, tenant_id, agent_detection=agent_detection,
             investigate_paths=investigate_paths,
+            build_agent_mode=build_agent_mode,
         )
 
     def _resolve_cxx_agent_mode(self, agent_detection: bool | None) -> str:
@@ -1089,10 +1159,27 @@ class ReviewService:
             )
         return "off"
 
+    def _resolve_build_agent_mode(self, requested: object) -> str:
+        """Resolve the per-task build-agent mode (frozen once at enqueue).
+
+        不传沿用服务端默认；显式值必须落在闭合词表内。与
+        effective_cxx_agent_mode 相同，模式在入队时解析一次并快照进
+        task_input 与队列消息，worker 与重试都用这份快照。
+        """
+
+        if requested is None:
+            return str(getattr(self.settings, "build_agent_mode", "off") or "off")
+        if not isinstance(requested, str) or requested not in {
+            "off", "auto", "required",
+        }:
+            raise ValueError("build_agent_mode must be off, auto or required")
+        return requested
+
     def _enqueue_scan_task(
         self, normalized: RepositorySource, tenant_id: str, label: str = "",
         agent_detection: bool | None = None,
         investigate_paths: list[str] | None = None,
+        build_agent_mode: str | None = None,
     ) -> dict[str, Any]:
         label = label or normalized.canonical_name or normalized.repository_key
         is_local = normalized.type == LOCAL_IMPORT_SOURCE_TYPE
@@ -1105,6 +1192,7 @@ class ReviewService:
         # 模式在入队时解析一次并快照：队列重试与 worker 都用这份快照，
         # 不重新套用入队之后变更的全局设置（方案 §3.2）。
         effective_cxx_agent_mode = self._resolve_cxx_agent_mode(agent_detection)
+        effective_build_agent_mode = self._resolve_build_agent_mode(build_agent_mode)
         task_input: dict[str, Any] = {
             "source": "repository-import" if is_local else "github-materializer",
             "task_type": "repository_scan",
@@ -1116,6 +1204,7 @@ class ReviewService:
             "effective_cxx_agent_mode": effective_cxx_agent_mode,
             "investigation_mode": self.settings.repository_investigation_mode,
             "investigate_paths": investigate_paths,
+            "build_agent_mode": effective_build_agent_mode,
         }
         message: dict[str, Any] = {
             "task_id": task_id,
@@ -1123,6 +1212,7 @@ class ReviewService:
             "scan_source": scan_source,
             "tenant_id": tenant_id,
             "effective_cxx_agent_mode": effective_cxx_agent_mode,
+            "build_agent_mode": effective_build_agent_mode,
             "investigate_paths": investigate_paths,
         }
         if is_local:
@@ -1195,6 +1285,7 @@ class ReviewService:
         scan_source: dict[str, Any] | None = None,
         cxx_agent_mode: str | None = None,
         investigate_paths: list[str] | None = None,
+        build_agent_mode: str = "off",
     ) -> None:
         tracker = self._scan_progress_tracker(task_id)
         try:
@@ -1206,6 +1297,7 @@ class ReviewService:
                     task_id, scan_source, tenant_id, tracker,
                     cxx_agent_mode=cxx_agent_mode,
                     investigate_paths=investigate_paths,
+                    build_agent_mode=build_agent_mode,
                 )
                 return
             tracker.pipeline_event(PREPARING_WORKSPACE, "正在准备本地导入工作区")
@@ -1223,6 +1315,7 @@ class ReviewService:
                 {"repository_key": repository_key}, tracker,
                 cxx_agent_mode=cxx_agent_mode,
                 investigate_paths=investigate_paths,
+                build_agent_mode=build_agent_mode,
             )
         except RepositoryScanCancelled:
             self._cancel_repository_scan(task_id, "Repository scan cancelled during execution.")
@@ -1236,6 +1329,7 @@ class ReviewService:
         tracker: ScanProgressTracker,
         cxx_agent_mode: str | None = None,
         investigate_paths: list[str] | None = None,
+        build_agent_mode: str = "off",
     ) -> None:
         # 集成层唯一允许的网络调用：ref 钉死与 codeload 物化（缓存命中时零网络）。
         source = parse_repository_source(scan_source)
@@ -1270,7 +1364,109 @@ class ReviewService:
                 materializer_warnings=materialized.get("warnings") or [],
                 cxx_agent_mode=cxx_agent_mode,
                 investigate_paths=investigate_paths,
+                build_agent_mode=build_agent_mode,
             )
+
+    def _make_build_agent_components(self):
+        """(model, executor, policy) for the build agent, or None.
+
+        The default wires a deterministic planner (inspect, propose the
+        standard CMake configure, prepare, execute, export, validate) - a
+        real LLM adapter can replace the model later without touching the
+        service plumbing.  ``None`` means the deployment has no approved
+        build image, so auto degrades with a gap and required blocks the
+        context-dependent stages.
+        """
+
+        image = str(getattr(self.settings, "build_agent_image", "") or "").strip()
+        if not image:
+            return None
+        policy = BuildPolicy(
+            dependency_sets={"default": ApprovedDependencySet(image=image)},
+            allow_repository_root_configure=bool(
+                getattr(self.settings, "build_agent_allow_repository_root", True)
+            ),
+        )
+        return _deterministic_build_model, BuildExecutor(), policy
+
+    def _run_build_agent(
+        self, task_id: str, workspace: "RepositoryWorkspace",
+        repository_label: str, progress: ScanProgressTracker | None,
+    ) -> BuildAgentResult:
+        """Run one bounded build attempt against the fixed snapshot."""
+
+        components = self._make_build_agent_components()
+        if components is None:
+            return BuildAgentResult(
+                run_id="build-" + uuid.uuid4().hex[:16],
+                status=NEEDS_ATTENTION,
+                snapshot_hash="",
+                plan_digest=None,
+                image_digest=None,
+                dependency_digest=None,
+                package_ref=None,
+                artifact_digest=None,
+                attempts=0,
+                coverage=None,
+                failure_code="build-not-configured",
+                evidence_refs=(),
+            )
+        model, executor, policy = components
+        inventory = workspace.inventory()
+        scope = sorted(
+            {
+                item.path.split("/", 1)[0]
+                for item in inventory.files
+                if "/" in item.path
+            }
+        )[:8] or ("src",)
+        units = [
+            item.path
+            for item in inventory.files
+            if item.path.endswith((".cpp", ".cc", ".cxx"))
+        ][:4]
+        if not units:
+            return BuildAgentResult(
+                run_id="build-" + uuid.uuid4().hex[:16],
+                status=NEEDS_ATTENTION,
+                snapshot_hash=inventory.fingerprint(),
+                plan_digest=None,
+                image_digest=None,
+                dependency_digest=None,
+                package_ref=None,
+                artifact_digest=None,
+                attempts=0,
+                coverage=None,
+                failure_code="build-no-cxx-units",
+                evidence_refs=(),
+            )
+        agent = BuildAgent(
+            model=model,
+            executor=executor,
+            policy=policy,
+            snapshot_dir=workspace.root,
+            artifacts_root=Path(self.settings.build_artifacts_root) / task_id,
+        )
+        request = BuildAgentRequestBody(
+            repository_ref=repository_label or "repository",
+            snapshot_hash=inventory.fingerprint(),
+            component_scope=tuple(scope),
+            target_units=tuple(units),
+            toolchain_profile="default",
+            policy_ref="server",
+            budget=BuildBudget(),
+        )
+        return agent.run(
+            request,
+            cancel=lambda: self.store.is_cancelled(task_id),
+            progress=(
+                lambda update: progress.pipeline_event(
+                    "build-agent", update.phase, attempt=update.attempt
+                )
+                if progress is not None
+                else None
+            ),
+        )
 
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
@@ -1279,6 +1475,7 @@ class ReviewService:
         materializer_warnings: list[dict[str, Any]] | None = None,
         cxx_agent_mode: str | None = None,
         investigate_paths: list[str] | None = None,
+        build_agent_mode: str = "off",
     ) -> None:
         workspace = RepositoryWorkspace(
             root,
@@ -1286,6 +1483,34 @@ class ReviewService:
             max_file_bytes=self.settings.repository_scan_max_file_bytes,
             max_total_bytes=self.settings.repository_scan_max_total_bytes,
         )
+        build_gap: dict[str, Any] | None = None
+        if build_agent_mode != "off":
+            build_result = self._run_build_agent(
+                task_id, workspace, repository_label, progress
+            )
+            self.store.update_task_input(task_id, {
+                "build_agent_result": {
+                    "run_id": build_result.run_id,
+                    "status": build_result.status,
+                    "snapshot_hash": build_result.snapshot_hash,
+                    "plan_digest": build_result.plan_digest,
+                    "package_ref": build_result.package_ref,
+                    "attempts": build_result.attempts,
+                    "failure_code": build_result.failure_code,
+                    "evidence_refs": list(build_result.evidence_refs),
+                },
+            })
+            if build_result.status != SUCCEEDED:
+                # auto 降级继续静态扫描但必须显式记录缺口；required 拒绝
+                # 进入依赖构建上下文的阶段（这里即平台检测链）。
+                build_gap = {
+                    "build_agent_mode": build_agent_mode,
+                    "status": build_result.status,
+                    "failure_code": build_result.failure_code,
+                    "blocking": build_agent_mode == "required",
+                }
+                if str(cxx_agent_mode or "off") != "off":
+                    cxx_agent_mode = "off"
         self.store.transition(
             task_id,
             TraceEvent(
@@ -1322,6 +1547,10 @@ class ReviewService:
             "snapshot_files": len(result.inventory.files),
             **import_policy_extra,
         }
+        if build_gap is not None:
+            # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
+            # 阻断依赖上下文阶段的判定，二者都不冒充成功。
+            result.report.collaboration["build_agent"] = build_gap
         if self.repository_semantic_triage is not None:
             if self.store.is_cancelled(task_id):
                 raise RepositoryScanCancelled()
@@ -1487,7 +1716,7 @@ class ReviewService:
         metrics.inc("repository_scans_total")
 
     def _on_task_retry(
-        self, payload: Dict[str, Any], attempt: int, max_attempts: int,
+        self, payload: dict[str, Any], attempt: int, max_attempts: int,
         exc: BaseException, delay: float,
     ) -> None:
         """Queue retry callback: bump progress attempt (scan tasks only).
@@ -1507,7 +1736,7 @@ class ReviewService:
         restored.advance(QUEUED, "任务将自动重试")
         self.store.update_task_progress(task_id, restored.to_dict())
 
-    def _process_queued(self, payload: Dict[str, Any]) -> None:
+    def _process_queued(self, payload: dict[str, Any]) -> None:
         task_id = payload["task_id"]
         task = self.store.get(task_id)
         if not task:
@@ -1540,6 +1769,11 @@ class ReviewService:
                     scan_source,
                     cxx_agent_mode=effective_mode,
                     investigate_paths=investigate_paths,
+                    build_agent_mode=str(
+                        payload.get("build_agent_mode")
+                        or (task.get("input") or {}).get("build_agent_mode")
+                        or "off"
+                    ),
                 )
             else:
                 self._process_repository_scan(
@@ -1549,6 +1783,11 @@ class ReviewService:
                     tenant_id,
                     cxx_agent_mode=effective_mode,
                     investigate_paths=investigate_paths,
+                    build_agent_mode=str(
+                        payload.get("build_agent_mode")
+                        or (task.get("input") or {}).get("build_agent_mode")
+                        or "off"
+                    ),
                 )
             return
         diff = self.store.get_task_payload(task_id)
@@ -1594,7 +1833,7 @@ class ReviewService:
             raise
 
 
-    def _on_dead_letter(self, payload: Dict[str, Any], error: str) -> None:
+    def _on_dead_letter(self, payload: dict[str, Any], error: str) -> None:
         task_id = payload.get("task_id", "")
         tenant_id = payload.get("tenant_id", "default")
         task = self.store.get(task_id, tenant_id) if task_id else None
@@ -1618,9 +1857,9 @@ class ReviewService:
         metrics.inc("dead_letters_total")
 
     def handle_github_pull_request(
-        self, payload: Dict[str, Any], delivery_id: str,
+        self, payload: dict[str, Any], delivery_id: str,
         payload_sha256: str, tenant_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         installation_id = (payload.get("installation") or {}).get("id")
         tenant_id = tenant_id or (
             self.store.installation_tenant(installation_id) if installation_id else None
@@ -1664,7 +1903,7 @@ class ReviewService:
         result["will_post_to_github"] = self.settings.auto_post_review
         return result
 
-    def github_client_for_installation(self, installation_id: Optional[int] = None) -> GitHubClient:
+    def github_client_for_installation(self, installation_id: int | None = None) -> GitHubClient:
         if installation_id is None:
             return self.github
         if not self.settings.github_app_id or not self.settings.github_private_key_path:
@@ -1675,8 +1914,8 @@ class ReviewService:
         return GitHubClient(token)
 
     def create_fix(
-        self, task_id: str, installation_id: Optional[int] = None,
-        tenant_id: Optional[str] = None,
+        self, task_id: str, installation_id: int | None = None,
+        tenant_id: str | None = None,
     ) -> dict:
         task = self.store.get(task_id, tenant_id)
         if not task or not task.get("report"):
@@ -1694,7 +1933,7 @@ class ReviewService:
         return result
 
     def create_repair_preview(
-        self, task_id: str, tenant_id: Optional[str] = None,
+        self, task_id: str, tenant_id: str | None = None,
     ) -> dict:
         task = self.store.get(task_id, tenant_id)
         if not task or task.get("state") != TaskState.SUCCESS.value or not task.get("report"):
@@ -1721,8 +1960,8 @@ class ReviewService:
         return {"task_id": task_id, "repository": repository_key, **result}
 
     def record_feedback(
-        self, task_id: str, category: str, finding: Optional[dict], note: str,
-        tenant_id: Optional[str] = None,
+        self, task_id: str, category: str, finding: dict | None, note: str,
+        tenant_id: str | None = None,
     ) -> dict:
         task = self.store.get(task_id, tenant_id)
         if not task:
@@ -1739,7 +1978,7 @@ class ReviewService:
         metrics.inc("feedback_total")
         return {"recorded": True, "category": category}
 
-    def resume_task(self, task_id: str, tenant_id: Optional[str] = None) -> dict:
+    def resume_task(self, task_id: str, tenant_id: str | None = None) -> dict:
         task = self.store.get(task_id, tenant_id)
         if not task:
             raise ValueError("task not found")
@@ -1783,7 +2022,7 @@ class ReviewService:
         }, message_id=task_id)
         return {"task_id": task_id, "state": "PENDING", "resumed": True}
 
-    def cancel_task(self, task_id: str, tenant_id: Optional[str] = None) -> bool:
+    def cancel_task(self, task_id: str, tenant_id: str | None = None) -> bool:
         return self.store.request_cancel(task_id, tenant_id)
 
     def _authorize_repository(self, tenant_id: str, repository: str) -> None:

@@ -148,7 +148,9 @@ HEALTH_TIMEOUT_SECONDS = 2.0
 UAF_FACTS_SCHEMA_VERSION = 1
 UAF_FACTS_PATH = "/v1/uaf-facts"
 UAF_FACTS_TOOL = "uaf-facts"
-UAF_FACTS_BUILD_CONTEXT_MODES = frozenset({"snapshot-compdb", "heuristic"})
+UAF_FACTS_BUILD_CONTEXT_MODES = frozenset(
+    {"snapshot-compdb", "heuristic", "verified-package"}
+)
 UAF_FACTS_TOOL_RUN_STATUSES = frozenset({"completed", "unavailable"})
 UAF_FACTS_EXTRACTIONS = frozenset({"completed", "unavailable"})
 # The eleven frozen first-phase fact kinds (design section 7.2); the client
@@ -175,7 +177,7 @@ _UAF_COVERAGE_KEYS = {"ast_complete", "cfg_complete", "semantic_gaps"}
 # --- /v1/repro protocol (agent vuln platform plan Task 1: repro workbench) ---
 REPRO_SCHEMA_VERSION = 1
 REPRO_PATH = "/v1/repro"
-REPRO_STAGES = frozenset({"compile", "run"})
+REPRO_STAGES = frozenset({"compile", "run", "context"})
 REPRO_ACCESS_KINDS = frozenset({"READ", "WRITE"})
 REPRO_FRAME_KEYS = frozenset({"function", "file", "line", "column"})
 MAX_REPRO_SOURCES = 16
@@ -864,6 +866,7 @@ class CxxMemoryAnalyzerClient:
         *,
         timeout: int | None = None,
         source_overrides: dict[str, str] | None = None,
+        verified_artifact_digest: str | None = None,
     ) -> ReproResponse:
         """Request one sandboxed ASan compile-and-run under a strict contract.
 
@@ -907,6 +910,11 @@ class CxxMemoryAnalyzerClient:
                 **(
                     {"source_overrides": validated_overrides}
                     if validated_overrides is not None
+                    else {}
+                ),
+                **(
+                    {"verified_artifact_digest": verified_artifact_digest}
+                    if verified_artifact_digest is not None
                     else {}
                 ),
             }

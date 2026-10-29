@@ -59,9 +59,11 @@ REPRO_STEP_OUTPUT_BYTES: Final = 1024 * 1024
 _C_SOURCE_SUFFIX: Final = ".c"
 _C_LANGUAGE: Final = "c"
 _CPP_LANGUAGE: Final = "c++"
-# Semantic options the experiment argv may carry.  ``-std`` is excluded:
-# one argv hosts the C target and the C++ driver, and a per-language
-# standard flag would be applied to both.
+# Semantic options the experiment argv may carry.  ``-std`` stays
+# excluded from the legacy whitelist: one argv hosts the C target and
+# the C++ driver, and a per-language standard flag would be applied to
+# both.  The verified-package path may carry a shared C++ standard via
+# the explicit ``allowed_std`` channel after its own language gate.
 _REPRO_CONTEXT_OPTIONS: Final = SEMANTIC_ARG_OPTIONS - {"-std"}
 # Joined spellings of the value-taking context options (-DFOO, -Ilib, ...).
 _SEMANTIC_JOINED: Final = ("-I", "-D", "-U", "-isystem")
@@ -147,13 +149,17 @@ def _safe_relative_path(value: object) -> str:
     return value
 
 
-def _validated_context_flags(flags: object) -> tuple[str, ...]:
+def _validated_context_flags(
+    flags: object, *, allowed_std: bool = False
+) -> tuple[str, ...]:
     """Accept only semantic compile-context tokens, fail-closed otherwise.
 
-    The whitelist mirrors the semantic context options minus ``-std``
-    (option-plus-value or joined spelling); any other token could smuggle
-    inputs, outputs or behavior changes into the pinned experiment argv
-    and is rejected.
+    The whitelist mirrors the semantic context options (option-plus-value
+    or joined spelling); any other token could smuggle inputs, outputs or
+    behavior changes into the pinned experiment argv and is rejected.
+    ``allowed_std`` opens the ``-std`` channel for the verified-package
+    path only, after its language gate decided a shared C++ standard may
+    ride the single command.
     """
     if isinstance(flags, str | bytes) or not isinstance(flags, list | tuple):
         raise ValueError("repro context flags must be a sequence of strings")
@@ -166,12 +172,15 @@ def _validated_context_flags(flags: object) -> tuple[str, ...]:
             validated.append(flag)
             expect_value = False
             continue
-        if flag in _REPRO_CONTEXT_OPTIONS:
+        if flag in _REPRO_CONTEXT_OPTIONS or (allowed_std and flag == "-std"):
             validated.append(flag)
             expect_value = True
             continue
         option, separator, _ = flag.partition("=")
-        if separator and option in _REPRO_CONTEXT_OPTIONS:
+        if separator and (
+            option in _REPRO_CONTEXT_OPTIONS
+            or (allowed_std and option == "-std")
+        ):
             validated.append(flag)
             continue
         if any(
@@ -194,6 +203,7 @@ def build_compile_argv(
     output_path: str,
     *,
     context_flags: Sequence[str] = (),
+    allowed_std: bool = False,
 ) -> list[str]:
     """Return the pinned, deterministic ASan compile argv for one experiment.
 
@@ -217,7 +227,11 @@ def build_compile_argv(
         raise ValueError("repro source files must be unique")
     driver = _safe_relative_path(driver_path)
     output = _safe_relative_path(output_path)
-    argv = [COMPILE_DRIVER, *COMPILE_FLAGS, *_validated_context_flags(context_flags)]
+    argv = [
+        COMPILE_DRIVER,
+        *COMPILE_FLAGS,
+        *_validated_context_flags(context_flags, allowed_std=allowed_std),
+    ]
     language = _CPP_LANGUAGE
     for source in sources:
         target_language = (
@@ -596,6 +610,48 @@ def _render_unit(option: str, value: str) -> tuple[str, ...]:
     return (option, value)
 
 
+
+
+def _verified_context_outcome(
+    snapshot: PreparedSnapshot,
+    sources: tuple[str, ...],
+    settings: AnalyzerSettings,
+    verified_view: object,
+) -> tuple[str, ...] | str:
+    """The verified-package context for one experiment, or the gap.
+
+    Returns the per-unit projection verbatim when every requested unit
+    carries the exact same validated flags (and any ``-std`` is shared by
+    every unit's language and the C++ driver).  Anything else returns a
+    stable diagnostic string: the experiment must fail explicitly with
+    that gap rather than silently compile a different configuration than
+    the facts and Specialist stages reasoned about.
+    """
+    per_unit: list[tuple[str, ...]] = []
+    for source in sources:
+        context = resolve_build_context_execution(
+            snapshot.root, source, settings, verified_view=verified_view
+        )
+        if context.status != "resolved":
+            return f"verified-context-unresolved:{source}"
+        # argv is (compiler, *flags, "-fsyntax-only", unit).
+        per_unit.append(tuple(context.arguments[1:-2]))
+    if not per_unit:
+        return "verified-context-unresolved:no-sources"
+    if any(unit != per_unit[0] for unit in per_unit[1:]):
+        return "verified-context-inconsistent"
+    flags = per_unit[0]
+    carries_std = any(
+        flag == "-std" or flag.startswith("-std=") for flag in flags
+    )
+    if carries_std and any(
+        not source.endswith((".cpp", ".cc", ".cxx", ".cxx0x", ".hpp"))
+        for source in sources
+    ):
+        return "verified-std-language-mismatch"
+    return flags
+
+
 def _context_flags(
     snapshot: PreparedSnapshot,
     sources: tuple[str, ...],
@@ -603,22 +659,19 @@ def _context_flags(
 ) -> tuple[str, ...]:
     """Semantic flags shared by every source, from trusted compdb entries.
 
-    Each source is resolved through the snapshot-compdb resolver (the same
-    trust model the facts extraction uses: paths must live inside the
-    snapshot, ambiguous or invalid entries degrade to ``incomplete``).
-    Only when every source resolves does the intersection of their
-    semantic arguments reach the experiment argv; any unresolved source
-    keeps the bare pinned argv (the historical behavior) instead of a
-    partially guessed context.  The intersection is taken over complete
-    (option, value) units rebased onto the snapshot root, and the shared
-    units render back in each option's legal spelling.
+    Legacy (snapshot-compdb) path only: the verified-package mode decides
+    through :func:`_verified_context_outcome` and fails explicitly when
+    the context cannot be kept, never by silently dropping it.
     """
+
     if settings is None:
         return ()
     shared: frozenset[tuple[str, str]] | None = None
     order: tuple[tuple[str, str], ...] = ()
     for source in sources:
-        context = resolve_build_context_execution(snapshot.root, source, settings)
+        context = resolve_build_context_execution(
+            snapshot.root, source, settings
+        )
         if context.status != "resolved":
             return ()
         semantic = _repro_context_projection(semantic_arguments(context.arguments))
@@ -648,6 +701,7 @@ def run_repro(
     deadline: AnalysisDeadline,
     timeout_seconds: int = 60,
     settings: AnalyzerSettings | None = None,
+    verified_view: object | None = None,
     source_overrides: dict[str, str] | None = None,
 ) -> ReproExecution:
     """Compile verified sources plus one untrusted driver and run it.
@@ -708,13 +762,37 @@ def run_repro(
     except FileExistsError as exc:
         raise ValueError("repro driver is already staged in this snapshot") from exc
 
+    if verified_view is not None:
+        outcome = _verified_context_outcome(
+            snapshot, sources, settings, verified_view
+        )
+        if isinstance(outcome, str):
+            # The verified context cannot be kept for this experiment:
+            # fail explicitly instead of compiling a different
+            # configuration than the facts and Specialist stages used.
+            return ReproExecution(
+                stage="context",
+                ok=False,
+                exit_code=None,
+                asan_report=None,
+                diagnostics=(outcome,),
+                artifacts=artifacts,
+                elapsed_seconds=round(time.monotonic() - started, 6),
+            )
+        context_flags = outcome
+    else:
+        context_flags = _context_flags(snapshot, sources, settings)
+
     deadline.check("repro compile")
     compile_execution = run_step(
         build_compile_argv(
             sources,
             driver_relative,
             binary_relative,
-            context_flags=_context_flags(snapshot, sources, settings),
+            context_flags=context_flags,
+            # A -std only ever comes from the verified path, whose
+            # language gate has already approved it for this command.
+            allowed_std=verified_view is not None,
         ),
         snapshot,
         ".",

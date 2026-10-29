@@ -728,26 +728,76 @@ def _semantic_flags_from_compdb(
                 if not isinstance(command, str):
                     continue
                 arguments = command.split()
-            flags: list[str] = []
-            expect_value = False
-            for token in arguments[1:]:
-                text = str(token)
-                if expect_value:
-                    flags.append(text)
-                    expect_value = False
-                elif text in _DRIVER_CONTRACT_VALUE_OPTIONS:
-                    flags.append(text)
-                    expect_value = True
-                elif text.startswith(("-I", "-D", "-U", "-isystem", "-target")):
-                    flags.append(text)
-                if len(flags) >= _DRIVER_CONTRACT_FLAGS_LIMIT:
-                    break
+            flags = _extract_driver_flags(arguments[1:])
             if flags:
                 return tuple(flags)
     return ()
 
 
-def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
+def _extract_driver_flags(tokens: Sequence[str]) -> list[str]:
+    """The semantic include/define tokens of one compiler argv tail."""
+    flags: list[str] = []
+    expect_value = False
+    for token in tokens:
+        text = str(token)
+        if expect_value:
+            flags.append(text)
+            expect_value = False
+        elif text in _DRIVER_CONTRACT_VALUE_OPTIONS:
+            flags.append(text)
+            expect_value = True
+        elif text.startswith(("-I", "-D", "-U", "-isystem", "-target")):
+            flags.append(text)
+        if len(flags) >= _DRIVER_CONTRACT_FLAGS_LIMIT:
+            break
+    return flags
+
+
+def _semantic_flags_from_view(
+    view: object, unit_path: str, workspace: RepositoryWorkspace
+) -> tuple[str, ...] | None:
+    """The validated flags of one unit's verified-package projection.
+
+    Goes through the same shared resolver as the facts and repro stages
+    (fail-closed validation included), so a view whose projection the
+    resolver rejects never produces a usable Specialist compile contract:
+    ``None`` means rejected and the driver contract says so instead of
+    describing an environment the platform itself would refuse.  The
+    returned flags are exactly the resolver's projected argv tail -
+    standards, language modes and forced includes included, no
+    Specialist-side re-filtering.
+    """
+    from cxx_analyzer.build_context import resolve_build_context_execution
+    from cxx_analyzer.config import AnalyzerSettings
+
+    settings = AnalyzerSettings(
+        auto_cmake=True,
+        build_steps=(),
+        test_steps=(),
+        max_memory_mb=1024,
+        max_processes=32,
+        max_output_bytes=8192,
+        step_timeout_seconds=17,
+        total_timeout_seconds=90,
+        repository_scan_max_files=100,
+        repository_scan_max_file_bytes=4096,
+        repository_scan_max_total_bytes=16384,
+        trusted_build_context_generation=False,
+    )
+    context = resolve_build_context_execution(
+        workspace.root, unit_path, settings, verified_view=view
+    )
+    if context.status != "resolved":
+        return None
+    # argv is (compiler, *flags, "-fsyntax-only", unit).
+    return tuple(context.arguments[1:-2])
+
+
+def _driver_contract(
+    workspace: RepositoryWorkspace,
+    unit_path: str,
+    verified_view: object | None = None,
+) -> str:
     """The exact experiment compile command the driver author must target.
 
     Models hallucinate headers and include the C target unit itself when
@@ -755,7 +805,17 @@ def _driver_contract(workspace: RepositoryWorkspace, unit_path: str) -> str:
     snapshot's own include/define flags) removes that guesswork.
     """
 
-    flags = _semantic_flags_from_compdb(workspace, unit_path)
+    if verified_view is not None:
+        flags = _semantic_flags_from_view(verified_view, unit_path, workspace)
+        if flags is None:
+            return (
+                "Driver contract (verified context rejected):\n"
+                "- The verified build context for this unit failed the "
+                "shared fail-closed validation; state no compile "
+                "environment and request a corrected build context."
+            )
+    else:
+        flags = _semantic_flags_from_compdb(workspace, unit_path)
     flags_text = " ".join(flags) if flags else "(no extra flags)"
     if unit_path.endswith(".c"):
         sources_text = f"-x c {unit_path} -x c++ <your driver>"
@@ -1832,6 +1892,7 @@ def _process_target(
     source_mode: str,
     repro_workbench: Any,
     tool_analysis: Any,
+    verified_view: object | None = None,
     diagnostics: list[str],
     specialist_calls: list[int],
     critic_calls: list[int],
@@ -1851,7 +1912,9 @@ def _process_target(
         line=target.line,
         fact_lines=fact_lines,
         snippet=snippet,
-        driver_contract=_driver_contract(workspace, target.path),
+        driver_contract=_driver_contract(
+            workspace, target.path, verified_view=verified_view
+        ),
     )
     step_timeout = _bounded_step_timeout(timeout, deadline)
     if step_timeout is None:
@@ -2062,6 +2125,7 @@ def run_platform_review(
     dialogue_rounds: int = 1,
     timeout: int = 60,
     source_mode: str = MODE_REPOSITORY,
+    verified_view: object | None = None,
     should_cancel: Any = None,
     tool_analysis: Any = None,
     cache: ResultCache | None = None,
@@ -2362,6 +2426,7 @@ def run_platform_review(
                 source_mode=source_mode,
                 repro_workbench=repro_workbench,
                 tool_analysis=tool_analysis,
+                verified_view=verified_view,
                 diagnostics=worker_diagnostics,
                 specialist_calls=specialist_calls,
                 critic_calls=critic_calls,

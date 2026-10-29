@@ -54,8 +54,52 @@ _UAF_FACTS_REQUEST_FIELDS: Final = frozenset(
     }
 )
 _UAF_FACTS_TOOL: Final = "uaf-facts"
-_UAF_FACTS_BUILD_CONTEXT_FIELDS: Final = frozenset({"mode"})
-_UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset({"snapshot-compdb", "heuristic"})
+_UAF_FACTS_BUILD_CONTEXT_FIELDS: Final = frozenset({"mode", "artifact_digest"})
+_UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset(
+    {"snapshot-compdb", "heuristic", "verified-package"}
+)
+
+# Verified-package views registered by the host process that owns the
+# sidecar (built with lima.build_context_view; this package stays
+# lima-free and consumes the duck-typed surface only).  Views are keyed
+# per snapshot and per artifact digest, with a default slot for hosts
+# that register one view per run; only mode=="verified-package" requests
+# ever consult the registry, so legacy modes keep their frozen
+# semantics no matter what else is registered.
+_VERIFIED_BUILD_VIEWS: dict[str, dict[str, object]] = {}
+_DEFAULT_VIEW_SLOT: Final = ""
+
+
+def register_verified_build_view(
+    snapshot_sha256: str, view: object, artifact_digest: str | None = None
+) -> None:
+    """Register one sealed analysis view for a snapshot's uaf-facts run."""
+
+    if (
+        not isinstance(snapshot_sha256, str)
+        or len(snapshot_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in snapshot_sha256)
+    ):
+        raise ValueError("invalid snapshot digest for verified view registration")
+    slot = artifact_digest if artifact_digest is not None else _DEFAULT_VIEW_SLOT
+    _VERIFIED_BUILD_VIEWS.setdefault(snapshot_sha256, {})[slot] = view
+
+
+def lookup_verified_build_view(
+    snapshot_sha256: str, artifact_digest: str | None
+) -> object | None:
+    """The registered view for one run identity, or ``None``."""
+
+    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {})
+    if artifact_digest:
+        return views.get(artifact_digest)
+    return views.get(_DEFAULT_VIEW_SLOT)
+
+
+def clear_verified_build_views() -> None:
+    """Drop every registered verified-package view (test isolation)."""
+
+    _VERIFIED_BUILD_VIEWS.clear()
 MAX_UAF_TRANSLATION_UNITS: Final = 16
 MAX_REPRO_SOURCES: Final = 16
 MAX_REPRO_DRIVER_BYTES: Final = 256 * 1024
@@ -69,7 +113,9 @@ _REPRO_REQUEST_FIELDS: Final = frozenset(
         "driver_code",
     }
 )
-_REPRO_OPTIONAL_FIELDS: Final = frozenset({"source_overrides"})
+_REPRO_OPTIONAL_FIELDS: Final = frozenset(
+    {"source_overrides", "verified_artifact_digest"}
+)
 _MAX_REPRO_SOURCE_OVERRIDES: Final = 4
 _MAX_REPRO_SOURCE_OVERRIDE_BYTES: Final = 512 * 1024
 # A JSON string can expand each input byte into six escape bytes. Cover
@@ -393,7 +439,11 @@ def _validate_uaf_facts_payload(payload: object) -> dict[str, object]:
         if isinstance(payload, dict)
         else None
     )
-    if type(payload) is not dict or set(payload) != _UAF_FACTS_REQUEST_FIELDS:
+    if (
+        type(payload) is not dict
+        or not _UAF_FACTS_REQUEST_FIELDS.issubset(payload)
+        or set(payload) - _UAF_FACTS_REQUEST_FIELDS - {"build_context_artifact_digest"}
+    ):
         raise RequestError("invalid_request", request_id=request_id)
 
     if request_id is None:
@@ -422,11 +472,19 @@ def _validate_uaf_facts_payload(payload: object) -> dict[str, object]:
     build_context = payload["build_context"]
     if (
         type(build_context) is not dict
-        or set(build_context) != _UAF_FACTS_BUILD_CONTEXT_FIELDS
+        or "mode" not in build_context
+        or set(build_context) - _UAF_FACTS_BUILD_CONTEXT_FIELDS
     ):
         raise RequestError("invalid_request", request_id=request_id)
     mode = build_context["mode"]
     if not isinstance(mode, str) or mode not in _UAF_FACTS_BUILD_CONTEXT_MODES:
+        raise RequestError("invalid_request", request_id=request_id)
+    artifact_digest = build_context.get("artifact_digest")
+    if artifact_digest is not None and (
+        not isinstance(artifact_digest, str)
+        or not artifact_digest
+        or mode != "verified-package"
+    ):
         raise RequestError("invalid_request", request_id=request_id)
 
     translation_units = _validate_uaf_translation_units(
@@ -439,6 +497,7 @@ def _validate_uaf_facts_payload(payload: object) -> dict[str, object]:
         "snapshot_sha256": snapshot_sha256,
         "translation_units": translation_units,
         "build_context_mode": mode,
+        "build_context_artifact_digest": artifact_digest,
     }
 
 
@@ -463,6 +522,8 @@ def _extract_uaf_unit(
     translation_unit: str,
     settings: AnalyzerSettings,
     deadline: AnalysisDeadline,
+    build_context_mode: str = "snapshot-compdb",
+    artifact_digest: str | None = None,
 ) -> dict[str, object]:
     """Resolve one unit's build context and extract facts when pinned.
 
@@ -472,7 +533,35 @@ def _extract_uaf_unit(
     because a heuristic context can never contribute to ``fact-verified``.
     """
 
-    context = resolve_build_context_execution(snapshot.root, translation_unit, settings)
+    verified_view = None
+    if build_context_mode == "verified-package":
+        verified_view = lookup_verified_build_view(
+            getattr(snapshot, "sha256", ""), artifact_digest
+        )
+        if verified_view is None:
+            from .build_context import _resolve_incomplete
+
+            context = _resolve_incomplete(
+                "verified-package", ("verified-view-not-registered",)
+            )
+            wire = context.wire
+            return _uaf_unit_entry(
+                translation_unit,
+                "unavailable",
+                wire,
+                {
+                    "ast_complete": False,
+                    "cfg_complete": False,
+                    "semantic_gaps": ["verified-view-not-registered"],
+                },
+                [],
+            )
+    context = resolve_build_context_execution(
+        snapshot.root,
+        translation_unit,
+        settings,
+        verified_view=verified_view,
+    )
     wire = context.wire
     if context.status != "resolved":
         return _uaf_unit_entry(
@@ -564,7 +653,14 @@ def uaf_facts_request(payload: object, settings: AnalyzerSettings) -> dict[str, 
     try:
         snapshot.verify_inventory(deadline)
         for unit in request["translation_units"]:
-            entry = _extract_uaf_unit(snapshot, unit, settings, deadline)
+            entry = _extract_uaf_unit(
+                snapshot,
+                unit,
+                settings,
+                deadline,
+                build_context_mode=str(request.get("build_context_mode", "snapshot-compdb")),
+                artifact_digest=request.get("build_context_artifact_digest"),
+            )
             translation_units.append(entry)
             if entry["extraction"] != "completed":
                 all_completed = False
@@ -682,6 +778,13 @@ def _validate_repro_payload(payload: object) -> dict[str, object]:
                     "invalid_request", request_id=request_id
                 )
 
+    verified_artifact_digest = payload.get("verified_artifact_digest")
+    if verified_artifact_digest is not None and (
+        not isinstance(verified_artifact_digest, str)
+        or not verified_artifact_digest
+    ):
+        raise RequestError("invalid_request", request_id=request_id)
+
     return {
         "request_id": request_id,
         "repository_key": normalized_key,
@@ -689,6 +792,7 @@ def _validate_repro_payload(payload: object) -> dict[str, object]:
         "source_files": source_files,
         "driver_code": driver_code,
         "source_overrides": source_overrides,
+        "verified_artifact_digest": verified_artifact_digest,
     }
 
 
@@ -725,6 +829,16 @@ def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, obje
     snapshot = prepared.__enter__()
     try:
         snapshot.verify_inventory(deadline)
+        verified_artifact_digest = request.get("verified_artifact_digest")
+        verified_view = None
+        if verified_artifact_digest is not None:
+            verified_view = lookup_verified_build_view(
+                snapshot.sha256, verified_artifact_digest
+            )
+            if verified_view is None:
+                raise RequestError("invalid_request", request_id=request_id)
+        elif lookup_verified_build_view(snapshot.sha256, None) is not None:
+            verified_view = lookup_verified_build_view(snapshot.sha256, None)
         execution = run_repro(
             snapshot,
             request["source_files"],
@@ -733,6 +847,7 @@ def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, obje
             timeout_seconds=settings.step_timeout_seconds,
             settings=settings,
             source_overrides=request["source_overrides"],
+            verified_view=verified_view,
         )
         snapshot.verify_inventory(deadline)
     except AnalysisDeadlineExceeded as exc:

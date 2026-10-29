@@ -196,7 +196,13 @@ _REJECTION_MESSAGES: Final = {
 # the main-process package; a parity test keeps the two in lockstep.
 WIRE_RESOLUTION_STATUSES: Final = frozenset({"resolved", "incomplete", "unavailable"})
 WIRE_SOURCE_KINDS: Final = frozenset(
-    {"repository-compdb", "cmake-export", "build-adapter", "heuristic"}
+    {
+        "repository-compdb",
+        "cmake-export",
+        "build-adapter",
+        "heuristic",
+        "verified-package",
+    }
 )
 _WIRE_MAX_DIAGNOSTIC_BYTES: Final = 2_048
 
@@ -783,11 +789,159 @@ def _canonical_unit(root: Path, translation_unit: object) -> str | None:
     return relative_text
 
 
+_VERIFIED_LAYOUT_DIR: Final = "build/lima-verified"
+
+
+def _materialize_view_members(
+    root: Path, view: object
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Lay the sealed package members into the writable build tree.
+
+    Production snapshots freeze the source tree read-only and keep only
+    ``build/`` writable, so nothing is ever written next to the sources:
+    vendored package roots land under ``build/lima-verified/`` (the
+    returned rewrite map re-points include values there) and generated
+    files return to their build locations, which are inside the writable
+    tree by construction.  The layout is idempotent (same bytes are
+    skipped) and byte conflicts or unwritable targets are reported as
+    diagnostics instead of partially mutating anything.
+    """
+
+    try:
+        members: dict[str, bytes] = {
+            str(path): bytes(view.read_member(path))
+            for path in view.member_paths
+        }
+    except Exception:  # noqa: BLE001 - a broken view is a failed layout
+        return ("verified-view-members-unreadable",), {}
+    diagnostics: list[str] = []
+    rewrites: dict[str, str] = {}
+    for relative, data in sorted(members.items()):
+        if relative in ("context_manifest.json", "compile_commands.json"):
+            continue
+        if relative.startswith("generated/"):
+            target_relative = relative[len("generated/") :]
+            if not target_relative or target_relative.startswith(("..", "/")):
+                diagnostics.append(f"verified-package-member-unsafe:{relative}")
+                continue
+            target = root / target_relative
+        else:
+            package_root = relative.split("/", 1)[0]
+            rewrites.setdefault(
+                package_root, f"{_VERIFIED_LAYOUT_DIR}/{package_root}"
+            )
+            target = root / _VERIFIED_LAYOUT_DIR / relative
+        try:
+            if target.exists():
+                if target.is_file() and target.read_bytes() == data:
+                    continue
+                diagnostics.append(
+                    f"verified-package-member-conflict:{relative}"
+                )
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except OSError:
+            diagnostics.append(f"verified-package-member-unwritable:{relative}")
+    return tuple(diagnostics), rewrites
+
+
+def _rewrite_include_values(
+    flags: Sequence[str], rewrites: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Re-point package-relative include values at the layout location."""
+
+    if not rewrites:
+        return tuple(flags)
+
+    def rewrite(value: str) -> str:
+        for package_root, layout in rewrites.items():
+            if value == package_root or value.startswith(package_root + "/"):
+                return layout + value[len(package_root) :]
+        return value
+
+    result: list[str] = []
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in _SUPPORTED_PATH_OPTIONS and index + 1 < len(flags):
+            result.append(flag)
+            result.append(rewrite(flags[index + 1]))
+            index += 2
+            continue
+        option, separator, tail = flag.partition("=")
+        if separator and tail and option in _SUPPORTED_PATH_OPTIONS:
+            result.append(option + "=" + rewrite(tail))
+            index += 1
+            continue
+        if flag.startswith("-I") and len(flag) > 2:
+            result.append("-I" + rewrite(flag[2:]))
+            index += 1
+            continue
+        result.append(flag)
+        index += 1
+    return tuple(result)
+
+
+def _resolve_from_verified_view(
+    root: Path, unit: str, view: object
+) -> UnitBuildContext | None:
+    """Resolve one unit from an injected verified-package view.
+
+    The view is a duck-typed :class:`lima.build_context_view.AnalysisContextView`
+    (this module stays lima-free): ``target_units``, ``flags_for_tu``,
+    ``member_paths`` and ``read_member`` are the consumed surface.  A unit
+    outside the view's declared targets returns ``None`` so the frozen
+    existing tiers keep answering for it.  The sealed package members are
+    laid into the snapshot first (vendored roots in place, generated files
+    back at their build locations), the argv is rebased onto the snapshot
+    root - one working directory for every path - and the projected flags
+    go through the same fail-closed validator as every other source
+    (response files, plugin loaders and escaping paths degrade to
+    ``incomplete``).  The TU-level ``context_hash`` is computed here; it
+    never borrows the package-level hashes.
+    """
+
+    target_units = tuple(getattr(view, "target_units", ()) or ())
+    if unit not in target_units:
+        return None
+    try:
+        flags = tuple(view.flags_for_tu(unit))
+    except Exception:  # noqa: BLE001 - a broken view is an incomplete unit
+        return _resolve_incomplete("verified-package", ("verified-view-invalid",))
+    layout_diagnostics, rewrites = _materialize_view_members(root, view)
+    if layout_diagnostics:
+        return _resolve_incomplete("verified-package", layout_diagnostics)
+    flags = _rewrite_include_values(flags, rewrites)
+    compiler = (
+        "clang++-14" if language_for_path(unit) == "c++" else "clang-14"
+    )
+    argv = (compiler, *flags, "-fsyntax-only", unit)
+    working_directory, relative_directory = inside_snapshot(root, root)
+    _unused, rejections = validate_compiler_argv(
+        argv, root=root, working_directory=working_directory
+    )
+    if rejections:
+        return _resolve_incomplete("verified-package", _dedupe(rejections))
+    context_hash = compute_context_hash(
+        unit, "verified-package", argv, relative_directory
+    )
+    return UnitBuildContext(
+        status="resolved",
+        source_kind="verified-package",
+        context_hash=context_hash,
+        diagnostics=(),
+        arguments=argv,
+        relative_directory=relative_directory,
+    )
+
+
 def _resolve(
     snapshot_root: Path,
     translation_unit: str,
     settings: AnalyzerSettings,
     capabilities: Mapping[str, bool] | None,
+    verified_view: object | None = None,
 ) -> UnitBuildContext:
     """Shared decision core behind every public resolver projection."""
 
@@ -805,6 +959,11 @@ def _resolve(
             status="unavailable",
             diagnostics=("unsupported-translation-unit",),
         )
+
+    if verified_view is not None:
+        outcome = _resolve_from_verified_view(root, unit, verified_view)
+        if outcome is not None:
+            return outcome
 
     generation_enabled = False
     if settings.trusted_build_context_generation:
@@ -851,6 +1010,7 @@ def resolve_build_context_execution(
     translation_unit: str,
     settings: AnalyzerSettings,
     capabilities: Mapping[str, bool] | None = None,
+    verified_view: object | None = None,
 ) -> UnitBuildContext:
     """Resolve one translation unit and keep the extraction-stage details.
 
@@ -863,7 +1023,13 @@ def resolve_build_context_execution(
     non-resolved context can never reach the compiler.
     """
 
-    return _resolve(snapshot_root, translation_unit, settings, capabilities)
+    return _resolve(
+        snapshot_root,
+        translation_unit,
+        settings,
+        capabilities,
+        verified_view,
+    )
 
 
 def resolve_build_context_wire(
@@ -871,6 +1037,7 @@ def resolve_build_context_wire(
     translation_unit: str,
     settings: AnalyzerSettings,
     capabilities: Mapping[str, bool] | None = None,
+    verified_view: object | None = None,
 ) -> dict[str, object]:
     """Resolve one translation unit and project the closed wire dict.
 
@@ -880,7 +1047,13 @@ def resolve_build_context_wire(
     identical to ``lima.uaf_models``.
     """
 
-    return _resolve(snapshot_root, translation_unit, settings, capabilities).wire
+    return _resolve(
+        snapshot_root,
+        translation_unit,
+        settings,
+        capabilities,
+        verified_view,
+    ).wire
 
 
 def resolve_build_context(
@@ -888,6 +1061,7 @@ def resolve_build_context(
     translation_unit: str,
     settings: AnalyzerSettings,
     capabilities: Mapping[str, bool] | None = None,
+    verified_view: object | None = None,
 ) -> object:
     """Resolve the pinned build context for one translation unit.
 
@@ -914,7 +1088,9 @@ def resolve_build_context(
     claims Clang parse success -- that is the extraction stage's answer.
     """
 
-    resolution = _resolve(snapshot_root, translation_unit, settings, capabilities)
+    resolution = _resolve(
+        snapshot_root, translation_unit, settings, capabilities, verified_view
+    )
     return _resolution(
         status=resolution.status,
         source_kind=resolution.source_kind,

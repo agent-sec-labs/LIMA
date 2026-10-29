@@ -860,9 +860,12 @@ function BuildAgentCard({
       : blocking
         ? { label: "构建失败（已阻断检测）", color: "red" }
         : { label: "构建失败（已降级）", color: "orange" };
+  const consumed = summary.consumed_by_analysis === true;
   const note =
     status === "SUCCEEDED"
-      ? `构建智能体在 ${attempts} 次尝试内准备了编译上下文；检测阶段使用同一份已验证参数。`
+      ? consumed
+        ? `构建智能体在 ${attempts} 次尝试内准备了编译上下文；检测阶段使用同一份已验证参数。`
+        : `构建智能体在 ${attempts} 次尝试内准备并校验了编译上下文；本部署尚未把该上下文接入检测阶段，本次检测未使用它。`
       : blocking
         ? "构建未完成，依赖编译上下文的检测阶段被拒绝执行；这不代表仓库没有风险，请处理构建阻塞后重试。"
         : "构建未完成，检测已降级为不依赖编译上下文的静态路径；结论覆盖范围相应缩小。";

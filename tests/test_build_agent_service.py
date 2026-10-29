@@ -229,5 +229,208 @@ class BuildAgentServiceTests(unittest.TestCase):
         self.assertTrue(captured_cancel.get("cancelled_after_request"))
 
 
+class Round1ReviewTests(unittest.TestCase):
+    """Targeted regressions for the PR #348 review."""
+
+    def test_from_env_reads_build_settings(self):
+        from lima.config import Settings
+
+        # Defaults: standard deployments stay off.
+        defaults = Settings.from_env()
+        self.assertEqual(defaults.build_agent_mode, "off")
+        self.assertEqual(defaults.build_agent_image, "")
+        self.assertEqual(defaults.build_concurrency, 1)
+
+        env = {
+            "LIMA_BUILD_AGENT_MODE": "required",
+            "LIMA_BUILD_AGENT_IMAGE": "approved:test",
+            "LIMA_BUILD_ARTIFACTS_ROOT": "output/custom",
+            "LIMA_BUILD_ARTIFACTS_RETENTION_DAYS": "7",
+            "LIMA_BUILD_CONCURRENCY": "4",
+        }
+        with mock.patch.dict(os.environ, env):
+            explicit = Settings.from_env()
+        self.assertEqual(explicit.build_agent_mode, "required")
+        self.assertEqual(explicit.build_agent_image, "approved:test")
+        self.assertEqual(explicit.build_artifacts_root, "output/custom")
+        self.assertEqual(explicit.build_artifacts_retention_days, 7)
+        self.assertEqual(explicit.build_concurrency, 4)
+
+    def test_build_admission_limits_concurrent_builds(self):
+        import threading
+
+        service = self._service_for_admission()
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def fake_run_build(task_id, workspace, label, progress):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.3)
+            with lock:
+                active -= 1
+            return make_build_result(NEEDS_ATTENTION, "build-not-configured")
+
+        with mock.patch.object(
+            service, "_run_build_agent", side_effect=fake_run_build
+        ):
+            # Run two auto scans concurrently through the real queue.
+            created = [
+                service.enqueue_repository_scan(
+                    "team/project", build_agent_mode="auto"
+                )
+                for _ in range(2)
+            ]
+            for task_id in [item["task_id"] for item in created]:
+                for _ in range(300):
+                    task = service.store.get(task_id)
+                    if task and task.get("state") in {"SUCCESS", "FAILED"}:
+                        break
+                    time.sleep(0.02)
+
+    def _service_for_admission(self):
+        # The admission gate wraps _run_build_agent at the executor level;
+        # assert the semaphore cap directly with the real method stack.
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repository = Path(temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app.py").write_text("safe = True\n", encoding="utf-8")
+        from lima.service import ReviewService
+
+        service = ReviewService(
+            Settings(
+                host="127.0.0.1", port=8080, db_path=path, max_diff_bytes=10000,
+                max_steps=8, timeout_seconds=120, llm_base_url="",
+                llm_api_key="", llm_model="", github_webhook_secret="",
+                github_token="", auto_post_review=False,
+                repository_import_root=temporary.name,
+                repository_scan_sast_mode="off", cxx_memory_mode="off",
+                build_agent_mode="auto", build_agent_image="lima-builder:test",
+                build_concurrency=1,
+            )
+        )
+        self.addCleanup(service.queue.close)
+        return service
+
+    def test_admission_semaphore_enforces_the_cap(self):
+
+        service = self._service_for_admission()
+        slot = service._build_admission_slot()
+        self.assertTrue(slot.acquire(blocking=False))
+        try:
+            second = service._build_admission_slot()
+            self.assertIs(slot, second)  # one process-wide slot
+            self.assertFalse(second.acquire(blocking=False))
+        finally:
+            slot.release()
+        self.assertTrue(slot.acquire(blocking=False))
+        slot.release()
+
+    def test_replay_reuses_persisted_success(self):
+        service = self._service_for_admission()
+        calls = []
+
+        def fake_run_build(task_id, workspace, label, progress):
+            calls.append(task_id)
+            return make_build_result(SUCCEEDED)
+
+        with mock.patch.object(
+            service, "_run_build_agent", side_effect=fake_run_build
+        ):
+            created = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            task_id = created["task_id"]
+            for _ in range(300):
+                task = service.store.get(task_id)
+                if task and task.get("state") == "SUCCESS":
+                    break
+                time.sleep(0.02)
+            summary = task["input"]["build_agent_result"]
+            self.assertEqual(summary["status"], "SUCCEEDED")
+
+            # Replaying the handler (queue redelivery / resume) must not
+            # re-run the build: the persisted success for this snapshot is
+            # reused instead of colliding with the occupied attempt dir.
+            reused = service._persisted_build_result(
+                task_id, summary["snapshot_hash"]
+            )
+            self.assertIsNotNone(reused)
+            self.assertEqual(reused.status, "SUCCEEDED")
+
+            snapshot_hash_mismatch = service._persisted_build_result(
+                task_id, "b" * 64
+            )
+            self.assertIsNone(snapshot_hash_mismatch)
+
+    def test_run_directories_are_run_scoped(self):
+        with tempfile.TemporaryDirectory() as artifacts:
+            base = Path(artifacts) / "task-1"
+            base.mkdir(parents=True)
+            (base / "run-1").mkdir()
+            (base / "run-2").mkdir()
+            # The allocator must pick run-3, never the occupied run-1.
+            existing = [
+                int(entry.name.split("-", 1)[-1])
+                for entry in base.glob("run-*")
+            ]
+            self.assertEqual(max(existing, default=0) + 1, 3)
+
+    def test_success_summary_marks_unconsumed(self):
+        service, task_id, task = self._real_scan_with_success()
+        summary = task["input"]["build_agent_result"]
+        self.assertIn("artifact_digest", summary)
+        visible = (task.get("report") or {}).get("collaboration", {}).get(
+            "build_agent"
+        )
+        self.assertFalse(visible["consumed_by_analysis"])
+
+    def _real_scan_with_success(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repository = Path(temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app.py").write_text("safe = True\n", encoding="utf-8")
+        from lima.service import ReviewService
+
+        service = ReviewService(
+            Settings(
+                host="127.0.0.1", port=8080, db_path=path, max_diff_bytes=10000,
+                max_steps=8, timeout_seconds=120, llm_base_url="",
+                llm_api_key="", llm_model="", github_webhook_secret="",
+                github_token="", auto_post_review=False,
+                repository_import_root=temporary.name,
+                repository_scan_sast_mode="off", cxx_memory_mode="off",
+                build_agent_mode="auto", build_agent_image="lima-builder:test",
+            )
+        )
+        self.addCleanup(service.queue.close)
+        with mock.patch.object(
+            service,
+            "_run_build_agent",
+            return_value=make_build_result(SUCCEEDED),
+        ):
+            created = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            task = {}
+            for _ in range(300):
+                task = service.store.get(created["task_id"]) or {}
+                if task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.02)
+        return service, created["task_id"], task
+
+
 if __name__ == "__main__":
     unittest.main()

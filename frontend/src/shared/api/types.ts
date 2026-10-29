@@ -10,6 +10,7 @@ export const TASK_STAGES = [
   "DOWNLOADING_ARCHIVE",
   "VALIDATING_ARCHIVE",
   "PREPARING_WORKSPACE",
+  "BUILD_AGENT_PREPARATION",
   "INVENTORY",
   "DATAFLOW_ANALYSIS",
   "AST_ANALYSIS",
@@ -311,6 +312,8 @@ export interface ScanReport {
       attempts?: number;
       failure_code?: string | null;
       blocking?: boolean;
+      artifact_digest?: string | null;
+      consumed_by_analysis?: boolean;
     };
     import_policy?: {
       resolved_revision?: string;

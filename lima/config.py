@@ -554,6 +554,20 @@ class Settings:
             cxx_max_response_bytes=_int("LIMA_CXX_MAX_RESPONSE_BYTES", 2 * 1024 * 1024),
             cxx_agent_mode=os.getenv("LIMA_CXX_AGENT_MODE", "off").strip().lower(),
             cxx_agent_model=os.getenv("LIMA_CXX_AGENT_MODEL", "").strip(),
+            build_agent_mode=os.getenv(
+                "LIMA_BUILD_AGENT_MODE", "off"
+            ).strip().lower(),
+            build_agent_image=os.getenv("LIMA_BUILD_AGENT_IMAGE", "").strip(),
+            build_artifacts_root=os.getenv(
+                "LIMA_BUILD_ARTIFACTS_ROOT", "output/build-artifacts"
+            ).strip(),
+            build_artifacts_retention_days=_int(
+                "LIMA_BUILD_ARTIFACTS_RETENTION_DAYS", 30
+            ),
+            build_concurrency=_int("LIMA_BUILD_CONCURRENCY", 1),
+            build_agent_allow_repository_root=_bool(
+                "LIMA_BUILD_AGENT_ALLOW_REPOSITORY_ROOT", True
+            ),
             cxx_agent_max_calls=_int("LIMA_CXX_AGENT_MAX_CALLS", 40),
             cxx_agent_max_context_files=_int("LIMA_CXX_AGENT_MAX_CONTEXT_FILES", 12),
             cxx_agent_max_context_lines=_int("LIMA_CXX_AGENT_MAX_CONTEXT_LINES", 1200),

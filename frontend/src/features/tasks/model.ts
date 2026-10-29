@@ -23,6 +23,7 @@ export const STAGE_LABELS: Record<TaskStage, string> = {
   DOWNLOADING_ARCHIVE: "下载快照",
   VALIDATING_ARCHIVE: "校验归档",
   PREPARING_WORKSPACE: "准备工作区",
+  BUILD_AGENT_PREPARATION: "构建智能体准备上下文",
   INVENTORY: "文件盘点",
   DATAFLOW_ANALYSIS: "数据流分析",
   AST_ANALYSIS: "AST 分析",

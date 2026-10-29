@@ -1367,6 +1367,23 @@ class ReviewService:
                 build_agent_mode=build_agent_mode,
             )
 
+    def _build_admission_slot(self):
+        """The process-wide build admission slot (capacity: build_concurrency).
+
+        队列裁定（#348 评审 F3）：构建容器执行的并发额度由全局信号量执
+        行——同一服务进程内同时进入容器构建的任务数不会超过部署上限。
+        额度耗尽时构建在此等待（周期性响应取消），而不是静默超额。
+        """
+
+        slots = getattr(self, "_build_slots", None)
+        if slots is None:
+            import threading
+
+            limit = max(1, int(getattr(self.settings, "build_concurrency", 1)))
+            slots = threading.BoundedSemaphore(limit)
+            self._build_slots = slots
+        return slots
+
     def _make_build_agent_components(self):
         """(model, executor, policy) for the build agent, or None.
 
@@ -1388,6 +1405,35 @@ class ReviewService:
             ),
         )
         return _deterministic_build_model, BuildExecutor(), policy
+
+    def _persisted_build_result(self, task_id: str, snapshot_hash: str):
+        """A reusable earlier success for this exact snapshot, if any.
+
+        队列重领/任务恢复会重放整个 handler；已发布成功的构建结果不能
+        被重跑覆盖（#348 评审 F4）。只有快照哈希完全一致的成功结果才可
+        复用，否则按新尝试处理。
+        """
+
+        task = self.store.get(task_id) or {}
+        summary = (task.get("input") or {}).get("build_agent_result") or {}
+        if summary.get("status") != SUCCEEDED:
+            return None
+        if summary.get("snapshot_hash") != snapshot_hash:
+            return None
+        return BuildAgentResult(
+            run_id=str(summary.get("run_id") or "build-reused"),
+            status=SUCCEEDED,
+            snapshot_hash=snapshot_hash,
+            plan_digest=summary.get("plan_digest"),
+            image_digest=summary.get("image_digest"),
+            dependency_digest=summary.get("dependency_digest"),
+            package_ref=summary.get("package_ref"),
+            artifact_digest=summary.get("artifact_digest"),
+            attempts=int(summary.get("attempts") or 0),
+            coverage=None,
+            failure_code=None,
+            evidence_refs=tuple(summary.get("evidence_refs") or ()),
+        )
 
     def _run_build_agent(
         self, task_id: str, workspace: "RepositoryWorkspace",
@@ -1413,6 +1459,14 @@ class ReviewService:
             )
         model, executor, policy = components
         inventory = workspace.inventory()
+        reused = self._persisted_build_result(task_id, inventory.fingerprint())
+        if reused is not None:
+            if progress is not None:
+                progress.pipeline_event(
+                    BUILD_AGENT_PREPARATION,
+                    "复用此前已成功的构建结果（快照一致）",
+                )
+            return reused
         scope = sorted(
             {
                 item.path.split("/", 1)[0]
@@ -1440,12 +1494,21 @@ class ReviewService:
                 failure_code="build-no-cxx-units",
                 evidence_refs=(),
             )
+        # 每次运行独立子目录：重放绝不复用已占用的 attempt 目录
+        # （BuildExecutor 拒绝非空 attempt 目录），运行序号单调递增。
+        task_root = Path(self.settings.build_artifacts_root) / task_id
+        existing_runs = [
+            int(entry.name.split("-", 1)[-1])
+            for entry in task_root.glob("run-*")
+            if entry.name.split("-", 1)[-1].isdigit()
+        ]
+        run_root = task_root / f"run-{max(existing_runs, default=0) + 1}"
         agent = BuildAgent(
             model=model,
             executor=executor,
             policy=policy,
             snapshot_dir=workspace.root,
-            artifacts_root=Path(self.settings.build_artifacts_root) / task_id,
+            artifacts_root=run_root,
         )
         request = BuildAgentRequestBody(
             repository_ref=repository_label or "repository",
@@ -1456,17 +1519,41 @@ class ReviewService:
             policy_ref="server",
             budget=BuildBudget(),
         )
-        return agent.run(
-            request,
-            cancel=lambda: self.store.is_cancelled(task_id),
-            progress=(
-                lambda update: progress.pipeline_event(
-                    "build-agent", update.phase, attempt=update.attempt
+        slot = self._build_admission_slot()
+        # 非阻塞式排队等待：额度耗尽时周期性让出并响应取消，而不是
+        # 静默超过部署额度。
+        while not slot.acquire(blocking=False):
+            if self.store.is_cancelled(task_id):
+                return BuildAgentResult(
+                    run_id="build-" + uuid.uuid4().hex[:16],
+                    status=NEEDS_ATTENTION,
+                    snapshot_hash=request.snapshot_hash,
+                    plan_digest=None,
+                    image_digest=None,
+                    dependency_digest=None,
+                    package_ref=None,
+                    artifact_digest=None,
+                    attempts=0,
+                    coverage=None,
+                    failure_code="build-admission-cancelled",
+                    evidence_refs=(),
                 )
-                if progress is not None
-                else None
-            ),
-        )
+            time.sleep(0.2)
+        try:
+            return agent.run(
+                request,
+                cancel=lambda: self.store.is_cancelled(task_id),
+                progress=(
+                    lambda update: progress.pipeline_event(
+                        BUILD_AGENT_PREPARATION,
+                        "构建 %s（第 %s 次尝试）" % (update.phase, update.attempt),
+                    )
+                    if progress is not None
+                    else None
+                ),
+            )
+        finally:
+            slot.release()
 
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
@@ -1495,6 +1582,7 @@ class ReviewService:
                     "snapshot_hash": build_result.snapshot_hash,
                     "plan_digest": build_result.plan_digest,
                     "package_ref": build_result.package_ref,
+                    "artifact_digest": build_result.artifact_digest,
                     "attempts": build_result.attempts,
                     "failure_code": build_result.failure_code,
                     "evidence_refs": list(build_result.evidence_refs),
@@ -1504,12 +1592,17 @@ class ReviewService:
                 "build_agent_mode": build_agent_mode,
                 "status": build_result.status,
                 "package_ref": build_result.package_ref,
+                "artifact_digest": build_result.artifact_digest,
                 "attempts": build_result.attempts,
                 "failure_code": build_result.failure_code,
                 "blocking": (
                     build_result.status != SUCCEEDED
                     and build_agent_mode == "required"
                 ),
+                # 本切片交付构建执行与展示；把已验证参数接入 facts/repro/
+                # Specialist 的消费链在 S6 试点接线，在此之前检测阶段不
+                # 消费该包——成功摘要必须如实说明，不宣称检测已使用。
+                "consumed_by_analysis": False,
             }
             if build_result.status != SUCCEEDED and str(
                 cxx_agent_mode or "off"

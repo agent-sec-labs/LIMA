@@ -66,7 +66,7 @@ function progress(overrides: Partial<TaskDetail["progress"]>): NonNullable<TaskD
   return {
     stage: "AST_ANALYSIS",
     stage_index: 9,
-    stage_total: 13,
+    stage_total: 15,
     message: "正在逐文件执行 AST 与规则分析",
     started_at: NOW,
     stage_started_at: NOW,
@@ -141,7 +141,7 @@ const CLEAN_TASK: TaskDetail = {
   input: { task_type: "repository_scan", repository_key: "team/clean" },
   progress: progress({
     stage: "COMPLETED",
-    stage_index: 13,
+    stage_index: 14,
     message: "任务完成",
     current: null,
     total: null,
@@ -180,7 +180,7 @@ const WARN_TASK: TaskDetail = {
   repository: "org/warn",
   progress: progress({
     stage: "COMPLETED",
-    stage_index: 13,
+    stage_index: 14,
     message: "任务完成",
     current: null,
     total: null,
@@ -208,7 +208,7 @@ const TASK_LIST: { tasks: TaskListItem[] } = {
       progress: {
         stage: "DATAFLOW_ANALYSIS",
         stage_index: 8,
-        stage_total: 13,
+        stage_total: 15,
         message: "正在建立跨文件数据流索引",
         attempt: 2,
         max_attempts: 3,
@@ -264,7 +264,7 @@ describe("task list", () => {
     stubFetch([{ url: "/api/tasks", body: TASK_LIST }]);
     renderAt("/tasks");
     expect(await screen.findByText("org/alpha")).toBeInTheDocument();
-    expect(screen.getByText("数据流分析（8/13）")).toBeInTheDocument();
+    expect(screen.getByText("数据流分析（8/15）")).toBeInTheDocument();
     expect(screen.getByText("分析中")).toBeInTheDocument();
     expect(screen.getAllByText("已完成").length).toBeGreaterThanOrEqual(2);
   });

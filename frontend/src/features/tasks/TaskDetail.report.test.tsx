@@ -77,8 +77,8 @@ function successTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     input: { task_type: "repository_scan", repository_key: "team/report" },
     progress: {
       stage: "COMPLETED",
-      stage_index: 13,
-      stage_total: 13,
+      stage_index: 14,
+      stage_total: 15,
       message: "任务完成",
       started_at: NOW,
       stage_started_at: NOW,
@@ -325,6 +325,44 @@ describe("task detail report surface", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("renders the build-agent summary card for success, degradation and blocking gaps (slice 5)", async () => {
+    const base = {
+      scanned_files: 1,
+      import_policy: { repository_key: "team/report" },
+    };
+    stubFetch([
+      {
+        url: "/v1/tasks/task-report",
+        body: successTask({
+          report: {
+            ...DERIVED_REPORT,
+            collaboration: {
+              ...base,
+              build_agent: {
+                build_agent_mode: "auto",
+                status: "SUCCEEDED",
+                package_ref: "attempt-1/package",
+                attempts: 1,
+                failure_code: null,
+                blocking: false,
+                consumed_by_analysis: false,
+              },
+            },
+          },
+        }),
+      },
+      { url: "/v1/tasks/task-report/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-report");
+    const card = await screen.findByTestId("build-agent-card");
+    expect(card).toBeVisible();
+    expect(screen.getByText("构建成功")).toBeVisible();
+    expect(screen.getByText("模式 auto")).toBeVisible();
+    expect(
+      screen.getByText(/尚未把该上下文接入检测阶段，本次检测未使用它/),
+    ).toBeVisible();
   });
 
   it("shows the derived disposition banner and per-finding dispositions", async () => {
@@ -802,7 +840,7 @@ describe("task detail report surface", () => {
       progress: {
         stage: "SEMANTIC_TRIAGE",
         stage_index: 10,
-        stage_total: 13,
+        stage_total: 15,
         message: "正在语义复核候选发现",
         started_at: now,
         stage_started_at: now,

@@ -27,10 +27,10 @@ from lima.task_progress import (
 
 class TaskProgressContractTests(unittest.TestCase):
     def test_stage_constants_are_ordered_and_indexed(self):
-        self.assertEqual(14, len(STAGE_ORDER))
+        self.assertEqual(15, len(STAGE_ORDER))
         self.assertEqual(len(set(STAGE_ORDER)), len(STAGE_ORDER))
         self.assertEqual(1, STAGE_INDEX[QUEUED])
-        self.assertEqual(14, STAGE_INDEX[COMPLETED])
+        self.assertEqual(15, STAGE_INDEX[COMPLETED])
         # 方案 §3.3：平台链阶段位于 SAST 与语义复核之间。
         self.assertLess(STAGE_INDEX[SAST_ANALYSIS], STAGE_INDEX[PLATFORM_ANALYSIS])
         self.assertLess(STAGE_INDEX[PLATFORM_ANALYSIS], STAGE_INDEX[SEMANTIC_TRIAGE])
@@ -48,18 +48,18 @@ class TaskProgressContractTests(unittest.TestCase):
             "message": "old task",
         })
         self.assertEqual(
-            (12, 14), (progress.stage_index, progress.stage_total)
+            (13, 15), (progress.stage_index, progress.stage_total)
         )
         progress.advance(COMPLETED)
         self.assertEqual(
-            (14, 14), (progress.stage_index, progress.stage_total)
+            (15, 15), (progress.stage_index, progress.stage_total)
         )
 
     def test_begin_initializes_timestamps_once(self):
         progress = TaskProgress.begin(QUEUED, "任务已进入队列")
         self.assertEqual(QUEUED, progress.stage)
         self.assertEqual(1, progress.stage_index)
-        self.assertEqual(14, progress.stage_total)
+        self.assertEqual(15, progress.stage_total)
         self.assertEqual(progress.started_at, progress.stage_started_at)
         self.assertEqual(progress.started_at, progress.updated_at)
 
@@ -178,7 +178,7 @@ class TaskProgressPersistenceTests(unittest.TestCase):
         summary = listed["progress"]
         self.assertEqual(DOWNLOADING_ARCHIVE, summary["stage"])
         self.assertEqual(4, summary["stage_index"])
-        self.assertEqual(14, summary["stage_total"])
+        self.assertEqual(15, summary["stage_total"])
         self.assertEqual("正在下载仓库快照", summary["message"])
         self.assertEqual(4, summary["current"])
         self.assertNotIn("detail", summary)

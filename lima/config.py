@@ -1,9 +1,8 @@
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
 from urllib.parse import urlsplit
-
 
 _DOTENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_PREFIX = "LIMA_"
@@ -24,7 +23,7 @@ def _promote_legacy_environment() -> None:
         os.environ.setdefault(lima_key, value)
 
 
-def load_dotenv(paths: Optional[Iterable[str]] = None) -> None:
+def load_dotenv(paths: Iterable[str] | None = None) -> None:
     """Load local dotenv files without overriding real process environment values.
 
     The project-root file has priority over ``lima/.env``.  This allows the
@@ -39,7 +38,7 @@ def load_dotenv(paths: Optional[Iterable[str]] = None) -> None:
     ]
     for path in candidates:
         try:
-            with open(path, "r", encoding="utf-8-sig") as handle:
+            with open(path, encoding="utf-8-sig") as handle:
                 lines = handle.readlines()
         except OSError:
             continue
@@ -192,6 +191,12 @@ class Settings:
     cxx_max_response_bytes: int = 2 * 1024 * 1024
     cxx_agent_mode: str = "off"
     cxx_agent_model: str = ""
+    build_agent_mode: str = "off"
+    build_agent_image: str = ""
+    build_artifacts_root: str = "output/build-artifacts"
+    build_artifacts_retention_days: int = 30
+    build_concurrency: int = 1
+    build_agent_allow_repository_root: bool = True
     cxx_agent_max_calls: int = 40
     cxx_agent_max_context_files: int = 12
     cxx_agent_max_context_lines: int = 1200
@@ -226,7 +231,7 @@ class Settings:
 
         return self.cxx_agent_model.strip() or self.llm_model.strip()
 
-    def resolved_llm(self) -> Dict[str, object]:
+    def resolved_llm(self) -> dict[str, object]:
         """Resolve a named provider to the existing OpenAI-compatible transport."""
         provider = self.llm_provider.strip().lower()
         if provider in {"", "local", "none"}:
@@ -327,6 +332,12 @@ class Settings:
             raise ValueError(
                 "LIMA_CONTEXT_RESERVED_TOKENS must be smaller than the context budget"
             )
+        if self.build_agent_mode not in {"off", "auto", "required"}:
+            raise ValueError("build_agent_mode must be off, auto or required")
+        if self.build_concurrency < 1:
+            raise ValueError("build_concurrency must be positive")
+        if self.build_artifacts_retention_days < 1:
+            raise ValueError("build_artifacts_retention_days must be positive")
         if self.repository_scan_sast_mode not in {"auto", "off", "required"}:
             raise ValueError(
                 "LIMA_REPOSITORY_SCAN_SAST_MODE must be auto, off or required"
@@ -543,6 +554,20 @@ class Settings:
             cxx_max_response_bytes=_int("LIMA_CXX_MAX_RESPONSE_BYTES", 2 * 1024 * 1024),
             cxx_agent_mode=os.getenv("LIMA_CXX_AGENT_MODE", "off").strip().lower(),
             cxx_agent_model=os.getenv("LIMA_CXX_AGENT_MODEL", "").strip(),
+            build_agent_mode=os.getenv(
+                "LIMA_BUILD_AGENT_MODE", "off"
+            ).strip().lower(),
+            build_agent_image=os.getenv("LIMA_BUILD_AGENT_IMAGE", "").strip(),
+            build_artifacts_root=os.getenv(
+                "LIMA_BUILD_ARTIFACTS_ROOT", "output/build-artifacts"
+            ).strip(),
+            build_artifacts_retention_days=_int(
+                "LIMA_BUILD_ARTIFACTS_RETENTION_DAYS", 30
+            ),
+            build_concurrency=_int("LIMA_BUILD_CONCURRENCY", 1),
+            build_agent_allow_repository_root=_bool(
+                "LIMA_BUILD_AGENT_ALLOW_REPOSITORY_ROOT", True
+            ),
             cxx_agent_max_calls=_int("LIMA_CXX_AGENT_MAX_CALLS", 40),
             cxx_agent_max_context_files=_int("LIMA_CXX_AGENT_MAX_CONTEXT_FILES", 12),
             cxx_agent_max_context_lines=_int("LIMA_CXX_AGENT_MAX_CONTEXT_LINES", 1200),

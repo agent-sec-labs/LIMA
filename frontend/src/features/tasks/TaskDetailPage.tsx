@@ -843,6 +843,47 @@ function PlatformTargetDetails({ target }: { target: PlatformTarget }): React.JS
 /** C++ 智能体检测（平台链）审计卡（#246，方案 §4.3/§4.4）。
  * 旧报告无 platform、或 status=disabled（本次关闭）时不渲染空卡片；
  * 其余状态如实展示，不把不可用虚构成零发现。 */
+function BuildAgentCard({
+  summary,
+}: {
+  summary: Record<string, unknown>;
+}): React.JSX.Element | null {
+  const status = String(summary.status || "");
+  if (!status) return null;
+  const blocking = summary.blocking === true;
+  const mode = String(summary.build_agent_mode || "");
+  const failureCode = summary.failure_code ? String(summary.failure_code) : null;
+  const attempts = Number(summary.attempts || 0);
+  const meta =
+    status === "SUCCEEDED"
+      ? { label: "构建成功", color: "green" }
+      : blocking
+        ? { label: "构建失败（已阻断检测）", color: "red" }
+        : { label: "构建失败（已降级）", color: "orange" };
+  const consumed = summary.consumed_by_analysis === true;
+  const note =
+    status === "SUCCEEDED"
+      ? consumed
+        ? `构建智能体在 ${attempts} 次尝试内准备了编译上下文；检测阶段使用同一份已验证参数。`
+        : `构建智能体在 ${attempts} 次尝试内准备并校验了编译上下文；本部署尚未把该上下文接入检测阶段，本次检测未使用它。`
+      : blocking
+        ? "构建未完成，依赖编译上下文的检测阶段被拒绝执行；这不代表仓库没有风险，请处理构建阻塞后重试。"
+        : "构建未完成，检测已降级为不依赖编译上下文的静态路径；结论覆盖范围相应缩小。";
+  return (
+    <Card size="small" title="构建智能体" data-testid="build-agent-card">
+      <Space size="middle" wrap>
+        <Tag color={meta.color}>{meta.label}</Tag>
+        {mode && <Tag>模式 {mode}</Tag>}
+        {attempts > 0 && <Tag>尝试 {attempts} 次</Tag>}
+        {failureCode && <Tag color="default">失败码 {failureCode}</Tag>}
+      </Space>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 0, marginTop: 8, fontSize: 12 }}>
+        {note}
+      </Typography.Paragraph>
+    </Card>
+  );
+}
+
 function PlatformCard({ summary }: { summary: PlatformSummary }): React.JSX.Element | null {
   const status = String(summary.status || "");
   if (!status || status === "disabled") return null;
@@ -1008,6 +1049,11 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
     report.collaboration?.platform && typeof report.collaboration.platform === "object"
       ? report.collaboration.platform
       : null;
+  const buildAgentSummary =
+    report.collaboration?.build_agent &&
+    typeof report.collaboration.build_agent === "object"
+      ? (report.collaboration.build_agent as Record<string, unknown>)
+      : null;
   const [previewBusy, setPreviewBusy] = useState(false);
   const [fixBusy, setFixBusy] = useState(false);
   const [operation, setOperation] = useState<
@@ -1114,6 +1160,7 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
         <SemanticTriageCard report={report} />
         <CxxMemoryCard summary={report.collaboration?.cxx_memory} />
         {uafSummary && <UafV2Card summary={uafSummary} />}
+        {buildAgentSummary && <BuildAgentCard summary={buildAgentSummary} />}
         {platformSummary && <PlatformCard summary={platformSummary} />}
         <Space size="large" wrap aria-label="报告摘要">
           <span>问题总数 <strong>{findings.length}</strong></span>

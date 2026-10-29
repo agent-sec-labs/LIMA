@@ -134,7 +134,10 @@ class BuildAgentServiceTests(unittest.TestCase):
             "attempt-1/logs/step-000.stderr.log"
         ))
         report = task.get("report") or {}
-        self.assertNotIn("build_agent", report.get("collaboration", {}))
+        visible = report.get("collaboration", {}).get("build_agent")
+        self.assertIsNotNone(visible)
+        self.assertEqual(visible["status"], "SUCCEEDED")
+        self.assertFalse(visible["blocking"])
 
     def test_auto_failure_degrades_with_explicit_gap(self):
         service, task_id, task = self._run_scan_with_build(

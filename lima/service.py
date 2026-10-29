@@ -1500,17 +1500,23 @@ class ReviewService:
                     "evidence_refs": list(build_result.evidence_refs),
                 },
             })
-            if build_result.status != SUCCEEDED:
+            build_gap = {
+                "build_agent_mode": build_agent_mode,
+                "status": build_result.status,
+                "package_ref": build_result.package_ref,
+                "attempts": build_result.attempts,
+                "failure_code": build_result.failure_code,
+                "blocking": (
+                    build_result.status != SUCCEEDED
+                    and build_agent_mode == "required"
+                ),
+            }
+            if build_result.status != SUCCEEDED and str(
+                cxx_agent_mode or "off"
+            ) != "off":
                 # auto 降级继续静态扫描但必须显式记录缺口；required 拒绝
                 # 进入依赖构建上下文的阶段（这里即平台检测链）。
-                build_gap = {
-                    "build_agent_mode": build_agent_mode,
-                    "status": build_result.status,
-                    "failure_code": build_result.failure_code,
-                    "blocking": build_agent_mode == "required",
-                }
-                if str(cxx_agent_mode or "off") != "off":
-                    cxx_agent_mode = "off"
+                cxx_agent_mode = "off"
         self.store.transition(
             task_id,
             TraceEvent(

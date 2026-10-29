@@ -327,6 +327,40 @@ describe("task detail report surface", () => {
     vi.restoreAllMocks();
   });
 
+  it("renders the build-agent summary card for success, degradation and blocking gaps (slice 5)", async () => {
+    const base = {
+      scanned_files: 1,
+      import_policy: { repository_key: "team/report" },
+    };
+    stubFetch([
+      {
+        url: "/v1/tasks/task-report",
+        body: successTask({
+          report: {
+            ...DERIVED_REPORT,
+            collaboration: {
+              ...base,
+              build_agent: {
+                build_agent_mode: "auto",
+                status: "SUCCEEDED",
+                package_ref: "attempt-1/package",
+                attempts: 1,
+                failure_code: null,
+                blocking: false,
+              },
+            },
+          },
+        }),
+      },
+      { url: "/v1/tasks/task-report/feedback", body: { cases: [] } },
+    ]);
+    renderAt("/tasks/task-report");
+    const card = await screen.findByTestId("build-agent-card");
+    expect(card).toBeVisible();
+    expect(screen.getByText("构建成功")).toBeVisible();
+    expect(screen.getByText("模式 auto")).toBeVisible();
+  });
+
   it("shows the derived disposition banner and per-finding dispositions", async () => {
     stubFetch([
       { url: "/v1/tasks/task-report", body: successTask({ report: DERIVED_REPORT }) },

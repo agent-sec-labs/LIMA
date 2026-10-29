@@ -304,6 +304,14 @@ export interface ScanReport {
     cxx_memory?: CxxMemorySummary;
     uaf_v2?: UafV2Summary;
     platform?: PlatformSummary;
+    build_agent?: {
+      build_agent_mode?: string;
+      status?: string;
+      package_ref?: string | null;
+      attempts?: number;
+      failure_code?: string | null;
+      blocking?: boolean;
+    };
     import_policy?: {
       resolved_revision?: string;
       cache_hit?: boolean;

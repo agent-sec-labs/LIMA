@@ -2,6 +2,9 @@ import hashlib
 import re
 import sys
 import tempfile
+import dataclasses
+from dataclasses import replace
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -88,6 +91,7 @@ from .skills import SkillRegistry
 from .store import utc_now
 from .task_failure import classify_exception
 from .task_progress import (
+    BUILD_AGENT_PREPARATION,
     COMPLETED,
     FINALIZING,
     PREPARING_WORKSPACE,
@@ -1410,8 +1414,9 @@ class ReviewService:
         """A reusable earlier success for this exact snapshot, if any.
 
         队列重领/任务恢复会重放整个 handler；已发布成功的构建结果不能
-        被重跑覆盖（#348 评审 F4）。只有快照哈希完全一致的成功结果才可
-        复用，否则按新尝试处理。
+        被重跑覆盖。复用前提有三：状态为成功、快照哈希一致、且包仍能
+        通过 S4A 校验（目录存在、清单 revision 绑定同一快照）——制品
+        被清理或字节被改动时按新尝试处理，不把缺失的包当成功。
         """
 
         task = self.store.get(task_id) or {}
@@ -1419,6 +1424,23 @@ class ReviewService:
         if summary.get("status") != SUCCEEDED:
             return None
         if summary.get("snapshot_hash") != snapshot_hash:
+            return None
+        package_ref = summary.get("package_ref")
+        if not package_ref:
+            return None
+        task_root = Path(self.settings.build_artifacts_root) / task_id
+        package_dir = task_root / package_ref
+        if not package_dir.is_dir():
+            return None
+        try:
+            from .build_context_view import verify_build_artifact
+
+            verify_build_artifact(
+                package_dir,
+                snapshot_hash,
+                str(summary.get("artifact_digest") or ""),
+            )
+        except Exception:  # noqa: BLE001 - any verification failure means retry
             return None
         return BuildAgentResult(
             run_id=str(summary.get("run_id") or "build-reused"),
@@ -1502,7 +1524,8 @@ class ReviewService:
             for entry in task_root.glob("run-*")
             if entry.name.split("-", 1)[-1].isdigit()
         ]
-        run_root = task_root / f"run-{max(existing_runs, default=0) + 1}"
+        run_index = max(existing_runs, default=0) + 1
+        run_root = task_root / f"run-{run_index}"
         agent = BuildAgent(
             model=model,
             executor=executor,
@@ -1540,7 +1563,7 @@ class ReviewService:
                 )
             time.sleep(0.2)
         try:
-            return agent.run(
+            result = agent.run(
                 request,
                 cancel=lambda: self.store.is_cancelled(task_id),
                 progress=(
@@ -1554,6 +1577,21 @@ class ReviewService:
             )
         finally:
             slot.release()
+        # 服务边界统一引用：包与证据改为相对任务产物根（含 run-N 前缀），
+        # 数据库里的一条引用能直接还原磁盘位置。
+        run_prefix = f"run-{run_index}/"
+        return replace(
+            result,
+            package_ref=(
+                run_prefix + result.package_ref
+                if result.package_ref and not result.package_ref.startswith("run-")
+                else result.package_ref
+            ),
+            evidence_refs=tuple(
+                run_prefix + ref if not ref.startswith("run-") else ref
+                for ref in result.evidence_refs
+            ),
+        )
 
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,

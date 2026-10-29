@@ -19,6 +19,7 @@ from unittest import mock
 from lima.build_agent import NEEDS_ATTENTION, SUCCEEDED, BuildResult
 from lima.config import Settings
 from lima.service import ReviewService
+from lima.workspace import RepositoryWorkspace
 
 
 def make_build_result(status: str, failure_code: str | None = None) -> BuildResult:
@@ -335,40 +336,84 @@ class Round1ReviewTests(unittest.TestCase):
 
     def test_replay_reuses_persisted_success(self):
         service = self._service_for_admission()
-        calls = []
+        with tempfile.TemporaryDirectory() as artifacts:
+            with mock.patch.object(
+                type(service.settings),
+                "build_artifacts_root",
+                artifacts,
+                create=True,
+            ):
+                # service.settings is a frozen dataclass; patch the lookup
+                # the reuse path performs through the instance instead.
+                service.__dict__["settings"] = replace(
+                    service.settings, build_artifacts_root=artifacts
+                )
+                # Lay out a real verified package for the fake build result
+                # so the reuse gate can re-verify it (PR #348 round-2 F4).
+                from lima.build_context_view import (
+                    compute_artifact_digest,
+                    snapshot_fingerprint,
+                    verify_build_artifact,
+                )
+                from tests.test_build_context_view import (
+                    write_package_fixture as write_view_fixture,
+                )
 
-        def fake_run_build(task_id, workspace, label, progress):
-            calls.append(task_id)
-            return make_build_result(SUCCEEDED)
+                workspace_root = Path(artifacts) / "snapshot"
+                (workspace_root / "app").mkdir(parents=True)
+                (workspace_root / "app" / "main.cpp").write_text(
+                    "int main(void) { return 0; }\\n", encoding="utf8"
+                )
+                fingerprint = snapshot_fingerprint(workspace_root)
+                package_dir = (
+                    Path(artifacts) / "task-1" / "run-1" / "attempt-1" / "package"
+                )
+                write_view_fixture(
+                    package_dir,
+                    revision=fingerprint,
+                    entry={
+                        "directory": "app",
+                        "arguments": [
+                            "/usr/bin/c++", "-DVERIFIED=1", "-c", "main.cpp",
+                        ],
+                        "file": "app/main.cpp",
+                    },
+                )
+                artifact_digest = compute_artifact_digest(package_dir)
+                verify_build_artifact(package_dir, fingerprint, artifact_digest)
 
-        with mock.patch.object(
-            service, "_run_build_agent", side_effect=fake_run_build
-        ):
-            created = service.enqueue_repository_scan(
-                "team/project", build_agent_mode="auto"
-            )
-            task_id = created["task_id"]
-            for _ in range(300):
-                task = service.store.get(task_id)
-                if task and task.get("state") == "SUCCESS":
-                    break
-                time.sleep(0.02)
-            summary = task["input"]["build_agent_result"]
-            self.assertEqual(summary["status"], "SUCCEEDED")
+                task_root = Path(artifacts) / "task-1"
+                service.store.create("task-1", "team/project", None, {}, "default")
+                service.store.update_task_input("task-1", {
+                    "build_agent_result": {
+                        "run_id": "build-1",
+                        "status": "SUCCEEDED",
+                        "snapshot_hash": fingerprint,
+                        "plan_digest": "p" * 64,
+                        "package_ref": "run-1/attempt-1/package",
+                        "artifact_digest": artifact_digest,
+                        "attempts": 1,
+                        "failure_code": None,
+                        "evidence_refs": ["run-1/attempt-1/package"],
+                    },
+                })
+                reused = service._persisted_build_result(task_root.name, fingerprint)
+                self.assertIsNotNone(reused)
+                self.assertEqual(reused.status, "SUCCEEDED")
+                self.assertEqual(reused.package_ref, "run-1/attempt-1/package")
 
-            # Replaying the handler (queue redelivery / resume) must not
-            # re-run the build: the persisted success for this snapshot is
-            # reused instead of colliding with the occupied attempt dir.
-            reused = service._persisted_build_result(
-                task_id, summary["snapshot_hash"]
-            )
-            self.assertIsNotNone(reused)
-            self.assertEqual(reused.status, "SUCCEEDED")
+                # A different snapshot must not reuse.
+                self.assertIsNone(
+                    service._persisted_build_result(task_root.name, "b" * 64)
+                )
 
-            snapshot_hash_mismatch = service._persisted_build_result(
-                task_id, "b" * 64
-            )
-            self.assertIsNone(snapshot_hash_mismatch)
+                # Removing the package must not reuse either.
+                import shutil as _shutil
+
+                _shutil.rmtree(package_dir)
+                self.assertIsNone(
+                    service._persisted_build_result(task_root.name, fingerprint)
+                )
 
     def test_run_directories_are_run_scoped(self):
         with tempfile.TemporaryDirectory() as artifacts:
@@ -430,6 +475,172 @@ class Round1ReviewTests(unittest.TestCase):
                     break
                 time.sleep(0.02)
         return service, created["task_id"], task
+
+
+class Round2ReviewTests(unittest.TestCase):
+    """The real _run_build_agent call paths (PR #348 round 2)."""
+
+    def _service(self, **overrides):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repository = Path(temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app").mkdir(exist_ok=True)
+        (repository / "app" / "main.cpp").write_text(
+            "int main(void) { return 0; }\n", encoding="utf8"
+        )
+        (repository / "app" / "util.cpp").write_text(
+            "int util(void) { return 1; }\n", encoding="utf8"
+        )
+        from lima.service import ReviewService
+
+        settings = replace(
+            Settings(
+                host="127.0.0.1", port=8080, db_path=path, max_diff_bytes=10000,
+                max_steps=8, timeout_seconds=120, llm_base_url="",
+                llm_api_key="", llm_model="", github_webhook_secret="",
+                github_token="", auto_post_review=False,
+                repository_import_root=temporary.name,
+                repository_scan_sast_mode="off", cxx_memory_mode="off",
+                build_agent_mode="auto", build_agent_image="lima-builder:test",
+            ),
+            **overrides,
+        )
+        service = ReviewService(settings)
+        self.addCleanup(service.queue.close)
+        return service, Path(temporary.name) / "team" / "project"
+
+    def test_stage_callback_persists_through_real_path(self):
+        # The progress callback must run the real pipeline_event path with
+        # the registered stage (round-2 F1): no NameError, no swallowed
+        # observation.
+        from lima.build_agent import BuildProgress
+        from lima.service import ScanProgressTracker
+        from lima.task_progress import BUILD_AGENT_PREPARATION, TaskProgress
+
+        service, repo = self._service()
+        task_id = "cb-real"
+        service.store.create(task_id, "team/project", None, {}, "default")
+        service.store.update_task_input(task_id, {"build_agent_mode": "auto"})
+        tracker = ScanProgressTracker(
+            service.store,
+            task_id,
+            TaskProgress.begin(max_attempts=1),
+        )
+        events: list[str] = []
+
+        def fake_agent_run(request, *, cancel, progress):
+            progress(
+                BuildProgress(
+                    phase="INSPECTING", attempt=1, plan_digest=None,
+                    evidence_refs=(),
+                )
+            )
+            events.append(BUILD_AGENT_PREPARATION)
+            return make_build_result(NEEDS_ATTENTION, "build-not-configured")
+
+        with mock.patch.object(
+            service,
+            "_make_build_agent_components",
+            return_value=(
+                lambda state: {"action": "final", "output": {"status": "done"}},
+                None,
+                None,
+            ),
+        ), mock.patch(
+            "lima.service.BuildAgent"
+        ) as agent_cls:
+            agent_cls.return_value.run.side_effect = fake_agent_run
+            service._run_build_agent(
+                task_id, RepositoryWorkspace(str(repo)), "team/project", tracker
+            )
+        self.assertEqual(events, [BUILD_AGENT_PREPARATION])
+        persisted = (service.store.get(task_id) or {}).get("progress") or {}
+        self.assertEqual(persisted.get("stage"), BUILD_AGENT_PREPARATION)
+
+    def test_admission_wait_is_cancellable(self):
+        # With the budget exhausted and the task cancelled, the wait loop
+        # must return a terminal result instead of sleeping forever
+        # (round-2 F1/F2).
+        service, repo = self._service(build_concurrency=1)
+        task_id = "cb-wait"
+        service.store.create(task_id, "team/project", None, {}, "default")
+        slot = service._build_admission_slot()
+        self.assertTrue(slot.acquire(blocking=False))
+        try:
+            service.store.request_cancel(task_id)
+            with mock.patch.object(
+                service,
+                "_make_build_agent_components",
+                return_value=(
+                    lambda state: {"action": "final", "output": {"status": "done"}},
+                    None,
+                    None,
+                ),
+            ), mock.patch("lima.service.BuildAgent"):
+                result = service._run_build_agent(
+                    task_id,
+                    RepositoryWorkspace(str(repo)),
+                    "team/project",
+                    None,
+                )
+            self.assertEqual(result.status, NEEDS_ATTENTION)
+            self.assertEqual(
+                result.failure_code, "build-admission-cancelled"
+            )
+        finally:
+            slot.release()
+
+    def test_run_prefix_rewrites_references(self):
+        # package_ref and evidence refs must carry the run-N prefix so the
+        # persisted reference resolves on disk (round-2 F3).
+        from lima.build_agent import BuildResult as AgentResult
+
+        service, repo = self._service()
+
+        def fake_agent_run(request, *, cancel, progress):
+            return AgentResult(
+                run_id="build-x",
+                status="SUCCEEDED",
+                snapshot_hash=request.snapshot_hash,
+                plan_digest="p" * 64,
+                image_digest=None,
+                dependency_digest=None,
+                package_ref="attempt-1/package",
+                artifact_digest=None,
+                attempts=1,
+                coverage=None,
+                failure_code=None,
+                evidence_refs=("attempt-1/logs/step-000.stderr.log",),
+            )
+
+        with mock.patch.object(
+            service,
+            "_make_build_agent_components",
+            return_value=(
+                lambda state: {"action": "final", "output": {"status": "done"}},
+                None,
+                None,
+            ),
+        ), mock.patch("lima.service.BuildAgent") as agent_cls:
+            agent_cls.return_value.run.side_effect = fake_agent_run
+            result = service._run_build_agent(
+                "prefix-task", RepositoryWorkspace(str(repo)), "team/project", None
+            )
+        self.assertEqual(result.package_ref, "run-1/attempt-1/package")
+        self.assertEqual(
+            result.evidence_refs,
+            ("run-1/attempt-1/logs/step-000.stderr.log",),
+        )
+        # The reference resolves on disk relative to the task artifacts root.
+        task_root = Path(service.settings.build_artifacts_root) / "prefix-task"
+        self.assertEqual(
+            (task_root / result.package_ref),
+            task_root / "run-1" / "attempt-1" / "package",
+        )
 
 
 if __name__ == "__main__":

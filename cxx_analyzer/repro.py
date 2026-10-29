@@ -610,63 +610,67 @@ def _render_unit(option: str, value: str) -> tuple[str, ...]:
     return (option, value)
 
 
+
+
+def _verified_context_outcome(
+    snapshot: PreparedSnapshot,
+    sources: tuple[str, ...],
+    settings: AnalyzerSettings,
+    verified_view: object,
+) -> tuple[str, ...] | str:
+    """The verified-package context for one experiment, or the gap.
+
+    Returns the per-unit projection verbatim when every requested unit
+    carries the exact same validated flags (and any ``-std`` is shared by
+    every unit's language and the C++ driver).  Anything else returns a
+    stable diagnostic string: the experiment must fail explicitly with
+    that gap rather than silently compile a different configuration than
+    the facts and Specialist stages reasoned about.
+    """
+    per_unit: list[tuple[str, ...]] = []
+    for source in sources:
+        context = resolve_build_context_execution(
+            snapshot.root, source, settings, verified_view=verified_view
+        )
+        if context.status != "resolved":
+            return f"verified-context-unresolved:{source}"
+        # argv is (compiler, *flags, "-fsyntax-only", unit).
+        per_unit.append(tuple(context.arguments[1:-2]))
+    if not per_unit:
+        return "verified-context-unresolved:no-sources"
+    if any(unit != per_unit[0] for unit in per_unit[1:]):
+        return "verified-context-inconsistent"
+    flags = per_unit[0]
+    carries_std = any(
+        flag == "-std" or flag.startswith("-std=") for flag in flags
+    )
+    if carries_std and any(
+        not source.endswith((".cpp", ".cc", ".cxx", ".cxx0x", ".hpp"))
+        for source in sources
+    ):
+        return "verified-std-language-mismatch"
+    return flags
+
+
 def _context_flags(
     snapshot: PreparedSnapshot,
     sources: tuple[str, ...],
     settings: object,
-    verified_view: object | None = None,
 ) -> tuple[str, ...]:
     """Semantic flags shared by every source, from trusted compdb entries.
 
-    Each source is resolved through the snapshot-compdb resolver (the same
-    trust model the facts extraction uses: paths must live inside the
-    snapshot, ambiguous or invalid entries degrade to ``incomplete``).
-    Only when every source resolves does the intersection of their
-    semantic arguments reach the experiment argv; any unresolved source
-    keeps the bare pinned argv (the historical behavior) instead of a
-    partially guessed context.  The intersection is taken over complete
-    (option, value) units rebased onto the snapshot root, and the shared
-    units render back in each option's legal spelling.
+    Legacy (snapshot-compdb) path only: the verified-package mode decides
+    through :func:`_verified_context_outcome` and fails explicitly when
+    the context cannot be kept, never by silently dropping it.
     """
+
     if settings is None:
         return ()
-    if verified_view is not None:
-        # The verified-package projection is consumed as one consistent
-        # environment: the per-unit flags the facts resolver validated
-        # are used verbatim only when every requested unit carries the
-        # exact same projection.  Divergent macros, includes or language
-        # standards cannot ride one experiment argv, so they fall back to
-        # the bare pinned argv instead of being silently trimmed - and a
-        # ``-std`` is only carried while every unit and the C++ driver
-        # share the same language.
-        per_unit: list[tuple[str, ...]] = []
-        for source in sources:
-            context = resolve_build_context_execution(
-                snapshot.root, source, settings, verified_view=verified_view
-            )
-            if context.status != "resolved":
-                return ()
-            # argv is (compiler, *flags, "-fsyntax-only", unit).
-            per_unit.append(tuple(context.arguments[1:-2]))
-        if not per_unit or any(
-            unit != per_unit[0] for unit in per_unit[1:]
-        ):
-            return ()
-        flags = per_unit[0]
-        carries_std = any(
-            flag == "-std" or flag.startswith("-std=") for flag in flags
-        )
-        if carries_std and any(
-            not source.endswith((".cpp", ".cc", ".cxx", ".cxx0x", ".hpp"))
-            for source in sources
-        ):
-            return ()
-        return flags
     shared: frozenset[tuple[str, str]] | None = None
     order: tuple[tuple[str, str], ...] = ()
     for source in sources:
         context = resolve_build_context_execution(
-            snapshot.root, source, settings, verified_view=verified_view
+            snapshot.root, source, settings
         )
         if context.status != "resolved":
             return ()
@@ -758,18 +762,36 @@ def run_repro(
     except FileExistsError as exc:
         raise ValueError("repro driver is already staged in this snapshot") from exc
 
+    if verified_view is not None:
+        outcome = _verified_context_outcome(
+            snapshot, sources, settings, verified_view
+        )
+        if isinstance(outcome, str):
+            # The verified context cannot be kept for this experiment:
+            # fail explicitly instead of compiling a different
+            # configuration than the facts and Specialist stages used.
+            return ReproExecution(
+                stage="context",
+                ok=False,
+                exit_code=None,
+                asan_report=None,
+                diagnostics=(outcome,),
+                artifacts=artifacts,
+                elapsed_seconds=round(time.monotonic() - started, 6),
+            )
+        context_flags = outcome
+    else:
+        context_flags = _context_flags(snapshot, sources, settings)
+
     deadline.check("repro compile")
     compile_execution = run_step(
         build_compile_argv(
             sources,
             driver_relative,
             binary_relative,
-            context_flags=_context_flags(
-                snapshot, sources, settings, verified_view
-            ),
-            # A -std only ever comes from the verified path, which already
-            # refused to carry one unless every unit shares the C++
-            # language with the driver.
+            context_flags=context_flags,
+            # A -std only ever comes from the verified path, whose
+            # language gate has already approved it for this command.
             allowed_std=verified_view is not None,
         ),
         snapshot,

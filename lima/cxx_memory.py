@@ -177,7 +177,7 @@ _UAF_COVERAGE_KEYS = {"ast_complete", "cfg_complete", "semantic_gaps"}
 # --- /v1/repro protocol (agent vuln platform plan Task 1: repro workbench) ---
 REPRO_SCHEMA_VERSION = 1
 REPRO_PATH = "/v1/repro"
-REPRO_STAGES = frozenset({"compile", "run"})
+REPRO_STAGES = frozenset({"compile", "run", "context"})
 REPRO_ACCESS_KINDS = frozenset({"READ", "WRITE"})
 REPRO_FRAME_KEYS = frozenset({"function", "file", "line", "column"})
 MAX_REPRO_SOURCES = 16

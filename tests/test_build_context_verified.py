@@ -249,10 +249,13 @@ class Round1ReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             snapshot, view = make_view(tmp)
             prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
-            flags = _context_flags(
+            from cxx_analyzer.repro import _verified_context_outcome
+
+            outcome = _verified_context_outcome(
                 prepared, ("app/main.cpp",), make_settings(), view
             )
-            self.assertIn("-DVERIFIED=1", flags)
+            self.assertIsInstance(outcome, tuple)
+            self.assertIn("-DVERIFIED=1", outcome)
             legacy = _context_flags(prepared, ("app/main.cpp",), make_settings())
             self.assertNotIn("-DVERIFIED=1", legacy)
 
@@ -525,7 +528,6 @@ class Round2ReviewTests(unittest.TestCase):
         # projections verbatim: a shared -std survives instead of being
         # dropped by the legacy language-neutral subset (review round 2
         # F3).
-        from cxx_analyzer.repro import _context_flags
 
         with tempfile.TemporaryDirectory() as tmp:
             snapshot, view = make_view(
@@ -539,11 +541,14 @@ class Round2ReviewTests(unittest.TestCase):
                 ),
             )
             prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
-            flags = _context_flags(
+            from cxx_analyzer.repro import _verified_context_outcome
+
+            outcome = _verified_context_outcome(
                 prepared, ("app/main.cpp", "app/util.cpp"), make_settings(), view
             )
-            self.assertIn("-std=c++20", flags)
-            self.assertIn("-DVERIFIED=1", flags)
+            self.assertIsInstance(outcome, tuple)
+            self.assertIn("-std=c++20", outcome)
+            self.assertIn("-DVERIFIED=1", outcome)
 
     def test_specialist_rejects_unsafe_view(self) -> None:
         # A view whose projection fails the shared fail-closed validation
@@ -603,7 +608,7 @@ class Round3ReviewTests(unittest.TestCase):
     def test_std_reaches_the_command_builder(self) -> None:
         # The verified -std survives the real command constructor, not
         # just the flag helper (review round 3 F1).
-        from cxx_analyzer.repro import _context_flags, build_compile_argv
+        from cxx_analyzer.repro import build_compile_argv
 
         with tempfile.TemporaryDirectory() as tmp:
             snapshot, view = make_view(
@@ -617,9 +622,13 @@ class Round3ReviewTests(unittest.TestCase):
                 ),
             )
             prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
-            flags = _context_flags(
+            from cxx_analyzer.repro import _verified_context_outcome
+
+            outcome = _verified_context_outcome(
                 prepared, ("app/main.cpp",), make_settings(), view
             )
+            self.assertIsInstance(outcome, tuple)
+            flags = outcome
             argv = build_compile_argv(
                 ["app/main.cpp"],
                 "build/repro_driver_x.cpp",
@@ -642,7 +651,6 @@ class Round3ReviewTests(unittest.TestCase):
         # verified path returns the bare environment instead of an
         # intersection that leaves a value-less option behind (review
         # round 3 F2).
-        from cxx_analyzer.repro import _context_flags, build_compile_argv
 
         with tempfile.TemporaryDirectory() as tmp:
             snapshot, view = make_view(
@@ -651,23 +659,17 @@ class Round3ReviewTests(unittest.TestCase):
                 util_arguments=("/usr/bin/c++", "-D", "TWO=1", "-Iheaders/fixture", "-c"),
             )
             prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
-            flags = _context_flags(
+            from cxx_analyzer.repro import _verified_context_outcome
+
+            outcome = _verified_context_outcome(
                 prepared, ("app/main.cpp", "app/util.cpp"), make_settings(), view
             )
-            self.assertEqual(flags, ())
-            # And the empty projection still builds a valid command.
-            argv = build_compile_argv(
-                ["app/main.cpp", "app/util.cpp"],
-                "build/repro_driver_x.cpp",
-                "build/repro_x",
-            )
-            self.assertNotIn("-D", argv)
+            self.assertEqual(outcome, "verified-context-inconsistent")
 
     def test_c_target_with_standard_falls_back(self) -> None:
         # A -std riding a command that also hosts the C++ driver is only
         # safe when every unit is C++; a C target falls back to the bare
         # environment.
-        from cxx_analyzer.repro import _context_flags
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -711,10 +713,57 @@ class Round3ReviewTests(unittest.TestCase):
             )
             view = create_analysis_view(snapshot, artifact, ("app/legacy.c",))
             prepared = SimpleNamespace(root=snapshot, sha256="a" * 64)
-            flags = _context_flags(
+            from cxx_analyzer.repro import _verified_context_outcome
+
+            outcome = _verified_context_outcome(
                 prepared, ("app/legacy.c",), make_settings(), view
             )
-            self.assertEqual(flags, ())
+            self.assertEqual(outcome, "verified-std-language-mismatch")
+
+
+class Round4ReviewTests(unittest.TestCase):
+    """The verified context gap must surface as an explicit failed result."""
+
+    def test_run_repro_reports_context_gap(self) -> None:
+        # Divergent verified units never silently compile under the bare
+        # argv: run_repro returns a stage="context" failure carrying the
+        # gap diagnostic (PR #347 round 4).
+        from cxx_analyzer.deadline import AnalysisDeadline
+        from cxx_analyzer.repro import run_repro
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, view = make_view(
+                tmp,
+                arguments=("/usr/bin/c++", "-D", "ONE=1", "-Iheaders/fixture", "-c"),
+                util_arguments=("/usr/bin/c++", "-D", "TWO=1", "-Iheaders/fixture", "-c"),
+            )
+            (snapshot / "build").mkdir(exist_ok=True)
+            prepared = SimpleNamespace(
+                root=snapshot,
+                build_root=snapshot / "build",
+                sha256="a" * 64,
+                files=("app/main.cpp", "app/util.cpp"),
+            )
+            execution = run_repro(
+                prepared,
+                ["app/main.cpp", "app/util.cpp"],
+                "int main(void){return 0;}",
+                deadline=AnalysisDeadline(expires_at=time.time() + 30),
+                timeout_seconds=5,
+                settings=make_settings(),
+                verified_view=view,
+            )
+            self.assertEqual(execution.stage, "context")
+            self.assertFalse(execution.ok)
+            self.assertIsNone(execution.exit_code)
+            self.assertIn(
+                "verified-context-inconsistent", execution.diagnostics
+            )
+
+    def test_repro_stage_vocabulary_accepts_context(self) -> None:
+        from lima.cxx_memory import REPRO_STAGES
+
+        self.assertIn("context", REPRO_STAGES)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ class DeferredTaskError(Exception):
 
 class TaskQueue:
     STREAM = "lima:review:stream"
+    DEFERRED = "lima:review:deferred"
     DLQ = "lima:review:dlq"
     GROUP = "lima-workers"
 
@@ -51,6 +52,7 @@ class TaskQueue:
         # T2：重试即将发生时的可观测回调（payload/attempt/max/error/delay）。
         self.on_retry = on_retry
         self.stream = stream or self.STREAM
+        self._deferred_key = self.DEFERRED
         self.dead_letter_stream = dead_letter_stream or self.DLQ
         self.group = group or self.GROUP
         self._executor = ThreadPoolExecutor(
@@ -122,17 +124,46 @@ class TaskQueue:
     def _schedule_deferred(
         self, envelope: Dict[str, Any], delay_seconds: float
     ) -> None:
-        """Reschedule one deferred task without consuming retry budget."""
+        """Reschedule one deferred task without consuming retry budget.
+
+        Redis 路径使用持久化延迟集合（ZSET）：以到期时间戳为 score 写
+        入，不立即 xadd——worker 循环中的 _promote_expired_deferred 到
+        期后才转投回 stream，延期窗口内不重执行 handler、不占扫描
+        worker、不消耗失败预算（#348 第五轮 P2）。内存路径用 Timer。
+        """
         if self._redis:
-            self._redis.xadd(self.stream, {
-                "envelope": json.dumps(envelope, ensure_ascii=False)
-            })
+            not_before = time.time() + max(0.0, delay_seconds)
+            self._redis.zadd(
+                self._deferred_key,
+                {json.dumps(envelope, ensure_ascii=False): not_before},
+            )
         else:
             timer = threading.Timer(
                 delay_seconds, self._submit_memory, args=(envelope,)
             )
             timer.daemon = True
             timer.start()
+
+    def _promote_expired_deferred(self) -> None:
+        """Move due deferred envelopes back into the stream (Redis only)."""
+        if not self._redis:
+            return
+        now = time.time()
+        try:
+            due = self._redis.zrangebyscore(
+                self._deferred_key, "-inf", now, start=0, num=10
+            )
+        except Exception:
+            return
+        for envelope_json in due:
+            # Remove first (atomic per member): a concurrent worker that
+            # also sees this member loses the race and skips it.
+            removed = self._redis.zrem(self._deferred_key, envelope_json)
+            if not removed:
+                continue
+            self._redis.xadd(
+                self.stream, {"envelope": envelope_json}
+            )
 
     def _schedule_retry(
         self, envelope: dict[str, Any], exc: BaseException
@@ -197,6 +228,7 @@ class TaskQueue:
 
     def _redis_worker(self) -> None:
         while not self._stop.is_set():
+            self._promote_expired_deferred()
             self._reclaim_stale()
             messages = self._redis.xreadgroup(
                 self.group, self.consumer, {self.stream: ">"}, count=1, block=1000

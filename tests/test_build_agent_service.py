@@ -936,5 +936,86 @@ class Round4ReviewTests(unittest.TestCase):
             self.assertEqual(len(service.queue.dead_letters()), 0)
 
 
+class Round5ReviewTests(unittest.TestCase):
+    """Redis deferral: persistent delay set, no hot re-delivery loop."""
+
+    def test_redis_deferral_uses_delayed_zset_not_immediate_xadd(self):
+        # Round-5 P2: the Redis deferred path must not immediately xadd;
+        # it writes to a ZSET keyed by not-before timestamp, and only the
+        # promotion step (called from the worker loop) moves due entries
+        # back to the stream.  Uses a recording transport.
+        from lima.task_queue import DeferredTaskError, TaskQueue
+
+        xadds = []
+        zadds = []
+        zrem_results = []
+        due_members: list[str] = []
+
+        class RecordingRedis:
+            def xadd(self, stream, fields):
+                xadds.append((stream, fields))
+
+            def zadd(self, key, mapping):
+                zadds.append((key, dict(mapping)))
+
+            def zrangebyscore(self, key, lo, hi, start=0, num=10):
+                return list(due_members)
+
+            def zrem(self, key, member):
+                zrem_results.append((key, member))
+                return 1 if member in due_members else 0
+
+        def handler(payload):
+            raise DeferredTaskError("budget exhausted", delay_seconds=5.0)
+
+        queue = TaskQueue(handler, workers=1)
+        queue._redis = RecordingRedis()
+        envelope = {"message_id": "m1", "attempt": 0, "payload": {}}
+
+        queue._deliver(envelope)
+        # The deferral wrote to the ZSET, not the stream.
+        self.assertEqual(len(xadds), 0)
+        self.assertEqual(len(zadds), 1)
+        key, mapping = zadds[0]
+        self.assertIn("lima:review:deferred", key)
+        serialized, not_before = next(iter(mapping.items()))
+        self.assertGreater(not_before, 0)  # a real timestamp score
+        self.assertIn("m1", serialized)
+        # attempt was rolled back (deferral is not a failure).
+        self.assertEqual(envelope["attempt"], 0)
+
+        # Before expiry: promotion sees no due members, does nothing.
+        queue._promote_expired_deferred()
+        self.assertEqual(len(xadds), 0)
+        self.assertEqual(len(zrem_results), 0)
+
+        # After expiry: the due member is promoted to the stream.
+        due_members.append(serialized)
+        queue._promote_expired_deferred()
+        self.assertEqual(len(xadds), 1)
+        stream, fields = xadds[0]
+        self.assertEqual(stream, "lima:review:stream")
+        self.assertEqual(fields["envelope"], serialized)
+        self.assertEqual(len(zrem_results), 1)
+
+    def test_redis_worker_loop_promotes_deferred(self):
+        # The worker loop calls _promote_expired_deferred before each
+        # _reclaim_stale, so due entries eventually re-enter the stream.
+        import inspect
+
+        from lima.task_queue import TaskQueue
+
+        source = inspect.getsource(TaskQueue._redis_worker)
+        self.assertIn(
+            "_promote_expired_deferred", source,
+            "worker loop must promote due deferred entries",
+        )
+        # And the promote happens before reclaim, not after.
+        self.assertLess(
+            source.index("_promote_expired_deferred"),
+            source.index("_reclaim_stale"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

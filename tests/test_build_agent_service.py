@@ -965,6 +965,16 @@ class Round5ReviewTests(unittest.TestCase):
                 zrem_results.append((key, member))
                 return 1 if member in due_members else 0
 
+            def eval(self, script, numkeys, *args):
+                # Lua promote: ZREM claims then XADD publishes (atomic).
+                deferred_key, stream, envelope = args
+                zrem_results.append((deferred_key, envelope))
+                if envelope in due_members:
+                    due_members.remove(envelope)
+                    xadds.append((stream, {"envelope": envelope}))
+                    return 1
+                return 0
+
         def handler(payload):
             raise DeferredTaskError("budget exhausted", delay_seconds=5.0)
 
@@ -977,7 +987,7 @@ class Round5ReviewTests(unittest.TestCase):
         self.assertEqual(len(xadds), 0)
         self.assertEqual(len(zadds), 1)
         key, mapping = zadds[0]
-        self.assertIn("lima:review:deferred", key)
+        self.assertIn("lima:review:stream:deferred", key)
         serialized, not_before = next(iter(mapping.items()))
         self.assertGreater(not_before, 0)  # a real timestamp score
         self.assertIn("m1", serialized)
@@ -1015,6 +1025,88 @@ class Round5ReviewTests(unittest.TestCase):
             source.index("_promote_expired_deferred"),
             source.index("_reclaim_stale"),
         )
+
+
+class Round6ReviewTests(unittest.TestCase):
+    """Queue-isolated deferral and atomic promote (round 6)."""
+
+    def test_deferred_keys_are_per_queue(self):
+        # Two queues on the same Redis backend must use separate deferred
+        # ZSETs so an experiment worker can never deliver a scan envelope
+        # to the experiment stream (round-6 F1).
+        from lima.task_queue import TaskQueue
+
+        scan = TaskQueue(lambda p: None, workers=1)
+        scan._redis = object()  # any non-None backend
+        experiment = TaskQueue(
+            lambda p: None, workers=1, stream="lima:experiment:stream"
+        )
+        experiment._redis = object()
+        scan_key = scan._deferred_key
+        exp_key = experiment._deferred_key
+        self.assertNotEqual(scan_key, exp_key)
+        self.assertIn("lima:review:stream", scan_key)
+        self.assertIn("lima:experiment:stream", exp_key)
+        self.assertTrue(scan_key.endswith(":deferred"))
+        self.assertTrue(exp_key.endswith(":deferred"))
+
+    def test_promote_is_atomic_and_exception_safe(self):
+        # The promote path uses Lua (ZREM+XADD atomic) and swallows
+        # infrastructure errors so the worker loop survives (round-6 F2).
+        from lima.task_queue import TaskQueue
+
+        evals = []
+
+        class FlakyRedis:
+            def zrangebyscore(self, key, lo, hi, start=0, num=10):
+                return ["envelope-json"]
+
+            def eval(self, script, numkeys, *args):
+                evals.append((script, args))
+                raise ConnectionError("redis down")
+
+        queue = TaskQueue(lambda p: None, workers=1)
+        queue._redis = FlakyRedis()
+
+        # The infrastructure error must not escape (worker loop survives).
+        queue._promote_expired_deferred()
+        self.assertEqual(len(evals), 1)
+        # The Lua script contains both ZREM and XADD (atomic transfer).
+        script = evals[0][0]
+        self.assertIn("ZREM", script)
+        self.assertIn("XADD", script)
+        # Arguments carry the deferred key and the stream (per-queue).
+        deferred_key, stream, envelope = evals[0][1]
+        self.assertIn(":deferred", deferred_key)
+        self.assertIn("lima:review:stream", stream)
+        self.assertEqual(envelope, "envelope-json")
+
+    def test_promote_uses_per_queue_keys(self):
+        # The Lua call binds this queue's deferred key AND this queue's
+        # stream — never another queue's (round-6 F1).
+        from lima.task_queue import TaskQueue
+
+        class RecordingRedis:
+            def __init__(self):
+                self.evals = []
+
+            def zrangebyscore(self, key, lo, hi, start=0, num=10):
+                return ["member"]
+
+            def eval(self, script, numkeys, *args):
+                self.evals.append(args)
+                return 1
+
+        queue = TaskQueue(
+            lambda p: None, workers=1, stream="lima:experiment:stream"
+        )
+        redis_stub = RecordingRedis()
+        queue._redis = redis_stub
+        queue._promote_expired_deferred()
+        self.assertEqual(len(redis_stub.evals), 1)
+        deferred_key, stream, _ = redis_stub.evals[0]
+        self.assertEqual(deferred_key, "lima:experiment:stream:deferred")
+        self.assertEqual(stream, "lima:experiment:stream")
 
 
 if __name__ == "__main__":

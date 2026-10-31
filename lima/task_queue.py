@@ -32,7 +32,6 @@ class DeferredTaskError(Exception):
 
 class TaskQueue:
     STREAM = "lima:review:stream"
-    DEFERRED = "lima:review:deferred"
     DLQ = "lima:review:dlq"
     GROUP = "lima-workers"
 
@@ -52,7 +51,9 @@ class TaskQueue:
         # T2：重试即将发生时的可观测回调（payload/attempt/max/error/delay）。
         self.on_retry = on_retry
         self.stream = stream or self.STREAM
-        self._deferred_key = self.DEFERRED
+        # 每个队列自己的延迟集合：扫描与实验队列共享 Redis 后端时，
+        # 到期成员只回到自己的 stream，不会交叉投递（#348 第六轮 F1）。
+        self._deferred_key = f"{self.stream}:deferred"
         self.dead_letter_stream = dead_letter_stream or self.DLQ
         self.group = group or self.GROUP
         self._executor = ThreadPoolExecutor(
@@ -144,8 +145,25 @@ class TaskQueue:
             timer.daemon = True
             timer.start()
 
+    # Lua: atomically claim-and-promote one deferred member.  ZREM wins
+    # the claim; XADD publishes to this queue's stream in the same atomic
+    # block.  If either side fails the member stays in the ZSET for the
+    # next promotion cycle — a lost task is impossible (F2).
+    _PROMOTE_LUA = """
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if removed == 1 then
+    redis.call('XADD', KEYS[2], '*', 'envelope', ARGV[1])
+    return 1
+end
+return 0
+"""
+
     def _promote_expired_deferred(self) -> None:
-        """Move due deferred envelopes back into the stream (Redis only)."""
+        """Move due deferred envelopes back into the stream (Redis only).
+
+        到期成员经 Lua 原子转投（ZREM 认领 + XADD 发布在同一原子块），
+        发布失败不删除来源；异常被捕获使 worker 循环继续运行。
+        """
         if not self._redis:
             return
         now = time.time()
@@ -156,14 +174,19 @@ class TaskQueue:
         except Exception:
             return
         for envelope_json in due:
-            # Remove first (atomic per member): a concurrent worker that
-            # also sees this member loses the race and skips it.
-            removed = self._redis.zrem(self._deferred_key, envelope_json)
-            if not removed:
+            try:
+                self._redis.eval(
+                    self._PROMOTE_LUA,
+                    2,
+                    self._deferred_key,
+                    self.stream,
+                    envelope_json,
+                )
+            except Exception:
+                # Infrastructure failure: the member stays in the ZSET
+                # (Lua is atomic — ZREM without XADD cannot happen), the
+                # worker loop continues, and the next cycle retries.
                 continue
-            self._redis.xadd(
-                self.stream, {"envelope": envelope_json}
-            )
 
     def _schedule_retry(
         self, envelope: dict[str, Any], exc: BaseException

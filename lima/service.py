@@ -97,7 +97,7 @@ from .task_progress import (
     SEMANTIC_TRIAGE,
     TaskProgress,
 )
-from .task_queue import PermanentTaskError, TaskQueue
+from .task_queue import DeferredTaskError, PermanentTaskError, TaskQueue
 from .uaf_orchestrator import UAF_FINDING_STATES
 from .verifier import RepairVerifier
 from .workspace import (
@@ -211,14 +211,21 @@ class ScanProgressTracker:
         self._store.update_task_progress(self._task_id, self.progress.to_dict())
 
 
-class _BuildAdmissionRetry(Exception):
-    """Build budget exhausted: retry with backoff, not a task failure.
+class _BuildAdmissionRetry(DeferredTaskError):
+    """Build budget exhausted: defer, not a task failure.
 
     Raising unwinds the handler and frees the scan worker immediately;
-    the queue's built-in retry (memory: timer backoff, redis: stream
-    redelivery) reschedules the task later.  off scans are never blocked
-    behind a waiting build.
+    the queue's deferred-reschedule path (memory: timer backoff; redis:
+    stream redelivery) re-runs the task later without consuming the
+    failure retry budget or dead-lettering.  off scans are never blocked
+    behind a waiting build, and a long build never starves a waiting
+    task into the DLQ.
     """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "build admission budget exhausted", delay_seconds=5.0
+        )
 
 
 def _deterministic_build_model(state: dict) -> dict:

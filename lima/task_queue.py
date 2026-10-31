@@ -17,6 +17,19 @@ class PermanentTaskError(RuntimeError):
     """An error that must not be retried."""
 
 
+class DeferredTaskError(Exception):
+    """The task is deferred (e.g., a shared budget is exhausted).
+
+    额度延期不是执行失败：释放 worker 并延迟重新调度，但不递增失败
+    attempt、不进死信。delay_seconds 仅作用于内存队列的定时器；Redis
+    模式沿既有重试路径立即重投。
+    """
+
+    def __init__(self, message: str = "", delay_seconds: float = 5.0) -> None:
+        super().__init__(message or "task deferred")
+        self.delay_seconds = max(0.1, float(delay_seconds))
+
+
 class TaskQueue:
     STREAM = "lima:review:stream"
     DLQ = "lima:review:dlq"
@@ -86,6 +99,12 @@ class TaskQueue:
         try:
             self.handler(envelope["payload"])
             return True
+        except DeferredTaskError as exc:
+            # 延期不是失败：回退本次递增的 attempt，按 delay 重排，不
+            # 消耗失败重试预算、不进死信（#348 第四轮 F1）。
+            envelope["attempt"] = max(0, int(envelope.get("attempt", 1)) - 1)
+            self._schedule_deferred(envelope, exc.delay_seconds)
+            return False
         except PermanentTaskError as exc:
             self._dead_letter(envelope, str(exc))
             return False
@@ -99,6 +118,21 @@ class TaskQueue:
         except Exception as exc:
             self._schedule_retry(envelope, exc)
             return False
+
+    def _schedule_deferred(
+        self, envelope: Dict[str, Any], delay_seconds: float
+    ) -> None:
+        """Reschedule one deferred task without consuming retry budget."""
+        if self._redis:
+            self._redis.xadd(self.stream, {
+                "envelope": json.dumps(envelope, ensure_ascii=False)
+            })
+        else:
+            timer = threading.Timer(
+                delay_seconds, self._submit_memory, args=(envelope,)
+            )
+            timer.daemon = True
+            timer.start()
 
     def _schedule_retry(
         self, envelope: dict[str, Any], exc: BaseException

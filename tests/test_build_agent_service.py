@@ -810,5 +810,131 @@ class Round3ReviewTests(unittest.TestCase):
             self.assertEqual(len(executor_calls), before + 1)
 
 
+class Round4ReviewTests(unittest.TestCase):
+    """Deferral is not a failure: retry budget and DLQ stay intact."""
+
+    def test_waiting_build_survives_retry_budget_and_eventually_succeeds(self):
+        # Round-4: a task waiting on the build budget must not consume
+        # failure retries or dead-letter; once the budget frees, it builds.
+        # Uses the real queue, store, semaphore and _run_build_agent; only
+        # the BuildAgent.run is a controlled stub.
+        import threading
+
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repository = Path(temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app").mkdir(exist_ok=True)
+        (repository / "app" / "main.cpp").write_text(
+            "int main(void) { return 0; }\\n", encoding="utf8"
+        )
+        (repository / "app" / "util.cpp").write_text(
+            "int util(void) { return 1; }\\n", encoding="utf8"
+        )
+        from lima.build_agent import SUCCEEDED as BUILD_OK
+        from lima.build_agent import BuildResult as AgentResult
+        from lima.service import ReviewService
+
+        service = ReviewService(
+            Settings(
+                host="127.0.0.1", port=8080, db_path=path, max_diff_bytes=10000,
+                max_steps=8, timeout_seconds=120, llm_base_url="",
+                llm_api_key="", llm_model="", github_webhook_secret="",
+                github_token="", auto_post_review=False,
+                repository_import_root=temporary.name,
+                repository_scan_sast_mode="off", cxx_memory_mode="off",
+                build_agent_mode="auto", build_agent_image="lima-builder:test",
+                build_concurrency=1, queue_max_attempts=2,
+            )
+        )
+        self.addCleanup(service.queue.close)
+
+        budget_released = threading.Event()
+        agent_entries = []
+        lock = threading.Lock()
+
+        def stub_agent_run(request, *, cancel, progress):
+            with lock:
+                agent_entries.append(request.snapshot_hash[:8])
+            if not budget_released.is_set():
+                budget_released.wait(timeout=20)
+            return AgentResult(
+                run_id="build-r4",
+                status=BUILD_OK,
+                snapshot_hash=request.snapshot_hash,
+                plan_digest="p" * 64,
+                image_digest=None,
+                dependency_digest=None,
+                package_ref=None,
+                artifact_digest=None,
+                attempts=1,
+                coverage=None,
+                failure_code=None,
+                evidence_refs=(),
+            )
+
+        components = (
+            lambda state: {"action": "final", "output": {"status": "done"}},
+            None,
+            None,
+        )
+        with mock.patch.object(
+            service, "_make_build_agent_components", return_value=components
+        ), mock.patch("lima.service.BuildAgent") as agent_cls:
+            agent_cls.return_value.run.side_effect = stub_agent_run
+
+            # First build occupies the budget.
+            first = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            for _ in range(200):
+                with lock:
+                    if agent_entries:
+                        break
+                time.sleep(0.05)
+
+            # Second build must defer (real admission gate, budget=1).
+            second = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            time.sleep(1.5)  # let the deferral cycle through the queue
+
+            # Off scan must succeed while the budget is occupied.
+            off = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="off"
+            )
+            off_task = {}
+            for _ in range(200):
+                off_task = service.store.get(off["task_id"]) or {}
+                if off_task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(off_task["state"], "SUCCESS")
+
+            # The waiting second task must not be FAILED nor dead-lettered.
+            second_task = service.store.get(second["task_id"]) or {}
+            self.assertNotEqual(second_task.get("state"), "FAILED")
+            self.assertEqual(len(service.queue.dead_letters()), 0)
+
+            # Release the budget: the second task eventually builds.
+            budget_released.set()
+            for _ in range(400):
+                second_task = service.store.get(second["task_id"]) or {}
+                if second_task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(second_task["state"], "SUCCESS")
+            for _ in range(400):
+                first_task = service.store.get(first["task_id"]) or {}
+                if first_task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(first_task["state"], "SUCCESS")
+            self.assertEqual(len(service.queue.dead_letters()), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

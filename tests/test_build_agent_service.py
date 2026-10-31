@@ -561,36 +561,73 @@ class Round2ReviewTests(unittest.TestCase):
         persisted = (service.store.get(task_id) or {}).get("progress") or {}
         self.assertEqual(persisted.get("stage"), BUILD_AGENT_PREPARATION)
 
-    def test_admission_wait_is_cancellable(self):
-        # With the budget exhausted and the task cancelled, the wait loop
-        # must return a terminal result instead of sleeping forever
-        # (round-2 F1/F2).
+    def test_admission_exhausted_releases_worker_and_respects_cancel(self):
+        # Round-3 F2: an exhausted budget must free the scan worker (raise
+        # the retry signal, never sleep-loop inside the worker), and a
+        # cancelled task must still get a terminal result instead of a
+        # pointless retry.
+        from lima.service import _BuildAdmissionRetry
+
         service, repo = self._service(build_concurrency=1)
         task_id = "cb-wait"
         service.store.create(task_id, "team/project", None, {}, "default")
         slot = service._build_admission_slot()
         self.assertTrue(slot.acquire(blocking=False))
+        components = (
+            lambda state: {"action": "final", "output": {"status": "done"}},
+            None,
+            None,
+        )
         try:
+            # Cancelled: terminal result, no retry signal.
             service.store.request_cancel(task_id)
             with mock.patch.object(
-                service,
-                "_make_build_agent_components",
-                return_value=(
-                    lambda state: {"action": "final", "output": {"status": "done"}},
-                    None,
-                    None,
-                ),
+                service, "_make_build_agent_components", return_value=components
             ), mock.patch("lima.service.BuildAgent"):
                 result = service._run_build_agent(
-                    task_id,
-                    RepositoryWorkspace(str(repo)),
-                    "team/project",
-                    None,
+                    task_id, RepositoryWorkspace(str(repo)),
+                    "team/project", None,
                 )
             self.assertEqual(result.status, NEEDS_ATTENTION)
-            self.assertEqual(
-                result.failure_code, "build-admission-cancelled"
+            self.assertEqual(result.failure_code, "build-admission-cancelled")
+        finally:
+            slot.release()
+
+        # Not cancelled: the retry signal frees the worker immediately.
+        task_id2 = "cb-wait-2"
+        service.store.create(task_id2, "team/project", None, {}, "default")
+        slot2 = service._build_admission_slot()
+        self.assertTrue(slot2.acquire(blocking=False))
+        try:
+            with mock.patch.object(
+                service, "_make_build_agent_components", return_value=components
+            ), mock.patch("lima.service.BuildAgent"):
+                with self.assertRaises(_BuildAdmissionRetry):
+                    service._run_build_agent(
+                        task_id2, RepositoryWorkspace(str(repo)),
+                        "team/project", None,
+                    )
+        finally:
+            slot2.release()
+
+    def test_off_scan_runs_while_build_budget_exhausted(self):
+        # Round-3 F2: an off scan must complete even while a build task is
+        # waiting on the exhausted budget - the worker is never blocked.
+        service, repo = self._service(build_concurrency=1)
+        slot = service._build_admission_slot()
+        self.assertTrue(slot.acquire(blocking=False))
+        try:
+            # Submit an off scan while the budget is fully occupied.
+            created = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="off"
             )
+            task = {}
+            for _ in range(300):
+                task = service.store.get(created["task_id"]) or {}
+                if task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(task["state"], "SUCCESS")
         finally:
             slot.release()
 
@@ -641,6 +678,136 @@ class Round2ReviewTests(unittest.TestCase):
             (task_root / result.package_ref),
             task_root / "run-1" / "attempt-1" / "package",
         )
+
+
+class Round3ReviewTests(unittest.TestCase):
+    """Round-3: publish-boundary digest and end-to-end reuse closure."""
+
+    def test_success_publishes_digest_and_reuses_without_reexecution(self):
+        # The full closure (round-3 F1): a real _run_build_agent success
+        # computes and anchors the artifact digest at the publish boundary,
+        # the summary persists it, and a second call with the budget free
+        # reuses the result without touching the executor.
+        from lima.build_agent import BuildResult as AgentResult
+        from lima.build_context_view import (
+            verify_build_artifact,
+        )
+        from tests.test_build_context_view import write_package_fixture
+
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        artifacts = tempfile.TemporaryDirectory()
+        self.addCleanup(artifacts.cleanup)
+        repository = Path(temporary.name, "team", "project")
+        (repository / "app").mkdir(parents=True)
+        (repository / "app" / "main.cpp").write_text(
+            "int main(void) { return 0; }\\n", encoding="utf8"
+        )
+        from lima.service import ReviewService
+        from lima.workspace import RepositoryWorkspace
+
+        service = ReviewService(
+            Settings(
+                host="127.0.0.1", port=8080, db_path=path, max_diff_bytes=10000,
+                max_steps=8, timeout_seconds=120, llm_base_url="",
+                llm_api_key="", llm_model="", github_webhook_secret="",
+                github_token="", auto_post_review=False,
+                repository_import_root=temporary.name,
+                repository_scan_sast_mode="off", cxx_memory_mode="off",
+                build_agent_mode="auto", build_agent_image="lima-builder:test",
+                build_artifacts_root=artifacts.name,
+            )
+        )
+        self.addCleanup(service.queue.close)
+
+        workspace = RepositoryWorkspace(str(repository))
+        fingerprint = workspace.inventory().fingerprint()
+        # The fake agent run lays out a real package inside the run root so
+        # the publish boundary can compute and verify the digest.
+        executor_calls = []
+
+        def fake_agent_run(request, *, cancel, progress):
+            executor_calls.append(1)
+            package_dir = (
+                Path(artifacts.name) / "digest-task" / "run-1"
+                / "attempt-1" / "package"
+            )
+            write_package_fixture(
+                package_dir,
+                revision=request.snapshot_hash,
+                entry={
+                    "directory": "app",
+                    "arguments": [
+                        "/usr/bin/c++", "-DVERIFIED=1", "-c", "main.cpp",
+                    ],
+                    "file": "app/main.cpp",
+                },
+            )
+            return AgentResult(
+                run_id="build-d",
+                status="SUCCEEDED",
+                snapshot_hash=request.snapshot_hash,
+                plan_digest="p" * 64,
+                image_digest=None,
+                dependency_digest=None,
+                package_ref="attempt-1/package",
+                artifact_digest=None,
+                attempts=1,
+                coverage=None,
+                failure_code=None,
+                evidence_refs=("attempt-1/package",),
+            )
+
+        task_id = "digest-task"
+        service.store.create(task_id, "team/project", None, {}, "default")
+        components = (
+            lambda state: {"action": "final", "output": {"status": "done"}},
+            None,
+            None,
+        )
+        with mock.patch.object(
+            service, "_make_build_agent_components", return_value=components
+        ), mock.patch("lima.service.BuildAgent") as agent_cls:
+            agent_cls.return_value.run.side_effect = fake_agent_run
+            first = service._run_build_agent(
+                task_id, workspace, "team/project", None
+            )
+            self.assertEqual(first.status, "SUCCEEDED")
+            self.assertIsNotNone(first.artifact_digest)
+            package_dir = Path(artifacts.name) / task_id / first.package_ref
+            verify_build_artifact(
+                package_dir, fingerprint, first.artifact_digest
+            )
+            service.store.update_task_input(task_id, {
+                "build_agent_result": {
+                    "run_id": first.run_id,
+                    "status": first.status,
+                    "snapshot_hash": first.snapshot_hash,
+                    "plan_digest": first.plan_digest,
+                    "package_ref": first.package_ref,
+                    "artifact_digest": first.artifact_digest,
+                    "attempts": first.attempts,
+                    "failure_code": first.failure_code,
+                    "evidence_refs": list(first.evidence_refs),
+                },
+            })
+            before = len(executor_calls)
+            second = service._run_build_agent(
+                task_id, workspace, "team/project", None
+            )
+            self.assertEqual(second.status, "SUCCEEDED")
+            self.assertEqual(len(executor_calls), before)
+            self.assertEqual(second.package_ref, first.package_ref)
+            (package_dir / "headers" / "fixture" / "lib.h").write_bytes(
+                b"// tampered bytes\\n"
+            )
+            service._run_build_agent(
+                task_id, workspace, "team/project", None
+            )
+            self.assertEqual(len(executor_calls), before + 1)
 
 
 if __name__ == "__main__":

@@ -2,10 +2,8 @@ import hashlib
 import re
 import sys
 import tempfile
-import dataclasses
-from dataclasses import replace
-import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +211,16 @@ class ScanProgressTracker:
         self._store.update_task_progress(self._task_id, self.progress.to_dict())
 
 
+class _BuildAdmissionRetry(Exception):
+    """Build budget exhausted: retry with backoff, not a task failure.
+
+    Raising unwinds the handler and frees the scan worker immediately;
+    the queue's built-in retry (memory: timer backoff, redis: stream
+    redelivery) reschedules the task later.  off scans are never blocked
+    behind a waiting build.
+    """
+
+
 def _deterministic_build_model(state: dict) -> dict:
     """A planner without an LLM: the standard CMake configure pipeline.
 
@@ -301,7 +309,7 @@ class ReviewService:
             self.registry.register(
                 "llm-review",
                 self._build_llm_reviewer(active["prompt"] if active else ""),
-                "1.0.0", "Context-aware AI code review via %s" % self.llm_config["provider"],
+                "1.0.0", "Context-aware AI code review via {}".format(self.llm_config["provider"]),
             )
         self.registry.reload()
         coordinator = self._build_coordinator(self.registry.reviewers())
@@ -588,7 +596,7 @@ class ReviewService:
             self.experiment_queue.submit({
                 "run_id": run_id, "tenant_id": tenant_id,
                 "allow_ambiguous_retry": allow_ambiguous_retry,
-            }, message_id="%s:%s" % (run_id, uuid.uuid4().hex[:8]))
+            }, message_id=f"{run_id}:{uuid.uuid4().hex[:8]}")
         return {"run_id": run_id, "state": record["state"], "resumed": True}
 
     def _process_experiment_queued(self, payload: dict[str, Any]) -> None:
@@ -605,7 +613,7 @@ class ReviewService:
         if record:
             self.store.update_experiment(
                 run_id, "FAILED", record.get("progress") or {},
-                error="experiment queue failure: %s" % error[:1500],
+                error=f"experiment queue failure: {error[:1500]}",
             )
 
     def close(self) -> None:
@@ -686,7 +694,7 @@ class ReviewService:
         primary = {
             "risk": primary_report.risk,
             "finding_keys": sorted(
-                "%s:%s:%s" % (item.path, item.line, item.rule_id)
+                f"{item.path}:{item.line}:{item.rule_id}"
                 for item in primary_report.findings
             ),
         }
@@ -695,7 +703,7 @@ class ReviewService:
             findings = candidate.review(diff, parsed)
             candidate_result = {
                 "finding_keys": sorted(
-                    "%s:%s:%s" % (item.path, item.line, item.rule_id)
+                    f"{item.path}:{item.line}:{item.rule_id}"
                     for item in findings
                 )
             }
@@ -723,7 +731,7 @@ class ReviewService:
             self.registry.register(
                 "llm-review",
                 self._build_llm_reviewer(active["prompt"] if active else ""),
-                "1.0.0", "Context-aware AI code review via %s" % self.llm_config["provider"],
+                "1.0.0", "Context-aware AI code review via {}".format(self.llm_config["provider"]),
             )
         self.registry.reload()
         skills = self.registry.list()
@@ -1324,6 +1332,9 @@ class ReviewService:
         except RepositoryScanCancelled:
             self._cancel_repository_scan(task_id, "Repository scan cancelled during execution.")
             return
+        except _BuildAdmissionRetry:
+            # 额度重试不是任务失败：进度已记录，队列退避后整体重跑。
+            raise
         except Exception as exc:
             self._record_task_failure(task_id, exc, tracker)
             raise
@@ -1351,7 +1362,7 @@ class ReviewService:
                 task_id,
                 TraceEvent(
                     1, TaskState.PLANNING,
-                    "Materialized pinned GitHub snapshot at %s." % revision,
+                    f"Materialized pinned GitHub snapshot at {revision}.",
                     utc_now(),
                 ),
             )
@@ -1543,9 +1554,11 @@ class ReviewService:
             budget=BuildBudget(),
         )
         slot = self._build_admission_slot()
-        # 非阻塞式排队等待：额度耗尽时周期性让出并响应取消，而不是
-        # 静默超过部署额度。
-        while not slot.acquire(blocking=False):
+        # 非阻塞准入（#348 评审第三轮 F2）：额度耗尽时不在扫描 worker
+        # 内占位等待——把消息重新入队让 worker 立即释放给其他任务（含
+        # off 扫描），由重试机制携带退避重新调度本任务。取消优先返回
+        # 终态结果。
+        if not slot.acquire(blocking=False):
             if self.store.is_cancelled(task_id):
                 return BuildAgentResult(
                     run_id="build-" + uuid.uuid4().hex[:16],
@@ -1561,7 +1574,7 @@ class ReviewService:
                     failure_code="build-admission-cancelled",
                     evidence_refs=(),
                 )
-            time.sleep(0.2)
+            raise _BuildAdmissionRetry()
         try:
             result = agent.run(
                 request,
@@ -1569,7 +1582,7 @@ class ReviewService:
                 progress=(
                     lambda update: progress.pipeline_event(
                         BUILD_AGENT_PREPARATION,
-                        "构建 %s（第 %s 次尝试）" % (update.phase, update.attempt),
+                        f"构建 {update.phase}（第 {update.attempt} 次尝试）",
                     )
                     if progress is not None
                     else None
@@ -1578,15 +1591,39 @@ class ReviewService:
         finally:
             slot.release()
         # 服务边界统一引用：包与证据改为相对任务产物根（含 run-N 前缀），
-        # 数据库里的一条引用能直接还原磁盘位置。
+        # 数据库里的一条引用能直接还原磁盘位置。首次成功发布时计算并
+        # 验证包的制品摘要，作为后续恢复复用的信任锚（#348 评审第三轮
+        # F1）：恢复用它核对字节，不在恢复时重新计算期望值。
         run_prefix = f"run-{run_index}/"
+        package_ref = (
+            run_prefix + result.package_ref
+            if result.package_ref and not result.package_ref.startswith("run-")
+            else result.package_ref
+        )
+        artifact_digest = result.artifact_digest
+        if result.status == SUCCEEDED and package_ref and not artifact_digest:
+            package_dir = task_root / package_ref
+            if package_dir.is_dir():
+                from .build_context_view import (
+                    compute_artifact_digest as _compute_digest,
+                )
+                from .build_context_view import (
+                    verify_build_artifact as _verify_artifact,
+                )
+
+                artifact_digest = _compute_digest(package_dir)
+                # 发布边界自验：摘要与快照绑定核对通过才发布，失败保持
+                # None（复用路径会按新尝试处理，不发布不可信摘要）。
+                try:
+                    _verify_artifact(
+                        package_dir, request.snapshot_hash, artifact_digest
+                    )
+                except Exception:  # noqa: BLE001 - unverifiable, do not anchor
+                    artifact_digest = None
         return replace(
             result,
-            package_ref=(
-                run_prefix + result.package_ref
-                if result.package_ref and not result.package_ref.startswith("run-")
-                else result.package_ref
-            ),
+            package_ref=package_ref,
+            artifact_digest=artifact_digest,
             evidence_refs=tuple(
                 run_prefix + ref if not ref.startswith("run-") else ref
                 for ref in result.evidence_refs
@@ -1610,9 +1647,19 @@ class ReviewService:
         )
         build_gap: dict[str, Any] | None = None
         if build_agent_mode != "off":
-            build_result = self._run_build_agent(
-                task_id, workspace, repository_label, progress
-            )
+            try:
+                build_result = self._run_build_agent(
+                    task_id, workspace, repository_label, progress
+                )
+            except _BuildAdmissionRetry:
+                # 构建额度已满：信号上抛释放扫描 worker，队列按退避重试
+                # 本任务（off 扫描不再被等待中的构建堵住）。
+                if progress is not None:
+                    progress.pipeline_event(
+                        BUILD_AGENT_PREPARATION,
+                        "构建额度已满，任务按退避重新排队",
+                    )
+                raise
             self.store.update_task_input(task_id, {
                 "build_agent_result": {
                     "run_id": build_result.run_id,
@@ -1960,7 +2007,7 @@ class ReviewService:
                 client = self.github_client_for_installation(payload.get("installation_id"))
                 client.upsert_comment(
                     payload["github_issue_url"], to_markdown(report.to_dict()),
-                    "<!-- lima-review:%s -->" % task_id,
+                    f"<!-- lima-review:{task_id} -->",
                 )
         except Exception:
             metrics.inc("reviews_failed_total")
@@ -1984,12 +2031,12 @@ class ReviewService:
                 task_id, error,
                 TraceEvent(
                     step, TaskState.FAILED,
-                    "Task entered the dead-letter queue: %s" % error, utc_now(),
+                    f"Task entered the dead-letter queue: {error}", utc_now(),
                 ),
             )
         self.store.create_alert(
             tenant_id, "dlq:%s" % (task_id or "unknown"), "critical",
-            "Task %s entered the dead-letter queue: %s" % (task_id, error),
+            f"Task {task_id} entered the dead-letter queue: {error}",
         )
         metrics.inc("dead_letters_total")
 
@@ -2012,7 +2059,7 @@ class ReviewService:
         action = payload.get("action")
         if action not in {"opened", "reopened", "synchronize"}:
             self.store.complete_webhook(delivery_id, None)
-            return {"ignored": True, "reason": "unsupported pull_request action: %s" % action}
+            return {"ignored": True, "reason": f"unsupported pull_request action: {action}"}
         pull = payload.get("pull_request") or {}
         repository = (payload.get("repository") or {}).get("full_name", "")
         number = payload.get("number")

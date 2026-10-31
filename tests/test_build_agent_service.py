@@ -966,14 +966,14 @@ class Round5ReviewTests(unittest.TestCase):
                 return 1 if member in due_members else 0
 
             def eval(self, script, numkeys, *args):
-                # Lua promote: ZREM claims then XADD publishes (atomic).
+                # Lua promote: check, XADD publish, then ZREM remove.
                 deferred_key, stream, envelope = args
+                if envelope not in due_members:
+                    return 0
+                xadds.append((stream, {"envelope": envelope}))
+                due_members.remove(envelope)
                 zrem_results.append((deferred_key, envelope))
-                if envelope in due_members:
-                    due_members.remove(envelope)
-                    xadds.append((stream, {"envelope": envelope}))
-                    return 1
-                return 0
+                return 1
 
         def handler(payload):
             raise DeferredTaskError("budget exhausted", delay_seconds=5.0)
@@ -1107,6 +1107,64 @@ class Round6ReviewTests(unittest.TestCase):
         deferred_key, stream, _ = redis_stub.evals[0]
         self.assertEqual(deferred_key, "lima:experiment:stream:deferred")
         self.assertEqual(stream, "lima:experiment:stream")
+
+
+class Round7ReviewTests(unittest.TestCase):
+    """Publish-first promote: a failed XADD never loses the member."""
+
+    def test_lua_publishes_before_removing(self):
+        # The Lua script must XADD before ZREM — Redis Lua does not roll
+        # back runtime errors, so delete-first loses tasks on XADD failure
+        # (round-7 P1).
+        from lima.task_queue import TaskQueue
+
+        script = TaskQueue._PROMOTE_LUA
+        zscore = script.index("ZSCORE")
+        xadd = script.index("XADD")
+        zrem = script.index("ZREM")
+        self.assertLess(zscore, xadd, "existence check precedes publish")
+        self.assertLess(xadd, zrem, "publish precedes removal")
+
+    def test_publish_failure_preserves_member(self):
+        # An XADD runtime error must leave the member in the ZSET so the
+        # next promotion cycle can retry (round-7 P1).
+        from lima.task_queue import TaskQueue
+
+        state = {"zset": ["envelope-A"], "stream_is_string": True}
+        xadds = []
+
+        class WrongTypeRedis:
+            """Simulates WRONGTYPE: the stream key is a string, XADD errors."""
+
+            def zrangebyscore(self, key, lo, hi, start=0, num=10):
+                return list(state["zset"])
+
+            def eval(self, script, numkeys, *args):
+                deferred_key, stream, envelope = args
+                # Model the Lua: ZSCORE check passes, then XADD errors.
+                if envelope not in state["zset"]:
+                    return 0
+                if state["stream_is_string"]:
+                    raise Exception("WRONGTYPE Operation against a key")
+                # Successful publish: XADD then ZREM.
+                xadds.append((stream, envelope))
+                state["zset"].remove(envelope)
+                return 1
+
+        queue = TaskQueue(lambda p: None, workers=1)
+        queue._redis = WrongTypeRedis()
+
+        # The promote must not escape the exception (worker survives)…
+        queue._promote_expired_deferred()
+        # …and the member must still be in the ZSET (not lost).
+        self.assertIn("envelope-A", state["zset"])
+        self.assertEqual(len(xadds), 0)
+
+        # Fix the stream type: the next promotion succeeds.
+        state["stream_is_string"] = False
+        queue._promote_expired_deferred()
+        self.assertEqual(len(xadds), 1)
+        self.assertNotIn("envelope-A", state["zset"])
 
 
 if __name__ == "__main__":

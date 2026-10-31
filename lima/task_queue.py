@@ -145,24 +145,29 @@ class TaskQueue:
             timer.daemon = True
             timer.start()
 
-    # Lua: atomically claim-and-promote one deferred member.  ZREM wins
-    # the claim; XADD publishes to this queue's stream in the same atomic
-    # block.  If either side fails the member stays in the ZSET for the
-    # next promotion cycle — a lost task is impossible (F2).
+    # Lua: publish-then-remove.  The member's existence is checked,
+    # then XADD publishes to this queue's stream; only after a successful
+    # publish does ZREM drop the member from the deferred set.  If XADD
+    # errors (e.g. WRONGTYPE) the member survives in the ZSET for the
+    # next cycle — Redis Lua is atomic (no interleaving) but does NOT
+    # roll back on runtime errors, so publish-first is the only ordering
+    # that cannot lose a task (round-7 P1).
     _PROMOTE_LUA = """
-local removed = redis.call('ZREM', KEYS[1], ARGV[1])
-if removed == 1 then
-    redis.call('XADD', KEYS[2], '*', 'envelope', ARGV[1])
-    return 1
+if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then
+    return 0
 end
-return 0
+redis.call('XADD', KEYS[2], '*', 'envelope', ARGV[1])
+redis.call('ZREM', KEYS[1], ARGV[1])
+return 1
 """
 
     def _promote_expired_deferred(self) -> None:
         """Move due deferred envelopes back into the stream (Redis only).
 
-        到期成员经 Lua 原子转投（ZREM 认领 + XADD 发布在同一原子块），
-        发布失败不删除来源；异常被捕获使 worker 循环继续运行。
+        到期成员经 Lua 原子转投（存在检查 → XADD 发布 → ZREM 移除，
+        同一原子块）。发布失败时成员留在 ZSET 供下轮重试——Redis Lua
+        不回滚运行时错误，所以只有"先发布后删除"不会丢任务。异常被
+        捕获使 worker 循环继续运行。
         """
         if not self._redis:
             return

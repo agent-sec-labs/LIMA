@@ -1644,9 +1644,10 @@ class ReviewService:
         """Construct the verified AnalysisContextView from a build result.
 
         消费链接线：构建成功后从产物目录加载包、走 S4A 校验与视图构
-        造，把经验证的 TU 参数投影交给扫描阶段。包缺失或校验失败时
-        返回 None（检测降级到旧路径，不阻断）， consumed_by_analysis
-        保持 false。
+        造，把经验证的 TU 参数投影交给扫描阶段。TU 列表从包的 compdb
+        读取（而非 workspace inventory），确保与构建时的声明一致。
+        包缺失或校验失败时返回 None（检测降级到旧路径，不阻断），
+        consumed_by_analysis 保持 false。
         """
 
         if build_result.status != SUCCEEDED or not build_result.package_ref:
@@ -1663,19 +1664,19 @@ class ReviewService:
                 create_analysis_view,
                 verify_build_artifact,
             )
+            from .context_package import read_package
 
             artifact = verify_build_artifact(
                 package_dir,
                 build_result.snapshot_hash,
                 build_result.artifact_digest or "",
             )
+            package = read_package(package_dir)
+            target_units = tuple(package.manifest.compdb.tu_list)
+            if not target_units:
+                return None
             return create_analysis_view(
-                workspace.root,
-                artifact,
-                tuple(workspace.inventory().files and [
-                    item.path for item in workspace.inventory().files
-                    if item.path.endswith((".cpp", ".cc", ".cxx", ".c"))
-                ] or ()),
+                workspace.root, artifact, target_units
             )
         except Exception:  # noqa: BLE001 - consumption failure degrades
             return None
@@ -1740,9 +1741,8 @@ class ReviewService:
                     build_result.status != SUCCEEDED
                     and build_agent_mode == "required"
                 ),
-                # 本切片交付构建执行与展示；把已验证参数接入 facts/repro/
-                # Specialist 的消费链在 S6 试点接线，在此之前检测阶段不
-                # 消费该包——成功摘要必须如实说明，不宣称检测已使用。
+                # consumed_by_analysis 反映实际消费：视图构造成功才为
+                # True，消费失败（包缺失/校验不过）保持 False。
                 "consumed_by_analysis": verified_view is not None,
             }
             if build_result.status != SUCCEEDED and str(

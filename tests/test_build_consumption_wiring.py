@@ -164,5 +164,87 @@ class ConsumptionWiringTests(unittest.TestCase):
         self.assertFalse(visible["consumed_by_analysis"])
 
 
+class ConsumptionRealPathTests(unittest.TestCase):
+    """The real _consume_build_context path: package → view → scanner kwarg."""
+
+    def test_consume_build_context_returns_real_view(self):
+        """A real package on disk produces a real AnalysisContextView."""
+        import json as _json
+
+        from lima.build_context_view import (
+            AnalysisContextView,
+            compute_artifact_digest,
+        )
+        from lima.context_package import build_manifest, write_package
+
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        artifacts = tempfile.TemporaryDirectory()
+        self.addCleanup(artifacts.cleanup)
+        repository = Path(temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app").mkdir()
+        (repository / "app" / "main.cpp").write_text(
+            "int main(void) { return 0; }\\n", encoding="utf8"
+        )
+        from lima.service import ReviewService
+        from lima.workspace import RepositoryWorkspace
+
+        service = ReviewService(
+            Settings(
+                host="127.0.0.1", port=8080, db_path=path,
+                max_diff_bytes=10000, max_steps=8, timeout_seconds=120,
+                llm_base_url="", llm_api_key="", llm_model="",
+                github_webhook_secret="", github_token="",
+                auto_post_review=False,
+                repository_import_root=temporary.name,
+                repository_scan_sast_mode="off", cxx_memory_mode="off",
+                build_artifacts_root=artifacts.name,
+            )
+        )
+        self.addCleanup(service.queue.close)
+
+        workspace = RepositoryWorkspace(str(repository))
+        fingerprint = workspace.inventory().fingerprint()
+        # Lay out a real verified package.
+        compdb = [
+            {
+                "directory": "app",
+                "arguments": [
+                    "/usr/bin/c++", "-DREAL=1", "-c", "main.cpp",
+                ],
+                "file": "app/main.cpp",
+            }
+        ]
+        manifest = build_manifest(
+            repository="team/project", revision=fingerprint,
+            compdb=compdb, generated=[], header_roots=[], rewrites={},
+            created_by="consumption-test",
+        )
+        package_dir = Path(artifacts.name) / "task-x" / "run-1" / "package"
+        write_package(
+            package_dir, manifest,
+            _json.dumps(compdb).encode("utf8"), {}, {},
+        )
+        digest = compute_artifact_digest(package_dir)
+        from lima.build_agent import SUCCEEDED as OK
+        from lima.build_agent import BuildResult
+
+        build_result = BuildResult(
+            run_id="build-real", status=OK, snapshot_hash=fingerprint,
+            plan_digest="p" * 64, image_digest=None, dependency_digest=None,
+            package_ref="run-1/package", artifact_digest=digest,
+            attempts=1, coverage=None, failure_code=None, evidence_refs=(),
+        )
+        view = service._consume_build_context("task-x", workspace, build_result)
+        # The view is a real AnalysisContextView with the compdb's TU list.
+        self.assertIsInstance(view, AnalysisContextView)
+        self.assertEqual(view.target_units, ("app/main.cpp",))
+        self.assertIn("-DREAL=1", view.flags_for_tu("app/main.cpp"))
+
+
 if __name__ == "__main__":
     unittest.main()

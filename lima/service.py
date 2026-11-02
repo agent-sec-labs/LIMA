@@ -1637,6 +1637,49 @@ class ReviewService:
             ),
         )
 
+    def _consume_build_context(
+        self, task_id: str, workspace: "RepositoryWorkspace",
+        build_result: BuildAgentResult,
+    ) -> object | None:
+        """Construct the verified AnalysisContextView from a build result.
+
+        消费链接线：构建成功后从产物目录加载包、走 S4A 校验与视图构
+        造，把经验证的 TU 参数投影交给扫描阶段。包缺失或校验失败时
+        返回 None（检测降级到旧路径，不阻断）， consumed_by_analysis
+        保持 false。
+        """
+
+        if build_result.status != SUCCEEDED or not build_result.package_ref:
+            return None
+        package_dir = (
+            Path(self.settings.build_artifacts_root)
+            / task_id
+            / build_result.package_ref
+        )
+        if not package_dir.is_dir():
+            return None
+        try:
+            from .build_context_view import (
+                create_analysis_view,
+                verify_build_artifact,
+            )
+
+            artifact = verify_build_artifact(
+                package_dir,
+                build_result.snapshot_hash,
+                build_result.artifact_digest or "",
+            )
+            return create_analysis_view(
+                workspace.root,
+                artifact,
+                tuple(workspace.inventory().files and [
+                    item.path for item in workspace.inventory().files
+                    if item.path.endswith((".cpp", ".cc", ".cxx", ".c"))
+                ] or ()),
+            )
+        except Exception:  # noqa: BLE001 - consumption failure degrades
+            return None
+
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
         repository_label: str, import_policy_extra: dict[str, Any],
@@ -1653,6 +1696,7 @@ class ReviewService:
             max_total_bytes=self.settings.repository_scan_max_total_bytes,
         )
         build_gap: dict[str, Any] | None = None
+        verified_view: object | None = None
         if build_agent_mode != "off":
             try:
                 build_result = self._run_build_agent(
@@ -1680,6 +1724,11 @@ class ReviewService:
                     "evidence_refs": list(build_result.evidence_refs),
                 },
             })
+            if build_result.status == SUCCEEDED:
+                # 消费链接线：构造经验证的视图交给扫描阶段（失败降级）。
+                verified_view = self._consume_build_context(
+                    task_id, workspace, build_result
+                )
             build_gap = {
                 "build_agent_mode": build_agent_mode,
                 "status": build_result.status,
@@ -1694,7 +1743,7 @@ class ReviewService:
                 # 本切片交付构建执行与展示；把已验证参数接入 facts/repro/
                 # Specialist 的消费链在 S6 试点接线，在此之前检测阶段不
                 # 消费该包——成功摘要必须如实说明，不宣称检测已使用。
-                "consumed_by_analysis": False,
+                "consumed_by_analysis": verified_view is not None,
             }
             if build_result.status != SUCCEEDED and str(
                 cxx_agent_mode or "off"
@@ -1720,6 +1769,7 @@ class ReviewService:
                     progress.pipeline_event if progress is not None else None
                 ),
                 task_id=task_id,
+                verified_view=verified_view,
                 # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
                 # 权威取消信号。
                 should_cancel=lambda: self.store.is_cancelled(task_id),

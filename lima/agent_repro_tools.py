@@ -327,6 +327,7 @@ class ReproWorkbench:
         driver_code: str,
         *,
         timeout: int | None = None,
+        verified_artifact_digest: str | None = None,
     ) -> ExperimentObservation:
         """Run one sandboxed ASan compile-and-run as a budgeted agent step.
 

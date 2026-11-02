@@ -1685,13 +1685,14 @@ class ReviewService:
                 from cxx_analyzer import server as analyzer_server
 
                 analyzer_server.register_verified_build_view(
-                    build_result.snapshot_hash,
-                    view,
-                    artifact_digest=(
-                        build_result.artifact_digest
-                        if build_result.artifact_digest else None
-                    ),
+                    build_result.snapshot_hash, view
                 )
+                if build_result.artifact_digest:
+                    analyzer_server.register_verified_build_view(
+                        build_result.snapshot_hash,
+                        view,
+                        artifact_digest=build_result.artifact_digest,
+                    )
             except Exception:  # noqa: BLE001 - registration best-effort
                 pass
             return view
@@ -1812,14 +1813,17 @@ class ReviewService:
         }
         if build_gap is not None and verified_view is not None:
             # consumed_by_analysis 最终以检测是否实际使用了该上下文为
-            # 准：平台链 off / 未配置分析器时不标记为已消费（评审 P2）。
+            # 准：只有平台链成功完成的肯定证据（status=completed）才标
+            # 记为已消费。analyzer-not-configured / llm-not-configured /
+            # no-cxx-sources / analyzer-unavailable 等都是未消费（#350
+            # 第二轮 P2：不能用否定列表推断已消费）。
             platform_summary = (
                 (result.report.collaboration or {}).get("platform") or {}
             )
             platform_status = str(platform_summary.get("status", ""))
-            build_gap["consumed_by_analysis"] = platform_status not in {
-                "", "disabled",
-            }
+            build_gap["consumed_by_analysis"] = (
+                platform_status == "completed"
+            )
         if build_gap is not None:
             # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
             # 阻断依赖上下文阶段的判定，二者都不冒充成功。

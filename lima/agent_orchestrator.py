@@ -1947,6 +1947,10 @@ def _process_target(
             )
             observation = repro_workbench.run_experiment(
                 repository_key, snapshot_hash, sources, driver,
+                verified_artifact_digest=(
+                    getattr(verified_view, "artifact_digest", None)
+                    if verified_view is not None else None
+                ),
                 **experiment_bound,
             )
             hit = experiment_matches_target(
@@ -2161,6 +2165,10 @@ def run_platform_review(
         raise ValueError("source_mode must be repository or diff-only")
     if build_context_mode not in UAF_FACTS_BUILD_CONTEXT_MODES:
         raise ValueError("build_context_mode is outside the closed domain")
+    if verified_view is not None and build_context_mode == "snapshot-compdb":
+        # 消费链接线：有经验证的视图时 facts/repro 切换到 verified-package
+        # 模式，sidecar 的注册表可查到该视图（由 service 侧注册）。
+        build_context_mode = "verified-package"
     _hex64(snapshot_hash, "snapshot_hash")
     if not isinstance(repository_key, str) or not repository_key:
         raise ValueError("repository_key must be non-empty text")

@@ -27,6 +27,8 @@ export interface AuditDraft {
   diff: string;
   pullRequest: string;
   agentDetection: boolean | null;
+  /** 构建智能体模式：空串 = 不发送（沿用服务端默认）。 */
+  buildAgentMode: string;
   /** Optional so drafts created before this field was added still restore. */
   investigatePaths?: string;
 }
@@ -39,6 +41,7 @@ export const EMPTY_DRAFT: AuditDraft = {
   diff: "",
   pullRequest: "",
   agentDetection: null,
+  buildAgentMode: "",
   investigatePaths: "",
 };
 
@@ -46,7 +49,9 @@ export const EMPTY_DRAFT: AuditDraft = {
 let draftStore: AuditDraft = { ...EMPTY_DRAFT };
 
 export function loadDraft(): AuditDraft {
-  return { ...draftStore };
+  // 旧草稿迁移：新字段（如 buildAgentMode）随 EMPTY_DRAFT 取默认值，
+  // 不因 schema 演进把历史会话的草稿判为无效。
+  return { ...EMPTY_DRAFT, ...draftStore };
 }
 
 export function saveDraft(draft: AuditDraft): void {
@@ -145,6 +150,7 @@ export const auditDraftSchema = z
     diff: z.string(),
     pullRequest: z.string(),
     agentDetection: z.boolean().nullable(),
+    buildAgentMode: z.enum(["", "off", "auto", "required"]),
     investigatePaths: z.string().optional(),
   })
   .superRefine((value, ctx) => {
@@ -323,6 +329,10 @@ export function buildSubmitPayload(
   const investigationPayload = investigatePaths.length > 0
     ? { investigate_paths: investigatePaths }
     : {};
+  const buildAgentPayload =
+    draft.buildAgentMode && draft.buildAgentMode !== ""
+      ? { build_agent_mode: draft.buildAgentMode }
+      : {};
   if (draft.sourceMode === "github") {
     const ref = draft.githubRef.trim();
     return {
@@ -335,6 +345,7 @@ export function buildSubmitPayload(
         },
         agent_detection: agentDetection,
         ...investigationPayload,
+        ...buildAgentPayload,
       },
     };
   }
@@ -344,6 +355,7 @@ export function buildSubmitPayload(
       repository_key: repository,
       agent_detection: agentDetection,
       ...investigationPayload,
+      ...buildAgentPayload,
     },
   };
 }

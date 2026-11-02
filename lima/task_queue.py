@@ -17,6 +17,19 @@ class PermanentTaskError(RuntimeError):
     """An error that must not be retried."""
 
 
+class DeferredTaskError(Exception):
+    """The task is deferred (e.g., a shared budget is exhausted).
+
+    额度延期不是执行失败：释放 worker 并延迟重新调度，但不递增失败
+    attempt、不进死信。delay_seconds 仅作用于内存队列的定时器；Redis
+    模式沿既有重试路径立即重投。
+    """
+
+    def __init__(self, message: str = "", delay_seconds: float = 5.0) -> None:
+        super().__init__(message or "task deferred")
+        self.delay_seconds = max(0.1, float(delay_seconds))
+
+
 class TaskQueue:
     STREAM = "lima:review:stream"
     DLQ = "lima:review:dlq"
@@ -38,6 +51,9 @@ class TaskQueue:
         # T2：重试即将发生时的可观测回调（payload/attempt/max/error/delay）。
         self.on_retry = on_retry
         self.stream = stream or self.STREAM
+        # 每个队列自己的延迟集合：扫描与实验队列共享 Redis 后端时，
+        # 到期成员只回到自己的 stream，不会交叉投递（#348 第六轮 F1）。
+        self._deferred_key = f"{self.stream}:deferred"
         self.dead_letter_stream = dead_letter_stream or self.DLQ
         self.group = group or self.GROUP
         self._executor = ThreadPoolExecutor(
@@ -86,6 +102,12 @@ class TaskQueue:
         try:
             self.handler(envelope["payload"])
             return True
+        except DeferredTaskError as exc:
+            # 延期不是失败：回退本次递增的 attempt，按 delay 重排，不
+            # 消耗失败重试预算、不进死信（#348 第四轮 F1）。
+            envelope["attempt"] = max(0, int(envelope.get("attempt", 1)) - 1)
+            self._schedule_deferred(envelope, exc.delay_seconds)
+            return False
         except PermanentTaskError as exc:
             self._dead_letter(envelope, str(exc))
             return False
@@ -99,6 +121,77 @@ class TaskQueue:
         except Exception as exc:
             self._schedule_retry(envelope, exc)
             return False
+
+    def _schedule_deferred(
+        self, envelope: Dict[str, Any], delay_seconds: float
+    ) -> None:
+        """Reschedule one deferred task without consuming retry budget.
+
+        Redis 路径使用持久化延迟集合（ZSET）：以到期时间戳为 score 写
+        入，不立即 xadd——worker 循环中的 _promote_expired_deferred 到
+        期后才转投回 stream，延期窗口内不重执行 handler、不占扫描
+        worker、不消耗失败预算（#348 第五轮 P2）。内存路径用 Timer。
+        """
+        if self._redis:
+            not_before = time.time() + max(0.0, delay_seconds)
+            self._redis.zadd(
+                self._deferred_key,
+                {json.dumps(envelope, ensure_ascii=False): not_before},
+            )
+        else:
+            timer = threading.Timer(
+                delay_seconds, self._submit_memory, args=(envelope,)
+            )
+            timer.daemon = True
+            timer.start()
+
+    # Lua: publish-then-remove.  The member's existence is checked,
+    # then XADD publishes to this queue's stream; only after a successful
+    # publish does ZREM drop the member from the deferred set.  If XADD
+    # errors (e.g. WRONGTYPE) the member survives in the ZSET for the
+    # next cycle — Redis Lua is atomic (no interleaving) but does NOT
+    # roll back on runtime errors, so publish-first is the only ordering
+    # that cannot lose a task (round-7 P1).
+    _PROMOTE_LUA = """
+if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then
+    return 0
+end
+redis.call('XADD', KEYS[2], '*', 'envelope', ARGV[1])
+redis.call('ZREM', KEYS[1], ARGV[1])
+return 1
+"""
+
+    def _promote_expired_deferred(self) -> None:
+        """Move due deferred envelopes back into the stream (Redis only).
+
+        到期成员经 Lua 原子转投（存在检查 → XADD 发布 → ZREM 移除，
+        同一原子块）。发布失败时成员留在 ZSET 供下轮重试——Redis Lua
+        不回滚运行时错误，所以只有"先发布后删除"不会丢任务。异常被
+        捕获使 worker 循环继续运行。
+        """
+        if not self._redis:
+            return
+        now = time.time()
+        try:
+            due = self._redis.zrangebyscore(
+                self._deferred_key, "-inf", now, start=0, num=10
+            )
+        except Exception:
+            return
+        for envelope_json in due:
+            try:
+                self._redis.eval(
+                    self._PROMOTE_LUA,
+                    2,
+                    self._deferred_key,
+                    self.stream,
+                    envelope_json,
+                )
+            except Exception:
+                # Infrastructure failure: the member stays in the ZSET
+                # (Lua is atomic — ZREM without XADD cannot happen), the
+                # worker loop continues, and the next cycle retries.
+                continue
 
     def _schedule_retry(
         self, envelope: dict[str, Any], exc: BaseException
@@ -163,6 +256,7 @@ class TaskQueue:
 
     def _redis_worker(self) -> None:
         while not self._stop.is_set():
+            self._promote_expired_deferred()
             self._reclaim_stale()
             messages = self._redis.xreadgroup(
                 self.group, self.consumer, {self.stream: ">"}, count=1, block=1000

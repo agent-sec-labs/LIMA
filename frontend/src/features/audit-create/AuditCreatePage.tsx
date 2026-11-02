@@ -460,6 +460,30 @@ export function AuditCreatePage(): React.JSX.Element {
               </div>
             )}
 
+            {draft.mode === "repository" && (
+              <div>
+                <label htmlFor="audit-build-agent-mode">构建智能体模式</label>
+                <select
+                  id="audit-build-agent-mode"
+                  aria-label="构建智能体模式"
+                  value={draft.buildAgentMode ?? ""}
+                  onChange={(event) => setValue("buildAgentMode", event.target.value)}
+                  style={{ width: "100%", padding: "4px 8px" }}
+                >
+                  <option value="">跟随服务端默认（关闭）</option>
+                  <option value="off">关闭（仅静态扫描）</option>
+                  <option value="auto">自动构建（失败可降级）</option>
+                  <option value="required">必须构建（失败阻断检测）</option>
+                </select>
+                <Typography.Text
+                  type="secondary"
+                  style={{ display: "block", fontSize: 12, marginTop: 4 }}
+                >
+                  自动构建在沙箱容器里准备编译上下文；关闭则检测使用快照内已有的构建信息。
+                </Typography.Text>
+              </div>
+            )}
+
             <div>
               <Button
                 type="primary"

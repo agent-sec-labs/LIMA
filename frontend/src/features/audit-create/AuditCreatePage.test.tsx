@@ -190,6 +190,7 @@ describe("buildSubmitPayload agent_detection placement (§4.1)", () => {
     diff: "",
     pullRequest: "",
     agentDetection: false,
+    buildAgentMode: "",
   };
 
   it("sends an explicit agent_detection on both repository sources", () => {
@@ -224,6 +225,36 @@ describe("buildSubmitPayload agent_detection placement (§4.1)", () => {
       investigatePaths: "src/parser.py\n../outside.py",
     });
     expect(invalid.success).toBe(false);
+  });
+
+  it("sends build_agent_mode only when the user selects one (slice 5)", () => {
+    const silent = buildSubmitPayload({
+      ...base,
+      buildAgentMode: "",
+    });
+    expect(silent.body).not.toHaveProperty("build_agent_mode");
+
+    const explicit = buildSubmitPayload({
+      ...base,
+      buildAgentMode: "required",
+    });
+    expect(explicit.body).toHaveProperty("build_agent_mode", "required");
+
+    const github = buildSubmitPayload({
+      ...base,
+      sourceMode: "github",
+      repository: "https://github.com/team/project",
+      buildAgentMode: "auto",
+    });
+    expect(github.body).toHaveProperty("build_agent_mode", "auto");
+
+    const diff = buildSubmitPayload({
+      ...base,
+      mode: "diff",
+      diff: "@@ -1 +1 @@\\n+x",
+      buildAgentMode: "auto",
+    });
+    expect(diff.body).not.toHaveProperty("build_agent_mode");
   });
 
   it("never adds agent_detection to PR/diff reviews", () => {
@@ -607,6 +638,7 @@ describe("AuditCreatePage agent detection switch (#245)", () => {
       diff: "",
       pullRequest: "",
       agentDetection: false,
+      buildAgentMode: "",
     });
     const { requests } = stubTrackedFetch([
       {

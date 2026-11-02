@@ -5,18 +5,17 @@ import os
 import re
 import traceback
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict
+from typing import Any
 
 from . import __version__
-from .config import Settings
 from .auth import Principal
+from .config import Settings
 from .github import verify_signature
 from .metrics import metrics
 from .report import to_markdown
 from .service import AgentDetectionRequestError, ReviewService
-
 
 TASK = re.compile(r"^/v1/tasks/([0-9a-f-]+)$")
 REPORT = re.compile(r"^/v1/tasks/([0-9a-f-]+)/report$")
@@ -110,7 +109,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": str(exc)})
             return None
 
-    def _send_json(self, status: int, value: Dict[str, Any]) -> None:
+    def _send_json(self, status: int, value: dict[str, Any]) -> None:
         body = json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
         self._headers(status, "application/json; charset=utf-8", len(body))
         self.wfile.write(body)
@@ -159,7 +158,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     @staticmethod
-    def _read_json(body: bytes) -> Dict[str, Any]:
+    def _read_json(body: bytes) -> dict[str, Any]:
         try:
             value = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -530,16 +529,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._investigate_paths(payload["investigate_paths"])
                     if "investigate_paths" in payload else None
                 )
+                build_agent_mode = payload.get("build_agent_mode")
+                if "build_agent_mode" in payload and (
+                    not isinstance(build_agent_mode, str)
+                    or build_agent_mode not in {"off", "auto", "required"}
+                ):
+                    raise ValueError(
+                        "build_agent_mode must be off, auto or required"
+                    )
                 if "source" in payload:
                     result = self.service.enqueue_repository_scan_source(
                         payload["source"], principal.tenant_id,
                         agent_detection, investigate_paths=investigate_paths,
+                        build_agent_mode=build_agent_mode,
                     )
                 else:
                     result = self.service.enqueue_repository_scan(
                         str(payload.get("repository_key", "")),
                         principal.tenant_id,
                         agent_detection, investigate_paths=investigate_paths,
+                        build_agent_mode=build_agent_mode,
                     )
                 self.service.store.audit(
                     principal.tenant_id, principal.username,
@@ -603,7 +612,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         event_time = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
                     except ValueError:
                         raise ValueError("invalid pull_request.updated_at")
-                    age = abs((datetime.now(timezone.utc) - event_time).total_seconds())
+                    age = abs((datetime.now(UTC) - event_time).total_seconds())
                     if age > self.settings.webhook_max_age_seconds:
                         self._send_json(409, {"error": "webhook is outside the replay window"})
                         return

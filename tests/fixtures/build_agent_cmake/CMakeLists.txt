@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.16)
+project(lima_fixture CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Generate a header at configure time: proves the build-tree include path
+# resolves through the verified-package view (the header only exists after
+# a successful CMake configure).
+set(LIMA_FIXTURE_VALUE 1)
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/generated_flag.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated_flag.h
+    @ONLY
+)
+
+add_library(fixture_lib STATIC
+    src/calculator.cpp
+    src/parser.cpp
+)
+target_include_directories(fixture_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+add_executable(fixture_app src/main.cpp)
+target_link_libraries(fixture_app fixture_lib)

@@ -17,6 +17,8 @@ Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_B
 
 需要在 Docker 中完整构建 C/C++ 目标仓库时，请使用 [容器完整构建指南](docs/CONTAINER_BUILD_GUIDE.md)：统一入口为 `python -m lima.container_build`，具体仓库的配方由使用者在本机维护。
 
+希望在审计任务内**自动准备** C/C++ 编译上下文时，可启用 Build Agent（`LIMA_BUILD_AGENT_MODE=off/auto/required`）：它会在沙箱容器中自动规划、执行 CMake configure 并导出经校验的上下文包，无需手写配方。详见 [Build Agent 用户流程](docs/BUILD_AGENT_USER_FLOW.md)。
+
 > 以证据审代码，以闭环修漏洞。Audit with evidence. Repair with confidence.
 
 以下功能清单描述当前版本能力，不代表目标三阶段平台已经完成：

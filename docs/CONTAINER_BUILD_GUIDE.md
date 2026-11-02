@@ -51,3 +51,5 @@ python -m lima.container_build --source 'D:\src\target-a' --recipe 'D:\local-bui
 复用前会检查卷中的源码和已初始化子模块是否干净，包括 Git `skip-worktree`、`assume-unchanged` 标志；失败时改用新卷。按 Ctrl+C 中断时，入口会停止容器并记录 `interrupted`；若停止和强制终止都无法确认，则记录失败及取消标记，worker 后续写入也不能覆盖宿主的最终结果。`--skip-image-build` 只适用于已经审阅并确认标识的本地镜像。容器构建可能需要拉取镜像或安装依赖，配方的网络和资源使用须按部署环境控制。
 
 现有 `recipe.yaml` 是另一种只导出分析上下文的 configure-only 协议，见 [配方协议说明](../deploy/build-recipes/README.md)。完整构建的 `full-build.json` 与它不共用 schema，也不会自动转换成下游分析上下文包。
+
+以上是人工完整构建路径。LIMA 还有一条**自动构建**路径（Build Agent），在审计任务内自动准备分析上下文——无需手写 Dockerfile 或配方，由部署策略控制镜像与依赖。详见 [Build Agent 用户流程](BUILD_AGENT_USER_FLOW.md)。

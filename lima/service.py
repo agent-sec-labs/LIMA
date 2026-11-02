@@ -1679,8 +1679,14 @@ class ReviewService:
                 workspace.root, artifact, target_units
             )
             # 注册到 sidecar 的进程内视图注册表（内存队列/同进程模式
-            # 下 facts/repro 的 HTTP handler 可查到该视图）。跨进程部
-            # 署需要额外的注册通道，是后续部署侧的工作。
+            # 下 facts/repro 的 HTTP handler 可查到该视图）。
+            #
+            # 跨进程部署限制（#350 评审确认）：独立 sidecar 进程看不
+            # 到主进程的模块字典。生产部署需要 sidecar 增加受信包注
+            # 册的 HTTP 端点或共享存储协议，这是部署基础设施变更，
+            # 不在本 PR 代码层范围内。在此之前 Redis 队列 + 独立
+            # sidecar 的部署中 verified-package 模式会正确报告
+            # verified-view-not-registered（拒绝式降级，不冒充成功）。
             try:
                 from cxx_analyzer import server as analyzer_server
 

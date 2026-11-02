@@ -1945,14 +1945,22 @@ def _process_target(
             experiment_bound = (
                 {} if deadline is None else {"timeout": experiment_timeout}
             )
-            observation = repro_workbench.run_experiment(
-                repository_key, snapshot_hash, sources, driver,
-                verified_artifact_digest=(
-                    getattr(verified_view, "artifact_digest", None)
-                    if verified_view is not None else None
-                ),
-                **experiment_bound,
-            )
+            if verified_view is not None:
+                observation = repro_workbench.run_experiment(
+                    repository_key, snapshot_hash, sources, driver,
+                    verified_artifact_digest=getattr(
+                        verified_view, "artifact_digest", None
+                    ),
+                    **experiment_bound,
+                )
+            else:
+                # Legacy call shape: custom/test workbenches that predate
+                # the verified-package chain only accept the original
+                # four positional args plus timeout.
+                observation = repro_workbench.run_experiment(
+                    repository_key, snapshot_hash, sources, driver,
+                    **experiment_bound,
+                )
             hit = experiment_matches_target(
                 observation,
                 hypothesis.cwe,

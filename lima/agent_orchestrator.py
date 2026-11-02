@@ -2174,9 +2174,28 @@ def run_platform_review(
     if build_context_mode not in UAF_FACTS_BUILD_CONTEXT_MODES:
         raise ValueError("build_context_mode is outside the closed domain")
     if verified_view is not None and build_context_mode == "snapshot-compdb":
-        # 消费链接线：有经验证的视图时 facts/repro 切换到 verified-package
-        # 模式，sidecar 的注册表可查到该视图（由 service 侧注册）。
-        build_context_mode = "verified-package"
+        # 消费链接线（能力门控）：只有 sidecar 实际能查到该视图时才
+        # 切换到 verified-package。跨进程部署中 sidecar 看不到主进程
+        # 的注册表，此时保持 snapshot-compdb（可用的降级路径），不把
+        # 检测切到必然返回 verified-view-not-registered 的模式。
+        try:
+            from cxx_analyzer.server import lookup_verified_build_view
+
+            snapshot_ok = lookup_verified_build_view(snapshot_hash, None)
+            digest_ok = (
+                lookup_verified_build_view(
+                    snapshot_hash,
+                    getattr(verified_view, "artifact_digest", None),
+                )
+                if getattr(verified_view, "artifact_digest", None)
+                else False
+            )
+            if snapshot_ok is not None or digest_ok is not None:
+                build_context_mode = "verified-package"
+        except ImportError:
+            # cxx_analyzer.server unavailable: same-process registration
+            # not possible; stay on the legacy mode.
+            pass
     _hex64(snapshot_hash, "snapshot_hash")
     if not isinstance(repository_key, str) or not repository_key:
         raise ValueError("repository_key must be non-empty text")

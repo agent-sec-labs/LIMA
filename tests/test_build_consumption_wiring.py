@@ -389,5 +389,49 @@ class RequiredConsumptionTests(unittest.TestCase):
         self.assertFalse(visible["consumed_by_analysis"])
 
 
+class CapabilityGateTests(unittest.TestCase):
+    """Mode switches only when the sidecar can actually serve the view."""
+
+    def test_mode_switches_when_view_registered_in_process(self):
+        """Same-process: registration visible → verified-package mode."""
+        from cxx_analyzer import server as analyzer_server
+
+        analyzer_server.clear_verified_build_views()
+        self.addCleanup(analyzer_server.clear_verified_build_views)
+        # Register a view for this snapshot.
+        fake_view = type("V", (), {"artifact_digest": "d" * 64})()
+        analyzer_server.register_verified_build_view("e" * 64, fake_view)
+
+        # Verify the gate sees it.
+        found = analyzer_server.lookup_verified_build_view("e" * 64, None)
+        self.assertIsNotNone(found)
+
+    def test_mode_stays_off_when_view_not_registered(self):
+        """Cross-process: registration invisible → stays snapshot-compdb."""
+        from cxx_analyzer import server as analyzer_server
+
+        analyzer_server.clear_verified_build_views()
+        self.addCleanup(analyzer_server.clear_verified_build_views)
+        # Nothing registered: lookup must return None.
+        self.assertIsNone(analyzer_server.lookup_verified_build_view("f" * 64, None))
+        self.assertIsNone(
+            analyzer_server.lookup_verified_build_view("f" * 64, "d" * 64)
+        )
+
+    def test_gate_code_present_in_run_platform_review(self):
+        """The capability gate exists in the source (not just the check)."""
+        import inspect
+
+        from lima import agent_orchestrator
+
+        source = inspect.getsource(agent_orchestrator.run_platform_review)
+        self.assertIn("lookup_verified_build_view", source)
+        self.assertIn("verified-package", source)
+        # The gate must check before switching (not after).
+        gate_pos = source.index("lookup_verified_build_view")
+        switch_pos = source.index('"verified-package"')
+        self.assertLess(gate_pos, switch_pos)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -122,9 +122,8 @@ class FakeConfigureExecutor:
         self._files["/src/build/compile_commands.json"] = json.dumps(
             compdb
         ).encode("utf8")
-        self._files["/src/build/generated_flag.h"] = (
-            b"#define LIMA_FIXTURE_GENERATED 1\\n"
-        )
+        generated = b"#define LIMA_FIXTURE_GENERATED 1" + bytes([10])
+        self._files["/src/build/generated_flag.h"] = generated
 
     def execute(self, recipe, snapshot_dir, output_dir, *,
                 limits, cancel, revision="unknown"):
@@ -224,13 +223,15 @@ class EndToEndBuildAgentTest(unittest.TestCase):
             )
             view = create_analysis_view(snapshot, artifact, TARGET_UNITS)
 
-            # Consumer 1: facts wire (shared resolver).
+            # Consumer 1: facts wire resolves every declared TU.
             settings = make_settings()
-            wire = resolve_build_context_wire(
-                snapshot, "src/calculator.cpp", settings, verified_view=view
-            )
-            self.assertEqual(wire["status"], "resolved")
-            self.assertEqual(wire["source_kind"], "verified-package")
+            for tu in TARGET_UNITS:
+                with self.subTest(tu=tu):
+                    wire = resolve_build_context_wire(
+                        snapshot, tu, settings, verified_view=view
+                    )
+                    self.assertEqual(wire["status"], "resolved")
+                    self.assertEqual(wire["source_kind"], "verified-package")
 
             # Consumer 2: repro parameter path.
             from cxx_analyzer.repro import _verified_context_outcome
@@ -259,6 +260,57 @@ class EndToEndBuildAgentTest(unittest.TestCase):
             resolved_flags = set(context.arguments[1:-2])
             self.assertIn("-std=c++17", resolved_flags)
             self.assertIn("-Iinclude", resolved_flags)
+
+    def test_every_declared_tu_passes_real_clang_check(self):
+        """Each declared target TU must compile through the resolved context.
+
+        Uses the real resolver output (argv + cwd) with a real Clang when
+        one is available; skips only when no compiler exists (CI has one).
+        This catches broken generated headers that structural checks miss.
+        """
+        import shutil as _shutil
+        import subprocess
+
+        compiler = (
+            _shutil.which("clang++-14")
+            or _shutil.which("clang++")
+            or _shutil.which("g++")
+        )
+        if compiler is None:
+            self.skipTest("a C++ compiler is required for this fixture")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, workspace, fingerprint, result, policy = run_build_agent(tmp)
+            package_dir = Path(tmp) / "artifacts" / result.package_ref
+            digest = compute_artifact_digest(package_dir)
+            artifact = verify_build_artifact(package_dir, fingerprint, digest)
+            view = create_analysis_view(snapshot, artifact, TARGET_UNITS)
+            settings = make_settings()
+
+            for tu in TARGET_UNITS:
+                with self.subTest(tu=tu):
+                    context = resolve_build_context_execution(
+                        snapshot, tu, settings, verified_view=view
+                    )
+                    self.assertEqual(
+                        context.status, "resolved",
+                        f"{tu} must resolve, not {context.status}",
+                    )
+                    # Use the resolver's exact argv (compiler, flags,
+                    # -fsyntax-only, source) from the snapshot root.
+                    argv = [compiler, *context.arguments[1:]]
+                    completed = subprocess.run(  # noqa: S603 - fixed fixture argv
+                        argv,
+                        cwd=snapshot,
+                        capture_output=True,
+                        check=False,
+                        timeout=60,
+                    )
+                    self.assertEqual(
+                        completed.returncode, 0,
+                        f"{tu} failed to compile:\n"
+                        + completed.stderr.decode("utf8", errors="replace")[-1500:],
+                    )
 
     def test_missing_dependency_reports_needs_attention(self):
         """An unregistered dependency is rejected at the tool layer."""

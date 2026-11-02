@@ -331,6 +331,16 @@ class CxxMemoryAdapter(Protocol):
         inventory: WorkspaceInventory,
     ) -> CxxAnalysisResult: ...
 
+    @property
+    def verified_package_supported(self) -> bool:
+        """Whether this adapter shares a process with the sidecar.
+
+        部署声明（不是运行时探测）：同进程部署的适配器设 True（视图
+        注册表可直接查到）；跨进程 HTTP 适配器保持默认 False。这是
+        消费链能力门控的权威信号，不依赖主进程模块字典的查询结果。
+        """
+        return False
+
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}

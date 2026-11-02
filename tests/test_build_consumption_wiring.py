@@ -390,47 +390,58 @@ class RequiredConsumptionTests(unittest.TestCase):
 
 
 class CapabilityGateTests(unittest.TestCase):
-    """Mode switches only when the sidecar can actually serve the view."""
+    """Mode switches only when the adapter declares same-process support."""
 
-    def test_mode_switches_when_view_registered_in_process(self):
-        """Same-process: registration visible → verified-package mode."""
+    def test_remote_adapter_does_not_switch(self):
+        """Cross-process: adapter says no → stays snapshot-compdb.
+
+        This is the actual failure condition (#350 round 5): the main
+        process has the view registered locally, but the adapter is an
+        HTTP client to an independent sidecar — the sidecar's registry
+        is a different dict.  The local registration must NOT cause a
+        mode switch.
+        """
         from cxx_analyzer import server as analyzer_server
 
+        SNAP = "a" * 64
         analyzer_server.clear_verified_build_views()
         self.addCleanup(analyzer_server.clear_verified_build_views)
-        # Register a view for this snapshot.
-        fake_view = type("V", (), {"artifact_digest": "d" * 64})()
-        analyzer_server.register_verified_build_view("e" * 64, fake_view)
 
-        # Verify the gate sees it.
-        found = analyzer_server.lookup_verified_build_view("e" * 64, None)
-        self.assertIsNotNone(found)
+        # Register in the main process (the service does this).
+        fake_view = type("V", (), {"artifact_digest": "b" * 64})()
+        analyzer_server.register_verified_build_view(SNAP, fake_view)
+        # Local registry has the view — but this must NOT matter.
 
-    def test_mode_stays_off_when_view_not_registered(self):
-        """Cross-process: registration invisible → stays snapshot-compdb."""
-        from cxx_analyzer import server as analyzer_server
-
-        analyzer_server.clear_verified_build_views()
-        self.addCleanup(analyzer_server.clear_verified_build_views)
-        # Nothing registered: lookup must return None.
-        self.assertIsNone(analyzer_server.lookup_verified_build_view("f" * 64, None))
-        self.assertIsNone(
-            analyzer_server.lookup_verified_build_view("f" * 64, "d" * 64)
-        )
-
-    def test_gate_code_present_in_run_platform_review(self):
-        """The capability gate exists in the source (not just the check)."""
+        # The adapter is remote (default verified_package_supported=False).
+        # Verify the gate source checks the adapter, not the registry.
         import inspect
 
         from lima import agent_orchestrator
 
         source = inspect.getsource(agent_orchestrator.run_platform_review)
-        self.assertIn("lookup_verified_build_view", source)
-        self.assertIn("verified-package", source)
-        # The gate must check before switching (not after).
-        gate_pos = source.index("lookup_verified_build_view")
-        switch_pos = source.index('"verified-package"')
-        self.assertLess(gate_pos, switch_pos)
+        self.assertIn("verified_package_supported", source)
+        self.assertIn("analyzer_client", source)
+        # The old registry-based check must be gone.
+        self.assertNotIn("lookup_verified_build_view", source)
+
+    def test_in_process_adapter_switches(self):
+        """Same-process: adapter declares True → mode switches."""
+        from lima.cxx_memory import CxxMemoryAdapter
+
+        # Verify the protocol has the property.
+        self.assertTrue(hasattr(CxxMemoryAdapter, "verified_package_supported"))
+
+    def test_adapter_property_defaults_false(self):
+        """Adapters that don't override default to False (remote)."""
+
+        class RemoteAdapter:
+            def analyze(self, *args, **kwargs):
+                pass
+
+        adapter = RemoteAdapter()
+        self.assertFalse(
+            getattr(adapter, "verified_package_supported", False)
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,16 @@
-#pragma once
+#include "calculator.h"
+#include "generated_flag.h"
 
-/// A generated header that only exists after a successful CMake configure.
-/// The E2E fixture proves the build agent's context package carries it
-/// (generated file collected from the build tree) and downstream
-/// consumers can resolve it through the verified-package view.
-#define LIMA_FIXTURE_GENERATED 1
+namespace lima_fixture {
+
+/// Uses the generated header's define to prove the build-tree include
+/// path resolves through the verified-package view.
+int parser_value() {
+#ifdef LIMA_FIXTURE_GENERATED
+    return add(LIMA_FIXTURE_GENERATED, 41);
+#else
+    return 0;
+#endif
+}
+
+}  // namespace lima_fixture

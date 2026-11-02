@@ -96,6 +96,7 @@ class FakeConfigureExecutor:
                     "/usr/bin/c++",
                     "-std=c++17",
                     "-I/src/include",
+                    "-I/src/build",
                     "-c",
                     "calculator.cpp",
                     "-o",
@@ -109,6 +110,7 @@ class FakeConfigureExecutor:
                     "/usr/bin/c++",
                     "-std=c++17",
                     "-I/src/include",
+                    "-I/src/build",
                     "-c",
                     "parser.cpp",
                     "-o",
@@ -139,7 +141,7 @@ class FakeConfigureExecutor:
             steps=(),
             image=recipe.image,
             image_digest=None,
-            package_path=str(Path(output_dir)),
+            package_path=str(package_dir),
             failure_code=None,
         )
 

@@ -69,7 +69,7 @@ BuildResult 摘要（状态、包引用、尝试次数、失败码、证据引�
 
 - facts / repro / Specialist 的 **verified-package 消费代码**已实现（S4B），包括共享 resolver、封存成员铺设、三方参数一致
 - 但服务端的扫描流程 **还没有把构建产物注册到分析器的视图注册表**，因此检测阶段目前仍走 `snapshot-compdb` 或 `heuristic` 路径
-- 完整的检测消费接线（sidecar 进程的视图注册、扫描器接收 verified-package 输入）是端到端试点（S6）的工作
+- 完整的检测消费接线（sidecar 进程的视图注册、扫描器接收 verified-package 输入）是下一个开发切片的工作——本切片交付构建执行、包校验、消费代码与文档，接线需要跨进程协调，在真实试点数据之后立项
 
 ## 部署配置
 

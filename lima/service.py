@@ -1675,9 +1675,26 @@ class ReviewService:
             target_units = tuple(package.manifest.compdb.tu_list)
             if not target_units:
                 return None
-            return create_analysis_view(
+            view = create_analysis_view(
                 workspace.root, artifact, target_units
             )
+            # 注册到 sidecar 的进程内视图注册表（内存队列/同进程模式
+            # 下 facts/repro 的 HTTP handler 可查到该视图）。跨进程部
+            # 署需要额外的注册通道，是后续部署侧的工作。
+            try:
+                from cxx_analyzer import server as analyzer_server
+
+                analyzer_server.register_verified_build_view(
+                    build_result.snapshot_hash,
+                    view,
+                    artifact_digest=(
+                        build_result.artifact_digest
+                        if build_result.artifact_digest else None
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - registration best-effort
+                pass
+            return view
         except Exception:  # noqa: BLE001 - consumption failure degrades
             return None
 
@@ -1730,26 +1747,31 @@ class ReviewService:
                 verified_view = self._consume_build_context(
                     task_id, workspace, build_result
                 )
+            consumption_ok = verified_view is not None
+            consumption_failure = (
+                "consumption-unavailable"
+                if build_result.status == SUCCEEDED and not consumption_ok
+                else build_result.failure_code
+            )
             build_gap = {
                 "build_agent_mode": build_agent_mode,
                 "status": build_result.status,
                 "package_ref": build_result.package_ref,
                 "artifact_digest": build_result.artifact_digest,
                 "attempts": build_result.attempts,
-                "failure_code": build_result.failure_code,
+                "failure_code": consumption_failure,
                 "blocking": (
-                    build_result.status != SUCCEEDED
-                    and build_agent_mode == "required"
+                    not consumption_ok and build_agent_mode == "required"
                 ),
                 # consumed_by_analysis 反映实际消费：视图构造成功才为
                 # True，消费失败（包缺失/校验不过）保持 False。
-                "consumed_by_analysis": verified_view is not None,
+                "consumed_by_analysis": consumption_ok,
             }
-            if build_result.status != SUCCEEDED and str(
+            if not consumption_ok and str(
                 cxx_agent_mode or "off"
             ) != "off":
-                # auto 降级继续静态扫描但必须显式记录缺口；required 拒绝
-                # 进入依赖构建上下文的阶段（这里即平台检测链）。
+                # 构建成功但消费失败（required）或构建失败（auto）都
+                # 拒绝进入依赖构建上下文的检测阶段。
                 cxx_agent_mode = "off"
         self.store.transition(
             task_id,
@@ -1788,6 +1810,16 @@ class ReviewService:
             "snapshot_files": len(result.inventory.files),
             **import_policy_extra,
         }
+        if build_gap is not None and verified_view is not None:
+            # consumed_by_analysis 最终以检测是否实际使用了该上下文为
+            # 准：平台链 off / 未配置分析器时不标记为已消费（评审 P2）。
+            platform_summary = (
+                (result.report.collaboration or {}).get("platform") or {}
+            )
+            platform_status = str(platform_summary.get("status", ""))
+            build_gap["consumed_by_analysis"] = platform_status not in {
+                "", "disabled",
+            }
         if build_gap is not None:
             # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
             # 阻断依赖上下文阶段的判定，二者都不冒充成功。

@@ -5,9 +5,10 @@ from __future__ import annotations
 import difflib
 import json
 import time
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Callable, Final, Iterable, Optional, Sequence
+from typing import Final
 
 from .adjudication import adjudicate_findings
 from .agent_orchestrator import (
@@ -139,13 +140,13 @@ class RepositoryScanner:
 
     def __init__(
         self,
-        reviewers: Optional[Iterable[Reviewer]] = None,
+        reviewers: Iterable[Reviewer] | None = None,
         *,
         sast_mode: str = "auto",
-        sast_adapters: Optional[Iterable[SastAdapter]] = None,
+        sast_adapters: Iterable[SastAdapter] | None = None,
         dataflow_enabled: bool = True,
         cxx_memory_mode: str = "off",
-        cxx_memory_adapter: Optional[CxxMemoryAdapter] = None,
+        cxx_memory_adapter: CxxMemoryAdapter | None = None,
         cxx_requested_layers: tuple[str, ...] = REQUESTED_LAYERS,
         cxx_agent_mode: str = "off",
         cxx_agent_budget_factory: Callable[[], CxxAgentBudget] | None = None,
@@ -399,6 +400,11 @@ class RepositoryScanner:
         payload = {
             "mode": mode,
             "status": status,
+            # #350 第六轮 P1：实际生效的构建上下文模式（门控切换/作废
+            # 后的终值），consumed_by_analysis 的肯定证据来源。
+            "build_context": getattr(
+                outcome, "build_context_mode", "snapshot-compdb"
+            ),
             "translation_units": list(outcome.translation_units),
             "stats": {
                 "leads": stats.lead_count,
@@ -690,6 +696,7 @@ class RepositoryScanner:
         mode_override: str | None = None,
         progress_callback: ProgressCallback | None = None,
         investigate_paths: Sequence[str] = (),
+        verified_view: object | None = None,
     ) -> dict:
         """Run the single agent platform chain for the facts domain.
 
@@ -752,6 +759,7 @@ class RepositoryScanner:
                 repository_key=repository_key,
                 snapshot_hash=inventory.fingerprint(),
                 translation_units=translation_units,
+                verified_view=verified_view,
                 mode=mode,
                 budget=budget,
                 llm_config=llm_config,
@@ -845,6 +853,7 @@ class RepositoryScanner:
         should_cancel: Callable[[], bool] | None = None,
         cxx_agent_mode: str | None = None,
         investigate_paths: Sequence[str] = (),
+        verified_view: object | None = None,
     ) -> RepositoryScanResult:
         """Scan a materialized workspace.
 
@@ -1051,6 +1060,7 @@ class RepositoryScanner:
             mode_override=cxx_agent_mode,
             progress_callback=progress_callback,
             investigate_paths=investigate_paths,
+            verified_view=verified_view,
         )
         check_cancelled()
 

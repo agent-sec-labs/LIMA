@@ -1637,6 +1637,74 @@ class ReviewService:
             ),
         )
 
+    def _consume_build_context(
+        self, task_id: str, workspace: "RepositoryWorkspace",
+        build_result: BuildAgentResult,
+    ) -> object | None:
+        """Construct the verified AnalysisContextView from a build result.
+
+        消费链接线：构建成功后从产物目录加载包、走 S4A 校验与视图构
+        造，把经验证的 TU 参数投影交给扫描阶段。TU 列表从包的 compdb
+        读取（而非 workspace inventory），确保与构建时的声明一致。
+        包缺失或校验失败时返回 None（检测降级到旧路径，不阻断），
+        consumed_by_analysis 保持 false。
+        """
+
+        if build_result.status != SUCCEEDED or not build_result.package_ref:
+            return None
+        package_dir = (
+            Path(self.settings.build_artifacts_root)
+            / task_id
+            / build_result.package_ref
+        )
+        if not package_dir.is_dir():
+            return None
+        try:
+            from .build_context_view import (
+                create_analysis_view,
+                verify_build_artifact,
+            )
+            from .context_package import read_package
+
+            artifact = verify_build_artifact(
+                package_dir,
+                build_result.snapshot_hash,
+                build_result.artifact_digest or "",
+            )
+            package = read_package(package_dir)
+            target_units = tuple(package.manifest.compdb.tu_list)
+            if not target_units:
+                return None
+            view = create_analysis_view(
+                workspace.root, artifact, target_units
+            )
+            # 注册到 sidecar 的进程内视图注册表（内存队列/同进程模式
+            # 下 facts/repro 的 HTTP handler 可查到该视图）。
+            #
+            # 跨进程部署限制（#350 评审确认）：独立 sidecar 进程看不
+            # 到主进程的模块字典。生产部署需要 sidecar 增加受信包注
+            # 册的 HTTP 端点或共享存储协议，这是部署基础设施变更，
+            # 不在本 PR 代码层范围内。在此之前 Redis 队列 + 独立
+            # sidecar 的部署中 verified-package 模式会正确报告
+            # verified-view-not-registered（拒绝式降级，不冒充成功）。
+            try:
+                from cxx_analyzer import server as analyzer_server
+
+                analyzer_server.register_verified_build_view(
+                    build_result.snapshot_hash, view
+                )
+                if build_result.artifact_digest:
+                    analyzer_server.register_verified_build_view(
+                        build_result.snapshot_hash,
+                        view,
+                        artifact_digest=build_result.artifact_digest,
+                    )
+            except Exception:  # noqa: BLE001 - registration best-effort
+                pass
+            return view
+        except Exception:  # noqa: BLE001 - consumption failure degrades
+            return None
+
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
         repository_label: str, import_policy_extra: dict[str, Any],
@@ -1653,6 +1721,7 @@ class ReviewService:
             max_total_bytes=self.settings.repository_scan_max_total_bytes,
         )
         build_gap: dict[str, Any] | None = None
+        verified_view: object | None = None
         if build_agent_mode != "off":
             try:
                 build_result = self._run_build_agent(
@@ -1680,27 +1749,54 @@ class ReviewService:
                     "evidence_refs": list(build_result.evidence_refs),
                 },
             })
+            if build_result.status == SUCCEEDED:
+                # 消费链接线：构造经验证的视图交给扫描阶段（失败降级）。
+                verified_view = self._consume_build_context(
+                    task_id, workspace, build_result
+                )
+            # #350 第六轮 P1：消费能力在分析开始前统一判定。适配器未
+            # 声明与 sidecar 同进程的 verified package 支持时，本地
+            # 构造成功的视图对 facts、Specialist 契约与复现实验三方
+            # 都不可消费——不能把"视图构造成功"当作"部署可消费"。
+            consumption_failure_code = None
+            if verified_view is not None:
+                analyzer_adapter = getattr(
+                    self.repository_scanner, "cxx_memory_adapter", None,
+                )
+                if not bool(getattr(
+                    analyzer_adapter, "verified_package_supported", False,
+                )):
+                    verified_view = None
+                    consumption_failure_code = (
+                        "verified-context-not-consumable"
+                    )
+            consumption_ok = verified_view is not None
+            if build_result.status == SUCCEEDED and not consumption_ok:
+                consumption_failure = (
+                    consumption_failure_code or "consumption-unavailable"
+                )
+            else:
+                consumption_failure = build_result.failure_code
             build_gap = {
                 "build_agent_mode": build_agent_mode,
                 "status": build_result.status,
                 "package_ref": build_result.package_ref,
                 "artifact_digest": build_result.artifact_digest,
                 "attempts": build_result.attempts,
-                "failure_code": build_result.failure_code,
+                "failure_code": consumption_failure,
                 "blocking": (
-                    build_result.status != SUCCEEDED
-                    and build_agent_mode == "required"
+                    not consumption_ok and build_agent_mode == "required"
                 ),
-                # 本切片交付构建执行与展示；把已验证参数接入 facts/repro/
-                # Specialist 的消费链在 S6 试点接线，在此之前检测阶段不
-                # 消费该包——成功摘要必须如实说明，不宣称检测已使用。
-                "consumed_by_analysis": False,
+                # consumed_by_analysis 反映实际消费：视图可交付给检测
+                # 才可能为 True，最终值在扫描后按平台摘要的肯定证据
+                # 重算（见下方 build_context 校验）。
+                "consumed_by_analysis": consumption_ok,
             }
-            if build_result.status != SUCCEEDED and str(
+            if not consumption_ok and str(
                 cxx_agent_mode or "off"
             ) != "off":
-                # auto 降级继续静态扫描但必须显式记录缺口；required 拒绝
-                # 进入依赖构建上下文的阶段（这里即平台检测链）。
+                # 构建成功但消费失败（required）或构建失败（auto）都
+                # 拒绝进入依赖构建上下文的检测阶段。
                 cxx_agent_mode = "off"
         self.store.transition(
             task_id,
@@ -1720,6 +1816,7 @@ class ReviewService:
                     progress.pipeline_event if progress is not None else None
                 ),
                 task_id=task_id,
+                verified_view=verified_view,
                 # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
                 # 权威取消信号。
                 should_cancel=lambda: self.store.is_cancelled(task_id),
@@ -1738,6 +1835,22 @@ class ReviewService:
             "snapshot_files": len(result.inventory.files),
             **import_policy_extra,
         }
+        if build_gap is not None and verified_view is not None:
+            # consumed_by_analysis 最终以检测实际使用该上下文的肯定证据
+            # 为准（#350 第六轮 P1）：平台链完成（status=completed）且
+            # 摘要带回实际生效的 build_context=verified-package——三方
+            # 消费者（facts/Specialist/复现）与门控同源，缺一即未消费。
+            # analyzer-not-configured / llm-not-configured /
+            # no-cxx-sources / review-incomplete 等状态在此自然为 False。
+            platform_summary = (
+                (result.report.collaboration or {}).get("platform") or {}
+            )
+            platform_status = str(platform_summary.get("status", ""))
+            platform_context = str(platform_summary.get("build_context", ""))
+            build_gap["consumed_by_analysis"] = (
+                platform_status == "completed"
+                and platform_context == "verified-package"
+            )
         if build_gap is not None:
             # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
             # 阻断依赖上下文阶段的判定，二者都不冒充成功。

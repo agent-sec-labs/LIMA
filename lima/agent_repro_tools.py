@@ -327,6 +327,7 @@ class ReproWorkbench:
         driver_code: str,
         *,
         timeout: int | None = None,
+        verified_artifact_digest: str | None = None,
     ) -> ExperimentObservation:
         """Run one sandboxed ASan compile-and-run as a budgeted agent step.
 
@@ -361,17 +362,20 @@ class ReproWorkbench:
             raise ValueError("timeout must be a positive integer or None")
         effective_timeout = timeout if timeout is not None else self.default_timeout
         self._budget.consume(calls=1, bytes=len(driver.encode("utf-8")))
+        # Build the client kwargs once; the digest is only passed when
+        # a verified context actually provided one (None means the legacy
+        # path, and the kwarg is omitted to preserve the original call
+        # shape for older clients).
+        client_kwargs = (
+            {"timeout": effective_timeout}
+            if self._client_accepts_timeout else {}
+        )
+        if verified_artifact_digest is not None:
+            client_kwargs["verified_artifact_digest"] = verified_artifact_digest
         try:
-            if self._client_accepts_timeout:
-                response = self._client.repro_compile_run(
-                    repo, snapshot, sources, driver, timeout=effective_timeout
-                )
-            else:
-                # Legacy 4-argument client: the wire timeout stays owned by
-                # the client itself.
-                response = self._client.repro_compile_run(
-                    repo, snapshot, sources, driver
-                )
+            response = self._client.repro_compile_run(
+                repo, snapshot, sources, driver, **client_kwargs
+            )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             return _degraded_observation(exc)
         observation = _observation_from_response(response)

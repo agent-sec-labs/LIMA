@@ -52,17 +52,19 @@ def make_settings() -> AnalyzerSettings:
     )
 
 
-def build_repository_and_view(root: Path):
+def build_repository_and_view(root: Path, variant: int = 0):
     """One directory serving as snapshot, import-root repo and package source.
 
     Returns ``(repository, view, snapshot_hash, artifact_digest)``.  The
     package binds ``src/a.cpp`` with ``-DVERIFIED=1`` plus one vendored
-    header member, mirroring the S4B fixtures.
+    header member, mirroring the S4B fixtures.  ``variant`` varies the
+    source content so distinct calls yield DISTINCT snapshot
+    fingerprints (capacity tests register many snapshots).
     """
     repository = root / "team" / "project"
-    (repository / "src").mkdir(parents=True)
+    (repository / "src").mkdir(parents=True, exist_ok=True)
     (repository / "src" / "a.cpp").write_text(
-        "int leak(void) { return 0; }\n", encoding="utf8"
+        f"int leak(void) {{ return {variant}; }}\n", encoding="utf8"
     )
     snapshot_hash = snapshot_fingerprint(repository)
     entry = {
@@ -94,7 +96,13 @@ def build_repository_and_view(root: Path):
 
 
 def envelope_from_view(view, snapshot_hash: str) -> dict:
-    """The wire envelope for one sealed view (the PR-B sender shape)."""
+    """The wire envelope for one sealed view (the PR-B sender shape).
+
+    Identity plus the sealed members only: TU flags, directories and
+    the context hash are DERIVED on the sidecar from the sealed
+    manifest/compdb members (#352 review round 1) -- they cannot be
+    asserted independently over the wire.
+    """
     members = {
         path: base64.b64encode(bytes(view.read_member(path))).decode("ascii")
         for path in view.member_paths
@@ -103,16 +111,7 @@ def envelope_from_view(view, snapshot_hash: str) -> dict:
         "schema_version": 1,
         "snapshot_sha256": snapshot_hash,
         "artifact_digest": view.artifact_digest,
-        "context_hash": view.context_hash,
         "target_units": list(view.target_units),
-        "tu_flags": {
-            unit: list(view.flags_for_tu(unit))
-            for unit in view.target_units
-        },
-        "tu_directories": {
-            unit: view.working_directory_for_tu(unit)
-            for unit in view.target_units
-        },
         "members": members,
     }
 
@@ -192,7 +191,7 @@ class WireValidationTests(RegistryIsolation):
         with self.assertRaises(analyzer_server.RequestError):
             self._register(extra)
         missing = json.loads(json.dumps(self.envelope))
-        del missing["context_hash"]
+        del missing["target_units"]
         with self.assertRaises(analyzer_server.RequestError):
             self._register(missing)
 
@@ -266,7 +265,7 @@ class WireValidationTests(RegistryIsolation):
         )
 
     def test_identity_fields_must_be_hex64(self):
-        for field in ("snapshot_sha256", "artifact_digest", "context_hash"):
+        for field in ("snapshot_sha256", "artifact_digest"):
             bad = json.loads(json.dumps(self.envelope))
             bad[field] = "z" * 64
             with self.assertRaises(analyzer_server.RequestError):
@@ -279,15 +278,90 @@ class WireValidationTests(RegistryIsolation):
             with self.assertRaises(analyzer_server.RequestError):
                 self._register(bad)
 
-    def test_tu_maps_must_cover_targets_exactly(self):
-        bad = json.loads(json.dumps(self.envelope))
-        bad["tu_flags"]["src/other.cpp"] = ["-DX=1"]
+    def _reseat(self, mutate) -> dict:
+        """Rebuild one envelope whose members were mutated, re-hashing.
+
+        The artifact digest is recomputed over the mutated members, so
+        these cases exercise the SEALED-PACKAGE derivation (manifest,
+        compdb, revision binding), not the digest anchor.
+        """
+
+        envelope = json.loads(json.dumps(self.envelope))
+        members = {
+            path: base64.b64decode(value)
+            for path, value in envelope["members"].items()
+        }
+        mutate(members)
+        envelope["members"] = {
+            path: base64.b64encode(data).decode("ascii")
+            for path, data in members.items()
+        }
+        envelope["artifact_digest"] = (
+            analyzer_server.artifact_digest_from_members(members)
+        )
+        return envelope
+
+    def test_sealed_semantics_cannot_be_reasserted_independently(self):
+        """Round-1 P1: every consumed semantic derives from sealed bytes.
+
+        A digest-consistent package whose manifest lies (wrong context
+        hash), whose revision re-labels it onto another snapshot, whose
+        compdb is malformed, whose target TU is not declared, or that
+        lacks a core member must all be refused -- and a refusal must
+        never overwrite an existing registration.
+        """
+        # Baseline good registration to prove refusals do not clobber.
+        self._register(self.envelope)
+
+        def tamper_context_hash(members):
+            manifest = json.loads(members["context_manifest.json"])
+            manifest["context_hash"] = "e" * 64
+            members["context_manifest.json"] = json.dumps(
+                manifest
+            ).encode("utf8")
+
+        def relabel_revision(members):
+            manifest = json.loads(members["context_manifest.json"])
+            manifest["revision"] = "f" * 64
+            members["context_manifest.json"] = json.dumps(
+                manifest
+            ).encode("utf8")
+
+        def mangle_compdb(members):
+            members["compile_commands.json"] = b"not json at all"
+
+        def drop_manifest(members):
+            del members["context_manifest.json"]
+
+        def drop_compdb(members):
+            del members["compile_commands.json"]
+
+        for mutate in (
+            tamper_context_hash,
+            relabel_revision,
+            mangle_compdb,
+            drop_manifest,
+            drop_compdb,
+        ):
+            with self.assertRaises(analyzer_server.RequestError):
+                self._register(self._reseat(mutate))
+        # Re-labeling via the envelope identity alone is refused the
+        # same way (the sealed revision no longer matches the claim).
+        relabeled = json.loads(json.dumps(self.envelope))
+        relabeled["snapshot_sha256"] = "1" * 64
         with self.assertRaises(analyzer_server.RequestError):
-            self._register(bad)
-        bad = json.loads(json.dumps(self.envelope))
-        del bad["tu_directories"]["src/a.cpp"]
+            self._register(relabeled)
+        # A target TU outside the declared compilation database.
+        undeclared = json.loads(json.dumps(self.envelope))
+        undeclared["target_units"] = ["src/other.cpp"]
         with self.assertRaises(analyzer_server.RequestError):
-            self._register(bad)
+            self._register(undeclared)
+        # The good registration survives every refusal untouched.
+        self.assertIsNotNone(
+            analyzer_server.lookup_verified_build_view(
+                self.snapshot_hash, self.digest
+            )
+        )
 
     def test_member_budget_enforced(self):
         big = json.loads(json.dumps(self.envelope))
@@ -339,6 +413,230 @@ class DigestParityTests(unittest.TestCase):
             self.assertEqual(
                 digest, analyzer_server.artifact_digest_from_members(members)
             )
+
+
+class DerivationParityTests(RegistryIsolation):
+    """The derived wire view equals the lima view on every consumed field.
+
+    The sidecar derives TU flags, working directories and the context
+    hash from the sealed manifest/compdb via mirrored algorithms; this
+    pins byte-level parity with what the in-process path would serve,
+    so facts/repro see identical semantics either way.
+    """
+
+    def test_derived_view_matches_lima_view(self):
+        from cxx_analyzer import wire_view
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repository, view, snapshot_hash, digest = (
+                build_repository_and_view(Path(tmp))
+            )
+            members = {
+                path: bytes(view.read_member(path))
+                for path in view.member_paths
+            }
+            derived = wire_view.derive_wire_view(
+                snapshot_hash, digest, list(view.target_units), members
+            )
+            self.assertEqual(view.target_units, derived.target_units)
+            self.assertEqual(view.context_hash, derived.context_hash)
+            self.assertEqual(view.artifact_digest, derived.artifact_digest)
+            self.assertEqual(view.member_paths, derived.member_paths)
+            for unit in view.target_units:
+                self.assertEqual(
+                    view.flags_for_tu(unit), derived.flags_for_tu(unit)
+                )
+                self.assertEqual(
+                    view.working_directory_for_tu(unit),
+                    derived.working_directory_for_tu(unit),
+                )
+                self.assertEqual(
+                    view.read_member("headers/fixture/lib.h"),
+                    derived.read_member("headers/fixture/lib.h"),
+                )
+
+
+class RegistryConcurrencyTests(RegistryIsolation):
+    """Round-1 P2: registration and cleanup are atomic under threads."""
+
+    def setUp(self):
+        super().setUp()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.repository, self.view, self.snapshot_hash, self.digest = (
+            build_repository_and_view(root)
+        )
+        self.envelope = envelope_from_view(self.view, self.snapshot_hash)
+        self.settings = make_settings()
+
+    def test_interleaved_register_delete_never_tears_state(self):
+        """A concurrent DELETE lands fully before or after the POST.
+
+        The reviewer's scenario: a barrier-synchronized DELETE between
+        the two slot writes produced a registered-default-but-missing-
+        digest mix.  With the registry lock the observable end state of
+        every round is either both slots present or both absent.
+        """
+        import threading as _threading
+
+        rounds = 24
+        barrier = _threading.Barrier(2, timeout=10)
+        torn: list[str] = []
+
+        def register_worker():
+            for _ in range(rounds):
+                barrier.wait()
+                try:
+                    analyzer_server.register_view_request(
+                        self.envelope, self.settings
+                    )
+                except analyzer_server.RequestError:
+                    torn.append("register-refused")
+
+        def delete_worker():
+            for _ in range(rounds):
+                barrier.wait()
+                analyzer_server.unregister_view_request({
+                    "snapshot_sha256": self.snapshot_hash,
+                    "artifact_digest": self.digest,
+                })
+
+        workers = [
+            _threading.Thread(target=register_worker),
+            _threading.Thread(target=delete_worker),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30)
+        # The final state must be a coherent registration or removal --
+        # never one slot without the other.
+        views = analyzer_server._VERIFIED_BUILD_VIEWS.get(
+            self.snapshot_hash, {}
+        )
+        has_digest = self.digest in views
+        has_default = "" in views
+        self.assertEqual(
+            has_digest, has_default, f"torn registry: {sorted(views)}"
+        )
+        self.assertEqual([], torn)
+        # Accounting invariant: tracked bytes exist exactly for the
+        # snapshots present (register tracks, unregister/evict untracks).
+        self.assertEqual(
+            set(analyzer_server._VERIFIED_BUILD_VIEWS),
+            set(analyzer_server._REGISTRY_SNAPSHOT_BYTES),
+        )
+
+    def test_slot_bound_race_never_exceeds_cap(self):
+        """Parallel distinct-digest registrations respect the cap."""
+        import threading as _threading
+
+        cap = analyzer_server._MAX_VIEWS_PER_SNAPSHOT
+        variants = []
+        for index in range(cap + 6):
+            envelope = json.loads(json.dumps(self.envelope))
+            envelope["members"]["headers/fixture/lib.h"] = base64.b64encode(
+                f"// lib race {index}\n".encode()
+            ).decode("ascii")
+            members = {
+                path: base64.b64decode(value)
+                for path, value in envelope["members"].items()
+            }
+            envelope["artifact_digest"] = (
+                analyzer_server.artifact_digest_from_members(members)
+            )
+            variants.append(envelope)
+        refused: list[int] = []
+        start = _threading.Barrier(len(variants), timeout=15)
+
+        def worker(index: int):
+            start.wait()
+            try:
+                analyzer_server.register_view_request(
+                    variants[index], self.settings
+                )
+            except analyzer_server.RequestError:
+                refused.append(index)
+
+        threads = [
+            _threading.Thread(target=worker, args=(index,))
+            for index in range(len(variants))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        views = analyzer_server._VERIFIED_BUILD_VIEWS[self.snapshot_hash]
+        self.assertLessEqual(len(views), cap)
+        # The default slot occupies one of the cap slots, so at most
+        # cap-1 distinct digests survive; every further variant refused.
+        self.assertEqual(len(variants) - (cap - 1), len(refused))
+
+
+class RegistryCapacityTests(RegistryIsolation):
+    """Round-1 P2: process-level capacity with oldest-first eviction."""
+
+    def setUp(self):
+        super().setUp()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.settings = make_settings()
+
+    def _envelope_for(self, index: int):
+        repository, view, snapshot_hash, digest = (
+            build_repository_and_view(self.root / f"case{index}", variant=index)
+        )
+        return envelope_from_view(view, snapshot_hash), snapshot_hash, digest
+
+    def test_snapshot_count_evicts_oldest_first(self):
+        cap = analyzer_server._MAX_REGISTRY_SNAPSHOTS
+        first = None
+        newest = None
+        for index in range(cap + 3):
+            envelope, snapshot_hash, _ = self._envelope_for(index)
+            if index == 0:
+                first = snapshot_hash
+            newest = snapshot_hash
+            analyzer_server.register_view_request(envelope, self.settings)
+        # The oldest registration (a crashed host's leak) is gone; the
+        # newest survive; the registry never exceeds the cap.
+        self.assertLessEqual(
+            len(analyzer_server._VERIFIED_BUILD_VIEWS), cap
+        )
+        self.assertNotIn(first, analyzer_server._VERIFIED_BUILD_VIEWS)
+        self.assertIn(newest, analyzer_server._VERIFIED_BUILD_VIEWS)
+
+    def test_total_bytes_evicts_oldest_and_rejects_oversize(self):
+        with mock.patch.object(
+            analyzer_server, "_MAX_REGISTRY_TOTAL_MEMBER_BYTES", 1
+        ):
+            # Any single registration already exceeds the byte cap and
+            # is refused without evicting everything else.
+            envelope, snapshot_hash, digest = self._envelope_for(0)
+            with self.assertRaises(analyzer_server.RequestError):
+                analyzer_server.register_view_request(envelope, self.settings)
+            self.assertEqual({}, analyzer_server._VERIFIED_BUILD_VIEWS)
+        with mock.patch.object(
+            analyzer_server, "_MAX_REGISTRY_SNAPSHOTS", 2
+        ):
+            for index in (1, 2, 3):
+                envelope, _, _ = self._envelope_for(index)
+                analyzer_server.register_view_request(envelope, self.settings)
+            self.assertLessEqual(
+                len(analyzer_server._VERIFIED_BUILD_VIEWS), 2
+            )
+        # Accounting follows unregistration: the removed snapshot's
+        # bytes are untracked while survivors stay tracked.
+        envelope, snapshot_hash, digest = self._envelope_for(4)
+        analyzer_server.register_view_request(envelope, self.settings)
+        analyzer_server.unregister_view_request({
+            "snapshot_sha256": snapshot_hash, "artifact_digest": digest,
+        })
+        self.assertNotIn(
+            snapshot_hash, analyzer_server._REGISTRY_SNAPSHOT_BYTES
+        )
 
 
 class RoutingTests(RegistryIsolation):

@@ -7,13 +7,14 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 from urllib.parse import parse_qs
 
-from . import sandbox, uaf_scan
+from . import sandbox, uaf_scan, wire_view
 from .build_context import resolve_build_context_execution
 from .build_scan import run_build_scan
 from .config import AnalyzerSettings
@@ -79,12 +80,61 @@ _UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset(
 # semantics no matter what else is registered.
 _VERIFIED_BUILD_VIEWS: dict[str, dict[str, object]] = {}
 _DEFAULT_VIEW_SLOT: Final = ""
+# Registry lifecycle (#352 review round 1): the threaded HTTP server can
+# interleave registration, lookup and cleanup, so every multi-step
+# registry mutation runs under one reentrant lock -- a torn registration
+# (digest slot published, default slot not) or a capacity check racing
+# an insert is never observable.
+_REGISTRY_LOCK: Final = threading.RLock()
+# Per-snapshot member-byte accounting for the process-level capacity;
+# updated under the same lock as the registry itself.
+_REGISTRY_SNAPSHOT_BYTES: dict[str, int] = {}
+# Process-level capacity: a host that dies after POST (no DELETE) or an
+# endless stream of new snapshots must not grow the sidecar without
+# bound.  Oldest-registered snapshots are evicted first when a new
+# registration arrives over capacity -- crash-leaked entries heal as
+# traffic continues, and in-flight requests already holding a view
+# reference are unaffected (references, not the registry, own them).
+_MAX_REGISTRY_SNAPSHOTS: Final = 64
+_MAX_REGISTRY_TOTAL_MEMBER_BYTES: Final = 128 * 1024 * 1024
+
+
+def _registry_total_bytes() -> int:
+    return sum(_REGISTRY_SNAPSHOT_BYTES.values())
+
+
+def _evict_until_capacity(exclude: str) -> None:
+    """Oldest-first snapshot eviction until the registry fits (locked)."""
+
+    while (
+        len(_VERIFIED_BUILD_VIEWS) > _MAX_REGISTRY_SNAPSHOTS
+        or _registry_total_bytes() > _MAX_REGISTRY_TOTAL_MEMBER_BYTES
+    ):
+        oldest = next(
+            (
+                snapshot
+                for snapshot in _VERIFIED_BUILD_VIEWS
+                if snapshot != exclude
+            ),
+            None,
+        )
+        if oldest is None:
+            break
+        del _VERIFIED_BUILD_VIEWS[oldest]
+        _REGISTRY_SNAPSHOT_BYTES.pop(oldest, None)
 
 
 def register_verified_build_view(
-    snapshot_sha256: str, view: object, artifact_digest: str | None = None
+    snapshot_sha256: str, view: object, artifact_digest: str | None = None,
+    *, member_bytes: int = 0,
 ) -> None:
-    """Register one sealed analysis view for a snapshot's uaf-facts run."""
+    """Register one sealed analysis view for a snapshot's uaf-facts run.
+
+    ``member_bytes`` (wire registrations pass the sealed total) feeds
+    the process-level capacity; the two slot writes and the capacity
+    eviction happen under one lock so no observer sees a half-registered
+    or over-capacity registry.
+    """
 
     if (
         not isinstance(snapshot_sha256, str)
@@ -93,7 +143,12 @@ def register_verified_build_view(
     ):
         raise ValueError("invalid snapshot digest for verified view registration")
     slot = artifact_digest if artifact_digest is not None else _DEFAULT_VIEW_SLOT
-    _VERIFIED_BUILD_VIEWS.setdefault(snapshot_sha256, {})[slot] = view
+    with _REGISTRY_LOCK:
+        views = _VERIFIED_BUILD_VIEWS.setdefault(snapshot_sha256, {})
+        views[slot] = view
+        if member_bytes > _REGISTRY_SNAPSHOT_BYTES.get(snapshot_sha256, 0):
+            _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = member_bytes
+        _evict_until_capacity(snapshot_sha256)
 
 
 def lookup_verified_build_view(
@@ -110,7 +165,9 @@ def lookup_verified_build_view(
 def clear_verified_build_views() -> None:
     """Drop every registered verified-package view (test isolation)."""
 
-    _VERIFIED_BUILD_VIEWS.clear()
+    with _REGISTRY_LOCK:
+        _VERIFIED_BUILD_VIEWS.clear()
+        _REGISTRY_SNAPSHOT_BYTES.clear()
 
 
 def unregister_verified_build_view(
@@ -121,21 +178,24 @@ def unregister_verified_build_view(
     Idempotent by design: the host service may replay the cleanup after
     a restart, and the default slot is only removed when it holds the
     same artifact identity (a newer registration must survive a stale
-    unregister).
+    unregister).  Both slot removals run under the registry lock.
     """
 
-    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
-    if not views:
-        return
-    views.pop(artifact_digest, None)
-    default_view = views.get(_DEFAULT_VIEW_SLOT)
-    if (
-        default_view is not None
-        and getattr(default_view, "artifact_digest", None) == artifact_digest
-    ):
-        del views[_DEFAULT_VIEW_SLOT]
-    if not views:
-        del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
+    with _REGISTRY_LOCK:
+        views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
+        if not views:
+            _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+            return
+        views.pop(artifact_digest, None)
+        default_view = views.get(_DEFAULT_VIEW_SLOT)
+        if (
+            default_view is not None
+            and getattr(default_view, "artifact_digest", None) == artifact_digest
+        ):
+            del views[_DEFAULT_VIEW_SLOT]
+        if not views:
+            del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
+            _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
 
 
 # ------------------------------------------------- verified-view wire (#351)
@@ -147,20 +207,19 @@ def unregister_verified_build_view(
 # construction), so no shared filesystem is required; snapshot content
 # still travels through the existing prepare_snapshot protocol.
 #
-# This module stays lima-free: the reconstructed view exposes exactly
-# the duck-typed surface cxx_analyzer.build_context consumes
-# (``target_units``, ``flags_for_tu``, ``member_paths``,
-# ``read_member``) plus the identity fields the request routing needs.
+# #352 review round 1 (P1): the envelope carries ONLY identity and the
+# sealed members.  TU flags, working directories, the context hash and
+# the snapshot binding are DERIVED from the sealed
+# context_manifest.json / compile_commands.json members (see
+# cxx_analyzer.wire_view) and cross-checked, so no independent field
+# can diverge from the sealed package semantics.
 
 _REGISTER_VIEW_FIELDS: Final = frozenset(
     {
         "schema_version",
         "snapshot_sha256",
         "artifact_digest",
-        "context_hash",
         "target_units",
-        "tu_flags",
-        "tu_directories",
         "members",
     }
 )
@@ -180,47 +239,6 @@ _MAX_REGISTER_MEMBER_TOTAL_BYTES: Final = 16 * 1024 * 1024
 # the registry; a ninth distinct digest is a leak somewhere upstream and
 # fails loudly instead of ballooning memory.
 _MAX_VIEWS_PER_SNAPSHOT: Final = 8
-
-
-class _WireVerifiedView:
-    """A view reconstructed from the registration envelope.
-
-    Read-only by construction: members arrive as decoded bytes and are
-    never written anywhere; consumers materialize them into the
-    disposable snapshot build tree themselves.
-    """
-
-    def __init__(
-        self,
-        *,
-        artifact_digest: str,
-        context_hash: str,
-        target_units: tuple[str, ...],
-        tu_flags: dict[str, tuple[str, ...]],
-        tu_directories: dict[str, str],
-        sealed_members: dict[str, bytes],
-    ) -> None:
-        self.artifact_digest = artifact_digest
-        self.context_hash = context_hash
-        self.target_units = target_units
-        self._tu_flags = tu_flags
-        self._tu_directories = tu_directories
-        self._sealed_members = sealed_members
-
-    @property
-    def member_paths(self) -> tuple[str, ...]:
-        """The sealed package members, in canonical posix order."""
-
-        return tuple(sorted(self._sealed_members))
-
-    def read_member(self, path: str) -> bytes:
-        return self._sealed_members[path]
-
-    def flags_for_tu(self, tu: str) -> tuple[str, ...]:
-        return self._tu_flags[tu]
-
-    def working_directory_for_tu(self, tu: str) -> str:
-        return self._tu_directories[tu]
 
 
 def artifact_digest_from_members(members: dict[str, bytes]) -> str:
@@ -278,11 +296,14 @@ def register_view_request(
 ) -> dict[str, object]:
     """Serve one ``POST /v1/verified-build-views`` registration.
 
-    The envelope is validated against a closed field set, every member
-    path is checked for containment, the member budget is enforced and
-    the recomputed artifact digest must match the claimed identity
-    before anything enters the registry.  Failures leave the registry
-    untouched.
+    Validation order: closed field set, schema, hex64 identities, member
+    paths/decode/budget, artifact-digest anchor over the transferred
+    bytes, then full sealed-package derivation in
+    :func:`cxx_analyzer.wire_view.derive_wire_view` (manifest structure,
+    revision bound to the claimed snapshot, context-hash recompute,
+    compdb agreement, target-unit declaration, per-entry projection).
+    Failures leave the registry untouched; acceptance publishes both
+    slots atomically under the registry lock.
     """
 
     if type(payload) is not dict or set(payload) != set(_REGISTER_VIEW_FIELDS):
@@ -293,41 +314,19 @@ def register_view_request(
         raise RequestError("unsupported_schema")
     snapshot_sha256 = payload["snapshot_sha256"]
     artifact_digest = payload["artifact_digest"]
-    context_hash = payload["context_hash"]
-    if (
-        not _hex64(snapshot_sha256)
-        or not _hex64(artifact_digest)
-        or not _hex64(context_hash)
-    ):
+    if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
         raise RequestError("invalid_request")
-
     target_units = payload["target_units"]
-    tu_flags = payload["tu_flags"]
-    tu_directories = payload["tu_directories"]
-    members_wire = payload["members"]
     if (
         type(target_units) is not list
         or not target_units
         or len(target_units) > MAX_UAF_TRANSLATION_UNITS
         or any(not isinstance(unit, str) or not unit for unit in target_units)
         or len(set(target_units)) != len(target_units)
-        or type(tu_flags) is not dict
-        or type(tu_directories) is not dict
-        or set(tu_flags) != set(target_units)
-        or set(tu_directories) != set(target_units)
     ):
         raise RequestError("invalid_request")
-    for unit in target_units:
-        flags = tu_flags[unit]
-        directory = tu_directories[unit]
-        if (
-            type(flags) is not list
-            or any(not isinstance(flag, str) for flag in flags)
-            or not isinstance(directory, str)
-            or not directory
-        ):
-            raise RequestError("invalid_request")
 
+    members_wire = payload["members"]
     if (
         type(members_wire) is not dict
         or not members_wire
@@ -348,34 +347,41 @@ def register_view_request(
         if total_member_bytes > _MAX_REGISTER_MEMBER_TOTAL_BYTES:
             raise RequestError("request_too_large", status=413)
         members[path] = data
+    # A single registration larger than the whole process-level registry
+    # budget could never fit; refuse it up front instead of evicting
+    # everything else to make room it cannot provide.
+    if total_member_bytes > _MAX_REGISTRY_TOTAL_MEMBER_BYTES:
+        raise RequestError("request_too_large", status=413)
     # Digest anchor: the transferred bytes must re-hash to the claimed
     # package identity, so a tampered member can never register under a
     # verified digest.
     if artifact_digest_from_members(members) != artifact_digest:
         raise RequestError("invalid_request")
-    # Slot bound: a new digest beyond the retry window is treated as an
-    # upstream leak and refused (fail-closed) rather than retained.  The
-    # check reads without mutating so a refusal still leaves the
-    # registry untouched.
-    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256) or {}
-    if (
-        artifact_digest not in views
-        and len(views) >= _MAX_VIEWS_PER_SNAPSHOT
-    ):
-        raise RequestError("invalid_request")
+    # Semantic derivation from the sealed package: structure, snapshot
+    # binding, context identity and the TU projection all come from the
+    # digest-covered members, never from independent envelope fields.
+    try:
+        view = wire_view.derive_wire_view(
+            snapshot_sha256, artifact_digest, target_units, members
+        )
+    except wire_view.WireViewError:
+        raise RequestError("invalid_request") from None
 
-    view = _WireVerifiedView(
-        artifact_digest=artifact_digest,
-        context_hash=context_hash,
-        target_units=tuple(target_units),
-        tu_flags={unit: tuple(tu_flags[unit]) for unit in target_units},
-        tu_directories={
-            unit: tu_directories[unit] for unit in target_units
-        },
-        sealed_members=members,
-    )
-    register_verified_build_view(snapshot_sha256, view, artifact_digest)
-    register_verified_build_view(snapshot_sha256, view, None)
+    with _REGISTRY_LOCK:
+        # Slot bound: a new digest beyond the retry window is treated as
+        # an upstream leak and refused (fail-closed) rather than
+        # retained, atomically with the publication below.
+        views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256) or {}
+        if (
+            artifact_digest not in views
+            and len(views) >= _MAX_VIEWS_PER_SNAPSHOT
+        ):
+            raise RequestError("invalid_request")
+        register_verified_build_view(
+            snapshot_sha256, view, artifact_digest,
+            member_bytes=total_member_bytes,
+        )
+        register_verified_build_view(snapshot_sha256, view, None)
     return {
         "status": "registered",
         "schema_version": SCHEMA_VERSION,

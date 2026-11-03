@@ -969,6 +969,9 @@ class PlatformReviewOutcome:
     leads_considered: int = 0
     translation_units: tuple[str, ...] = ()
     unreviewed_units: tuple[str, ...] = ()
+    # 实际生效的构建上下文模式（门控切换/作废后的终值）：平台摘要
+    # 以此为 consumed_by_analysis 的肯定证据（#350 第六轮 P1）。
+    build_context_mode: str = "snapshot-compdb"
 
 
 def platform_rule_id(cwe: str) -> str:
@@ -1101,6 +1104,7 @@ def _empty_outcome(
     diagnostics: tuple[str, ...], units: tuple[str, ...] = (),
     *,
     unreviewed_units: tuple[str, ...] = (),
+    build_context_mode: str = "snapshot-compdb",
 ) -> PlatformReviewOutcome:
     return PlatformReviewOutcome(
         findings=(),
@@ -1110,6 +1114,7 @@ def _empty_outcome(
         leads_considered=0,
         translation_units=units,
         unreviewed_units=unreviewed_units,
+        build_context_mode=build_context_mode,
     )
 
 
@@ -2173,18 +2178,27 @@ def run_platform_review(
         raise ValueError("source_mode must be repository or diff-only")
     if build_context_mode not in UAF_FACTS_BUILD_CONTEXT_MODES:
         raise ValueError("build_context_mode is outside the closed domain")
+    capability_notes: list[str] = []
     if verified_view is not None and build_context_mode == "snapshot-compdb":
-        # 消费链接线（部署声明能力门控）：只有分析器适配器显式声明
-        # 与 sidecar 同进程时才切换到 verified-package。跨进程 HTTP
-        # 部署中主进程的视图注册对独立 sidecar 不可见，此时保持
-        # snapshot-compdb（可用的降级路径），不把检测切到必然返回
-        # verified-view-not-registered 的模式。权威信号是适配器自身
-        # 的 verified_package_supported 声明，不是主进程字典查询。
+        # 消费链接线（部署声明能力门控，#350 第六轮 P1）：适配器未
+        # 声明与 sidecar 同进程时，视图对 facts、Specialist 契约与
+        # 复现实验三方都不可消费。在此统一作废视图，三方一起回退
+        # 到仓库上下文（facts 保持 snapshot-compdb、契约回到 compdb
+        # 投影、复现保持无 digest 的 legacy 调用形状），不允许任何
+        # 一方单独消费造成环境分叉。权威信号是适配器自身的
+        # verified_package_supported 声明，不是主进程字典查询。
         adapter_supports = bool(
             getattr(analyzer_client, "verified_package_supported", False)
         )
         if adapter_supports:
             build_context_mode = "verified-package"
+        else:
+            verified_view = None
+            capability_notes.append(
+                "build context: verified view degraded to repository "
+                "context (analyzer deployment does not declare "
+                "same-process verified package support)"
+            )
     _hex64(snapshot_hash, "snapshot_hash")
     if not isinstance(repository_key, str) or not repository_key:
         raise ValueError("repository_key must be non-empty text")
@@ -2234,7 +2248,10 @@ def run_platform_review(
     run_budget = budget if budget is not None else CxxAgentBudget()
 
     if mode == MODE_OFF:
-        return _empty_outcome(("mode-off",), units)
+        return _empty_outcome(
+            ("mode-off", *capability_notes), units,
+            build_context_mode=build_context_mode,
+        )
 
     resolved_llm = dict(llm_config) if llm_config else {}
     if not resolved_llm:
@@ -2242,7 +2259,10 @@ def run_platform_review(
             raise RuntimeError(
                 "platform review required the LLM but no provider is configured"
             )
-        return _empty_outcome(("llm-not-configured",), units)
+        return _empty_outcome(
+            ("llm-not-configured", *capability_notes), units,
+            build_context_mode=build_context_mode,
+        )
 
     deadline = (
         time.monotonic() + deadline_seconds
@@ -2259,14 +2279,24 @@ def run_platform_review(
 
     if _expired():
         return _empty_outcome(
-            ("deadline-exceeded before the platform review started",), units,
+            (
+                "deadline-exceeded before the platform review started",
+                *capability_notes,
+            ),
+            units,
+            build_context_mode=build_context_mode,
         )
     if _cancelled():
         return _empty_outcome(
-            ("cancelled before the platform review started",), units,
+            (
+                "cancelled before the platform review started",
+                *capability_notes,
+            ),
+            units,
+            build_context_mode=build_context_mode,
         )
 
-    diagnostics: list[str] = []
+    diagnostics: list[str] = [*capability_notes]
 
     def _fetch_bundle() -> UafFactBundle | None:
         if analyzer_client is None:
@@ -2308,6 +2338,7 @@ def run_platform_review(
             return _empty_outcome(
                 ("no-leads-available", *diagnostics), units,
                 unreviewed_units=discovery_unreviewed,
+                build_context_mode=build_context_mode,
             )
 
     scout_timeout = _bounded_step_timeout(timeout, deadline)
@@ -2322,6 +2353,7 @@ def run_platform_review(
                 set(discovery_unreviewed)
                 | {lead.path for lead in given_leads}
             )),
+            build_context_mode=build_context_mode,
         )
     try:
         report: ScoutReport = review_leads(
@@ -2346,6 +2378,7 @@ def run_platform_review(
                 set(discovery_unreviewed)
                 | {lead.path for lead in given_leads}
             )),
+            build_context_mode=build_context_mode,
         )
     if report.degradation:
         diagnostics.append(f"scout: {report.degradation}")
@@ -2368,6 +2401,7 @@ def run_platform_review(
             unreviewed_units=tuple(sorted(
                 set(discovery_unreviewed) | scout_unreviewed
             )),
+            build_context_mode=build_context_mode,
         )
 
     if bundle is None and analyzer_client is not None:
@@ -2606,4 +2640,5 @@ def run_platform_review(
         unreviewed_units=tuple(sorted(
             set(discovery_unreviewed) | stage_unreviewed | scout_unreviewed
         )),
+        build_context_mode=build_context_mode,
     )

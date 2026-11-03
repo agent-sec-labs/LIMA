@@ -1754,12 +1754,29 @@ class ReviewService:
                 verified_view = self._consume_build_context(
                     task_id, workspace, build_result
                 )
+            # #350 第六轮 P1：消费能力在分析开始前统一判定。适配器未
+            # 声明与 sidecar 同进程的 verified package 支持时，本地
+            # 构造成功的视图对 facts、Specialist 契约与复现实验三方
+            # 都不可消费——不能把"视图构造成功"当作"部署可消费"。
+            consumption_failure_code = None
+            if verified_view is not None:
+                analyzer_adapter = getattr(
+                    self.repository_scanner, "cxx_memory_adapter", None,
+                )
+                if not bool(getattr(
+                    analyzer_adapter, "verified_package_supported", False,
+                )):
+                    verified_view = None
+                    consumption_failure_code = (
+                        "verified-context-not-consumable"
+                    )
             consumption_ok = verified_view is not None
-            consumption_failure = (
-                "consumption-unavailable"
-                if build_result.status == SUCCEEDED and not consumption_ok
-                else build_result.failure_code
-            )
+            if build_result.status == SUCCEEDED and not consumption_ok:
+                consumption_failure = (
+                    consumption_failure_code or "consumption-unavailable"
+                )
+            else:
+                consumption_failure = build_result.failure_code
             build_gap = {
                 "build_agent_mode": build_agent_mode,
                 "status": build_result.status,
@@ -1770,8 +1787,9 @@ class ReviewService:
                 "blocking": (
                     not consumption_ok and build_agent_mode == "required"
                 ),
-                # consumed_by_analysis 反映实际消费：视图构造成功才为
-                # True，消费失败（包缺失/校验不过）保持 False。
+                # consumed_by_analysis 反映实际消费：视图可交付给检测
+                # 才可能为 True，最终值在扫描后按平台摘要的肯定证据
+                # 重算（见下方 build_context 校验）。
                 "consumed_by_analysis": consumption_ok,
             }
             if not consumption_ok and str(
@@ -1818,17 +1836,20 @@ class ReviewService:
             **import_policy_extra,
         }
         if build_gap is not None and verified_view is not None:
-            # consumed_by_analysis 最终以检测是否实际使用了该上下文为
-            # 准：只有平台链成功完成的肯定证据（status=completed）才标
-            # 记为已消费。analyzer-not-configured / llm-not-configured /
-            # no-cxx-sources / analyzer-unavailable 等都是未消费（#350
-            # 第二轮 P2：不能用否定列表推断已消费）。
+            # consumed_by_analysis 最终以检测实际使用该上下文的肯定证据
+            # 为准（#350 第六轮 P1）：平台链完成（status=completed）且
+            # 摘要带回实际生效的 build_context=verified-package——三方
+            # 消费者（facts/Specialist/复现）与门控同源，缺一即未消费。
+            # analyzer-not-configured / llm-not-configured /
+            # no-cxx-sources / review-incomplete 等状态在此自然为 False。
             platform_summary = (
                 (result.report.collaboration or {}).get("platform") or {}
             )
             platform_status = str(platform_summary.get("status", ""))
+            platform_context = str(platform_summary.get("build_context", ""))
             build_gap["consumed_by_analysis"] = (
                 platform_status == "completed"
+                and platform_context == "verified-package"
             )
         if build_gap is not None:
             # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是

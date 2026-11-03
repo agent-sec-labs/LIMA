@@ -83,18 +83,28 @@ class ConsumptionWiringTests(unittest.TestCase):
         return task, scan_spy, consume_spy
 
     def test_success_constructs_view_and_passes_to_scanner(self):
-        """A successful build must produce a view consumed by the scanner."""
+        """A successful build's view reaches the scanner only when the
+        analyzer deployment declares same-process verified package support
+        (round 6: capability is decided before the scan starts)."""
         service = self._service(
             build_agent_mode="auto", build_agent_image="lima-builder:test"
         )
         build_result = make_build_result(SUCCEEDED, "run-1/attempt-1/package")
         sentinel_view = object()  # stands in for the AnalysisContextView
 
+        class _DeclaringAdapter:
+            # In-process deployment: the adapter and the registry serving
+            # verified packages share one process.
+            verified_package_supported = True
+
         with mock.patch.object(
             service, "_run_build_agent", return_value=build_result
         ), mock.patch.object(
             service, "_consume_build_context", return_value=sentinel_view
         ) as consume_mock, mock.patch.object(
+            service.repository_scanner, "cxx_memory_adapter",
+            _DeclaringAdapter(),
+        ), mock.patch.object(
             service.repository_scanner, "scan",
             wraps=service.repository_scanner.scan,
         ) as scan_spy:
@@ -111,26 +121,18 @@ class ConsumptionWiringTests(unittest.TestCase):
         self.assertEqual(task["state"], "SUCCESS")
         # The consumption wiring was invoked.
         consume_mock.assert_called_once()
-        # The scanner received the verified_view.
+        # The declaring deployment received the verified_view.
         kwargs = scan_spy.call_args.kwargs
         self.assertIs(kwargs.get("verified_view"), sentinel_view)
         # The report honestly says whether the context was consumed.
-        # In this test the platform chain is off (default settings), so
-        # consumed_by_analysis is correctly False even though the view
-        # was constructed (the review's P2: don't mark consumed when
-        # no detection stage actually ran).
+        # No LLM provider is configured here, so the platform chain can
+        # never report completed-with-verified-package: consumed_by_analysis
+        # is False even though the view was handed over (don't mark
+        # consumed without the consumer's affirmative evidence).
         report = task.get("report") or {}
         visible = report.get("collaboration", {}).get("build_agent")
         self.assertIsNotNone(visible)
-        platform_status = str(
-            (report.get("collaboration", {}).get("platform") or {}).get(
-                "status", ""
-            )
-        )
-        if platform_status in {"", "disabled"}:
-            self.assertFalse(visible["consumed_by_analysis"])
-        else:
-            self.assertTrue(visible["consumed_by_analysis"])
+        self.assertFalse(visible["consumed_by_analysis"])
 
     def test_failure_does_not_construct_view(self):
         """A failed build must not produce a view for the scanner."""
@@ -388,6 +390,97 @@ class RequiredConsumptionTests(unittest.TestCase):
         # consumed_by_analysis must be false (honest, not optimistic).
         self.assertFalse(visible["consumed_by_analysis"])
 
+    def test_required_blocks_when_adapter_does_not_declare_support(self):
+        """required + view constructed + non-declaring adapter = blocked.
+
+        Round 6 P1: a locally constructed view is not consumable when the
+        analyzer deployment does not declare same-process verified package
+        support.  required must block the context-dependent stage instead
+        of running detection on a context nobody can consume.
+        """
+        service = self._service(
+            build_agent_mode="required", build_agent_image="test",
+            cxx_agent_mode="required",
+            cxx_memory_mode="auto",
+            llm_provider="custom",
+            llm_base_url="http://127.0.0.1:9/v1",
+            llm_api_key="unit-test-key",
+            llm_model="unit-test-model",
+        )
+        build_result = make_build_result(SUCCEEDED, "run-1/pkg")
+
+        with mock.patch.object(
+            service, "_run_build_agent", return_value=build_result
+        ), mock.patch.object(
+            # The view constructs fine locally; capability is the issue.
+            service, "_consume_build_context", return_value=object(),
+        ), mock.patch.object(
+            service.repository_scanner, "scan",
+            wraps=service.repository_scanner.scan,
+        ) as scan_spy:
+            created = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="required"
+            )
+            task = {}
+            for _ in range(300):
+                task = service.store.get(created["task_id"]) or {}
+                if task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.02)
+
+        kwargs = scan_spy.call_args.kwargs
+        self.assertEqual("off", kwargs.get("cxx_agent_mode"))
+        self.assertIsNone(kwargs.get("verified_view"))
+        report = task.get("report") or {}
+        visible = report.get("collaboration", {}).get("build_agent")
+        self.assertTrue(visible["blocking"])
+        self.assertEqual(
+            "verified-context-not-consumable", visible["failure_code"]
+        )
+        self.assertFalse(visible["consumed_by_analysis"])
+
+    def test_auto_degrades_when_adapter_does_not_declare_support(self):
+        """auto: same non-consumable view degrades with an explicit gap."""
+        service = self._service(
+            build_agent_mode="auto", build_agent_image="test",
+            cxx_agent_mode="auto",
+            cxx_memory_mode="auto",
+            llm_provider="custom",
+            llm_base_url="http://127.0.0.1:9/v1",
+            llm_api_key="unit-test-key",
+            llm_model="unit-test-model",
+        )
+        build_result = make_build_result(SUCCEEDED, "run-1/pkg")
+
+        with mock.patch.object(
+            service, "_run_build_agent", return_value=build_result
+        ), mock.patch.object(
+            service, "_consume_build_context", return_value=object(),
+        ), mock.patch.object(
+            service.repository_scanner, "scan",
+            wraps=service.repository_scanner.scan,
+        ) as scan_spy:
+            created = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            task = {}
+            for _ in range(300):
+                task = service.store.get(created["task_id"]) or {}
+                if task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.02)
+
+        kwargs = scan_spy.call_args.kwargs
+        self.assertEqual("off", kwargs.get("cxx_agent_mode"))
+        self.assertIsNone(kwargs.get("verified_view"))
+        report = task.get("report") or {}
+        visible = report.get("collaboration", {}).get("build_agent")
+        self.assertFalse(visible["blocking"])
+        self.assertEqual(
+            "verified-context-not-consumable", visible["failure_code"]
+        )
+        self.assertFalse(visible["consumed_by_analysis"])
+
 
 class CapabilityGateTests(unittest.TestCase):
     """Mode switches only when the adapter declares same-process support."""
@@ -441,6 +534,324 @@ class CapabilityGateTests(unittest.TestCase):
         adapter = RemoteAdapter()
         self.assertFalse(
             getattr(adapter, "verified_package_supported", False)
+        )
+
+
+def _make_verified_view(root: str):
+    """A real sealed view binding src/a.cpp with -DVERIFIED=1.
+
+    Uses the same product helpers as the S4A/S4B suites (package ->
+    verify -> create view) so the Specialist contract projection and the
+    repro digest both have genuine content to consume.
+    """
+    import json as _json
+
+    from lima.build_context_view import (
+        compute_artifact_digest,
+        create_analysis_view,
+        snapshot_fingerprint,
+        verify_build_artifact,
+    )
+    from lima.context_package import build_manifest, write_package
+
+    snapshot = Path(root)
+    fingerprint = snapshot_fingerprint(snapshot)
+    entry = {
+        "directory": "src",
+        "arguments": ["/usr/bin/c++", "-DVERIFIED=1", "-c", "a.cpp"],
+        "file": "src/a.cpp",
+    }
+    manifest = build_manifest(
+        repository="Fixtures/AgentRepo",
+        revision=fingerprint,
+        compdb=[entry],
+        generated=[],
+        header_roots=[],
+        rewrites={},
+        created_by="round6-three-consumer-test",
+    )
+    package = snapshot.parent / "package"
+    write_package(
+        package, manifest, _json.dumps([entry]).encode("utf8"), {}, {},
+    )
+    artifact = verify_build_artifact(
+        package, fingerprint, compute_artifact_digest(package)
+    )
+    return create_analysis_view(snapshot, artifact, ("src/a.cpp",))
+
+
+class ThreeConsumerDegradationTests(unittest.TestCase):
+    """Round 6 P1: one capability decision, three consistent consumers.
+
+    When the adapter does not declare same-process verified package
+    support, facts, the Specialist driver contract and the repro
+    experiment must degrade TOGETHER to the repository context; when it
+    declares support, all three consume the same view.  No consumer may
+    end up on a different environment than the others.
+    """
+
+    def _run_one(self, *, declaring: bool):
+        from lima.agent_orchestrator import run_platform_review
+        from lima.cxx_agent_tools import CxxAgentBudget
+        from tests.test_agent_orchestrator import (
+            LEAD,
+            REPO_KEY,
+            RESOLVED_LLM,
+            SNAPSHOT,
+            SPECIALIST_ROLE,
+            UNIT,
+            FakeUafAnalyzer,
+            ScriptedPlatformTransport,
+            _payload,
+            _straight_facts,
+            _unit_entry,
+            _write_cxx_repo,
+            critic_json,
+            hypothesis_json,
+            scout_target_transport,
+            uaf_hit,
+        )
+
+        class _DeclaringAnalyzer(FakeUafAnalyzer):
+            # In-process deployment: adapter and verified-package
+            # registry share one process.
+            verified_package_supported = True
+
+        analyzer = (
+            _DeclaringAnalyzer(_payload(_unit_entry(_straight_facts())))
+            if declaring
+            else FakeUafAnalyzer(_payload(_unit_entry(_straight_facts())))
+        )
+
+        class _RecordingWorkbench:
+            """run_experiment double preserving every extra kwarg."""
+
+            def __init__(self, observations):
+                self.observations = list(observations)
+                self.calls = []
+
+            def run_experiment(
+                self, repository_key, snapshot_hash, source_files,
+                driver_code, *, timeout=None, **kwargs,
+            ):
+                self.calls.append({
+                    "sources": tuple(source_files),
+                    "driver": driver_code,
+                    "extra": dict(kwargs),
+                })
+                return self.observations.pop(0)
+
+        workbench = _RecordingWorkbench([uaf_hit()])
+        transport = ScriptedPlatformTransport(
+            specialist=[hypothesis_json()], critic=[critic_json()],
+        )
+        scout_requests = []
+
+        root = tempfile.mkdtemp(suffix="-round6-three-consumer")
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        workspace = _write_cxx_repo(root)
+        view = _make_verified_view(root)
+
+        with mock.patch(
+            "lima.agent_scout.post_chat_completion_text",
+            scout_target_transport(scout_requests),
+        ), mock.patch(
+            "lima.uaf_llm_branch.post_chat_completion_text", transport,
+        ):
+            outcome = run_platform_review(
+                analyzer,
+                workspace,
+                repository_key=REPO_KEY,
+                snapshot_hash=SNAPSHOT,
+                translation_units=(UNIT,),
+                verified_view=view,
+                mode="auto",
+                budget=CxxAgentBudget(
+                    max_calls=64, max_output_bytes=1_048_576,
+                ),
+                llm_config=dict(RESOLVED_LLM),
+                repro_workbench=workbench,
+                leads=(LEAD,),
+                dialogue_rounds=1,
+                source_mode="repository",
+            )
+        specialist_payload = next(
+            payload
+            for payload in transport.calls
+            if SPECIALIST_ROLE in payload["messages"][0]["content"]
+        )
+        return analyzer, workbench, specialist_payload, outcome, view
+
+    def test_platform_summary_carries_build_context(self):
+        """The real scanner summary projects the outcome's mode field."""
+        from lima.agent_orchestrator import (
+            PlatformReviewOutcome,
+            PlatformReviewStats,
+        )
+        from lima.repository_scanner import RepositoryScanner
+
+        scanner = RepositoryScanner(sast_mode="off", dataflow_enabled=False)
+        outcome = PlatformReviewOutcome(
+            findings=(),
+            targets=(),
+            stats=PlatformReviewStats(0, 0, 0, 0, 0, 0, 0),
+            build_context_mode="verified-package",
+        )
+        summary = scanner._platform_collaboration("auto", "completed", outcome)
+        self.assertEqual("verified-package", summary["build_context"])
+
+    def test_degrading_adapter_reverts_all_three_consumers(self):
+        """No declaration: facts, contract and repro all revert together."""
+        analyzer, workbench, specialist_payload, outcome, _ = (
+            self._run_one(declaring=False)
+        )
+        # facts boundary: repository context, not verified-package.
+        self.assertTrue(analyzer.unit_calls)
+        self.assertEqual(
+            "snapshot-compdb", analyzer.unit_calls[0][1]
+        )
+        # Specialist contract: compdb projection without view macros.
+        self.assertNotIn(
+            "-DVERIFIED=1", specialist_payload["messages"][1]["content"]
+        )
+        # repro: legacy call shape, no artifact digest kwarg.
+        self.assertTrue(workbench.calls)
+        self.assertEqual({}, workbench.calls[0]["extra"])
+        # Outcome evidence + explicit degradation note.
+        self.assertEqual("snapshot-compdb", outcome.build_context_mode)
+        self.assertTrue(
+            any("degraded" in note for note in outcome.diagnostics),
+            outcome.diagnostics,
+        )
+
+    def test_declaring_adapter_feeds_all_three_consumers(self):
+        """Declaration: facts, contract and repro consume the same view."""
+        analyzer, workbench, specialist_payload, outcome, view = (
+            self._run_one(declaring=True)
+        )
+        self.assertEqual(
+            "verified-package", analyzer.unit_calls[0][1]
+        )
+        self.assertIn(
+            "-DVERIFIED=1", specialist_payload["messages"][1]["content"]
+        )
+        self.assertTrue(workbench.calls)
+        self.assertEqual(
+            view.artifact_digest,
+            workbench.calls[0]["extra"].get("verified_artifact_digest"),
+        )
+        self.assertEqual("verified-package", outcome.build_context_mode)
+        self.assertFalse(
+            any("degraded" in note for note in outcome.diagnostics),
+            outcome.diagnostics,
+        )
+
+
+class ConsumedEvidenceTests(unittest.TestCase):
+    """consumed_by_analysis needs the consumer's affirmative evidence.
+
+    Platform completed alone is not enough: the platform summary must
+    also carry build_context=verified-package (round 6 P1).
+    """
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, self.path)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        repository = Path(self.temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app.py").write_text(
+            "safe = True\n", encoding="utf8"
+        )
+        self.base = Settings(
+            host="127.0.0.1", port=8080, db_path=self.path,
+            max_diff_bytes=10000, max_steps=8, timeout_seconds=120,
+            llm_base_url="", llm_api_key="", llm_model="",
+            github_webhook_secret="", github_token="",
+            auto_post_review=False,
+            repository_import_root=self.temporary.name,
+            repository_scan_sast_mode="off", cxx_memory_mode="off",
+        )
+
+    class _StaticScanner:
+        """Declaring scanner whose platform summary is fixed."""
+
+        def __init__(self, platform_summary: dict) -> None:
+            self.platform_summary = dict(platform_summary)
+            self.scan_kwargs: dict | None = None
+
+        @property
+        def cxx_memory_adapter(self):
+            class _Adapter:
+                verified_package_supported = True
+
+            return _Adapter()
+
+        def scan(self, workspace, **kwargs):
+            from lima.models import ReviewReport
+            from lima.repository_scanner import RepositoryScanResult
+            from lima.workspace import WorkspaceInventory
+
+            self.scan_kwargs = dict(kwargs)
+            return RepositoryScanResult(
+                report=ReviewReport(
+                    repository=str(workspace.root),
+                    pull_request=None,
+                    summary="scan",
+                    risk="low",
+                    collaboration={"platform": dict(self.platform_summary)},
+                ),
+                inventory=WorkspaceInventory(root=str(workspace.root)),
+            )
+
+    def _visible_gap(self, platform_summary: dict) -> dict:
+        service = ReviewService(replace(self.base, build_agent_mode="auto"))
+        self.addCleanup(service.queue.close)
+        service.repository_scanner = self._StaticScanner(platform_summary)
+        build_result = make_build_result(SUCCEEDED, "run-1/pkg")
+        with mock.patch.object(
+            service, "_run_build_agent", return_value=build_result
+        ), mock.patch.object(
+            service, "_consume_build_context", return_value=object(),
+        ):
+            created = service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            task = {}
+            for _ in range(300):
+                task = service.store.get(created["task_id"]) or {}
+                if task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.02)
+        self.assertEqual("SUCCESS", task["state"])
+        return (task.get("report") or {}).get("collaboration", {})
+
+    def test_consumed_true_only_with_verified_package_evidence(self):
+        collaboration = self._visible_gap(
+            {"mode": "auto", "status": "completed",
+             "build_context": "verified-package"}
+        )
+        self.assertTrue(
+            collaboration["build_agent"]["consumed_by_analysis"]
+        )
+
+    def test_completed_but_legacy_context_is_not_consumed(self):
+        collaboration = self._visible_gap(
+            {"mode": "auto", "status": "completed",
+             "build_context": "snapshot-compdb"}
+        )
+        self.assertFalse(
+            collaboration["build_agent"]["consumed_by_analysis"]
+        )
+
+    def test_disabled_platform_is_not_consumed(self):
+        collaboration = self._visible_gap(
+            {"mode": "off", "status": "disabled"}
+        )
+        self.assertFalse(
+            collaboration["build_agent"]["consumed_by_analysis"]
         )
 
 

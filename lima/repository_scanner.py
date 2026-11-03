@@ -400,6 +400,11 @@ class RepositoryScanner:
         payload = {
             "mode": mode,
             "status": status,
+            # #350 第六轮 P1：实际生效的构建上下文模式（门控切换/作废
+            # 后的终值），consumed_by_analysis 的肯定证据来源。
+            "build_context": getattr(
+                outcome, "build_context_mode", "snapshot-compdb"
+            ),
             "translation_units": list(outcome.translation_units),
             "stats": {
                 "leads": stats.lead_count,

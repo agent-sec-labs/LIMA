@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import shutil
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
+from urllib.parse import parse_qs
 
 from . import sandbox, uaf_scan
 from .build_context import resolve_build_context_execution
@@ -23,20 +26,28 @@ from .snapshot import _normalize_repository_key, prepare_snapshot
 from .source_scan import run_source_scan
 
 SCHEMA_VERSION: Final = 1
-HOST: Final = "0.0.0.0"  # noqa: S104 - Reachable only on the internal Compose network.
-PORT: Final = 8090
+# Bind address, port and roots stay at their Compose defaults; the env
+# overrides exist so an out-of-compose subprocess sidecar (issue #351)
+# can be pointed at test-local paths without touching production.
+HOST: Final = os.environ.get("LIMA_CXX_HOST", "0.0.0.0")  # noqa: S104 - Reachable only on the internal Compose network.
+PORT: Final = int(os.environ.get("LIMA_CXX_PORT", "8090"))
 MAX_REQUEST_BYTES: Final = 64 * 1024
 MAX_RESPONSE_BYTES: Final = 2 * 1024 * 1024
 MAX_FINDINGS: Final = 256
 MAX_DIAGNOSTICS: Final = 256
 MAX_TOOL_RUNS: Final = 320
-IMPORT_ROOT: Final = Path("/repositories")
-WORK_ROOT: Final = Path("/work/snapshots")
+IMPORT_ROOT: Final = Path(
+    os.environ.get("LIMA_CXX_IMPORT_ROOT", "/repositories")
+)
+WORK_ROOT: Final = Path(
+    os.environ.get("LIMA_CXX_WORK_ROOT", "/work/snapshots")
+)
 
 _ANALYZE_PATH: Final = "/v1/analyze"
 _UAF_FACTS_PATH: Final = "/v1/uaf-facts"
 _REPRO_PATH: Final = "/v1/repro"
 _HEALTH_PATH: Final = "/health"
+_REGISTER_VIEW_PATH: Final = "/v1/verified-build-views"
 _REQUEST_FIELDS: Final = frozenset(
     {"request_id", "repository_key", "snapshot_sha256", "requested_layers"}
 )
@@ -100,6 +111,306 @@ def clear_verified_build_views() -> None:
     """Drop every registered verified-package view (test isolation)."""
 
     _VERIFIED_BUILD_VIEWS.clear()
+
+
+def unregister_verified_build_view(
+    snapshot_sha256: str, artifact_digest: str
+) -> None:
+    """Drop one wire-registered view from both registry slots.
+
+    Idempotent by design: the host service may replay the cleanup after
+    a restart, and the default slot is only removed when it holds the
+    same artifact identity (a newer registration must survive a stale
+    unregister).
+    """
+
+    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
+    if not views:
+        return
+    views.pop(artifact_digest, None)
+    default_view = views.get(_DEFAULT_VIEW_SLOT)
+    if (
+        default_view is not None
+        and getattr(default_view, "artifact_digest", None) == artifact_digest
+    ):
+        del views[_DEFAULT_VIEW_SLOT]
+    if not views:
+        del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
+
+
+# ------------------------------------------------- verified-view wire (#351)
+#
+# Cross-process registration: the host process that owns the sealed
+# AnalysisContextView sends it over HTTP so an independent sidecar can
+# serve verified-package facts and repro from its own registry.  The
+# envelope is self-contained (the view seals member bytes at
+# construction), so no shared filesystem is required; snapshot content
+# still travels through the existing prepare_snapshot protocol.
+#
+# This module stays lima-free: the reconstructed view exposes exactly
+# the duck-typed surface cxx_analyzer.build_context consumes
+# (``target_units``, ``flags_for_tu``, ``member_paths``,
+# ``read_member``) plus the identity fields the request routing needs.
+
+_REGISTER_VIEW_FIELDS: Final = frozenset(
+    {
+        "schema_version",
+        "snapshot_sha256",
+        "artifact_digest",
+        "context_hash",
+        "target_units",
+        "tu_flags",
+        "tu_directories",
+        "members",
+    }
+)
+_UNREGISTER_VIEW_FIELDS: Final = frozenset(
+    {"snapshot_sha256", "artifact_digest"}
+)
+# The envelope carries the whole sealed package (compdb, manifest,
+# vendored headers, generated files) base64-encoded; the budgets sit
+# above the package budgets the build stage already enforces.
+REGISTER_VIEW_MAX_REQUEST_BYTES: Final = 32 * 1024 * 1024
+_MAX_REGISTER_MEMBERS: Final = 1024
+_MAX_REGISTER_MEMBER_TOTAL_BYTES: Final = 16 * 1024 * 1024
+# Distinct digests per snapshot: builds are capped at three attempts per
+# task, so eight slots (seven digests plus the default slot) leave retry
+# headroom while bounding stale-slot retention on a long-lived sidecar.
+# Re-registering an existing digest overwrites in place and never grows
+# the registry; a ninth distinct digest is a leak somewhere upstream and
+# fails loudly instead of ballooning memory.
+_MAX_VIEWS_PER_SNAPSHOT: Final = 8
+
+
+class _WireVerifiedView:
+    """A view reconstructed from the registration envelope.
+
+    Read-only by construction: members arrive as decoded bytes and are
+    never written anywhere; consumers materialize them into the
+    disposable snapshot build tree themselves.
+    """
+
+    def __init__(
+        self,
+        *,
+        artifact_digest: str,
+        context_hash: str,
+        target_units: tuple[str, ...],
+        tu_flags: dict[str, tuple[str, ...]],
+        tu_directories: dict[str, str],
+        sealed_members: dict[str, bytes],
+    ) -> None:
+        self.artifact_digest = artifact_digest
+        self.context_hash = context_hash
+        self.target_units = target_units
+        self._tu_flags = tu_flags
+        self._tu_directories = tu_directories
+        self._sealed_members = sealed_members
+
+    @property
+    def member_paths(self) -> tuple[str, ...]:
+        """The sealed package members, in canonical posix order."""
+
+        return tuple(sorted(self._sealed_members))
+
+    def read_member(self, path: str) -> bytes:
+        return self._sealed_members[path]
+
+    def flags_for_tu(self, tu: str) -> tuple[str, ...]:
+        return self._tu_flags[tu]
+
+    def working_directory_for_tu(self, tu: str) -> str:
+        return self._tu_directories[tu]
+
+
+def artifact_digest_from_members(members: dict[str, bytes]) -> str:
+    """Per-member digest parity with lima's ``compute_artifact_digest``.
+
+    Same rule (canonical posix path, byte length and SHA-256 per member
+    over the sorted list, JSON-hashed) so a wire envelope built from a
+    verified package re-hashes to its own ``artifact_digest``; the
+    equality is pinned by a cross-check test against the lima original.
+    """
+
+    material = [
+        {
+            "path": path,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for path, data in sorted(members.items())
+    ]
+    payload = json.dumps(material, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
+def _hex64(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _safe_member_path(path: object) -> bool:
+    if not isinstance(path, str) or not path:
+        return False
+    # Control characters (null bytes above all) are rejected here: the
+    # materializer's write guard catches OSError only, and an embedded
+    # null would surface as a per-request 500 instead of a registration
+    # refusal.  Windows drive-letter prefixes are never legitimate
+    # package members and only produce junk directories downstream.
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in path):
+        return False
+    first = path.split("/", 1)[0]
+    if len(first) == 2 and first.endswith(":"):
+        return False
+    pure = PurePosixPath(path)
+    return (
+        pure.is_absolute() is False
+        and "\\" not in path
+        and not any(part in ("..", "") for part in pure.parts)
+    )
+
+
+def register_view_request(
+    payload: object, settings: AnalyzerSettings
+) -> dict[str, object]:
+    """Serve one ``POST /v1/verified-build-views`` registration.
+
+    The envelope is validated against a closed field set, every member
+    path is checked for containment, the member budget is enforced and
+    the recomputed artifact digest must match the claimed identity
+    before anything enters the registry.  Failures leave the registry
+    untouched.
+    """
+
+    if type(payload) is not dict or set(payload) != set(_REGISTER_VIEW_FIELDS):
+        raise RequestError("invalid_request")
+    if type(payload["schema_version"]) is not int or (
+        payload["schema_version"] != SCHEMA_VERSION
+    ):
+        raise RequestError("unsupported_schema")
+    snapshot_sha256 = payload["snapshot_sha256"]
+    artifact_digest = payload["artifact_digest"]
+    context_hash = payload["context_hash"]
+    if (
+        not _hex64(snapshot_sha256)
+        or not _hex64(artifact_digest)
+        or not _hex64(context_hash)
+    ):
+        raise RequestError("invalid_request")
+
+    target_units = payload["target_units"]
+    tu_flags = payload["tu_flags"]
+    tu_directories = payload["tu_directories"]
+    members_wire = payload["members"]
+    if (
+        type(target_units) is not list
+        or not target_units
+        or len(target_units) > MAX_UAF_TRANSLATION_UNITS
+        or any(not isinstance(unit, str) or not unit for unit in target_units)
+        or len(set(target_units)) != len(target_units)
+        or type(tu_flags) is not dict
+        or type(tu_directories) is not dict
+        or set(tu_flags) != set(target_units)
+        or set(tu_directories) != set(target_units)
+    ):
+        raise RequestError("invalid_request")
+    for unit in target_units:
+        flags = tu_flags[unit]
+        directory = tu_directories[unit]
+        if (
+            type(flags) is not list
+            or any(not isinstance(flag, str) for flag in flags)
+            or not isinstance(directory, str)
+            or not directory
+        ):
+            raise RequestError("invalid_request")
+
+    if (
+        type(members_wire) is not dict
+        or not members_wire
+        or len(members_wire) > _MAX_REGISTER_MEMBERS
+        or any(not _safe_member_path(path) for path in members_wire)
+    ):
+        raise RequestError("invalid_request")
+    members: dict[str, bytes] = {}
+    total_member_bytes = 0
+    for path, encoded in members_wire.items():
+        if not isinstance(encoded, str):
+            raise RequestError("invalid_request")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            raise RequestError("invalid_request") from None
+        total_member_bytes += len(data)
+        if total_member_bytes > _MAX_REGISTER_MEMBER_TOTAL_BYTES:
+            raise RequestError("request_too_large", status=413)
+        members[path] = data
+    # Digest anchor: the transferred bytes must re-hash to the claimed
+    # package identity, so a tampered member can never register under a
+    # verified digest.
+    if artifact_digest_from_members(members) != artifact_digest:
+        raise RequestError("invalid_request")
+    # Slot bound: a new digest beyond the retry window is treated as an
+    # upstream leak and refused (fail-closed) rather than retained.  The
+    # check reads without mutating so a refusal still leaves the
+    # registry untouched.
+    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256) or {}
+    if (
+        artifact_digest not in views
+        and len(views) >= _MAX_VIEWS_PER_SNAPSHOT
+    ):
+        raise RequestError("invalid_request")
+
+    view = _WireVerifiedView(
+        artifact_digest=artifact_digest,
+        context_hash=context_hash,
+        target_units=tuple(target_units),
+        tu_flags={unit: tuple(tu_flags[unit]) for unit in target_units},
+        tu_directories={
+            unit: tu_directories[unit] for unit in target_units
+        },
+        sealed_members=members,
+    )
+    register_verified_build_view(snapshot_sha256, view, artifact_digest)
+    register_verified_build_view(snapshot_sha256, view, None)
+    return {
+        "status": "registered",
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_sha256": snapshot_sha256,
+        "artifact_digest": artifact_digest,
+    }
+
+
+def unregister_view_request(payload: object) -> dict[str, object]:
+    """Serve one ``DELETE /v1/verified-build-views`` cleanup."""
+
+    if type(payload) is not dict or set(payload) != set(
+        _UNREGISTER_VIEW_FIELDS
+    ):
+        raise RequestError("invalid_request")
+    snapshot_sha256 = payload["snapshot_sha256"]
+    artifact_digest = payload["artifact_digest"]
+    if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
+        raise RequestError("invalid_request")
+    unregister_verified_build_view(snapshot_sha256, artifact_digest)
+    return {
+        "status": "unregistered",
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_sha256": snapshot_sha256,
+        "artifact_digest": artifact_digest,
+    }
+
+
+def _confirmed_view_response(
+    snapshot_sha256: str, artifact_digest: str | None
+) -> tuple[int, dict[str, object]]:
+    if lookup_verified_build_view(snapshot_sha256, artifact_digest) is None:
+        return 404, {"status": "not-registered"}
+    return 200, {"status": "registered"}
+
 MAX_UAF_TRANSLATION_UNITS: Final = 16
 MAX_REPRO_SOURCES: Final = 16
 MAX_REPRO_DRIVER_BYTES: Final = 256 * 1024
@@ -982,6 +1293,61 @@ def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
     }
 
 
+def _register_view_dispatch(
+    method: str,
+    query_string: str,
+    content_type: str,
+    body: bytes,
+    settings: AnalyzerSettings,
+) -> tuple[int, dict[str, object]]:
+    """Route the three verbs on ``/v1/verified-build-views``.
+
+    GET (with query) is the confirmation lookup the host service uses
+    as its capability signal; POST registers one sealed view; DELETE
+    removes one registration.  Only this endpoint tolerates a query
+    string; the frozen legacy paths keep exact matching.
+    """
+
+    if method == "GET":
+        query = parse_qs(query_string)
+        snapshot_values = query.get("snapshot_sha256", [])
+        digest_values = query.get("artifact_digest", [])
+        if (
+            len(snapshot_values) != 1
+            or len(digest_values) > 1
+            or not _hex64(snapshot_values[0])
+            or (digest_values and not _hex64(digest_values[0]))
+        ):
+            return 400, _error_payload("invalid_request")
+        artifact_digest = digest_values[0] if digest_values else None
+        return _confirmed_view_response(snapshot_values[0], artifact_digest)
+    if method not in ("POST", "DELETE"):
+        return 405, _error_payload("method_not_allowed")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        return 415, _error_payload("unsupported_media_type")
+    if (
+        not isinstance(body, bytes)
+        or len(body) > REGISTER_VIEW_MAX_REQUEST_BYTES
+    ):
+        return 413, _error_payload("request_too_large")
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_json_number,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return 400, _error_payload("invalid_json")
+    try:
+        if method == "POST":
+            return 200, register_view_request(payload, settings)
+        return 200, unregister_view_request(payload)
+    except RequestError as exc:
+        return exc.status, _error_payload(exc.code, exc.request_id)
+    except Exception:
+        return 500, _error_payload("internal_error")
+
+
 def dispatch_request(
     method: str,
     path: str,
@@ -991,6 +1357,11 @@ def dispatch_request(
 ) -> tuple[int, dict[str, object]]:
     """Handle an HTTP-shaped request without exposing server implementation details."""
 
+    route, _, query_string = path.partition("?")
+    if route == _REGISTER_VIEW_PATH:
+        return _register_view_dispatch(
+            method, query_string, content_type, body, settings
+        )
     if path not in {_ANALYZE_PATH, _UAF_FACTS_PATH, _REPRO_PATH, _HEALTH_PATH}:
         return 404, _error_payload("not_found")
     if path == _HEALTH_PATH:
@@ -1077,7 +1448,15 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
         self._handle()
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+    def _read_json_body(self) -> bytes | None:
+        """Read one bounded JSON request body, or send the refusal.
+
+        Returns ``None`` after sending the error response so the verb
+        handler can simply return; the per-path ceiling mirrors the
+        dispatch-level budget so oversized bodies are refused before
+        they are read.
+        """
+
         raw_length = self.headers.get("Content-Length")
         try:
             content_length = int(raw_length) if raw_length is not None else -1
@@ -1085,19 +1464,27 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
             content_length = -1
         if content_length < 0:
             self._send(400, _error_payload("invalid_request"))
-            return
+            return None
         # ``path`` is always present on real requests (BaseHTTPRequestHandler
-        # sets it before do_POST); the getattr default only serves synthetic
-        # handlers in the HTTP-boundary tests.
+        # sets it before the verb method); the getattr default only serves
+        # synthetic handlers in the HTTP-boundary tests.
         path = getattr(self, "path", "")
-        max_request_bytes = (
-            REPRO_MAX_REQUEST_BYTES if path == _REPRO_PATH else MAX_REQUEST_BYTES
-        )
+        route = path.partition("?")[0]
+        if route == _REGISTER_VIEW_PATH:
+            max_request_bytes = REGISTER_VIEW_MAX_REQUEST_BYTES
+        elif path == _REPRO_PATH:
+            max_request_bytes = REPRO_MAX_REQUEST_BYTES
+        else:
+            max_request_bytes = MAX_REQUEST_BYTES
         if content_length > max_request_bytes:
             self._send(413, _error_payload("request_too_large"))
-            return
-        body = self.rfile.read(content_length)
-        self._handle(body)
+            return None
+        return self.rfile.read(content_length)
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+        body = self._read_json_body()
+        if body is not None:
+            self._handle(body)
 
     def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
         self._handle()
@@ -1109,6 +1496,15 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
         self._handle()
 
     def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+        # Only the registration cleanup sends its identity as a JSON
+        # body; a DELETE anywhere else keeps the historical empty-body
+        # dispatch (and 405s there) so legacy behavior is unchanged.
+        route = getattr(self, "path", "").partition("?")[0]
+        if route == _REGISTER_VIEW_PATH:
+            body = self._read_json_body()
+            if body is not None:
+                self._handle(body)
+            return
         self._handle()
 
     def log_message(self, format: str, *args: object) -> None:

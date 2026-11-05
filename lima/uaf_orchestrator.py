@@ -395,6 +395,7 @@ def instrument_facts(
     snapshot_hash: str,
     translation_units: tuple[str, ...],
     build_context_mode: str = "snapshot-compdb",
+    artifact_digest: str | None = None,
 ) -> UafFactBundle:
     """Consult the facts instrument: analyzer call -> certified bundle.
 
@@ -402,6 +403,11 @@ def instrument_facts(
     review identity by :func:`_expectation_for` and certified by
     :func:`adapt_uaf_response` (fail-closed).  Purely a tool for the
     platform agents; it never produces a conclusion by itself.
+
+    ``artifact_digest`` (#354 review round 1, P1) binds the
+    verified-package request to this run's delivered package instead of
+    the snapshot's mutable default slot.  It is forwarded only when
+    present so pre-protocol analyzer doubles keep their call shape.
     """
 
     if not callable(getattr(analyzer_client, "analyze_uaf_facts", None)):
@@ -419,11 +425,15 @@ def instrument_facts(
             f"translation_units must be a non-empty tuple of at most "
             f"{MAX_UAF_TRANSLATION_UNITS} paths"
         )
+    digest_kwargs: dict[str, str] = (
+        {} if artifact_digest is None else {"artifact_digest": artifact_digest}
+    )
     response = analyzer_client.analyze_uaf_facts(
         repository_key,
         snapshot_hash,
         translation_units,
         build_context_mode,
+        **digest_kwargs,
     )
     expectation = _expectation_for(
         response, snapshot_hash, build_context_mode, translation_units

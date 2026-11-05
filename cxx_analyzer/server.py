@@ -267,6 +267,11 @@ _MAX_REGISTER_MEMBER_TOTAL_BYTES: Final = 16 * 1024 * 1024
 # the registry; a ninth distinct digest is a leak somewhere upstream and
 # fails loudly instead of ballooning memory.
 _MAX_VIEWS_PER_SNAPSHOT: Final = 8
+# Registration ceiling for declared target units: the view speaks for
+# the whole package (the manifest contract bounds entries at 2048),
+# while each /v1/uaf-facts request stays capped at
+# MAX_UAF_TRANSLATION_UNITS (#354 review round 1, P2).
+_MAX_REGISTER_TARGET_UNITS: Final = 2048
 
 
 def artifact_digest_from_members(members: dict[str, bytes]) -> str:
@@ -352,10 +357,15 @@ def register_view_request(
     if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
         raise RequestError("invalid_request")
     target_units = payload["target_units"]
+    # The view may declare the whole compilation database; only the
+    # per-REQUEST unit batch is capped at MAX_UAF_TRANSLATION_UNITS.
+    # Conflating the two rejected every real CMake export with more
+    # than 16 TUs (#354 review round 1, P2).  The registration ceiling
+    # mirrors the manifest entry contract the derivation enforces.
     if (
         type(target_units) is not list
         or not target_units
-        or len(target_units) > MAX_UAF_TRANSLATION_UNITS
+        or len(target_units) > _MAX_REGISTER_TARGET_UNITS
         or any(not isinstance(unit, str) or not unit for unit in target_units)
         or len(set(target_units)) != len(target_units)
     ):

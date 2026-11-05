@@ -846,6 +846,8 @@ class CxxMemoryAnalyzerClient:
         snapshot_sha256: str,
         translation_units: tuple[str, ...],
         build_context_mode: str,
+        *,
+        artifact_digest: str | None = None,
     ) -> UafFactsResponse:
         """Request one versioned UAF fact bundle under a strict contract.
 
@@ -855,6 +857,13 @@ class CxxMemoryAnalyzerClient:
         version, an echo mismatch, an out-of-vocabulary extraction, or a
         bundle digest that fails local re-derivation all raise
         :class:`CxxAnalyzerProtocolError`.
+
+        ``artifact_digest`` (#354 review round 1, P1) binds a
+        verified-package request to THIS task's delivered package: without
+        it the sidecar falls back to the snapshot's mutable default slot,
+        where a sibling task registering another build of the same
+        snapshot would silently serve its context.  Must be a valid
+        digest and only valid with the verified-package mode.
         """
 
         if not isinstance(repository_key, str) or not repository_key:
@@ -867,8 +876,20 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer snapshot digest")
         if build_context_mode not in UAF_FACTS_BUILD_CONTEXT_MODES:
             raise CxxAnalyzerProtocolError("invalid C/C++ analyzer build context mode")
+        if artifact_digest is not None and (
+            not isinstance(artifact_digest, str)
+            or len(artifact_digest) != 64
+            or any(character not in _HEX64 for character in artifact_digest)
+            or build_context_mode != "verified-package"
+        ):
+            raise CxxAnalyzerProtocolError(
+                "invalid C/C++ analyzer artifact digest"
+            )
         requested_units = _validate_uaf_requested_units(translation_units)
         request_id = str(uuid.uuid4())
+        build_context: dict[str, object] = {"mode": build_context_mode}
+        if artifact_digest is not None:
+            build_context["artifact_digest"] = artifact_digest
         body = json.dumps(
             {
                 "schema_version": UAF_FACTS_SCHEMA_VERSION,
@@ -876,7 +897,7 @@ class CxxMemoryAnalyzerClient:
                 "repository_key": repository_key,
                 "snapshot_sha256": snapshot_sha256,
                 "translation_units": list(requested_units),
-                "build_context": {"mode": build_context_mode},
+                "build_context": build_context,
             }
         ).encode("utf-8")
         payload = self._post_json(UAF_FACTS_PATH, body)

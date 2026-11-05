@@ -528,5 +528,324 @@ class SubprocessCrossProcessTests(unittest.TestCase):
         self.assertEqual("invalid_request", payload["error"])
 
 
+class FactsDigestBindingTests(unittest.TestCase):
+    """Round-1 P1: a verified-package facts request is bound to THIS
+    task's delivered artifact, not the snapshot's mutable default slot.
+
+    The reviewer's repro: two legal builds of the SAME snapshot, both
+    registered, and a digest-less facts request silently served the
+    sibling's context.  The real client now pins the digest.
+    """
+
+    def test_sibling_builds_of_one_snapshot_stay_disambiguated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # Same variant (same snapshot), different compdb macros:
+            # two sealed artifacts of ONE snapshot identity.
+            repository_a, view_a, snapshot_hash, digest_a = (
+                build_repository_and_view(root / "case-a")
+            )
+            repository_b, view_b, snapshot_hash_b, digest_b = (
+                build_repository_and_view(root / "case-b", macro="2")
+            )
+            self.assertEqual(snapshot_hash, snapshot_hash_b)
+            self.assertNotEqual(digest_a, digest_b)
+            self.assertNotEqual(view_a.context_hash, view_b.context_hash)
+
+            with _SidecarThread() as sidecar:
+                client = _client(sidecar.port)
+                self.assertTrue(
+                    client.register_verified_view(snapshot_hash, view_a)
+                )
+                self.assertTrue(
+                    client.register_verified_view(snapshot_hash, view_b)
+                )
+                with mock.patch.object(
+                    __import__(
+                        "cxx_analyzer.server", fromlist=["server"]
+                    ),
+                    "IMPORT_ROOT",
+                    root / "case-a",
+                ), mock.patch.object(
+                    __import__("cxx_analyzer.server", fromlist=["server"]),
+                    "WORK_ROOT",
+                    Path(temporary) / "work-a",
+                ):
+                    (Path(temporary) / "work-a").mkdir(exist_ok=True)
+
+                    def _tu_context_hash(artifact_digest=None):
+                        response = client.analyze_uaf_facts(
+                            "team/project", snapshot_hash, ("src/a.cpp",),
+                            "verified-package",
+                            **(
+                                {} if artifact_digest is None
+                                else {"artifact_digest": artifact_digest}
+                            ),
+                        )
+                        return response.translation_units[0]["build_context"][
+                            "context_hash"
+                        ]
+
+                    # The reviewer's repro, inverted: the digest-bound
+                    # requests are pinned to their own package's TU
+                    # context, the digest-less default serves whatever
+                    # registered last (the sibling's build).
+                    hash_a = _tu_context_hash(digest_a)
+                    hash_b = _tu_context_hash(digest_b)
+                    hash_default = _tu_context_hash()
+                    self.assertNotEqual(hash_a, hash_b)
+                    self.assertEqual(hash_b, hash_default)
+                    self.assertEqual(hash_a, _tu_context_hash(digest_a))
+
+    def test_client_rejects_malformed_digest_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _repository, view, _snapshot, _digest = (
+                build_repository_and_view(Path(temporary))
+            )
+            with _SidecarThread() as sidecar:
+                client = _client(sidecar.port)
+                from lima.cxx_memory import CxxAnalyzerProtocolError
+
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    client.analyze_uaf_facts(
+                        "team/project", "a" * 64, ("src/a.cpp",),
+                        "verified-package", artifact_digest="z" * 64,
+                    )
+                with self.assertRaises(CxxAnalyzerProtocolError):
+                    # The digest binding is only valid in verified-package
+                    # mode.
+                    client.analyze_uaf_facts(
+                        "team/project", "a" * 64, ("src/a.cpp",),
+                        "snapshot-compdb", artifact_digest="b" * 64,
+                    )
+
+
+class HolderLifecycleTests(unittest.TestCase):
+    """Round-1 P1: cleanup releases this task's hold, not the shared
+    registration; release also covers scan exceptions and cancellation."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(os.unlink, self.path)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        repository = Path(self.temporary.name, "team", "project")
+        repository.mkdir(parents=True)
+        (repository / "app.py").write_text(
+            "safe = True\n", encoding="utf8"
+        )
+        self.base = Settings(
+            host="127.0.0.1", port=8080, db_path=self.path,
+            max_diff_bytes=10000, max_steps=8, timeout_seconds=120,
+            llm_base_url="", llm_api_key="", llm_model="",
+            github_webhook_secret="", github_token="",
+            auto_post_review=False,
+            repository_import_root=self.temporary.name,
+            repository_scan_sast_mode="off", cxx_memory_mode="off",
+        )
+        from tests.test_build_consumption_wiring import make_build_result
+        from lima.build_agent import SUCCEEDED
+        from lima.service import (
+            _VERIFIED_VIEW_HOLDERS,
+            _VERIFIED_VIEW_HOLDERS_LOCK,
+        )
+
+        self.holders = _VERIFIED_VIEW_HOLDERS
+        self.holders_lock = _VERIFIED_VIEW_HOLDERS_LOCK
+        self.build_result = make_build_result(SUCCEEDED, "run-1/pkg")
+
+        class _RecordingAdapter:
+            def __init__(self):
+                self.registers = []
+                self.unregisters = []
+
+            def register_verified_view(self, snapshot, view):
+                self.registers.append(snapshot)
+                return True
+
+            def unregister_verified_view(self, snapshot, digest):
+                self.unregisters.append((snapshot, digest))
+                return True
+
+        self.adapter = _RecordingAdapter()
+        self.service = ReviewService(
+            replace(self.base, build_agent_mode="auto")
+        )
+        self.addCleanup(self.service.queue.close)
+        self.service.repository_scanner.cxx_memory_adapter = self.adapter
+        self.holders.clear()
+        self.addCleanup(self.holders.clear)
+
+    def test_last_holder_releases_the_shared_registration(self):
+        self.assertTrue(
+            self.service._deliver_verified_context(
+                self.adapter, self.build_result, object(), "task-1"
+            )
+        )
+        self.assertTrue(
+            self.service._deliver_verified_context(
+                self.adapter, self.build_result, object(), "task-2"
+            )
+        )
+        self.assertEqual(2, len(self.adapter.registers))
+        # The first task finishing must NOT delete the registration the
+        # second task is still consuming.
+        self.service._release_verified_context(
+            self.adapter, self.build_result, "task-1"
+        )
+        self.assertEqual([], self.adapter.unregisters)
+        # Replay/idempotency: releasing a released task again is a no-op.
+        self.service._release_verified_context(
+            self.adapter, self.build_result, "task-1"
+        )
+        self.assertEqual([], self.adapter.unregisters)
+        # The last holder frees the shared registration.
+        self.service._release_verified_context(
+            self.adapter, self.build_result, "task-2"
+        )
+        self.assertEqual(
+            [("a" * 64, "c" * 64)], self.adapter.unregisters
+        )
+        with self.holders_lock:
+            self.assertEqual({}, self.holders)
+
+    def test_release_covers_scan_exceptions(self):
+        from lima.build_agent import SUCCEEDED
+        from tests.test_build_consumption_wiring import make_build_result
+
+        build_result = make_build_result(SUCCEEDED, "run-1/pkg")
+        with mock.patch.object(
+            self.service, "_run_build_agent", return_value=build_result
+        ), mock.patch.object(
+            self.service, "_consume_build_context", return_value=object(),
+        ), mock.patch.object(
+            self.service.repository_scanner, "scan",
+            side_effect=RuntimeError("scan exploded"),
+        ):
+            created = self.service.enqueue_repository_scan(
+                "team/project", build_agent_mode="auto"
+            )
+            task = {}
+            for _ in range(300):
+                task = self.service.store.get(created["task_id"]) or {}
+                if task.get("state") in {"SUCCESS", "FAILED"}:
+                    break
+                time.sleep(0.02)
+        # The scan kept failing and the task failed after its retries,
+        # yet every delivery attempt released from the finally -- the
+        # shared registration never outlives its last holder (one
+        # unregister per retry's delivery, all for the identity pair).
+        self.assertEqual("FAILED", task["state"])
+        self.assertTrue(self.adapter.registers)
+        self.assertEqual(
+            len(self.adapter.registers), len(self.adapter.unregisters)
+        )
+        self.assertEqual(
+            {("a" * 64, "c" * 64)}, set(self.adapter.unregisters)
+        )
+        with self.holders_lock:
+            self.assertEqual({}, self.holders)
+
+
+class WideCompdbTests(unittest.TestCase):
+    """Round-1 P2: a whole-package view registers past the 16-TU
+    per-REQUEST batch cap; only facts requests stay batched."""
+
+    def _wide_repository_and_view(self, root: Path, unit_count: int):
+        import json as _json
+
+        from lima.build_context_view import (
+            compute_artifact_digest,
+            create_analysis_view,
+            snapshot_fingerprint,
+            verify_build_artifact,
+        )
+        from lima.context_package import build_manifest, write_package
+
+        repository = root / "team" / "project"
+        (repository / "src").mkdir(parents=True, exist_ok=True)
+        entries = []
+        for index in range(unit_count):
+            unit = f"src/unit{index:02d}.cpp"
+            (repository / unit).write_text(
+                f"int u{index}(void) {{ return {index}; }}\n",
+                encoding="utf8",
+            )
+            entries.append({
+                "directory": "src",
+                "arguments": [
+                    "/usr/bin/c++", "-DVERIFIED=1", "-c",
+                    unit.rsplit("/", 1)[-1],
+                ],
+                "file": unit,
+            })
+        snapshot_hash = snapshot_fingerprint(repository)
+        manifest = build_manifest(
+            repository="Fixtures/WideRepo",
+            revision=snapshot_hash,
+            compdb=entries,
+            generated=[],
+            header_roots=["headers/fixture"],
+            rewrites={},
+            created_by="wide-compdb-test",
+        )
+        package = root / "package"
+        write_package(
+            package, manifest, _json.dumps(entries).encode("utf8"),
+            {}, {"headers/fixture/lib.h": b"// lib\n"},
+        )
+        artifact = verify_build_artifact(
+            package, snapshot_hash, compute_artifact_digest(package)
+        )
+        target_units = tuple(
+            sorted(entry["file"] for entry in entries)
+        )
+        view = create_analysis_view(repository, artifact, target_units)
+        return repository, view, snapshot_hash
+
+    def test_seventeen_tu_package_registers_whole_view(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _repository, view, snapshot_hash = (
+                self._wide_repository_and_view(Path(temporary), 17)
+            )
+            self.assertEqual(17, len(view.target_units))
+            with _SidecarThread() as sidecar:
+                client = _client(sidecar.port)
+                self.assertTrue(
+                    client.register_verified_view(snapshot_hash, view)
+                )
+                self.assertTrue(
+                    client.confirmed_verified_view(
+                        snapshot_hash, view.artifact_digest
+                    )
+                )
+                # A per-request batch within the 16-TU request cap still
+                # resolves through the wide view.
+                with mock.patch.object(
+                    __import__(
+                        "cxx_analyzer.server", fromlist=["server"]
+                    ),
+                    "IMPORT_ROOT",
+                    Path(temporary),
+                ), mock.patch.object(
+                    __import__("cxx_analyzer.server", fromlist=["server"]),
+                    "WORK_ROOT",
+                    Path(temporary) / "work",
+                ):
+                    (Path(temporary) / "work").mkdir(exist_ok=True)
+                    response = client.analyze_uaf_facts(
+                        "team/project", snapshot_hash,
+                        ("src/unit00.cpp", "src/unit16.cpp"),
+                        "verified-package",
+                        artifact_digest=view.artifact_digest,
+                    )
+                    for unit in response.translation_units:
+                        self.assertEqual(
+                            "verified-package",
+                            unit["build_context"]["source_kind"],
+                        )
+
+
 if __name__ == "__main__":
     unittest.main()

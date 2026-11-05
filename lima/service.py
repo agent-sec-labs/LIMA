@@ -2,6 +2,7 @@ import hashlib
 import re
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -278,6 +279,15 @@ def _deterministic_build_model(state: dict) -> dict:
     if step == 6:
         return {"action": "tool", "tool": "validate_context", "arguments": {}}
     return {"action": "final", "output": {"status": "done"}}
+
+
+# #354 评审第一轮 P1：同一 (snapshot, artifact) 身份可被多个并发在途
+# 任务共享（相同快照的两次构建产出同一制品）。注册按持有者计数：
+# 每次交付都刷新注册（sidecar 端幂等），释放只撤销本任务的持有权，
+# 最后一个持有者结束时才真正注销——先结束的任务不能删掉另一个
+# 任务仍在消费的注册。跨主进程的部署仍由 sidecar 的最老先回收兜底。
+_VERIFIED_VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
+_VERIFIED_VIEW_HOLDERS_LOCK = threading.Lock()
 
 
 class ReviewService:
@@ -1706,7 +1716,11 @@ class ReviewService:
             return None
 
     def _deliver_verified_context(
-        self, adapter: object, build_result: BuildAgentResult, view: object
+        self,
+        adapter: object,
+        build_result: BuildAgentResult,
+        view: object,
+        task_id: str,
     ) -> bool:
         """Deliver one sealed view to the analyzer deployment (#351 B).
 
@@ -1715,25 +1729,42 @@ class ReviewService:
         ——这是跨进程部署的权威信号，注册失败按交付失败处理。
         其余适配器：沿用部署声明（``verified_package_supported``，
         #350 第六轮语义；进程内注册已在 _consume_build_context 完成）。
+
+        #354 评审第一轮 P1：交付总是伴随持有权登记（同身份的重复
+        POST 在 sidecar 端幂等，还兼作注册刷新），释放按持有者计数
+        ——先结束的任务不能删掉共享同一制品身份的另一个在途任务
+        正在消费的注册。
         """
 
+        artifact_digest = build_result.artifact_digest or ""
         register = getattr(adapter, "register_verified_view", None)
         if callable(register):
             try:
-                return bool(register(build_result.snapshot_hash, view))
+                delivered = bool(
+                    register(build_result.snapshot_hash, view)
+                )
             except Exception:  # noqa: BLE001 - delivery failure degrades
                 metrics.inc("build_context_delivery_failed_total")
                 return False
-        return bool(getattr(adapter, "verified_package_supported", False))
+        else:
+            delivered = bool(
+                getattr(adapter, "verified_package_supported", False)
+            )
+        if delivered and len(artifact_digest) == 64:
+            with _VERIFIED_VIEW_HOLDERS_LOCK:
+                _VERIFIED_VIEW_HOLDERS.setdefault(
+                    (build_result.snapshot_hash, artifact_digest), set()
+                ).add(task_id)
+        return delivered
 
-    def _cleanup_verified_context(
-        self, adapter: object, build_result: BuildAgentResult
+    def _release_verified_context(
+        self, adapter: object, build_result: BuildAgentResult, task_id: str
     ) -> None:
-        """Task-end cleanup of one delivered view registration.
+        """Release this task's hold on one delivered view registration.
 
-        幂等（sidecar 端保证）：HTTP 部署走 DELETE，进程内部署走本
-        地注销。失败只计数不阻断——崩溃残留由 sidecar 的最老先回收
-        兜底（#352）。
+        幂等：只有最后一个持有者结束时才真正注销（HTTP DELETE 或
+        进程内注销）。失败只计数不阻断——崩溃残留由 sidecar 的最老
+        先回收兜底（#352）。
         """
 
         artifact_digest = build_result.artifact_digest or ""
@@ -1745,6 +1776,19 @@ class ReviewService:
             )
         ):
             return
+        with _VERIFIED_VIEW_HOLDERS_LOCK:
+            holders = _VERIFIED_VIEW_HOLDERS.get(
+                (build_result.snapshot_hash, artifact_digest)
+            )
+            if not holders:
+                return
+            holders.discard(task_id)
+            if holders:
+                # 其他任务仍在消费同一制品身份：保留注册。
+                return
+            del _VERIFIED_VIEW_HOLDERS[
+                (build_result.snapshot_hash, artifact_digest)
+            ]
         unregister = getattr(adapter, "unregister_verified_view", None)
         try:
             if callable(unregister):
@@ -1775,6 +1819,7 @@ class ReviewService:
         )
         build_gap: dict[str, Any] | None = None
         verified_view: object | None = None
+        delivered_registration: tuple[object, BuildAgentResult] | None = None
         if build_agent_mode != "off":
             try:
                 build_result = self._run_build_agent(
@@ -1817,9 +1862,13 @@ class ReviewService:
                 analyzer_adapter = getattr(
                     self.repository_scanner, "cxx_memory_adapter", None,
                 )
-                if not self._deliver_verified_context(
-                    analyzer_adapter, build_result, verified_view
+                if self._deliver_verified_context(
+                    analyzer_adapter, build_result, verified_view, task_id
                 ):
+                    delivered_registration = (
+                        analyzer_adapter, build_result
+                    )
+                else:
                     verified_view = None
                     consumption_failure_code = (
                         "verified-context-not-consumable"
@@ -1859,65 +1908,66 @@ class ReviewService:
                 "Running bounded AST and SAST repository analysis.", utc_now(),
             ),
         )
-        with self.observability.span(
-            "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
-            repository=repository_label,
-        ), metrics.timer("repository_scan_duration"):
-            result = self.repository_scanner.scan(
-                workspace,
-                repository_key=repository_label,
-                progress_callback=(
-                    progress.pipeline_event if progress is not None else None
-                ),
-                task_id=task_id,
-                verified_view=verified_view,
-                # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
-                # 权威取消信号。
-                should_cancel=lambda: self.store.is_cancelled(task_id),
-                # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
-                # 并发任务各自隔离。
-                cxx_agent_mode=cxx_agent_mode,
-                investigate_paths=investigate_paths or (),
-            )
-        if self.store.is_cancelled(task_id):
-            raise RepositoryScanCancelled()
-        result.report.repository = repository_label
-        result.report.collaboration["import_policy"] = {
-            "host_path_exposed": False,
-            "repository_code_executed": False,
-            "snapshot_sha256": result.inventory.fingerprint(),
-            "snapshot_files": len(result.inventory.files),
-            **import_policy_extra,
-        }
-        if build_gap is not None and verified_view is not None:
-            # consumed_by_analysis 最终以检测实际使用该上下文的肯定证据
-            # 为准（#350 第六轮 P1）：平台链完成（status=completed）且
-            # 摘要带回实际生效的 build_context=verified-package——三方
-            # 消费者（facts/Specialist/复现）与门控同源，缺一即未消费。
-            # analyzer-not-configured / llm-not-configured /
-            # no-cxx-sources / review-incomplete 等状态在此自然为 False。
-            platform_summary = (
-                (result.report.collaboration or {}).get("platform") or {}
-            )
-            platform_status = str(platform_summary.get("status", ""))
-            platform_context = str(platform_summary.get("build_context", ""))
-            build_gap["consumed_by_analysis"] = (
-                platform_status == "completed"
-                and platform_context == "verified-package"
-            )
-        if build_gap is not None:
-            # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
-            # 阻断依赖上下文阶段的判定，二者都不冒充成功。
-            result.report.collaboration["build_agent"] = build_gap
-            if build_result.status == SUCCEEDED:
-                # #351 B：任务报告已组装，按任务生命周期注销已交付的
-                # 注册（幂等；扫描中途异常路径由 sidecar 最老先回收
-                # 兜底）。交付失败也可能已留下进程内注册，一并清理。
-                self._cleanup_verified_context(
-                    getattr(
-                        self.repository_scanner, "cxx_memory_adapter", None
+        try:
+            with self.observability.span(
+                "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
+                repository=repository_label,
+            ), metrics.timer("repository_scan_duration"):
+                result = self.repository_scanner.scan(
+                    workspace,
+                    repository_key=repository_label,
+                    progress_callback=(
+                        progress.pipeline_event if progress is not None else None
                     ),
-                    build_result,
+                    task_id=task_id,
+                    verified_view=verified_view,
+                    # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
+                    # 权威取消信号。
+                    should_cancel=lambda: self.store.is_cancelled(task_id),
+                    # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
+                    # 并发任务各自隔离。
+                    cxx_agent_mode=cxx_agent_mode,
+                    investigate_paths=investigate_paths or (),
+                )
+            if self.store.is_cancelled(task_id):
+                raise RepositoryScanCancelled()
+            result.report.repository = repository_label
+            result.report.collaboration["import_policy"] = {
+                "host_path_exposed": False,
+                "repository_code_executed": False,
+                "snapshot_sha256": result.inventory.fingerprint(),
+                "snapshot_files": len(result.inventory.files),
+                **import_policy_extra,
+            }
+            if build_gap is not None and verified_view is not None:
+                # consumed_by_analysis 最终以检测实际使用该上下文的肯定证据
+                # 为准（#350 第六轮 P1）：平台链完成（status=completed）且
+                # 摘要带回实际生效的 build_context=verified-package——三方
+                # 消费者（facts/Specialist/复现）与门控同源，缺一即未消费。
+                # analyzer-not-configured / llm-not-configured /
+                # no-cxx-sources / review-incomplete 等状态在此自然为 False。
+                platform_summary = (
+                    (result.report.collaboration or {}).get("platform") or {}
+                )
+                platform_status = str(platform_summary.get("status", ""))
+                platform_context = str(platform_summary.get("build_context", ""))
+                build_gap["consumed_by_analysis"] = (
+                    platform_status == "completed"
+                    and platform_context == "verified-package"
+                )
+            if build_gap is not None:
+                # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
+                # 阻断依赖上下文阶段的判定，二者都不冒充成功。
+                result.report.collaboration["build_agent"] = build_gap
+        finally:
+            # #354 评审第一轮 P1：释放覆盖异常与取消路径——扫描中途
+            # 抛出（含 RepositoryScanCancelled）时同样只撤销本任务的
+            # 持有权，最后一个持有者结束时才真正注销共享注册。
+            if delivered_registration is not None:
+                self._release_verified_context(
+                    delivered_registration[0],
+                    delivered_registration[1],
+                    task_id,
                 )
         if self.repository_semantic_triage is not None:
             if self.store.is_cancelled(task_id):

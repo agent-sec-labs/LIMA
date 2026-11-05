@@ -203,9 +203,11 @@ class FakeUafAnalyzer:
 
     def analyze_uaf_facts(
         self, repository_key, snapshot_sha256, translation_units,
-        build_context_mode,
+        build_context_mode, *, artifact_digest=None,
     ):
-        self.unit_calls.append((tuple(translation_units), build_context_mode))
+        self.unit_calls.append(
+            (tuple(translation_units), build_context_mode, artifact_digest)
+        )
         payload = dict(self.payload or _payload())
         payload["repository_key"] = repository_key
         payload["snapshot_sha256"] = snapshot_sha256

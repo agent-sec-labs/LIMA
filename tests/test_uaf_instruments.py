@@ -172,9 +172,11 @@ class FakeUafAnalyzer:
 
     def analyze_uaf_facts(
         self, repository_key, snapshot_sha256, translation_units,
-        build_context_mode,
+        build_context_mode, *, artifact_digest=None,
     ):
-        self.unit_calls.append((tuple(translation_units), build_context_mode))
+        self.unit_calls.append(
+            (tuple(translation_units), build_context_mode, artifact_digest)
+        )
         payload = dict(self.payload or _payload())
         payload["repository_key"] = repository_key
         payload["snapshot_sha256"] = snapshot_sha256
@@ -346,7 +348,9 @@ class InstrumentFactsTests(unittest.TestCase):
             snapshot_hash=SNAPSHOT,
             translation_units=(UNIT,),
         )
-        self.assertEqual([((UNIT,), "snapshot-compdb")], analyzer.unit_calls)
+        self.assertEqual(
+            [((UNIT,), "snapshot-compdb", None)], analyzer.unit_calls
+        )
         self.assertEqual(1, len(bundle.per_unit))
         self.assertEqual(3, len(bundle.facts))
         self.assertEqual(UNIT, bundle.per_unit[0].translation_unit)

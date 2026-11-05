@@ -469,7 +469,10 @@ _COMPILE_ENVIRONMENT_ERROR_TYPE: Final = "compile-environment-failed"
 # Reasoning-happy models hang on whole-file audits; one window per call
 # keeps every discovery round inside a step budget.  Line boundaries are
 # respected so approximate line numbers stay meaningful per window.
-_DISCOVERY_WINDOW_BYTES: Final = 48 * 1024
+# 16KB windows: the LLM gateway takes 5-10 minutes per 48KB window,
+# which exhausts the 900s step timeout before Discovery completes;
+# 16KB windows keep each call in the 1-2 minute range.
+_DISCOVERY_WINDOW_BYTES: Final = 16 * 1024
 _MAX_DISCOVERY_WINDOWS: Final = 8
 # Kept-lead allowance per audited discovery window.  Battles r5-r8:
 # glm-5.3 reliably reports 16-17 leads across the ~6 windows of a

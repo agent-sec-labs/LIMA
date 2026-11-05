@@ -260,6 +260,20 @@ class WirePackageValidationTests(unittest.TestCase):
             members["context_manifest.json"] = json.dumps(manifest).encode("utf8")
         self._assert_reader_and_wire_reject(mutate)
 
+    def test_surrogate_member_path_returns_400_without_changing_registry(self) -> None:
+        good = self._envelope(self._members())
+        analyzer_server.register_view_request(good, _settings())
+        before = dict(analyzer_server._VERIFIED_BUILD_VIEWS[self.snapshot])
+        malformed = self._envelope(self._members())
+        malformed["members"]["bad\ud800.h"] = base64.b64encode(b"x").decode("ascii")
+        status, payload = analyzer_server.dispatch_request(
+            "POST", "/v1/verified-build-views", "application/json",
+            json.dumps(malformed).encode("utf8"), _settings(),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_request", payload["error"])
+        self.assertEqual(before, analyzer_server._VERIFIED_BUILD_VIEWS[self.snapshot])
+
 
 if __name__ == "__main__":
     unittest.main()

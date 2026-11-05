@@ -301,6 +301,13 @@ def _hex64(value: object) -> bool:
 def _safe_member_path(path: object) -> bool:
     if not isinstance(path, str) or not path:
         return False
+    # JSON can contain escaped lone surrogates.  Refuse them before the
+    # artifact hash serializes member names as strict UTF-8.
+    try:
+        if len(path.encode("utf8")) > 1024:
+            return False
+    except UnicodeEncodeError:
+        return False
     # Control characters (null bytes above all) are rejected here: the
     # materializer's write guard catches OSError only, and an embedded
     # null would surface as a per-request 500 instead of a registration

@@ -281,11 +281,15 @@ def _deterministic_build_model(state: dict) -> dict:
     return {"action": "final", "output": {"status": "done"}}
 
 
-# #354 评审第一轮 P1：同一 (snapshot, artifact) 身份可被多个并发在途
-# 任务共享（相同快照的两次构建产出同一制品）。注册按持有者计数：
-# 每次交付都刷新注册（sidecar 端幂等），释放只撤销本任务的持有权，
-# 最后一个持有者结束时才真正注销——先结束的任务不能删掉另一个
-# 任务仍在消费的注册。跨主进程的部署仍由 sidecar 的最老先回收兜底。
+# #354 评审第二轮 P1：交付持有权的权威归属。
+# HTTP 部署：持有权是 sidecar 端的 token（注册带 holder、按 holder 释放），
+# 注册、计数与注销在同一服务端生命周期锁下——本进程的释放不可能删掉
+# 任何进程刚交付的注册，请求顺序无关。多实例/Redis 多消费者共享同一
+# sidecar 时同样正确。
+# 进程内声明部署（无 HTTP 通道）：本地按持有者计数，且注册刷新、计数
+# 增减与末持有者注销在同一把锁内串行完成（本地注销是纯字典操作，锁内
+# 执行安全），杜绝"本地判定末持有者后、实际注销前被新交付插队"的撕
+# 裂。崩溃残留由 sidecar 的最老先回收兜底（#352）。
 _VERIFIED_VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
 _VERIFIED_VIEW_HOLDERS_LOCK = threading.Lock()
 
@@ -1724,47 +1728,58 @@ class ReviewService:
     ) -> bool:
         """Deliver one sealed view to the analyzer deployment (#351 B).
 
-        HTTP 适配器（``CxxMemoryAnalyzerClient``）：封存信封注册到
-        sidecar（``POST /v1/verified-build-views``），ack 即能力证据
-        ——这是跨进程部署的权威信号，注册失败按交付失败处理。
+        HTTP 适配器（``CxxMemoryAnalyzerClient``）：封存信封以本任务
+        为 holder 注册到 sidecar，ack 即能力证据——持有权计数在服务
+        端与注册同一生命周期锁下维护（#354 评审第二轮 P1），本进程
+        或任何实例的释放都不可能删掉刚交付的注册，请求顺序无关。
         其余适配器：沿用部署声明（``verified_package_supported``，
-        #350 第六轮语义；进程内注册已在 _consume_build_context 完成）。
-
-        #354 评审第一轮 P1：交付总是伴随持有权登记（同身份的重复
-        POST 在 sidecar 端幂等，还兼作注册刷新），释放按持有者计数
-        ——先结束的任务不能删掉共享同一制品身份的另一个在途任务
-        正在消费的注册。
+        #350 第六轮语义）；进程内生命周期（注册刷新 + 持有者登记）
+        在同一把锁内串行完成，防止释放判定与交付交错撕裂。
         """
 
-        artifact_digest = build_result.artifact_digest or ""
+        artifact_digest = build_result.artifact_digest
         register = getattr(adapter, "register_verified_view", None)
         if callable(register):
             try:
-                delivered = bool(
-                    register(build_result.snapshot_hash, view)
+                return bool(
+                    register(
+                        build_result.snapshot_hash, view, holder=task_id
+                    )
                 )
             except Exception:  # noqa: BLE001 - delivery failure degrades
                 metrics.inc("build_context_delivery_failed_total")
                 return False
-        else:
-            delivered = bool(
-                getattr(adapter, "verified_package_supported", False)
+        if not bool(getattr(adapter, "verified_package_supported", False)):
+            return False
+        if len(artifact_digest or "") != 64:
+            return True
+        from cxx_analyzer import server as analyzer_server
+
+        with _VERIFIED_VIEW_HOLDERS_LOCK:
+            # 进程内刷新 + 持有权登记同一临界区（本地注册是纯字典
+            # 操作，锁内执行安全）：释放侧的末持有者判定不可能插进
+            # 这次交付与登记之间。
+            analyzer_server.register_verified_build_view(
+                build_result.snapshot_hash, view
             )
-        if delivered and len(artifact_digest) == 64:
-            with _VERIFIED_VIEW_HOLDERS_LOCK:
-                _VERIFIED_VIEW_HOLDERS.setdefault(
-                    (build_result.snapshot_hash, artifact_digest), set()
-                ).add(task_id)
-        return delivered
+            analyzer_server.register_verified_build_view(
+                build_result.snapshot_hash, view,
+                artifact_digest=artifact_digest,
+            )
+            _VERIFIED_VIEW_HOLDERS.setdefault(
+                (build_result.snapshot_hash, artifact_digest), set()
+            ).add(task_id)
+        return True
 
     def _release_verified_context(
         self, adapter: object, build_result: BuildAgentResult, task_id: str
     ) -> None:
         """Release this task's hold on one delivered view registration.
 
-        幂等：只有最后一个持有者结束时才真正注销（HTTP DELETE 或
-        进程内注销）。失败只计数不阻断——崩溃残留由 sidecar 的最老
-        先回收兜底（#352）。
+        HTTP 部署：按本任务 holder 释放——服务端计数，注册随最后
+        一个持有者离开。进程内声明部署：持有者计数与末持有者注销
+        在同一临界区完成。幂等；失败只计数不阻断——崩溃残留由
+        sidecar 的最老先回收兜底（#352）。
         """
 
         artifact_digest = build_result.artifact_digest or ""
@@ -1776,6 +1791,18 @@ class ReviewService:
             )
         ):
             return
+        unregister = getattr(adapter, "unregister_verified_view", None)
+        if callable(unregister):
+            try:
+                unregister(
+                    build_result.snapshot_hash, artifact_digest,
+                    holder=task_id,
+                )
+            except Exception:  # noqa: BLE001 - cleanup best-effort
+                metrics.inc("build_context_cleanup_failed_total")
+            return
+        from cxx_analyzer import server as analyzer_server
+
         with _VERIFIED_VIEW_HOLDERS_LOCK:
             holders = _VERIFIED_VIEW_HOLDERS.get(
                 (build_result.snapshot_hash, artifact_digest)
@@ -1789,18 +1816,14 @@ class ReviewService:
             del _VERIFIED_VIEW_HOLDERS[
                 (build_result.snapshot_hash, artifact_digest)
             ]
-        unregister = getattr(adapter, "unregister_verified_view", None)
-        try:
-            if callable(unregister):
-                unregister(build_result.snapshot_hash, artifact_digest)
-                return
-            from cxx_analyzer import server as analyzer_server
-
-            analyzer_server.unregister_verified_build_view(
-                build_result.snapshot_hash, artifact_digest
-            )
-        except Exception:  # noqa: BLE001 - cleanup best-effort
-            metrics.inc("build_context_cleanup_failed_total")
+            # 末持有者注销也在同一临界区：判定与注销之间不可能被
+            # 新交付插队（新交付会先刷新注册并登记持有权）。
+            try:
+                analyzer_server.unregister_verified_build_view(
+                    build_result.snapshot_hash, artifact_digest
+                )
+            except Exception:  # noqa: BLE001 - cleanup best-effort
+                metrics.inc("build_context_cleanup_failed_total")
 
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,

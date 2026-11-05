@@ -190,6 +190,7 @@ class ServiceDeliveryTests(unittest.TestCase):
                 if task.get("state") in {"SUCCESS", "FAILED"}:
                     break
                 time.sleep(0.02)
+            task.setdefault("task_id", created["task_id"])
         return task, scan_spy
 
     def test_http_delivery_passes_view_and_cleans_up(self):
@@ -197,16 +198,20 @@ class ServiceDeliveryTests(unittest.TestCase):
             replace(self.base, build_agent_mode="auto")
         )
         self.addCleanup(service.queue.close)
-        deliveries: list[tuple[str, object]] = []
-        cleanups: list[tuple[str, str]] = []
+        deliveries: list[tuple[str, object, object]] = []
+        cleanups: list[tuple[str, str, object]] = []
 
         class _HttpAdapter:
-            def register_verified_view(self, snapshot, view):
-                deliveries.append((snapshot, view))
+            def register_verified_view(
+                self, snapshot, view, *, holder=None
+            ):
+                deliveries.append((snapshot, view, holder))
                 return True
 
-            def unregister_verified_view(self, snapshot, digest):
-                cleanups.append((snapshot, digest))
+            def unregister_verified_view(
+                self, snapshot, digest, *, holder=None
+            ):
+                cleanups.append((snapshot, digest, holder))
                 return True
 
         service.repository_scanner.cxx_memory_adapter = _HttpAdapter()
@@ -216,8 +221,12 @@ class ServiceDeliveryTests(unittest.TestCase):
         self.assertEqual("a" * 64, deliveries[0][0])
         kwargs = scan_spy.call_args.kwargs
         self.assertIsNotNone(kwargs.get("verified_view"))
-        # Task-end cleanup ran with the build's identity pair.
-        self.assertEqual([("a" * 64, "c" * 64)], cleanups)
+        # Task-end cleanup released THIS task's hold: identity pair plus
+        # the holder token (#354 round 2).
+        task_id = task["task_id"]
+        self.assertEqual(task_id, deliveries[0][2])
+        self.assertEqual(1, len(cleanups))
+        self.assertEqual(("a" * 64, "c" * 64, task_id), cleanups[0])
         visible = (
             (task.get("report") or {}).get("collaboration", {})
         ).get("build_agent")
@@ -239,7 +248,7 @@ class ServiceDeliveryTests(unittest.TestCase):
         self.addCleanup(service.queue.close)
 
         class _RefusingAdapter:
-            def register_verified_view(self, snapshot, view):
+            def register_verified_view(self, snapshot, view, *, holder=None):
                 return False
 
         service.repository_scanner.cxx_memory_adapter = _RefusingAdapter()
@@ -263,7 +272,7 @@ class ServiceDeliveryTests(unittest.TestCase):
         self.addCleanup(service.queue.close)
 
         class _BrokenAdapter:
-            def register_verified_view(self, snapshot, view):
+            def register_verified_view(self, snapshot, view, *, holder=None):
                 raise OSError("sidecar gone")
 
         service.repository_scanner.cxx_memory_adapter = _BrokenAdapter()
@@ -422,7 +431,9 @@ class SubprocessCrossProcessTests(unittest.TestCase):
             headers={"Content-Type": "application/json"} if data else {},
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(  # noqa: S310 - loopback, fixed port
+                request, timeout=120
+            ) as response:
                 return response.status, json.loads(response.read())
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read())
@@ -644,12 +655,12 @@ class HolderLifecycleTests(unittest.TestCase):
             repository_import_root=self.temporary.name,
             repository_scan_sast_mode="off", cxx_memory_mode="off",
         )
-        from tests.test_build_consumption_wiring import make_build_result
         from lima.build_agent import SUCCEEDED
         from lima.service import (
             _VERIFIED_VIEW_HOLDERS,
             _VERIFIED_VIEW_HOLDERS_LOCK,
         )
+        from tests.test_build_consumption_wiring import make_build_result
 
         self.holders = _VERIFIED_VIEW_HOLDERS
         self.holders_lock = _VERIFIED_VIEW_HOLDERS_LOCK
@@ -660,12 +671,16 @@ class HolderLifecycleTests(unittest.TestCase):
                 self.registers = []
                 self.unregisters = []
 
-            def register_verified_view(self, snapshot, view):
-                self.registers.append(snapshot)
+            def register_verified_view(
+                self, snapshot, view, *, holder=None
+            ):
+                self.registers.append((snapshot, holder))
                 return True
 
-            def unregister_verified_view(self, snapshot, digest):
-                self.unregisters.append((snapshot, digest))
+            def unregister_verified_view(
+                self, snapshot, digest, *, holder=None
+            ):
+                self.unregisters.append((snapshot, digest, holder))
                 return True
 
         self.adapter = _RecordingAdapter()
@@ -678,34 +693,52 @@ class HolderLifecycleTests(unittest.TestCase):
         self.addCleanup(self.holders.clear)
 
     def test_last_holder_releases_the_shared_registration(self):
+        # The declaration branch keeps the holder count locally, with
+        # the registration refresh, the count and the last-holder
+        # removal inside one critical section.
+        from cxx_analyzer import server as analyzer_server
+
+        class _DeclaringAdapter:
+            verified_package_supported = True
+
+        adapter = _DeclaringAdapter()
+        analyzer_server.clear_verified_build_views()
+        self.addCleanup(analyzer_server.clear_verified_build_views)
         self.assertTrue(
             self.service._deliver_verified_context(
-                self.adapter, self.build_result, object(), "task-1"
+                adapter, self.build_result, object(), "task-1"
             )
         )
         self.assertTrue(
             self.service._deliver_verified_context(
-                self.adapter, self.build_result, object(), "task-2"
+                adapter, self.build_result, object(), "task-2"
             )
         )
-        self.assertEqual(2, len(self.adapter.registers))
+        # Both deliveries refreshed the local registration.
+        self.assertIsNotNone(
+            analyzer_server.lookup_verified_build_view("a" * 64, "c" * 64)
+        )
         # The first task finishing must NOT delete the registration the
         # second task is still consuming.
         self.service._release_verified_context(
-            self.adapter, self.build_result, "task-1"
+            adapter, self.build_result, "task-1"
         )
-        self.assertEqual([], self.adapter.unregisters)
+        self.assertIsNotNone(
+            analyzer_server.lookup_verified_build_view("a" * 64, "c" * 64)
+        )
         # Replay/idempotency: releasing a released task again is a no-op.
         self.service._release_verified_context(
-            self.adapter, self.build_result, "task-1"
+            adapter, self.build_result, "task-1"
         )
-        self.assertEqual([], self.adapter.unregisters)
+        self.assertIsNotNone(
+            analyzer_server.lookup_verified_build_view("a" * 64, "c" * 64)
+        )
         # The last holder frees the shared registration.
         self.service._release_verified_context(
-            self.adapter, self.build_result, "task-2"
+            adapter, self.build_result, "task-2"
         )
-        self.assertEqual(
-            [("a" * 64, "c" * 64)], self.adapter.unregisters
+        self.assertIsNone(
+            analyzer_server.lookup_verified_build_view("a" * 64, "c" * 64)
         )
         with self.holders_lock:
             self.assertEqual({}, self.holders)
@@ -733,19 +766,221 @@ class HolderLifecycleTests(unittest.TestCase):
                     break
                 time.sleep(0.02)
         # The scan kept failing and the task failed after its retries,
-        # yet every delivery attempt released from the finally -- the
-        # shared registration never outlives its last holder (one
-        # unregister per retry's delivery, all for the identity pair).
+        # yet every delivery attempt released from the finally -- one
+        # holder-scoped unregister per retry's delivery, all for the
+        # identity pair and THIS task's token.
         self.assertEqual("FAILED", task["state"])
         self.assertTrue(self.adapter.registers)
         self.assertEqual(
             len(self.adapter.registers), len(self.adapter.unregisters)
         )
         self.assertEqual(
-            {("a" * 64, "c" * 64)}, set(self.adapter.unregisters)
+            {("a" * 64, "c" * 64, created["task_id"])},
+            set(self.adapter.unregisters),
         )
         with self.holders_lock:
             self.assertEqual({}, self.holders)
+
+
+class ServerTokenLifecycleTests(unittest.TestCase):
+    """Round-2 P1: delivery holds are server-side tokens.
+
+    The reviewer's interleave -- a release's DELETE landing AFTER a
+    sibling delivery's POST -- is now order-independent by
+    construction: the hold count lives with the registration under the
+    sidecar's registry lock.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        _repository, view, snapshot_hash, digest = (
+            build_repository_and_view(Path(self.temporary.name))
+        )
+        self.view = view
+        self.snapshot_hash = snapshot_hash
+        self.digest = digest
+
+    def test_holder_tokens_count_and_release_one_hold_each(self):
+        with _SidecarThread() as sidecar:
+            client = _client(sidecar.port)
+            self.assertTrue(
+                client.register_verified_view(
+                    self.snapshot_hash, self.view, holder="task-a"
+                )
+            )
+            self.assertTrue(
+                client.register_verified_view(
+                    self.snapshot_hash, self.view, holder="task-b"
+                )
+            )
+            # Retry of the same holder adds no unreleaseable reference.
+            self.assertTrue(
+                client.register_verified_view(
+                    self.snapshot_hash, self.view, holder="task-a"
+                )
+            )
+            self.assertTrue(
+                client.unregister_verified_view(
+                    self.snapshot_hash, self.digest, holder="task-a"
+                )
+            )
+            # task-b's delivery survives task-a's release.
+            self.assertTrue(
+                client.confirmed_verified_view(self.snapshot_hash, self.digest)
+            )
+            # An untracked holder releases nothing it does not own.
+            self.assertTrue(
+                client.unregister_verified_view(
+                    self.snapshot_hash, self.digest, holder="task-z"
+                )
+            )
+            self.assertTrue(
+                client.confirmed_verified_view(self.snapshot_hash, self.digest)
+            )
+            # The last tracked holder frees the registration.
+            self.assertTrue(
+                client.unregister_verified_view(
+                    self.snapshot_hash, self.digest, holder="task-b"
+                )
+            )
+            self.assertFalse(
+                client.confirmed_verified_view(self.snapshot_hash, self.digest)
+            )
+
+    def test_legacy_holderless_shapes_still_work(self):
+        with _SidecarThread() as sidecar:
+            client = _client(sidecar.port)
+            self.assertTrue(
+                client.register_verified_view(self.snapshot_hash, self.view)
+            )
+            self.assertTrue(
+                client.unregister_verified_view(
+                    self.snapshot_hash, self.digest
+                )
+            )
+            self.assertFalse(
+                client.confirmed_verified_view(self.snapshot_hash, self.digest)
+            )
+
+    def test_interleaved_release_cannot_delete_a_fresh_delivery(self):
+        # The reviewer's exact sequence, against the REAL service
+        # methods and a REAL sidecar: A delivers; A's release has its
+        # DELETE held back by a barrier; B delivers (real POST + ack);
+        # A's DELETE lands; B must still be registered.
+        with _SidecarThread() as sidecar:
+            base_client = _client(sidecar.port)
+            delete_gate = threading.Event()
+
+            class _GatedAdapter:
+                """The real client with a barrier on A's DELETE only."""
+
+                def register_verified_view(self, snapshot, view, *, holder=None):
+                    return base_client.register_verified_view(
+                        snapshot, view, holder=holder
+                    )
+
+                def unregister_verified_view(
+                    self, snapshot, digest, *, holder=None
+                ):
+                    delete_gate.wait(timeout=30)
+                    return base_client.unregister_verified_view(
+                        snapshot, digest, holder=holder
+                    )
+
+            gated = _GatedAdapter()
+            handle, database = tempfile.mkstemp(suffix=".db")
+            os.close(handle)
+            self.addCleanup(os.unlink, database)
+            holder_service = ReviewService(
+                Settings(
+                    host="127.0.0.1", port=0, db_path=database,
+                    max_diff_bytes=10000, max_steps=1, timeout_seconds=30,
+                    llm_base_url="", llm_api_key="", llm_model="",
+                    github_webhook_secret="", github_token="",
+                    auto_post_review=False,
+                )
+            )
+            self.addCleanup(holder_service.queue.close)
+
+            class _Build:
+                snapshot_hash = self.snapshot_hash
+                artifact_digest = self.digest
+
+            self.assertTrue(
+                holder_service._deliver_verified_context(
+                    gated, _Build(), self.view, "task-a"
+                )
+            )
+            releaser = threading.Thread(
+                target=holder_service._release_verified_context,
+                args=(gated, _Build(), "task-a"),
+                daemon=True,
+            )
+            releaser.start()
+            # While A's DELETE is held back, B delivers for real.
+            self.assertTrue(
+                holder_service._deliver_verified_context(
+                    gated, _Build(), self.view, "task-b"
+                )
+            )
+            delete_gate.set()
+            releaser.join(timeout=30)
+            # B's registration survived A's late DELETE.
+            self.assertTrue(
+                base_client.confirmed_verified_view(
+                    self.snapshot_hash, self.digest
+                )
+            )
+            # And B can still release it as the last holder.
+            self.assertTrue(
+                base_client.unregister_verified_view(
+                    self.snapshot_hash, self.digest, holder="task-b"
+                )
+            )
+            self.assertFalse(
+                base_client.confirmed_verified_view(
+                    self.snapshot_hash, self.digest
+                )
+            )
+
+    def test_two_app_instances_share_one_sidecar(self):
+        # Two independent client objects stand in for two service
+        # processes: overlapping deliveries of the same identity, and
+        # neither instance's release deletes the other's registration.
+        with _SidecarThread() as sidecar:
+            client_one = _client(sidecar.port)
+            client_two = _client(sidecar.port)
+            self.assertTrue(
+                client_one.register_verified_view(
+                    self.snapshot_hash, self.view, holder="inst-1:task-1"
+                )
+            )
+            self.assertTrue(
+                client_two.register_verified_view(
+                    self.snapshot_hash, self.view, holder="inst-2:task-2"
+                )
+            )
+            self.assertTrue(
+                client_one.unregister_verified_view(
+                    self.snapshot_hash, self.digest, holder="inst-1:task-1"
+                )
+            )
+            self.assertTrue(
+                client_two.confirmed_verified_view(
+                    self.snapshot_hash, self.digest
+                )
+            )
+            self.assertTrue(
+                client_two.unregister_verified_view(
+                    self.snapshot_hash, self.digest, holder="inst-2:task-2"
+                )
+            )
+            self.assertFalse(
+                client_two.confirmed_verified_view(
+                    self.snapshot_hash, self.digest
+                )
+            )
 
 
 class WideCompdbTests(unittest.TestCase):

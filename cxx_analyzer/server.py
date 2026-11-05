@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import threading
+import unicodedata
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -89,6 +90,17 @@ _REGISTRY_LOCK: Final = threading.RLock()
 # Per-snapshot member-byte accounting for the process-level capacity;
 # updated under the same lock as the registry itself.
 _REGISTRY_SNAPSHOT_BYTES: dict[str, int] = {}
+# #354 review round 2 (P1): delivery holds are SERVER-side tokens.  A
+# host process counting holders locally could delete a registration a
+# sibling host (or a racing deliver in its own process) had just
+# re-acquired -- the count and the registration it guards must share
+# one lifecycle owner.  Each (snapshot, digest) tracks the distinct
+# holder tokens that registered it; a holder-scoped DELETE releases
+# only that token and the registration disappears with the LAST one.
+# Registrations without holders keep the legacy whole-identity
+# semantics; a holder-scoped release never deletes a registration it
+# does not own.
+_VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
 # Process-level capacity: a host that dies after POST (no DELETE) or an
 # endless stream of new snapshots must not grow the sidecar without
 # bound.  Oldest-registered snapshots are evicted first when a new
@@ -140,6 +152,12 @@ def _evict_until_capacity(exclude: str) -> None:
             break
         del _VERIFIED_BUILD_VIEWS[oldest]
         _REGISTRY_SNAPSHOT_BYTES.pop(oldest, None)
+        for identity in [
+            identity
+            for identity in _VIEW_HOLDERS
+            if identity[0] == oldest
+        ]:
+            del _VIEW_HOLDERS[identity]
 
 
 def register_verified_build_view(
@@ -194,10 +212,11 @@ def clear_verified_build_views() -> None:
     with _REGISTRY_LOCK:
         _VERIFIED_BUILD_VIEWS.clear()
         _REGISTRY_SNAPSHOT_BYTES.clear()
+        _VIEW_HOLDERS.clear()
 
 
 def unregister_verified_build_view(
-    snapshot_sha256: str, artifact_digest: str
+    snapshot_sha256: str, artifact_digest: str, holder: str | None = None
 ) -> None:
     """Drop one wire-registered view from both registry slots.
 
@@ -205,13 +224,33 @@ def unregister_verified_build_view(
     a restart, and the default slot is only removed when it holds the
     same artifact identity (a newer registration must survive a stale
     unregister).  Both slot removals run under the registry lock.
+
+    ``holder`` (#354 review round 2, P1) releases ONE delivery hold
+    instead of the whole registration: the registration disappears
+    only with its last holder, so an overlapping task's delivery
+    survives this release regardless of request ordering.  A
+    holder-scoped release never touches a registration whose holders
+    it does not belong to; ``None`` keeps the legacy whole-identity
+    semantics for pre-protocol callers.
     """
 
     with _REGISTRY_LOCK:
+        identity = (snapshot_sha256, artifact_digest)
         views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
         if not views:
             _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+            _VIEW_HOLDERS.pop(identity, None)
             return
+        if holder is not None:
+            holders = _VIEW_HOLDERS.get(identity)
+            if holders is None:
+                # Legacy (holderless) registration: a holder-scoped
+                # release never deletes what it does not own.
+                return
+            holders.discard(holder)
+            if holders:
+                return
+            _VIEW_HOLDERS.pop(identity, None)
         views.pop(artifact_digest, None)
         default_view = views.get(_DEFAULT_VIEW_SLOT)
         if (
@@ -251,6 +290,12 @@ _REGISTER_VIEW_FIELDS: Final = frozenset(
         "members",
     }
 )
+# Optional delivery-hold token (#354 review round 2, P1): the host
+# names the task (or instance-scoped identity) that holds this
+# delivery.  Retries re-POST the same token (idempotent set add); a
+# holder-scoped DELETE releases that one hold and the registration
+# leaves with the last holder.
+_MAX_HOLDER_BYTES: Final = 128
 _UNREGISTER_VIEW_FIELDS: Final = frozenset(
     {"snapshot_sha256", "artifact_digest"}
 )
@@ -272,6 +317,19 @@ _MAX_VIEWS_PER_SNAPSHOT: Final = 8
 # while each /v1/uaf-facts request stays capped at
 # MAX_UAF_TRANSLATION_UNITS (#354 review round 1, P2).
 _MAX_REGISTER_TARGET_UNITS: Final = 2048
+
+
+def _holder_token(value: object) -> bool:
+    """A bounded, control-free holder token (task or instance identity)."""
+
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= _MAX_HOLDER_BYTES
+        and not any(
+            unicodedata.category(character) == "Cc" for character in value
+        )
+    )
 
 
 def artifact_digest_from_members(members: dict[str, bytes]) -> str:
@@ -346,7 +404,11 @@ def register_view_request(
     slots atomically under the registry lock.
     """
 
-    if type(payload) is not dict or set(payload) != set(_REGISTER_VIEW_FIELDS):
+    if (
+        type(payload) is not dict
+        or not _REGISTER_VIEW_FIELDS.issubset(payload)
+        or set(payload) - _REGISTER_VIEW_FIELDS - {"holder"}
+    ):
         raise RequestError("invalid_request")
     if type(payload["schema_version"]) is not int or (
         payload["schema_version"] != SCHEMA_VERSION
@@ -355,6 +417,9 @@ def register_view_request(
     snapshot_sha256 = payload["snapshot_sha256"]
     artifact_digest = payload["artifact_digest"]
     if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
+        raise RequestError("invalid_request")
+    holder = payload.get("holder")
+    if holder is not None and not _holder_token(holder):
         raise RequestError("invalid_request")
     target_units = payload["target_units"]
     # The view may declare the whole compilation database; only the
@@ -426,6 +491,13 @@ def register_view_request(
             snapshot_sha256, view, artifact_digest,
             set_default=True,
         )
+        if holder is not None:
+            # The delivery hold lives with the registration it guards
+            # (same lock, same lifecycle owner); retry re-POSTs are
+            # idempotent set adds (#354 review round 2, P1).
+            _VIEW_HOLDERS.setdefault(
+                (snapshot_sha256, artifact_digest), set()
+            ).add(holder)
     return {
         "status": "registered",
         "schema_version": SCHEMA_VERSION,
@@ -435,17 +507,27 @@ def register_view_request(
 
 
 def unregister_view_request(payload: object) -> dict[str, object]:
-    """Serve one ``DELETE /v1/verified-build-views`` cleanup."""
+    """Serve one ``DELETE /v1/verified-build-views`` cleanup.
 
-    if type(payload) is not dict or set(payload) != set(
-        _UNREGISTER_VIEW_FIELDS
+    The optional ``holder`` releases one delivery hold; the
+    registration leaves with its last holder.  Without it the whole
+    identity is removed (legacy whole-identity semantics).
+    """
+
+    if (
+        type(payload) is not dict
+        or not _UNREGISTER_VIEW_FIELDS.issubset(payload)
+        or set(payload) - _UNREGISTER_VIEW_FIELDS - {"holder"}
     ):
         raise RequestError("invalid_request")
     snapshot_sha256 = payload["snapshot_sha256"]
     artifact_digest = payload["artifact_digest"]
     if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
         raise RequestError("invalid_request")
-    unregister_verified_build_view(snapshot_sha256, artifact_digest)
+    holder = payload.get("holder")
+    if holder is not None and not _holder_token(holder):
+        raise RequestError("invalid_request")
+    unregister_verified_build_view(snapshot_sha256, artifact_digest, holder)
     return {
         "status": "unregistered",
         "schema_version": SCHEMA_VERSION,

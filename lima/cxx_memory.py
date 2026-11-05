@@ -323,7 +323,7 @@ class CxxAnalyzerHealth:
 
 
 def verified_view_envelope(
-    snapshot_sha256: str, view: object
+    snapshot_sha256: str, view: object, holder: str | None = None
 ) -> dict[str, object]:
     """The #351 wire envelope for one sealed view (lima-side sender).
 
@@ -331,6 +331,11 @@ def verified_view_envelope(
     working directories and the context hash from the sealed
     manifest/compdb members (PR #352 round 1), so no projection field is
     asserted independently over the wire.
+
+    ``holder`` (#354 review round 2, P1) names the task that holds this
+    delivery: the sidecar counts distinct holders per identity and a
+    holder-scoped DELETE releases only that hold, so overlapping tasks
+    and retries stay order-independent.
     """
 
     members: dict[str, str] = {}
@@ -338,13 +343,16 @@ def verified_view_envelope(
         members[str(path)] = base64.b64encode(
             bytes(view.read_member(path))  # type: ignore[attr-defined]
         ).decode("ascii")
-    return {
+    envelope: dict[str, object] = {
         "schema_version": 1,
         "snapshot_sha256": snapshot_sha256,
         "artifact_digest": getattr(view, "artifact_digest", ""),
         "target_units": list(getattr(view, "target_units", ()) or ()),
         "members": members,
     }
+    if holder is not None:
+        envelope["holder"] = holder
+    return envelope
 
 
 class CxxMemoryAdapter(Protocol):
@@ -1002,7 +1010,7 @@ class CxxMemoryAnalyzerClient:
     _REGISTER_VIEW_PATH = "/v1/verified-build-views"
 
     def register_verified_view(
-        self, snapshot_sha256: str, view: object
+        self, snapshot_sha256: str, view: object, *, holder: str | None = None
     ) -> bool:
         """Register one sealed view on the analyzer sidecar (#351 part B).
 
@@ -1013,6 +1021,10 @@ class CxxMemoryAnalyzerClient:
         ``False``; transport/protocol failures raise, per the client
         convention.  The ack is the cross-process capability evidence
         the service consumes.
+
+        ``holder`` (#354 review round 2, P1) claims this delivery for
+        the named task: retries re-claim idempotently and a
+        holder-scoped unregister releases only this hold.
         """
 
         if (
@@ -1023,7 +1035,7 @@ class CxxMemoryAnalyzerClient:
             raise CxxAnalyzerProtocolError(
                 "invalid C/C++ analyzer snapshot digest"
             )
-        envelope = verified_view_envelope(snapshot_sha256, view)
+        envelope = verified_view_envelope(snapshot_sha256, view, holder)
         body = json.dumps(
             envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")
         ).encode("utf8")
@@ -1065,15 +1077,28 @@ class CxxMemoryAnalyzerClient:
         )
 
     def unregister_verified_view(
-        self, snapshot_sha256: str, artifact_digest: str
+        self,
+        snapshot_sha256: str,
+        artifact_digest: str,
+        *,
+        holder: str | None = None,
     ) -> bool:
-        """Best-effort task-end cleanup of one registered view."""
+        """Best-effort task-end cleanup of one registered view.
 
+        With ``holder`` this releases that one delivery hold; the
+        registration leaves with its last holder (#354 review round 2,
+        P1), so an overlapping task's delivery survives regardless of
+        request ordering.  Without it the whole identity is removed.
+        """
+
+        body_dict: dict[str, object] = {
+            "snapshot_sha256": snapshot_sha256,
+            "artifact_digest": artifact_digest,
+        }
+        if holder is not None:
+            body_dict["holder"] = holder
         body = json.dumps(
-            {
-                "snapshot_sha256": snapshot_sha256,
-                "artifact_digest": artifact_digest,
-            },
+            body_dict,
             ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),

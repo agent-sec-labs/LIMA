@@ -100,7 +100,25 @@ _MAX_REGISTRY_TOTAL_MEMBER_BYTES: Final = 128 * 1024 * 1024
 
 
 def _registry_total_bytes() -> int:
-    return sum(_REGISTRY_SNAPSHOT_BYTES.values())
+    with _REGISTRY_LOCK:
+        return sum(_REGISTRY_SNAPSHOT_BYTES.values())
+
+
+def _retained_member_bytes(views: dict[str, object]) -> int:
+    """Count every retained view once, including a default-only view.
+
+    Different artifact slots own separate sealed bytes.  The default
+    slot normally aliases one of them, so counting slots would double
+    its storage while counting only the largest view would omit builds.
+    In-process test adapters without sealed members contribute no bytes.
+    """
+
+    unique_views = {id(view): view for view in views.values()}
+    return sum(
+        len(view.read_member(path))
+        for view in unique_views.values()
+        for path in getattr(view, "member_paths", ())
+    )
 
 
 def _evict_until_capacity(exclude: str) -> None:
@@ -126,14 +144,14 @@ def _evict_until_capacity(exclude: str) -> None:
 
 def register_verified_build_view(
     snapshot_sha256: str, view: object, artifact_digest: str | None = None,
-    *, member_bytes: int = 0,
+    *, set_default: bool = False,
 ) -> None:
     """Register one sealed analysis view for a snapshot's uaf-facts run.
 
-    ``member_bytes`` (wire registrations pass the sealed total) feeds
-    the process-level capacity; the two slot writes and the capacity
-    eviction happen under one lock so no observer sees a half-registered
-    or over-capacity registry.
+    Capacity is computed from the final retained references, before
+    publication.  ``set_default`` publishes the digest and its default
+    alias together, avoiding both torn reads and temporary double counts
+    when refreshing an existing artifact with a new wire object.
     """
 
     if (
@@ -144,10 +162,17 @@ def register_verified_build_view(
         raise ValueError("invalid snapshot digest for verified view registration")
     slot = artifact_digest if artifact_digest is not None else _DEFAULT_VIEW_SLOT
     with _REGISTRY_LOCK:
-        views = _VERIFIED_BUILD_VIEWS.setdefault(snapshot_sha256, {})
+        views = dict(_VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {}))
         views[slot] = view
-        if member_bytes > _REGISTRY_SNAPSHOT_BYTES.get(snapshot_sha256, 0):
-            _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = member_bytes
+        if set_default:
+            views[_DEFAULT_VIEW_SLOT] = view
+        retained_bytes = _retained_member_bytes(views)
+        if retained_bytes > _MAX_REGISTRY_TOTAL_MEMBER_BYTES:
+            # Other snapshots cannot free capacity occupied by this
+            # snapshot alone.  Refuse without replacing its current view.
+            raise RequestError("request_too_large", status=413)
+        _VERIFIED_BUILD_VIEWS[snapshot_sha256] = views
+        _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = retained_bytes
         _evict_until_capacity(snapshot_sha256)
 
 
@@ -156,10 +181,11 @@ def lookup_verified_build_view(
 ) -> object | None:
     """The registered view for one run identity, or ``None``."""
 
-    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {})
-    if artifact_digest:
-        return views.get(artifact_digest)
-    return views.get(_DEFAULT_VIEW_SLOT)
+    with _REGISTRY_LOCK:
+        views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {})
+        if artifact_digest:
+            return views.get(artifact_digest)
+        return views.get(_DEFAULT_VIEW_SLOT)
 
 
 def clear_verified_build_views() -> None:
@@ -196,6 +222,8 @@ def unregister_verified_build_view(
         if not views:
             del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
             _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+        else:
+            _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = _retained_member_bytes(views)
 
 
 # ------------------------------------------------- verified-view wire (#351)
@@ -379,9 +407,8 @@ def register_view_request(
             raise RequestError("invalid_request")
         register_verified_build_view(
             snapshot_sha256, view, artifact_digest,
-            member_bytes=total_member_bytes,
+            set_default=True,
         )
-        register_verified_build_view(snapshot_sha256, view, None)
     return {
         "status": "registered",
         "schema_version": SCHEMA_VERSION,

@@ -116,6 +116,22 @@ def envelope_from_view(view, snapshot_hash: str) -> dict:
     }
 
 
+def replace_fixture_header(envelope: dict, content: bytes) -> None:
+    """Keep capacity-test package totals valid while varying artifact bytes."""
+
+    members = {
+        path: base64.b64decode(data) for path, data in envelope["members"].items()
+    }
+    members["headers/fixture/lib.h"] = content
+    manifest = json.loads(members["context_manifest.json"])
+    manifest["totals"]["total_bytes"] = len(members["compile_commands.json"]) + len(content)
+    members["context_manifest.json"] = json.dumps(manifest).encode("utf8")
+    envelope["members"] = {
+        path: base64.b64encode(data).decode("ascii") for path, data in members.items()
+    }
+    envelope["artifact_digest"] = analyzer_server.artifact_digest_from_members(members)
+
+
 class RegistryIsolation(unittest.TestCase):
     def setUp(self):
         analyzer_server.clear_verified_build_views()
@@ -226,16 +242,7 @@ class WireValidationTests(RegistryIsolation):
         last_variant = None
         for index in range(limit - 1):
             variant = json.loads(json.dumps(self.envelope))
-            variant["members"]["headers/fixture/lib.h"] = base64.b64encode(
-                f"// lib v{index}\n".encode()
-            ).decode("ascii")
-            members = {
-                path: base64.b64decode(value)
-                for path, value in variant["members"].items()
-            }
-            variant["artifact_digest"] = (
-                analyzer_server.artifact_digest_from_members(members)
-            )
+            replace_fixture_header(variant, f"// lib v{index}\n".encode())
             self._register(variant)
             last_variant = variant
         views = analyzer_server._VERIFIED_BUILD_VIEWS[self.snapshot_hash]
@@ -243,16 +250,7 @@ class WireValidationTests(RegistryIsolation):
         # A new digest beyond the window is a leak signal: refused, and
         # the registry is untouched by the refusal.
         overflow = json.loads(json.dumps(self.envelope))
-        overflow["members"]["headers/fixture/lib.h"] = base64.b64encode(
-            b"// lib overflow\n"
-        ).decode("ascii")
-        members = {
-            path: base64.b64decode(value)
-            for path, value in overflow["members"].items()
-        }
-        overflow["artifact_digest"] = (
-            analyzer_server.artifact_digest_from_members(members)
-        )
+        replace_fixture_header(overflow, b"// lib overflow\n")
         with self.assertRaises(analyzer_server.RequestError):
             self._register(overflow)
         self.assertEqual(
@@ -536,16 +534,7 @@ class RegistryConcurrencyTests(RegistryIsolation):
         variants = []
         for index in range(cap + 6):
             envelope = json.loads(json.dumps(self.envelope))
-            envelope["members"]["headers/fixture/lib.h"] = base64.b64encode(
-                f"// lib race {index}\n".encode()
-            ).decode("ascii")
-            members = {
-                path: base64.b64decode(value)
-                for path, value in envelope["members"].items()
-            }
-            envelope["artifact_digest"] = (
-                analyzer_server.artifact_digest_from_members(members)
-            )
+            replace_fixture_header(envelope, f"// lib race {index}\n".encode())
             variants.append(envelope)
         refused: list[int] = []
         start = _threading.Barrier(len(variants), timeout=15)

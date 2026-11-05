@@ -221,12 +221,13 @@ class ServiceDeliveryTests(unittest.TestCase):
         self.assertEqual("a" * 64, deliveries[0][0])
         kwargs = scan_spy.call_args.kwargs
         self.assertIsNotNone(kwargs.get("verified_view"))
-        # Task-end cleanup released THIS task's hold: identity pair plus
-        # the holder token (#354 round 2).
-        task_id = task["task_id"]
-        self.assertEqual(task_id, deliveries[0][2])
+        # Cleanup releases the exact execution token that was delivered,
+        # rather than the logical task ID shared by repeated deliveries.
+        holder = deliveries[0][2]
+        self.assertIsInstance(holder, str)
+        self.assertNotEqual(task["task_id"], holder)
         self.assertEqual(1, len(cleanups))
-        self.assertEqual(("a" * 64, "c" * 64, task_id), cleanups[0])
+        self.assertEqual(("a" * 64, "c" * 64, holder), cleanups[0])
         visible = (
             (task.get("report") or {}).get("collaboration", {})
         ).get("build_agent")
@@ -767,16 +768,20 @@ class HolderLifecycleTests(unittest.TestCase):
                 time.sleep(0.02)
         # The scan kept failing and the task failed after its retries,
         # yet every delivery attempt released from the finally -- one
-        # holder-scoped unregister per retry's delivery, all for the
-        # identity pair and THIS task's token.
+        # holder-scoped unregister per retry's execution. A queue retry
+        # gets a fresh token, while its finally releases the exact token
+        # acquired by that execution.
         self.assertEqual("FAILED", task["state"])
         self.assertTrue(self.adapter.registers)
         self.assertEqual(
             len(self.adapter.registers), len(self.adapter.unregisters)
         )
+        tokens = [holder for _snapshot, holder in self.adapter.registers]
+        self.assertEqual(len(tokens), len(set(tokens)))
+        self.assertNotIn(created["task_id"], tokens)
         self.assertEqual(
-            {("a" * 64, "c" * 64, created["task_id"])},
-            set(self.adapter.unregisters),
+            [(snapshot, "c" * 64, holder) for snapshot, holder in self.adapter.registers],
+            self.adapter.unregisters,
         )
         with self.holders_lock:
             self.assertEqual({}, self.holders)

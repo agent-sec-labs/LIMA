@@ -291,8 +291,9 @@ _REGISTER_VIEW_FIELDS: Final = frozenset(
     }
 )
 # Optional delivery-hold token (#354 review round 2, P1): the host
-# names the task (or instance-scoped identity) that holds this
-# delivery.  Retries re-POST the same token (idempotent set add); a
+# names the unique execution that holds this delivery (not a logical
+# task ID shared by reclaimed deliveries). Retries within that
+# execution re-POST the same token (idempotent set add); a
 # holder-scoped DELETE releases that one hold and the registration
 # leaves with the last holder.
 _MAX_HOLDER_BYTES: Final = 128
@@ -320,12 +321,16 @@ _MAX_REGISTER_TARGET_UNITS: Final = 2048
 
 
 def _holder_token(value: object) -> bool:
-    """A bounded, control-free holder token (task or instance identity)."""
+    """A bounded, control-free execution identity for one delivery hold."""
 
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
     return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value.encode("utf-8")) <= _MAX_HOLDER_BYTES
+        len(encoded) <= _MAX_HOLDER_BYTES
         and not any(
             unicodedata.category(character) == "Cc" for character in value
         )

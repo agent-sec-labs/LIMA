@@ -1724,13 +1724,13 @@ class ReviewService:
         adapter: object,
         build_result: BuildAgentResult,
         view: object,
-        task_id: str,
+        holder_token: str,
     ) -> bool:
         """Deliver one sealed view to the analyzer deployment (#351 B).
 
-        HTTP 适配器（``CxxMemoryAnalyzerClient``）：封存信封以本任务
-        为 holder 注册到 sidecar，ack 即能力证据——持有权计数在服务
-        端与注册同一生命周期锁下维护（#354 评审第二轮 P1），本进程
+        HTTP 适配器（``CxxMemoryAnalyzerClient``）：封存信封以本次执行
+        的唯一 token 为 holder 注册到 sidecar，ack 即能力证据——持有权计数
+        在服务端与注册同一生命周期锁下维护（#354 评审第二轮 P1），本进程
         或任何实例的释放都不可能删掉刚交付的注册，请求顺序无关。
         其余适配器：沿用部署声明（``verified_package_supported``，
         #350 第六轮语义）；进程内生命周期（注册刷新 + 持有者登记）
@@ -1743,7 +1743,7 @@ class ReviewService:
             try:
                 return bool(
                     register(
-                        build_result.snapshot_hash, view, holder=task_id
+                        build_result.snapshot_hash, view, holder=holder_token
                     )
                 )
             except Exception:  # noqa: BLE001 - delivery failure degrades
@@ -1768,15 +1768,15 @@ class ReviewService:
             )
             _VERIFIED_VIEW_HOLDERS.setdefault(
                 (build_result.snapshot_hash, artifact_digest), set()
-            ).add(task_id)
+            ).add(holder_token)
         return True
 
     def _release_verified_context(
-        self, adapter: object, build_result: BuildAgentResult, task_id: str
+        self, adapter: object, build_result: BuildAgentResult, holder_token: str
     ) -> None:
-        """Release this task's hold on one delivered view registration.
+        """Release this execution's hold on one delivered view registration.
 
-        HTTP 部署：按本任务 holder 释放——服务端计数，注册随最后
+        HTTP 部署：按本次执行 holder 释放——服务端计数，注册随最后
         一个持有者离开。进程内声明部署：持有者计数与末持有者注销
         在同一临界区完成。幂等；失败只计数不阻断——崩溃残留由
         sidecar 的最老先回收兜底（#352）。
@@ -1796,7 +1796,7 @@ class ReviewService:
             try:
                 unregister(
                     build_result.snapshot_hash, artifact_digest,
-                    holder=task_id,
+                    holder=holder_token,
                 )
             except Exception:  # noqa: BLE001 - cleanup best-effort
                 metrics.inc("build_context_cleanup_failed_total")
@@ -1809,7 +1809,7 @@ class ReviewService:
             )
             if not holders:
                 return
-            holders.discard(task_id)
+            holders.discard(holder_token)
             if holders:
                 # 其他任务仍在消费同一制品身份：保留注册。
                 return
@@ -1842,7 +1842,7 @@ class ReviewService:
         )
         build_gap: dict[str, Any] | None = None
         verified_view: object | None = None
-        delivered_registration: tuple[object, BuildAgentResult] | None = None
+        delivered_registration: tuple[object, BuildAgentResult, str] | None = None
         if build_agent_mode != "off":
             try:
                 build_result = self._run_build_agent(
@@ -1885,11 +1885,16 @@ class ReviewService:
                 analyzer_adapter = getattr(
                     self.repository_scanner, "cxx_memory_adapter", None,
                 )
+                # A Redis message can be reclaimed while its old handler
+                # still runs. Distinct executions of the same task must
+                # own distinct holds; POST retries within this delivery
+                # and its finally release reuse this one execution token.
+                holder_token = "scan-" + uuid.uuid4().hex
                 if self._deliver_verified_context(
-                    analyzer_adapter, build_result, verified_view, task_id
+                    analyzer_adapter, build_result, verified_view, holder_token
                 ):
                     delivered_registration = (
-                        analyzer_adapter, build_result
+                        analyzer_adapter, build_result, holder_token
                     )
                 else:
                     verified_view = None
@@ -1924,14 +1929,14 @@ class ReviewService:
                 # 构建成功但消费失败（required）或构建失败（auto）都
                 # 拒绝进入依赖构建上下文的检测阶段。
                 cxx_agent_mode = "off"
-        self.store.transition(
-            task_id,
-            TraceEvent(
-                2, TaskState.EXECUTING,
-                "Running bounded AST and SAST repository analysis.", utc_now(),
-            ),
-        )
         try:
+            self.store.transition(
+                task_id,
+                TraceEvent(
+                    2, TaskState.EXECUTING,
+                    "Running bounded AST and SAST repository analysis.", utc_now(),
+                ),
+            )
             with self.observability.span(
                 "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
                 repository=repository_label,
@@ -1990,7 +1995,7 @@ class ReviewService:
                 self._release_verified_context(
                     delivered_registration[0],
                     delivered_registration[1],
-                    task_id,
+                    delivered_registration[2],
                 )
         if self.repository_semantic_triage is not None:
             if self.store.is_cancelled(task_id):

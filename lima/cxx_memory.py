@@ -332,8 +332,10 @@ def verified_view_envelope(
     manifest/compdb members (PR #352 round 1), so no projection field is
     asserted independently over the wire.
 
-    ``holder`` (#354 review round 2, P1) names the task that holds this
-    delivery: the sidecar counts distinct holders per identity and a
+    ``holder`` names the execution that holds this delivery, not its
+    logical task ID. Re-POSTs within that execution reuse the token;
+    another execution of the same task needs a fresh token. The
+    sidecar counts distinct holders per identity and a
     holder-scoped DELETE releases only that hold, so overlapping tasks
     and retries stay order-independent.
     """
@@ -1022,8 +1024,8 @@ class CxxMemoryAnalyzerClient:
         convention.  The ack is the cross-process capability evidence
         the service consumes.
 
-        ``holder`` (#354 review round 2, P1) claims this delivery for
-        the named task: retries re-claim idempotently and a
+        ``holder`` claims this delivery for one execution: retries
+        within that execution re-claim idempotently and a
         holder-scoped unregister releases only this hold.
         """
 

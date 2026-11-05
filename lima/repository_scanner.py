@@ -760,6 +760,15 @@ class RepositoryScanner:
                 snapshot_hash=inventory.fingerprint(),
                 translation_units=translation_units,
                 verified_view=verified_view,
+                # #351 B：service 只在视图已交付（sidecar 注册 ack 或
+                # 进程内声明）后才把视图传进来，因此这里显式要求
+                # verified-package——#350 第六轮预留的接入点，绕过适
+                # 配器静态声明门控。未交付视图的调用保持默认
+                # snapshot-compdb，直接调用方仍走门控降级路径。
+                build_context_mode=(
+                    "verified-package" if verified_view is not None
+                    else "snapshot-compdb"
+                ),
                 mode=mode,
                 budget=budget,
                 llm_config=llm_config,

@@ -732,6 +732,11 @@ class ThreeConsumerDegradationTests(unittest.TestCase):
         self.assertEqual(
             "verified-package", analyzer.unit_calls[0][1]
         )
+        # #354 评审第一轮 P1：facts 请求绑定本任务制品摘要，不落
+        # 快照默认槽（同快照被注册其他构建产物时会分叉）。
+        self.assertEqual(
+            view.artifact_digest, analyzer.unit_calls[0][2]
+        )
         self.assertIn(
             "-DVERIFIED=1", specialist_payload["messages"][1]["content"]
         )

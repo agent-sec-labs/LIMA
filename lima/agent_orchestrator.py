@@ -2316,6 +2316,14 @@ def run_platform_review(
             snapshot_hash=snapshot_hash,
             translation_units=units,
             build_context_mode=build_context_mode,
+            # #354 评审第一轮 P1：verified-package 请求绑定本任务已
+            # 交付的制品摘要——同一快照被另一任务注册不同构建产物
+            # 时，默认槽会被覆盖，facts 必须取本任务的包。
+            artifact_digest=(
+                getattr(verified_view, "artifact_digest", None)
+                if build_context_mode == "verified-package"
+                else None
+            ),
         )
 
     # Leads: caller-provided, else release events from the facts instrument,

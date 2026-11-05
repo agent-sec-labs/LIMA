@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import shutil
+import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
+from urllib.parse import parse_qs
 
-from . import sandbox, uaf_scan
+from . import sandbox, uaf_scan, wire_view
 from .build_context import resolve_build_context_execution
 from .build_scan import run_build_scan
 from .config import AnalyzerSettings
@@ -23,20 +27,28 @@ from .snapshot import _normalize_repository_key, prepare_snapshot
 from .source_scan import run_source_scan
 
 SCHEMA_VERSION: Final = 1
-HOST: Final = "0.0.0.0"  # noqa: S104 - Reachable only on the internal Compose network.
-PORT: Final = 8090
+# Bind address, port and roots stay at their Compose defaults; the env
+# overrides exist so an out-of-compose subprocess sidecar (issue #351)
+# can be pointed at test-local paths without touching production.
+HOST: Final = os.environ.get("LIMA_CXX_HOST", "0.0.0.0")  # noqa: S104 - Reachable only on the internal Compose network.
+PORT: Final = int(os.environ.get("LIMA_CXX_PORT", "8090"))
 MAX_REQUEST_BYTES: Final = 64 * 1024
 MAX_RESPONSE_BYTES: Final = 2 * 1024 * 1024
 MAX_FINDINGS: Final = 256
 MAX_DIAGNOSTICS: Final = 256
 MAX_TOOL_RUNS: Final = 320
-IMPORT_ROOT: Final = Path("/repositories")
-WORK_ROOT: Final = Path("/work/snapshots")
+IMPORT_ROOT: Final = Path(
+    os.environ.get("LIMA_CXX_IMPORT_ROOT", "/repositories")
+)
+WORK_ROOT: Final = Path(
+    os.environ.get("LIMA_CXX_WORK_ROOT", "/work/snapshots")
+)
 
 _ANALYZE_PATH: Final = "/v1/analyze"
 _UAF_FACTS_PATH: Final = "/v1/uaf-facts"
 _REPRO_PATH: Final = "/v1/repro"
 _HEALTH_PATH: Final = "/health"
+_REGISTER_VIEW_PATH: Final = "/v1/verified-build-views"
 _REQUEST_FIELDS: Final = frozenset(
     {"request_id", "repository_key", "snapshot_sha256", "requested_layers"}
 )
@@ -68,12 +80,79 @@ _UAF_FACTS_BUILD_CONTEXT_MODES: Final = frozenset(
 # semantics no matter what else is registered.
 _VERIFIED_BUILD_VIEWS: dict[str, dict[str, object]] = {}
 _DEFAULT_VIEW_SLOT: Final = ""
+# Registry lifecycle (#352 review round 1): the threaded HTTP server can
+# interleave registration, lookup and cleanup, so every multi-step
+# registry mutation runs under one reentrant lock -- a torn registration
+# (digest slot published, default slot not) or a capacity check racing
+# an insert is never observable.
+_REGISTRY_LOCK: Final = threading.RLock()
+# Per-snapshot member-byte accounting for the process-level capacity;
+# updated under the same lock as the registry itself.
+_REGISTRY_SNAPSHOT_BYTES: dict[str, int] = {}
+# Process-level capacity: a host that dies after POST (no DELETE) or an
+# endless stream of new snapshots must not grow the sidecar without
+# bound.  Oldest-registered snapshots are evicted first when a new
+# registration arrives over capacity -- crash-leaked entries heal as
+# traffic continues, and in-flight requests already holding a view
+# reference are unaffected (references, not the registry, own them).
+_MAX_REGISTRY_SNAPSHOTS: Final = 64
+_MAX_REGISTRY_TOTAL_MEMBER_BYTES: Final = 128 * 1024 * 1024
+
+
+def _registry_total_bytes() -> int:
+    with _REGISTRY_LOCK:
+        return sum(_REGISTRY_SNAPSHOT_BYTES.values())
+
+
+def _retained_member_bytes(views: dict[str, object]) -> int:
+    """Count every retained view once, including a default-only view.
+
+    Different artifact slots own separate sealed bytes.  The default
+    slot normally aliases one of them, so counting slots would double
+    its storage while counting only the largest view would omit builds.
+    In-process test adapters without sealed members contribute no bytes.
+    """
+
+    unique_views = {id(view): view for view in views.values()}
+    return sum(
+        len(view.read_member(path))
+        for view in unique_views.values()
+        for path in getattr(view, "member_paths", ())
+    )
+
+
+def _evict_until_capacity(exclude: str) -> None:
+    """Oldest-first snapshot eviction until the registry fits (locked)."""
+
+    while (
+        len(_VERIFIED_BUILD_VIEWS) > _MAX_REGISTRY_SNAPSHOTS
+        or _registry_total_bytes() > _MAX_REGISTRY_TOTAL_MEMBER_BYTES
+    ):
+        oldest = next(
+            (
+                snapshot
+                for snapshot in _VERIFIED_BUILD_VIEWS
+                if snapshot != exclude
+            ),
+            None,
+        )
+        if oldest is None:
+            break
+        del _VERIFIED_BUILD_VIEWS[oldest]
+        _REGISTRY_SNAPSHOT_BYTES.pop(oldest, None)
 
 
 def register_verified_build_view(
-    snapshot_sha256: str, view: object, artifact_digest: str | None = None
+    snapshot_sha256: str, view: object, artifact_digest: str | None = None,
+    *, set_default: bool = False,
 ) -> None:
-    """Register one sealed analysis view for a snapshot's uaf-facts run."""
+    """Register one sealed analysis view for a snapshot's uaf-facts run.
+
+    Capacity is computed from the final retained references, before
+    publication.  ``set_default`` publishes the digest and its default
+    alias together, avoiding both torn reads and temporary double counts
+    when refreshing an existing artifact with a new wire object.
+    """
 
     if (
         not isinstance(snapshot_sha256, str)
@@ -82,7 +161,19 @@ def register_verified_build_view(
     ):
         raise ValueError("invalid snapshot digest for verified view registration")
     slot = artifact_digest if artifact_digest is not None else _DEFAULT_VIEW_SLOT
-    _VERIFIED_BUILD_VIEWS.setdefault(snapshot_sha256, {})[slot] = view
+    with _REGISTRY_LOCK:
+        views = dict(_VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {}))
+        views[slot] = view
+        if set_default:
+            views[_DEFAULT_VIEW_SLOT] = view
+        retained_bytes = _retained_member_bytes(views)
+        if retained_bytes > _MAX_REGISTRY_TOTAL_MEMBER_BYTES:
+            # Other snapshots cannot free capacity occupied by this
+            # snapshot alone.  Refuse without replacing its current view.
+            raise RequestError("request_too_large", status=413)
+        _VERIFIED_BUILD_VIEWS[snapshot_sha256] = views
+        _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = retained_bytes
+        _evict_until_capacity(snapshot_sha256)
 
 
 def lookup_verified_build_view(
@@ -90,16 +181,276 @@ def lookup_verified_build_view(
 ) -> object | None:
     """The registered view for one run identity, or ``None``."""
 
-    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {})
-    if artifact_digest:
-        return views.get(artifact_digest)
-    return views.get(_DEFAULT_VIEW_SLOT)
+    with _REGISTRY_LOCK:
+        views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {})
+        if artifact_digest:
+            return views.get(artifact_digest)
+        return views.get(_DEFAULT_VIEW_SLOT)
 
 
 def clear_verified_build_views() -> None:
     """Drop every registered verified-package view (test isolation)."""
 
-    _VERIFIED_BUILD_VIEWS.clear()
+    with _REGISTRY_LOCK:
+        _VERIFIED_BUILD_VIEWS.clear()
+        _REGISTRY_SNAPSHOT_BYTES.clear()
+
+
+def unregister_verified_build_view(
+    snapshot_sha256: str, artifact_digest: str
+) -> None:
+    """Drop one wire-registered view from both registry slots.
+
+    Idempotent by design: the host service may replay the cleanup after
+    a restart, and the default slot is only removed when it holds the
+    same artifact identity (a newer registration must survive a stale
+    unregister).  Both slot removals run under the registry lock.
+    """
+
+    with _REGISTRY_LOCK:
+        views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
+        if not views:
+            _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+            return
+        views.pop(artifact_digest, None)
+        default_view = views.get(_DEFAULT_VIEW_SLOT)
+        if (
+            default_view is not None
+            and getattr(default_view, "artifact_digest", None) == artifact_digest
+        ):
+            del views[_DEFAULT_VIEW_SLOT]
+        if not views:
+            del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
+            _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+        else:
+            _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = _retained_member_bytes(views)
+
+
+# ------------------------------------------------- verified-view wire (#351)
+#
+# Cross-process registration: the host process that owns the sealed
+# AnalysisContextView sends it over HTTP so an independent sidecar can
+# serve verified-package facts and repro from its own registry.  The
+# envelope is self-contained (the view seals member bytes at
+# construction), so no shared filesystem is required; snapshot content
+# still travels through the existing prepare_snapshot protocol.
+#
+# #352 review round 1 (P1): the envelope carries ONLY identity and the
+# sealed members.  TU flags, working directories, the context hash and
+# the snapshot binding are DERIVED from the sealed
+# context_manifest.json / compile_commands.json members (see
+# cxx_analyzer.wire_view) and cross-checked, so no independent field
+# can diverge from the sealed package semantics.
+
+_REGISTER_VIEW_FIELDS: Final = frozenset(
+    {
+        "schema_version",
+        "snapshot_sha256",
+        "artifact_digest",
+        "target_units",
+        "members",
+    }
+)
+_UNREGISTER_VIEW_FIELDS: Final = frozenset(
+    {"snapshot_sha256", "artifact_digest"}
+)
+# The envelope carries the whole sealed package (compdb, manifest,
+# vendored headers, generated files) base64-encoded; the budgets sit
+# above the package budgets the build stage already enforces.
+REGISTER_VIEW_MAX_REQUEST_BYTES: Final = 32 * 1024 * 1024
+_MAX_REGISTER_MEMBERS: Final = 1024
+_MAX_REGISTER_MEMBER_TOTAL_BYTES: Final = 16 * 1024 * 1024
+# Distinct digests per snapshot: builds are capped at three attempts per
+# task, so eight slots (seven digests plus the default slot) leave retry
+# headroom while bounding stale-slot retention on a long-lived sidecar.
+# Re-registering an existing digest overwrites in place and never grows
+# the registry; a ninth distinct digest is a leak somewhere upstream and
+# fails loudly instead of ballooning memory.
+_MAX_VIEWS_PER_SNAPSHOT: Final = 8
+
+
+def artifact_digest_from_members(members: dict[str, bytes]) -> str:
+    """Per-member digest parity with lima's ``compute_artifact_digest``.
+
+    Same rule (canonical posix path, byte length and SHA-256 per member
+    over the sorted list, JSON-hashed) so a wire envelope built from a
+    verified package re-hashes to its own ``artifact_digest``; the
+    equality is pinned by a cross-check test against the lima original.
+    """
+
+    material = [
+        {
+            "path": path,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for path, data in sorted(members.items())
+    ]
+    payload = json.dumps(material, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
+def _hex64(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _safe_member_path(path: object) -> bool:
+    if not isinstance(path, str) or not path:
+        return False
+    # JSON can contain escaped lone surrogates.  Refuse them before the
+    # artifact hash serializes member names as strict UTF-8.
+    try:
+        if len(path.encode("utf8")) > 1024:
+            return False
+    except UnicodeEncodeError:
+        return False
+    # Control characters (null bytes above all) are rejected here: the
+    # materializer's write guard catches OSError only, and an embedded
+    # null would surface as a per-request 500 instead of a registration
+    # refusal.  Windows drive-letter prefixes are never legitimate
+    # package members and only produce junk directories downstream.
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in path):
+        return False
+    first = path.split("/", 1)[0]
+    if len(first) == 2 and first.endswith(":"):
+        return False
+    pure = PurePosixPath(path)
+    return (
+        pure.is_absolute() is False
+        and "\\" not in path
+        and not any(part in ("..", "") for part in pure.parts)
+    )
+
+
+def register_view_request(
+    payload: object, settings: AnalyzerSettings
+) -> dict[str, object]:
+    """Serve one ``POST /v1/verified-build-views`` registration.
+
+    Validation order: closed field set, schema, hex64 identities, member
+    paths/decode/budget, artifact-digest anchor over the transferred
+    bytes, then full sealed-package derivation in
+    :func:`cxx_analyzer.wire_view.derive_wire_view` (manifest structure,
+    revision bound to the claimed snapshot, context-hash recompute,
+    compdb agreement, target-unit declaration, per-entry projection).
+    Failures leave the registry untouched; acceptance publishes both
+    slots atomically under the registry lock.
+    """
+
+    if type(payload) is not dict or set(payload) != set(_REGISTER_VIEW_FIELDS):
+        raise RequestError("invalid_request")
+    if type(payload["schema_version"]) is not int or (
+        payload["schema_version"] != SCHEMA_VERSION
+    ):
+        raise RequestError("unsupported_schema")
+    snapshot_sha256 = payload["snapshot_sha256"]
+    artifact_digest = payload["artifact_digest"]
+    if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
+        raise RequestError("invalid_request")
+    target_units = payload["target_units"]
+    if (
+        type(target_units) is not list
+        or not target_units
+        or len(target_units) > MAX_UAF_TRANSLATION_UNITS
+        or any(not isinstance(unit, str) or not unit for unit in target_units)
+        or len(set(target_units)) != len(target_units)
+    ):
+        raise RequestError("invalid_request")
+
+    members_wire = payload["members"]
+    if (
+        type(members_wire) is not dict
+        or not members_wire
+        or len(members_wire) > _MAX_REGISTER_MEMBERS
+        or any(not _safe_member_path(path) for path in members_wire)
+    ):
+        raise RequestError("invalid_request")
+    members: dict[str, bytes] = {}
+    total_member_bytes = 0
+    for path, encoded in members_wire.items():
+        if not isinstance(encoded, str):
+            raise RequestError("invalid_request")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            raise RequestError("invalid_request") from None
+        total_member_bytes += len(data)
+        if total_member_bytes > _MAX_REGISTER_MEMBER_TOTAL_BYTES:
+            raise RequestError("request_too_large", status=413)
+        members[path] = data
+    # A single registration larger than the whole process-level registry
+    # budget could never fit; refuse it up front instead of evicting
+    # everything else to make room it cannot provide.
+    if total_member_bytes > _MAX_REGISTRY_TOTAL_MEMBER_BYTES:
+        raise RequestError("request_too_large", status=413)
+    # Digest anchor: the transferred bytes must re-hash to the claimed
+    # package identity, so a tampered member can never register under a
+    # verified digest.
+    if artifact_digest_from_members(members) != artifact_digest:
+        raise RequestError("invalid_request")
+    # Semantic derivation from the sealed package: structure, snapshot
+    # binding, context identity and the TU projection all come from the
+    # digest-covered members, never from independent envelope fields.
+    try:
+        view = wire_view.derive_wire_view(
+            snapshot_sha256, artifact_digest, target_units, members
+        )
+    except wire_view.WireViewError:
+        raise RequestError("invalid_request") from None
+
+    with _REGISTRY_LOCK:
+        # Slot bound: a new digest beyond the retry window is treated as
+        # an upstream leak and refused (fail-closed) rather than
+        # retained, atomically with the publication below.
+        views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256) or {}
+        if (
+            artifact_digest not in views
+            and len(views) >= _MAX_VIEWS_PER_SNAPSHOT
+        ):
+            raise RequestError("invalid_request")
+        register_verified_build_view(
+            snapshot_sha256, view, artifact_digest,
+            set_default=True,
+        )
+    return {
+        "status": "registered",
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_sha256": snapshot_sha256,
+        "artifact_digest": artifact_digest,
+    }
+
+
+def unregister_view_request(payload: object) -> dict[str, object]:
+    """Serve one ``DELETE /v1/verified-build-views`` cleanup."""
+
+    if type(payload) is not dict or set(payload) != set(
+        _UNREGISTER_VIEW_FIELDS
+    ):
+        raise RequestError("invalid_request")
+    snapshot_sha256 = payload["snapshot_sha256"]
+    artifact_digest = payload["artifact_digest"]
+    if not _hex64(snapshot_sha256) or not _hex64(artifact_digest):
+        raise RequestError("invalid_request")
+    unregister_verified_build_view(snapshot_sha256, artifact_digest)
+    return {
+        "status": "unregistered",
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_sha256": snapshot_sha256,
+        "artifact_digest": artifact_digest,
+    }
+
+
+def _confirmed_view_response(
+    snapshot_sha256: str, artifact_digest: str | None
+) -> tuple[int, dict[str, object]]:
+    if lookup_verified_build_view(snapshot_sha256, artifact_digest) is None:
+        return 404, {"status": "not-registered"}
+    return 200, {"status": "registered"}
+
 MAX_UAF_TRANSLATION_UNITS: Final = 16
 MAX_REPRO_SOURCES: Final = 16
 MAX_REPRO_DRIVER_BYTES: Final = 256 * 1024
@@ -982,6 +1333,61 @@ def health_payload(settings: AnalyzerSettings) -> dict[str, object]:
     }
 
 
+def _register_view_dispatch(
+    method: str,
+    query_string: str,
+    content_type: str,
+    body: bytes,
+    settings: AnalyzerSettings,
+) -> tuple[int, dict[str, object]]:
+    """Route the three verbs on ``/v1/verified-build-views``.
+
+    GET (with query) is the confirmation lookup the host service uses
+    as its capability signal; POST registers one sealed view; DELETE
+    removes one registration.  Only this endpoint tolerates a query
+    string; the frozen legacy paths keep exact matching.
+    """
+
+    if method == "GET":
+        query = parse_qs(query_string)
+        snapshot_values = query.get("snapshot_sha256", [])
+        digest_values = query.get("artifact_digest", [])
+        if (
+            len(snapshot_values) != 1
+            or len(digest_values) > 1
+            or not _hex64(snapshot_values[0])
+            or (digest_values and not _hex64(digest_values[0]))
+        ):
+            return 400, _error_payload("invalid_request")
+        artifact_digest = digest_values[0] if digest_values else None
+        return _confirmed_view_response(snapshot_values[0], artifact_digest)
+    if method not in ("POST", "DELETE"):
+        return 405, _error_payload("method_not_allowed")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        return 415, _error_payload("unsupported_media_type")
+    if (
+        not isinstance(body, bytes)
+        or len(body) > REGISTER_VIEW_MAX_REQUEST_BYTES
+    ):
+        return 413, _error_payload("request_too_large")
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_json_number,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return 400, _error_payload("invalid_json")
+    try:
+        if method == "POST":
+            return 200, register_view_request(payload, settings)
+        return 200, unregister_view_request(payload)
+    except RequestError as exc:
+        return exc.status, _error_payload(exc.code, exc.request_id)
+    except Exception:
+        return 500, _error_payload("internal_error")
+
+
 def dispatch_request(
     method: str,
     path: str,
@@ -991,6 +1397,11 @@ def dispatch_request(
 ) -> tuple[int, dict[str, object]]:
     """Handle an HTTP-shaped request without exposing server implementation details."""
 
+    route, _, query_string = path.partition("?")
+    if route == _REGISTER_VIEW_PATH:
+        return _register_view_dispatch(
+            method, query_string, content_type, body, settings
+        )
     if path not in {_ANALYZE_PATH, _UAF_FACTS_PATH, _REPRO_PATH, _HEALTH_PATH}:
         return 404, _error_payload("not_found")
     if path == _HEALTH_PATH:
@@ -1077,7 +1488,15 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
         self._handle()
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+    def _read_json_body(self) -> bytes | None:
+        """Read one bounded JSON request body, or send the refusal.
+
+        Returns ``None`` after sending the error response so the verb
+        handler can simply return; the per-path ceiling mirrors the
+        dispatch-level budget so oversized bodies are refused before
+        they are read.
+        """
+
         raw_length = self.headers.get("Content-Length")
         try:
             content_length = int(raw_length) if raw_length is not None else -1
@@ -1085,19 +1504,27 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
             content_length = -1
         if content_length < 0:
             self._send(400, _error_payload("invalid_request"))
-            return
+            return None
         # ``path`` is always present on real requests (BaseHTTPRequestHandler
-        # sets it before do_POST); the getattr default only serves synthetic
-        # handlers in the HTTP-boundary tests.
+        # sets it before the verb method); the getattr default only serves
+        # synthetic handlers in the HTTP-boundary tests.
         path = getattr(self, "path", "")
-        max_request_bytes = (
-            REPRO_MAX_REQUEST_BYTES if path == _REPRO_PATH else MAX_REQUEST_BYTES
-        )
+        route = path.partition("?")[0]
+        if route == _REGISTER_VIEW_PATH:
+            max_request_bytes = REGISTER_VIEW_MAX_REQUEST_BYTES
+        elif path == _REPRO_PATH:
+            max_request_bytes = REPRO_MAX_REQUEST_BYTES
+        else:
+            max_request_bytes = MAX_REQUEST_BYTES
         if content_length > max_request_bytes:
             self._send(413, _error_payload("request_too_large"))
-            return
-        body = self.rfile.read(content_length)
-        self._handle(body)
+            return None
+        return self.rfile.read(content_length)
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+        body = self._read_json_body()
+        if body is not None:
+            self._handle(body)
 
     def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
         self._handle()
@@ -1109,6 +1536,15 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
         self._handle()
 
     def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+        # Only the registration cleanup sends its identity as a JSON
+        # body; a DELETE anywhere else keeps the historical empty-body
+        # dispatch (and 405s there) so legacy behavior is unchanged.
+        route = getattr(self, "path", "").partition("?")[0]
+        if route == _REGISTER_VIEW_PATH:
+            body = self._read_json_body()
+            if body is not None:
+                self._handle(body)
+            return
         self._handle()
 
     def log_message(self, format: str, *args: object) -> None:

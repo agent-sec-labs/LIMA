@@ -1223,7 +1223,7 @@ class DiscoveryFallbackTests(unittest.TestCase):
 
         source = "\n".join(
             f"int f{index}(void) {{ return {index}; }}"
-            for index in range(10500)
+            for index in range(3500)
         )
 
         class _FlatWorkspace:
@@ -1267,7 +1267,7 @@ class DiscoveryFallbackTests(unittest.TestCase):
 
         source = "\n".join(
             f"int f{index}(void) {{ return {index}; }}"
-            for index in range(10500)
+            for index in range(3500)
         )
 
         class _FlatWorkspace:
@@ -1330,7 +1330,7 @@ class DiscoveryFallbackTests(unittest.TestCase):
 
         source = "\n".join(
             f"int f{index}(void) {{ return {index}; }}"
-            for index in range(10500)
+            for index in range(3500)
         )
         root = tempfile.mkdtemp(suffix="-scout-quota-e2e")
         workspace = _write_cxx_repo(root, name="parser.c", content=source)
@@ -1596,7 +1596,7 @@ class DiscoveryFallbackTests(unittest.TestCase):
 
         big_source = "\n".join(
             f"int filler_{index}(void) {{ return {index}; }}"
-            for index in range(4000)
+            for index in range(1300)
         )
 
         class _FlatWorkspace:
@@ -1640,7 +1640,7 @@ class DiscoveryFallbackTests(unittest.TestCase):
 
         big_source = "\n".join(
             f"int filler_{index}(void) {{ return {index}; }}"
-            for index in range(4000)
+            for index in range(1300)
         )
 
         class _FlatWorkspace:
@@ -1758,8 +1758,11 @@ class DiscoveryFallbackTests(unittest.TestCase):
         line = "x" * 60 + "\n"  # 61 bytes per line
         big = line * 2000
         windows = _split_windows(big)
-        # 49152 // 61 = 805 lines per window boundary.
-        self.assertEqual([1, 806, 1611], [start for _, start in windows])
+        # 16384 // 61 = 268 lines per window boundary (16KB windows).
+        self.assertEqual(
+            [1, 269, 537, 805, 1073, 1341, 1609, 1877],
+            [start for _, start in windows],
+        )
         for text, _start in windows:
             self.assertLessEqual(len(text.encode("utf-8")), _DISCOVERY_WINDOW_BYTES)
         self.assertEqual(big, "\n".join(text for text, _ in windows))

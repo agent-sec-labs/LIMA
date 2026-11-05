@@ -11,6 +11,7 @@ versions, while consensus claims anchor on exact snapshot positions.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import urllib.error
@@ -319,6 +320,31 @@ class CxxAnalyzerHealth:
                 self.trusted_build_context_generation_available
             ),
         }
+
+
+def verified_view_envelope(
+    snapshot_sha256: str, view: object
+) -> dict[str, object]:
+    """The #351 wire envelope for one sealed view (lima-side sender).
+
+    Identity plus the sealed members only: the sidecar derives TU flags,
+    working directories and the context hash from the sealed
+    manifest/compdb members (PR #352 round 1), so no projection field is
+    asserted independently over the wire.
+    """
+
+    members: dict[str, str] = {}
+    for path in view.member_paths:  # type: ignore[attr-defined]
+        members[str(path)] = base64.b64encode(
+            bytes(view.read_member(path))  # type: ignore[attr-defined]
+        ).decode("ascii")
+    return {
+        "schema_version": 1,
+        "snapshot_sha256": snapshot_sha256,
+        "artifact_digest": getattr(view, "artifact_digest", ""),
+        "target_units": list(getattr(view, "target_units", ()) or ()),
+        "members": members,
+    }
 
 
 class CxxMemoryAdapter(Protocol):
@@ -952,6 +978,90 @@ class CxxMemoryAnalyzerClient:
             source_overrides_sha256=dict(override_digests),
         )
 
+    _REGISTER_VIEW_PATH = "/v1/verified-build-views"
+
+    def register_verified_view(
+        self, snapshot_sha256: str, view: object
+    ) -> bool:
+        """Register one sealed view on the analyzer sidecar (#351 part B).
+
+        Sends the self-contained envelope (identity plus sealed members;
+        the sidecar derives every consumed semantic from the sealed
+        manifest/compdb) to ``POST /v1/verified-build-views`` and
+        validates the identity echo.  A semantic refusal (4xx) returns
+        ``False``; transport/protocol failures raise, per the client
+        convention.  The ack is the cross-process capability evidence
+        the service consumes.
+        """
+
+        if (
+            not isinstance(snapshot_sha256, str)
+            or len(snapshot_sha256) != 64
+            or any(character not in _HEX64 for character in snapshot_sha256)
+        ):
+            raise CxxAnalyzerProtocolError(
+                "invalid C/C++ analyzer snapshot digest"
+            )
+        envelope = verified_view_envelope(snapshot_sha256, view)
+        body = json.dumps(
+            envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("utf8")
+        status, payload = self._json_exchange(
+            "POST", self._REGISTER_VIEW_PATH, body
+        )
+        if status != 200:
+            return False
+        if (
+            not isinstance(payload, dict)
+            or set(payload)
+            != {"status", "schema_version", "snapshot_sha256", "artifact_digest"}
+            or payload["status"] != "registered"
+            or type(payload["schema_version"]) is not int
+            or payload["schema_version"] != 1
+            or payload["snapshot_sha256"] != snapshot_sha256
+            or payload["artifact_digest"] != getattr(
+                view, "artifact_digest", None
+            )
+        ):
+            raise CxxAnalyzerProtocolError(
+                "invalid C/C++ analyzer registration ack"
+            )
+        return True
+
+    def confirmed_verified_view(
+        self, snapshot_sha256: str, artifact_digest: str | None = None
+    ) -> bool:
+        """The sidecar's confirmation for one registered view identity."""
+
+        query = f"?snapshot_sha256={snapshot_sha256}"
+        if artifact_digest is not None:
+            query += f"&artifact_digest={artifact_digest}"
+        status, payload = self._json_exchange(
+            "GET", self._REGISTER_VIEW_PATH + query, None
+        )
+        return status == 200 and isinstance(payload, dict) and (
+            payload.get("status") == "registered"
+        )
+
+    def unregister_verified_view(
+        self, snapshot_sha256: str, artifact_digest: str
+    ) -> bool:
+        """Best-effort task-end cleanup of one registered view."""
+
+        body = json.dumps(
+            {
+                "snapshot_sha256": snapshot_sha256,
+                "artifact_digest": artifact_digest,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf8")
+        status, _payload = self._json_exchange(
+            "DELETE", self._REGISTER_VIEW_PATH, body
+        )
+        return status == 200
+
     def _post_json(self, path: str, body: bytes, *, timeout: int | None = None) -> Any:
         """POST one JSON request and return the parsed, size-capped response.
 
@@ -959,6 +1069,28 @@ class CxxMemoryAnalyzerClient:
         (the deadline-bounded step timeout); ``None`` keeps
         :attr:`timeout_seconds`.
         """
+
+        _status, payload = self._json_exchange(
+            "POST", path, body, timeout=timeout
+        )
+        return payload
+
+    def _json_exchange(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        *,
+        timeout: int | None = None,
+    ) -> tuple[int, Any]:
+        """One JSON HTTP exchange returning ``(status, parsed payload)``.
+
+        Non-2xx statuses are returned, not raised: the verified-view
+        registration verbs distinguish 200/404 semantically.  Transport
+        failures raise :class:`CxxAnalyzerUnavailable`; oversized or
+        malformed responses raise :class:`CxxAnalyzerProtocolError`.
+        """
+
         if (
             timeout is not None
             and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0)
@@ -969,25 +1101,42 @@ class CxxMemoryAnalyzerClient:
         request = urllib.request.Request(  # noqa: S310 - Settings permits only HTTP(S).
             self.base_url + path,
             data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            headers=(
+                {"Content-Type": "application/json"} if body is not None else {}
+            ),
+            method=method,
         )
         try:
             with self.opener(request, timeout=wire_timeout) as response:
                 raw_response = response.read(self.max_response_bytes + 1)
+                status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as error_response:
+            # urllib raises instead of handing back non-2xx bodies; the
+            # verified-view verbs read 404s semantically, so the error
+            # body is surfaced as (status, payload) like any other.
+            try:
+                raw_response = error_response.read(
+                    self.max_response_bytes + 1
+                )
+            except (OSError, TimeoutError) as exc:
+                raise CxxAnalyzerUnavailable(
+                    "C/C++ analyzer is unavailable"
+                ) from exc
+            status = int(error_response.code)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise CxxAnalyzerUnavailable("C/C++ analyzer is unavailable") from exc
 
         if len(raw_response) > self.max_response_bytes:
             raise CxxAnalyzerProtocolError("C/C++ analyzer response exceeds size limit")
         try:
-            return json.loads(
+            parsed = json.loads(
                 raw_response.decode("utf-8"),
                 object_pairs_hook=reject_duplicate_keys,
                 parse_constant=_reject_non_json_number,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise CxxAnalyzerProtocolError("C/C++ analyzer returned invalid JSON") from exc
+        return status, parsed
 
     @classmethod
     def _validate_repro_payload(

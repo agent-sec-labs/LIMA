@@ -1705,6 +1705,59 @@ class ReviewService:
         except Exception:  # noqa: BLE001 - consumption failure degrades
             return None
 
+    def _deliver_verified_context(
+        self, adapter: object, build_result: BuildAgentResult, view: object
+    ) -> bool:
+        """Deliver one sealed view to the analyzer deployment (#351 B).
+
+        HTTP 适配器（``CxxMemoryAnalyzerClient``）：封存信封注册到
+        sidecar（``POST /v1/verified-build-views``），ack 即能力证据
+        ——这是跨进程部署的权威信号，注册失败按交付失败处理。
+        其余适配器：沿用部署声明（``verified_package_supported``，
+        #350 第六轮语义；进程内注册已在 _consume_build_context 完成）。
+        """
+
+        register = getattr(adapter, "register_verified_view", None)
+        if callable(register):
+            try:
+                return bool(register(build_result.snapshot_hash, view))
+            except Exception:  # noqa: BLE001 - delivery failure degrades
+                metrics.inc("build_context_delivery_failed_total")
+                return False
+        return bool(getattr(adapter, "verified_package_supported", False))
+
+    def _cleanup_verified_context(
+        self, adapter: object, build_result: BuildAgentResult
+    ) -> None:
+        """Task-end cleanup of one delivered view registration.
+
+        幂等（sidecar 端保证）：HTTP 部署走 DELETE，进程内部署走本
+        地注销。失败只计数不阻断——崩溃残留由 sidecar 的最老先回收
+        兜底（#352）。
+        """
+
+        artifact_digest = build_result.artifact_digest or ""
+        if (
+            len(artifact_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in artifact_digest
+            )
+        ):
+            return
+        unregister = getattr(adapter, "unregister_verified_view", None)
+        try:
+            if callable(unregister):
+                unregister(build_result.snapshot_hash, artifact_digest)
+                return
+            from cxx_analyzer import server as analyzer_server
+
+            analyzer_server.unregister_verified_build_view(
+                build_result.snapshot_hash, artifact_digest
+            )
+        except Exception:  # noqa: BLE001 - cleanup best-effort
+            metrics.inc("build_context_cleanup_failed_total")
+
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
         repository_label: str, import_policy_extra: dict[str, Any],
@@ -1754,18 +1807,19 @@ class ReviewService:
                 verified_view = self._consume_build_context(
                     task_id, workspace, build_result
                 )
-            # #350 第六轮 P1：消费能力在分析开始前统一判定。适配器未
-            # 声明与 sidecar 同进程的 verified package 支持时，本地
-            # 构造成功的视图对 facts、Specialist 契约与复现实验三方
-            # 都不可消费——不能把"视图构造成功"当作"部署可消费"。
+            # #351 B：消费能力 = 视图已交付给实际服务检测的分析器部署。
+            # HTTP 适配器把封存信封注册到 sidecar，ack 即跨进程能力证
+            # 据；其余适配器沿用 #350 第六轮的部署声明（进程内注册已
+            # 在 _consume_build_context 内完成）。交付失败时视图对
+            # facts、Specialist 契约与复现三方都不可消费。
             consumption_failure_code = None
             if verified_view is not None:
                 analyzer_adapter = getattr(
                     self.repository_scanner, "cxx_memory_adapter", None,
                 )
-                if not bool(getattr(
-                    analyzer_adapter, "verified_package_supported", False,
-                )):
+                if not self._deliver_verified_context(
+                    analyzer_adapter, build_result, verified_view
+                ):
                     verified_view = None
                     consumption_failure_code = (
                         "verified-context-not-consumable"
@@ -1855,6 +1909,16 @@ class ReviewService:
             # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
             # 阻断依赖上下文阶段的判定，二者都不冒充成功。
             result.report.collaboration["build_agent"] = build_gap
+            if build_result.status == SUCCEEDED:
+                # #351 B：任务报告已组装，按任务生命周期注销已交付的
+                # 注册（幂等；扫描中途异常路径由 sidecar 最老先回收
+                # 兜底）。交付失败也可能已留下进程内注册，一并清理。
+                self._cleanup_verified_context(
+                    getattr(
+                        self.repository_scanner, "cxx_memory_adapter", None
+                    ),
+                    build_result,
+                )
         if self.repository_semantic_triage is not None:
             if self.store.is_cancelled(task_id):
                 raise RepositoryScanCancelled()

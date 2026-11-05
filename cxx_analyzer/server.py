@@ -1020,6 +1020,11 @@ def uaf_facts_request(payload: object, settings: AnalyzerSettings) -> dict[str, 
         raise RequestError(
             "analysis_timed_out", status=504, request_id=request_id
         ) from exc
+    except RequestError:
+        # RequestError extends ValueError: semantic refusals raised
+        # inside the analysis body must keep their own wire code
+        # instead of being re-wrapped as snapshot_rejected (#351 B).
+        raise
     except ValueError as exc:
         raise RequestError("snapshot_rejected", request_id=request_id) from exc
     finally:
@@ -1205,6 +1210,12 @@ def repro_request(payload: object, settings: AnalyzerSettings) -> dict[str, obje
         raise RequestError(
             "analysis_timed_out", status=504, request_id=request_id
         ) from exc
+    except RequestError:
+        # RequestError extends ValueError: the verified-view miss below
+        # raises invalid_request inside this try -- it must keep its own
+        # wire code instead of being re-wrapped as snapshot_rejected
+        # (#351 B; found by the cross-process repro wiring test).
+        raise
     except ValueError as exc:
         raise RequestError("snapshot_rejected", request_id=request_id) from exc
     finally:

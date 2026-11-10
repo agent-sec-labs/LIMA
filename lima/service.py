@@ -1949,6 +1949,7 @@ class ReviewService:
                     ),
                     task_id=task_id,
                     verified_view=verified_view,
+                    require_verified_context=build_agent_mode == "required",
                     # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
                     # 权威取消信号。
                     should_cancel=lambda: self.store.is_cancelled(task_id),
@@ -1979,10 +1980,20 @@ class ReviewService:
                 )
                 platform_status = str(platform_summary.get("status", ""))
                 platform_context = str(platform_summary.get("build_context", ""))
+                requested_units = set(platform_summary.get("translation_units") or ())
+                received_units = set(platform_summary.get("verified_context_units") or ())
                 build_gap["consumed_by_analysis"] = (
                     platform_status == "completed"
                     and platform_context == "verified-package"
+                    and bool(requested_units)
+                    and requested_units <= received_units
                 )
+                if requested_units - received_units:
+                    build_gap["failure_code"] = "verified-context-unavailable"
+                    build_gap["blocking"] = build_agent_mode == "required"
+                elif build_agent_mode == "required" and not build_gap["consumed_by_analysis"]:
+                    build_gap["failure_code"] = "verified-context-not-consumed"
+                    build_gap["blocking"] = True
             if build_gap is not None:
                 # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
                 # 阻断依赖上下文阶段的判定，二者都不冒充成功。
@@ -2109,6 +2120,11 @@ class ReviewService:
             }
         # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
         warnings_by_reason = coverage_warning_counts(result.inventory)
+        if build_gap is not None:
+            if build_gap.get("blocking"):
+                warnings_by_reason["build-context-blocked"] = 1
+            elif build_gap.get("failure_code") or not build_gap.get("consumed_by_analysis"):
+                warnings_by_reason["build-context-not-consumed"] = 1
         cxx_status = str(
             (result.report.collaboration.get("cxx_memory") or {}).get("status", "")
         ).strip().lower()

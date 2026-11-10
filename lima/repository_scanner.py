@@ -406,6 +406,7 @@ class RepositoryScanner:
                 outcome, "build_context_mode", "snapshot-compdb"
             ),
             "translation_units": list(outcome.translation_units),
+            "verified_context_units": list(getattr(outcome, "verified_context_units", ())),
             "stats": {
                 "leads": stats.lead_count,
                 "targets": stats.target_count,
@@ -697,6 +698,7 @@ class RepositoryScanner:
         progress_callback: ProgressCallback | None = None,
         investigate_paths: Sequence[str] = (),
         verified_view: object | None = None,
+        require_verified_context: bool = False,
     ) -> dict:
         """Run the single agent platform chain for the facts domain.
 
@@ -760,6 +762,7 @@ class RepositoryScanner:
                 snapshot_hash=inventory.fingerprint(),
                 translation_units=translation_units,
                 verified_view=verified_view,
+                require_verified_context=require_verified_context,
                 # #351 B：service 只在视图已交付（sidecar 注册 ack 或
                 # 进程内声明）后才把视图传进来，因此这里显式要求
                 # verified-package——#350 第六轮预留的接入点，绕过适
@@ -863,6 +866,7 @@ class RepositoryScanner:
         cxx_agent_mode: str | None = None,
         investigate_paths: Sequence[str] = (),
         verified_view: object | None = None,
+        require_verified_context: bool = False,
     ) -> RepositoryScanResult:
         """Scan a materialized workspace.
 
@@ -1070,6 +1074,7 @@ class RepositoryScanner:
             progress_callback=progress_callback,
             investigate_paths=investigate_paths,
             verified_view=verified_view,
+            require_verified_context=require_verified_context,
         )
         check_cancelled()
 

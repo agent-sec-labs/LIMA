@@ -165,6 +165,22 @@ class RepositoryWorkspace:
             raise ValueError("workspace path must reference a regular file")
         return resolved
 
+    def _read_bounded_bytes(self, path: Path) -> bytes:
+        """Read one regular file without trusting an earlier size observation."""
+        observed_size = path.stat().st_size
+        if observed_size > self.max_file_bytes:
+            raise ValueError("workspace file exceeds the per-file size limit")
+        # Reading one byte beyond the limit detects a file that grew after
+        # stat(), without ever retaining an unbounded payload in memory.
+        with path.open("rb") as handle:
+            data = handle.read(self.max_file_bytes + 1)
+        if len(data) > self.max_file_bytes:
+            raise ValueError("workspace file exceeds the per-file size limit")
+        if len(data) != observed_size:
+            raise ValueError("workspace snapshot drift")
+        return data
+
+
     def inventory(self) -> WorkspaceInventory:
         result = WorkspaceInventory(root=str(self.root))
         candidates: list[Path] = []
@@ -219,10 +235,12 @@ class RepositoryWorkspace:
                 self._record_skip(result, "total-size-limit")
                 continue
             try:
-                data = path.read_bytes()
+                data = self._read_bounded_bytes(path)
             except OSError:
                 self._record_skip(result, "unreadable")
                 continue
+            if len(data) != size:
+                raise ValueError("workspace snapshot drift")
             if b"\x00" in data[:8_192]:
                 self._record_skip(result, "binary")
                 continue
@@ -245,13 +263,11 @@ class RepositoryWorkspace:
 
     def read_text(self, relative_path: str | os.PathLike[str]) -> str:
         path = self._safe_path(relative_path)
-        if path.stat().st_size > self.max_file_bytes:
-            raise ValueError("workspace file exceeds the per-file size limit")
         # Decode raw bytes without universal-newline translation: the
         # inventory hashes exact file bytes, so any newline normalisation
         # here would make CRLF files fail the index drift check (and would
         # also contradict the U+000A-only line-number convention).
-        return path.read_bytes().decode("utf-8")
+        return self._read_bounded_bytes(path).decode("utf-8")
 
     def absolute_file(self, relative_path: str | os.PathLike[str]) -> Path:
         """Resolve an inventoried file while enforcing the workspace boundary."""
@@ -259,5 +275,11 @@ class RepositoryWorkspace:
 
     def iter_text(self, inventory: Optional[WorkspaceInventory] = None) -> Iterator[tuple[str, str]]:
         snapshot = inventory or self.inventory()
+        texts: list[tuple[str, str]] = []
         for item in snapshot.files:
-            yield item.path, self.read_text(item.path)
+            path = self._safe_path(item.path)
+            data = self._read_bounded_bytes(path)
+            if len(data) != item.size or hashlib.sha256(data).hexdigest() != item.sha256:
+                raise ValueError("workspace snapshot drift")
+            texts.append((item.path, data.decode("utf-8")))
+        yield from texts

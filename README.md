@@ -570,7 +570,7 @@ Redis 的非容器运行模式会自动退回 SQLite 与进程内线程队列，
 | `POST` | `/v1/tasks/{id}/cancel` | 请求取消任务 |
 | `POST` | `/v1/tasks/{id}/resume` | 从最近 checkpoint 续跑任务 |
 | `GET/POST` | `/v1/repository-grants` | 管理员查询或授予租户的仓库授权；`auto_fix=true` 是自动修复的前置条件 |
-| `POST` | `/v1/github/installations` | 管理员登记 GitHub App installation 并绑定当前租户 |
+| `POST` | `/v1/github/installations` | 管理员登记已获部署配置批准的 GitHub App installation；不能自行认领或覆盖其他租户 |
 | `POST` | `/v1/experiments` | 创建可恢复的 repository-disjoint 后台实验 |
 | `GET` | `/v1/experiments` | 查询当前租户的实验列表 |
 | `GET` | `/v1/experiments/{id}` | 查询实验、逐案例状态和最终结果 |
@@ -648,3 +648,5 @@ LIMA 自有代码、文档、测试、UI、标注与工具按 [Apache License 2.
 维护者主要将本项目用于求职展示、安全研究与开源学习；项目按“原样”提供，不构成
 漏洞检测率、自动修复安全性、生产适用性或合规性的保证。上游代码片段与第三方材料
 继续适用其各自的原始许可证。
+
+GitHub App 的部署白名单、历史任务迁移和扫描快照边界见 [租户凭据与快照说明](docs/GITHUB_TENANT_AND_SNAPSHOT_BOUNDARIES.md)。

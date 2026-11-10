@@ -577,10 +577,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 principal = self._principal("manage")
                 payload = self._read_json(body)
                 installation_id = payload.get("installation_id")
-                if not isinstance(installation_id, int) or installation_id <= 0:
+                if type(installation_id) is not int or installation_id <= 0:
                     raise ValueError("installation_id must be a positive integer")
                 account = str(payload.get("account", "github-app"))[:100]
-                self.service.store.save_installation(
+                self.service.register_github_installation(
                     installation_id, account, principal.tenant_id
                 )
                 self.service.store.audit(
@@ -627,7 +627,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 principal = self._principal("fix")
                 payload = self._read_json(body)
                 installation_id = payload.get("installation_id")
-                if installation_id is not None and not isinstance(installation_id, int):
+                if installation_id is not None and type(installation_id) is not int:
                     raise ValueError("installation_id must be an integer")
                 result = self.service.create_fix(
                     match.group(1), installation_id, principal.tenant_id

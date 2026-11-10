@@ -36,6 +36,7 @@ def make_settings(db_path: str) -> Settings:
         llm_model="", github_webhook_secret="", github_token="",
         auto_post_review=False, auth_required=True, auth_secret=AUTH_SIGNING_KEY,
         bootstrap_admin_username="admin", bootstrap_admin_password=BOOTSTRAP_CREDENTIAL,
+        github_installation_tenants='{"501":"default"}',
     )
 
 
@@ -238,6 +239,54 @@ class ApiSecurityTests(unittest.TestCase):
         )
         with self.assertRaises(PermissionError):
             self.service.create_fix("fix-task", tenant_id="tenant-fix")
+
+    def test_tenant_admin_cannot_claim_another_installation_or_unproven_id(self):
+        from unittest import mock
+
+        store = self.service.store
+        store.create_user("boundary-admin", "boundary-admin", hash_password("boundary-password"),
+                          "tenant-a", "admin")
+        store.save_installation(802, "org-b", "tenant-b")
+        token = self.login("boundary-admin", "boundary-password")
+        settings = replace(
+            self.service.settings,
+            github_installation_tenants='{"801":"tenant-a","802":"tenant-b"}',
+        )
+        with mock.patch.object(self.service, "settings", settings):
+            for identity in (802, 803):
+                status, _, _ = self.request("POST", "/v1/github/installations", token,
+                                             {"installation_id": identity, "account": "claimed"})
+                self.assertEqual(403, status)
+            status, _, _ = self.request("POST", "/v1/github/installations", token,
+                                         {"installation_id": 801, "account": "org-a"})
+            self.assertEqual(201, status)
+        self.assertEqual("tenant-b", store.installation_tenant(802))
+        self.assertEqual("tenant-a", store.installation_tenant(801))
+        self.assertIsNone(store.installation_tenant(803))
+
+    def test_fix_cannot_select_another_tenants_credentials_over_http(self):
+        from unittest import mock
+
+        store = self.service.store
+        store.create_user("boundary-fixer", "boundary-fixer", hash_password("boundary-password"),
+                          "tenant-a", "maintainer")
+        store.save_installation(812, "org-b", "tenant-b")
+        store.create("fee1", "org/repo", 7, {
+            "head_sha": "a" * 40, "diff_source": "pinned-compare-v1",
+            "github_auth": {"mode": "app", "installation_id": 811},
+        }, "tenant-a")
+        store.grant_repository("tenant-a", "org/repo", auto_fix=True)
+        store.succeed("fee1", ReviewReport("org/repo", 7, "done", "low"),
+                      TraceEvent(1, TaskState.SUCCESS, "done", "2026-11-10T00:00:00Z"))
+        token = self.login("boundary-fixer", "boundary-password")
+        with mock.patch("lima.service.GitHubAppAuthenticator") as authenticator, \
+                mock.patch.object(self.service.fixer, "create_fix_commits") as fixer:
+            status, _, _ = self.request(
+                "POST", "/v1/tasks/fee1/fix", token, {"installation_id": 812},
+            )
+        self.assertEqual(403, status)
+        authenticator.assert_not_called()
+        fixer.assert_not_called()
 
 
 class RepositoryGrantPolicyTests(unittest.TestCase):

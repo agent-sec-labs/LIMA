@@ -5,9 +5,11 @@ from __future__ import annotations
 import difflib
 import json
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Final
 
 from .adjudication import adjudicate_findings
@@ -855,6 +857,29 @@ class RepositoryScanner:
         )
         return requested[:MAX_UAF_TRANSLATION_UNITS]
 
+    @contextmanager
+    def _materialized_snapshot(
+        self, workspace: RepositoryWorkspace, inventory: WorkspaceInventory,
+    ) -> Iterator[RepositoryWorkspace]:
+        """Expose the verified inventory bytes from an isolated temporary root."""
+        with TemporaryDirectory(prefix="lima-snapshot-") as temporary:
+            snapshot_root = Path(temporary)
+            for relative_path, content in workspace.iter_text(inventory):
+                relative = PurePosixPath(relative_path)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError("workspace snapshot contains an invalid path")
+                destination = snapshot_root.joinpath(*relative.parts)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content.encode("utf-8"))
+            yield RepositoryWorkspace(
+                snapshot_root,
+                max_files=max(workspace.max_files, len(inventory.files)),
+                max_file_bytes=workspace.max_file_bytes,
+                max_total_bytes=workspace.max_total_bytes,
+                extensions=workspace.extensions,
+                ignored_directories=workspace.ignored_directories,
+            )
+
     def scan(
         self,
         workspace: RepositoryWorkspace,
@@ -895,6 +920,45 @@ class RepositoryScanner:
             progress_callback, INVENTORY, "工作区盘点完成",
             current=len(inventory.files), total=len(inventory.files), unit="files",
         )
+        with self._materialized_snapshot(workspace, inventory) as snapshot_workspace:
+            result = self._scan(
+                snapshot_workspace,
+                inventory=inventory,
+                repository_key=repository_key,
+                progress_callback=progress_callback,
+                task_id=task_id,
+                should_cancel=should_cancel,
+                cxx_agent_mode=cxx_agent_mode,
+                investigate_paths=investigate_paths,
+                verified_view=verified_view,
+                require_verified_context=require_verified_context,
+            )
+        result.report.repository = str(workspace.root)
+        return result
+
+    def _scan(
+        self,
+        workspace: RepositoryWorkspace,
+        *,
+        inventory: WorkspaceInventory,
+        repository_key: str = "",
+        progress_callback: ProgressCallback | None = None,
+        task_id: str = "",
+        should_cancel: Callable[[], bool] | None = None,
+        cxx_agent_mode: str | None = None,
+        investigate_paths: Sequence[str] = (),
+        verified_view: object | None = None,
+        require_verified_context: bool = False,
+    ) -> RepositoryScanResult:
+        """Analyze the captured workspace using its original inventory."""
+
+        cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
+
+        def check_cancelled() -> None:
+            if cancel_probe is not None and cancel_probe():
+                raise RepositoryScanCancelled()
+
+        check_cancelled()
         findings: list[Finding] = []
         finding_index: dict[tuple[str, int, str], Finding] = {}
         cxx_finding_index: dict[tuple[str, str, str, int], Finding] = {}

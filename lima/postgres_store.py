@@ -1102,14 +1102,19 @@ class PostgresTaskStore:
     def save_installation(
         self, installation_id: int, account_login: str, tenant_id: str = "default"
     ) -> None:
+        from .github_identity import installation_id as validate_installation_id
+
+        validate_installation_id(installation_id)
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO installations(installation_id,account_login,created_at,tenant_id) "
                 "VALUES (%s,%s,%s,%s) ON CONFLICT(installation_id) DO UPDATE "
-                "SET account_login=EXCLUDED.account_login,created_at=EXCLUDED.created_at,"
-                "tenant_id=EXCLUDED.tenant_id",
+                "SET account_login=EXCLUDED.account_login "
+                "WHERE installations.tenant_id=EXCLUDED.tenant_id",
                 (installation_id, account_login, utc_now(), tenant_id),
             )
+            if cursor.rowcount != 1:
+                raise PermissionError("GitHub installation belongs to another tenant")
 
     def installation_tenant(self, installation_id: int) -> Optional[str]:
         with self._connect() as conn:

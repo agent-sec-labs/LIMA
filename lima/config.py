@@ -128,6 +128,7 @@ class Settings:
     github_app_id: str = ""
     github_app_slug: str = ""
     github_private_key_path: str = ""
+    github_installation_tenants: str = "{}"
     public_base_url: str = "http://127.0.0.1:8080"
     llm_provider: str = "local"
     deepseek_api_key: str = ""
@@ -451,6 +452,7 @@ class Settings:
             ),
             skills_dir=os.getenv("LIMA_SKILLS_DIR", "skills"),
             github_app_id=os.getenv("LIMA_GITHUB_APP_ID", ""),
+            github_installation_tenants=os.getenv("LIMA_GITHUB_INSTALLATION_TENANTS", "{}"),
             github_app_slug=os.getenv("LIMA_GITHUB_APP_SLUG", ""),
             github_private_key_path=os.getenv("LIMA_GITHUB_PRIVATE_KEY_PATH", ""),
             public_base_url=os.getenv("LIMA_PUBLIC_BASE_URL", "http://127.0.0.1:8080").rstrip("/"),

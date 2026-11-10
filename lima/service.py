@@ -37,6 +37,8 @@ from .evolution import EvolutionEngine
 from .experiments import LLM_MODES, ExperimentRunner
 from .fixer import SafeFixer
 from .github import GitHubAppAuthenticator, GitHubClient, pull_request_commit_shas
+from .github_identity import installation_bindings
+from .github_identity import installation_id as validate_installation_id
 from .harness import ReviewHarness
 from .memory import MemoryManager
 from .metrics import metrics
@@ -298,6 +300,7 @@ class ReviewService:
     def __init__(self, settings: Settings):
         self.settings = settings
         settings.validate_evolution()
+        installation_bindings(settings.github_installation_tenants)
         self.llm_config = settings.resolved_llm()
         if settings.repository_scan_llm_mode == "required" and not self.llm_config:
             raise ValueError(
@@ -793,13 +796,18 @@ class ReviewService:
     def _create_task(
         self, repository: str, diff: str, pull_request: int | None, source: str,
         tenant_id: str = "default",
+        github_auth: dict | None = None,
     ) -> str:
         task_id = str(uuid.uuid4())
         encoded = diff.encode("utf-8")
         assignment = self.releases.assignment(tenant_id, "llm-review", task_id)
+        if (github_auth is None and tenant_id == self.settings.default_tenant_id
+                and not self._github_app_mode()):
+            github_auth = self._github_auth_binding(tenant_id)
         self.store.create(task_id, repository, pull_request, {
             "source": source, "diff_bytes": len(encoded), "diff_sha256": hashlib.sha256(encoded).hexdigest(),
             "release_lane": assignment["lane"], "shadow": assignment["shadow"],
+            "github_auth": github_auth,
         }, tenant_id)
         self.store.save_task_payload(task_id, diff)
         return task_id
@@ -853,7 +861,13 @@ class ReviewService:
     ) -> dict[str, Any]:
         self._validate_review(repository, diff)
         self._authorize_repository(tenant_id, repository)
-        task_id = self._create_task(repository, diff, pull_request, source, tenant_id)
+        github_auth = (
+            self._github_auth_binding(tenant_id, installation_id)
+            if installation_id is not None or github_issue_url else None
+        )
+        task_id = self._create_task(
+            repository, diff, pull_request, source, tenant_id, github_auth=github_auth,
+        )
         self.queue.submit({
             "task_id": task_id, "repository": repository, "pull_request": pull_request,
             "github_issue_url": github_issue_url, "installation_id": installation_id,
@@ -2254,10 +2268,7 @@ class ReviewService:
             return
         diff = self.store.get_task_payload(task_id)
         if diff is None and payload.get("diff_url"):
-            client = (
-                self.github_client_for_installation(payload.get("installation_id"))
-                if payload.get("installation_id") else self.github
-            )
+            client = self._github_client_for_task(task, payload.get("installation_id"))
             client.ensure_repository_access(payload["repository"])
             diff = client.fetch_diff(payload["diff_url"])
             self._validate_review(payload["repository"], diff)
@@ -2282,7 +2293,7 @@ class ReviewService:
             lane = (task.get("input") or {}).get("release_lane", "stable")
             self.releases.observe(tenant_id, "llm-review", False, lane)
             if payload.get("github_issue_url") and self.settings.auto_post_review:
-                client = self.github_client_for_installation(payload.get("installation_id"))
+                client = self._github_client_for_task(task, payload.get("installation_id"))
                 client.upsert_comment(
                     payload["github_issue_url"], to_markdown(report.to_dict()),
                     f"<!-- lima-review:{task_id} -->",
@@ -2323,9 +2334,17 @@ class ReviewService:
         payload_sha256: str, tenant_id: str = "",
     ) -> dict[str, Any]:
         installation_id = (payload.get("installation") or {}).get("id")
-        tenant_id = tenant_id or (
-            self.store.installation_tenant(installation_id) if installation_id else None
-        ) or self.settings.default_tenant_id
+        if installation_id is not None:
+            validate_installation_id(installation_id)
+            owner = installation_bindings(
+                self.settings.github_installation_tenants
+            ).get(installation_id)
+            if not owner or (tenant_id and owner != tenant_id):
+                raise PermissionError("GitHub installation tenant is not authorized")
+            tenant_id = owner
+        else:
+            tenant_id = tenant_id or self.settings.default_tenant_id
+        github_auth = self._github_auth_binding(tenant_id, installation_id)
         if not self.store.claim_webhook(
             delivery_id, tenant_id, "pull_request", payload_sha256
         ):
@@ -2351,7 +2370,8 @@ class ReviewService:
         self._authorize_repository(tenant_id, repository)
         task_id = self._create_deferred_task(
             repository, number, "github-webhook", tenant_id,
-            {"diff_url": diff_url, "head_sha": head_sha, "base_sha": base_sha},
+            {"diff_url": diff_url, "head_sha": head_sha, "base_sha": base_sha,
+             "github_auth": github_auth},
         )
         self.queue.submit({
             "task_id": task_id, "repository": repository, "pull_request": number,
@@ -2365,7 +2385,52 @@ class ReviewService:
         result["will_post_to_github"] = self.settings.auto_post_review
         return result
 
-    def github_client_for_installation(self, installation_id: int | None = None) -> GitHubClient:
+    def _github_app_mode(self) -> bool:
+        return bool(self.settings.github_app_id or self.settings.github_private_key_path)
+
+    def register_github_installation(self, installation_id, account, tenant_id):
+        validate_installation_id(installation_id)
+        owner = installation_bindings(
+            self.settings.github_installation_tenants
+        ).get(installation_id)
+        if owner != tenant_id:
+            raise PermissionError(
+                "installation ownership must be provisioned by the deployment operator"
+            )
+        self.store.save_installation(installation_id, account, tenant_id)
+
+    def _github_auth_binding(self, tenant_id, installation_id=None):
+        if installation_id is None:
+            if self._github_app_mode() or tenant_id != self.settings.default_tenant_id:
+                raise PermissionError("GitHub App tasks require a registered installation")
+            return {"mode": "pat"}
+        validate_installation_id(installation_id)
+        owner = installation_bindings(
+            self.settings.github_installation_tenants
+        ).get(installation_id)
+        if owner != tenant_id or self.store.installation_tenant(installation_id) != tenant_id:
+            raise PermissionError("GitHub installation tenant is not authorized")
+        if not self.settings.github_app_id or not self.settings.github_private_key_path:
+            raise PermissionError("GitHub App credentials are not configured")
+        return {"mode": "app", "installation_id": installation_id}
+
+    def _github_client_for_task(self, task, requested_installation_id=None):
+        auth = (task.get("input") or {}).get("github_auth")
+        if not isinstance(auth, dict) or auth.get("mode") not in {"app", "pat"}:
+            raise PermissionError("task has no trusted GitHub credential binding; run a new audit")
+        bound_id = auth.get("installation_id") if auth["mode"] == "app" else None
+        if auth["mode"] == "app":
+            validate_installation_id(bound_id)
+        if requested_installation_id is not None:
+            validate_installation_id(requested_installation_id)
+            if requested_installation_id != bound_id:
+                raise PermissionError("requested installation does not match the audited task")
+        return self.github_client_for_installation(bound_id, tenant_id=task["tenant_id"])
+
+    def github_client_for_installation(
+        self, installation_id: int | None = None, *, tenant_id: str,
+    ) -> GitHubClient:
+        self._github_auth_binding(tenant_id, installation_id)
         if installation_id is None:
             return self.github
         if not self.settings.github_app_id or not self.settings.github_private_key_path:
@@ -2388,7 +2453,7 @@ class ReviewService:
         if not self.store.repository_allowed(actual_tenant, task["repository"], True):
             raise PermissionError("automatic repair is not enabled for this repository")
         result = self.fixer.create_fix_commits(
-            self.github_client_for_installation(installation_id),
+            self._github_client_for_task(task, installation_id),
             task["repository"], task["pull_request"], task["report"],
         )
         metrics.inc("fix_runs_total")

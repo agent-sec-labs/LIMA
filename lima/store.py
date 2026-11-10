@@ -950,12 +950,19 @@ class TaskStore:
     def save_installation(
         self, installation_id: int, account_login: str, tenant_id: str = "default"
     ) -> None:
+        from .github_identity import installation_id as validate_installation_id
+
+        validate_installation_id(installation_id)
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO installations"
-                "(installation_id,account_login,created_at,tenant_id) VALUES (?, ?, ?, ?)",
+            cursor = conn.execute(
+                "INSERT INTO installations"
+                "(installation_id,account_login,created_at,tenant_id) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(installation_id) DO UPDATE SET account_login=excluded.account_login "
+                "WHERE installations.tenant_id=excluded.tenant_id",
                 (installation_id, account_login, utc_now(), tenant_id),
             )
+            if cursor.rowcount != 1:
+                raise PermissionError("GitHub installation belongs to another tenant")
 
     def installation_tenant(self, installation_id: int) -> Optional[str]:
         with self._connect() as conn:

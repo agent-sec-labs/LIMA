@@ -49,10 +49,15 @@ class WorkspaceSnapshotConsistencyTests(unittest.TestCase):
             target = root / "app.py"
             target.write_text("small\n", encoding="utf-8")
             workspace = RepositoryWorkspace(root, max_file_bytes=10)
+            # Windows runners may spell TEMP with an 8.3 alias (RUNNER~1).
+            # _safe_path resolves that alias before opening the file.
+            target = target.resolve(strict=True)
             original_open = Path.open
+            injected = []
 
             def grow_before_open(path: Path, *args: object, **kwargs: object):
                 if path == target:
+                    injected.append(path)
                     with original_open(target, "wb") as writer:
                         writer.write(b"x" * 11)
                 return original_open(path, *args, **kwargs)
@@ -60,6 +65,7 @@ class WorkspaceSnapshotConsistencyTests(unittest.TestCase):
             with patch.object(Path, "open", new=grow_before_open):
                 with self.assertRaisesRegex(ValueError, "per-file size limit"):
                     workspace.read_text("app.py")
+            self.assertEqual([target], injected)
 
     def test_scanner_rejects_mutation_after_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:

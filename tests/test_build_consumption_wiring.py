@@ -732,6 +732,11 @@ class ThreeConsumerDegradationTests(unittest.TestCase):
         self.assertEqual(
             "verified-package", analyzer.unit_calls[0][1]
         )
+        # #354 评审第一轮 P1：facts 请求绑定本任务制品摘要，不落
+        # 快照默认槽（同快照被注册其他构建产物时会分叉）。
+        self.assertEqual(
+            view.artifact_digest, analyzer.unit_calls[0][2]
+        )
         self.assertIn(
             "-DVERIFIED=1", specialist_payload["messages"][1]["content"]
         )
@@ -806,7 +811,7 @@ class ConsumedEvidenceTests(unittest.TestCase):
                 inventory=WorkspaceInventory(root=str(workspace.root)),
             )
 
-    def _visible_gap(self, platform_summary: dict) -> dict:
+    def _visible_gap(self, platform_summary: dict, *, build_mode="auto") -> dict:
         service = ReviewService(replace(self.base, build_agent_mode="auto"))
         self.addCleanup(service.queue.close)
         service.repository_scanner = self._StaticScanner(platform_summary)
@@ -817,7 +822,7 @@ class ConsumedEvidenceTests(unittest.TestCase):
             service, "_consume_build_context", return_value=object(),
         ):
             created = service.enqueue_repository_scan(
-                "team/project", build_agent_mode="auto"
+                "team/project", build_agent_mode=build_mode
             )
             task = {}
             for _ in range(300):
@@ -831,11 +836,45 @@ class ConsumedEvidenceTests(unittest.TestCase):
     def test_consumed_true_only_with_verified_package_evidence(self):
         collaboration = self._visible_gap(
             {"mode": "auto", "status": "completed",
-             "build_context": "verified-package"}
+             "build_context": "verified-package",
+             "translation_units": ["app/main.cpp"],
+             "verified_context_units": ["app/main.cpp"]}
         )
         self.assertTrue(
             collaboration["build_agent"]["consumed_by_analysis"]
         )
+
+    def test_selected_verified_mode_without_receipt_is_not_consumed(self):
+        collaboration = self._visible_gap(
+            {"mode": "auto", "status": "completed",
+             "build_context": "verified-package",
+             "translation_units": ["app/main.cpp"]}
+        )
+        self.assertFalse(collaboration["build_agent"]["consumed_by_analysis"])
+
+    def test_partial_receipt_cannot_cover_the_requested_units(self):
+        collaboration = self._visible_gap(
+            {"mode": "auto", "status": "completed",
+             "build_context": "verified-package",
+             "translation_units": ["app/main.cpp", "app/other.cpp"],
+             "verified_context_units": ["app/main.cpp"]}, build_mode="required",
+        )
+        gap = collaboration["build_agent"]
+        self.assertFalse(gap["consumed_by_analysis"])
+        self.assertTrue(gap["blocking"])
+        self.assertEqual("verified-context-unavailable", gap["failure_code"])
+
+    def test_receipts_without_a_requested_scope_do_not_claim_consumption(self):
+        collaboration = self._visible_gap(
+            {"mode": "auto", "status": "completed",
+             "build_context": "verified-package",
+             "translation_units": [],
+             "verified_context_units": ["app/main.cpp"]}, build_mode="required",
+        )
+        gap = collaboration["build_agent"]
+        self.assertFalse(gap["consumed_by_analysis"])
+        self.assertTrue(gap["blocking"])
+        self.assertEqual("verified-context-not-consumed", gap["failure_code"])
 
     def test_completed_but_legacy_context_is_not_consumed(self):
         collaboration = self._visible_gap(
@@ -853,6 +892,15 @@ class ConsumedEvidenceTests(unittest.TestCase):
         self.assertFalse(
             collaboration["build_agent"]["consumed_by_analysis"]
         )
+
+    def test_required_with_disabled_platform_reports_blocked_consumption(self):
+        collaboration = self._visible_gap(
+            {"mode": "off", "status": "disabled"}, build_mode="required",
+        )
+        gap = collaboration["build_agent"]
+        self.assertFalse(gap["consumed_by_analysis"])
+        self.assertTrue(gap["blocking"])
+        self.assertEqual(gap["failure_code"], "verified-context-not-consumed")
 
 
 if __name__ == "__main__":

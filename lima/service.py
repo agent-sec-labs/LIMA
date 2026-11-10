@@ -2,6 +2,7 @@ import hashlib
 import re
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -278,6 +279,19 @@ def _deterministic_build_model(state: dict) -> dict:
     if step == 6:
         return {"action": "tool", "tool": "validate_context", "arguments": {}}
     return {"action": "final", "output": {"status": "done"}}
+
+
+# #354 评审第二轮 P1：交付持有权的权威归属。
+# HTTP 部署：持有权是 sidecar 端的 token（注册带 holder、按 holder 释放），
+# 注册、计数与注销在同一服务端生命周期锁下——本进程的释放不可能删掉
+# 任何进程刚交付的注册，请求顺序无关。多实例/Redis 多消费者共享同一
+# sidecar 时同样正确。
+# 进程内声明部署（无 HTTP 通道）：本地按持有者计数，且注册刷新、计数
+# 增减与末持有者注销在同一把锁内串行完成（本地注销是纯字典操作，锁内
+# 执行安全），杜绝"本地判定末持有者后、实际注销前被新交付插队"的撕
+# 裂。崩溃残留由 sidecar 的最老先回收兜底（#352）。
+_VERIFIED_VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
+_VERIFIED_VIEW_HOLDERS_LOCK = threading.Lock()
 
 
 class ReviewService:
@@ -1705,6 +1719,112 @@ class ReviewService:
         except Exception:  # noqa: BLE001 - consumption failure degrades
             return None
 
+    def _deliver_verified_context(
+        self,
+        adapter: object,
+        build_result: BuildAgentResult,
+        view: object,
+        holder_token: str,
+    ) -> bool:
+        """Deliver one sealed view to the analyzer deployment (#351 B).
+
+        HTTP 适配器（``CxxMemoryAnalyzerClient``）：封存信封以本次执行
+        的唯一 token 为 holder 注册到 sidecar，ack 即能力证据——持有权计数
+        在服务端与注册同一生命周期锁下维护（#354 评审第二轮 P1），本进程
+        或任何实例的释放都不可能删掉刚交付的注册，请求顺序无关。
+        其余适配器：沿用部署声明（``verified_package_supported``，
+        #350 第六轮语义）；进程内生命周期（注册刷新 + 持有者登记）
+        在同一把锁内串行完成，防止释放判定与交付交错撕裂。
+        """
+
+        artifact_digest = build_result.artifact_digest
+        register = getattr(adapter, "register_verified_view", None)
+        if callable(register):
+            try:
+                return bool(
+                    register(
+                        build_result.snapshot_hash, view, holder=holder_token
+                    )
+                )
+            except Exception:  # noqa: BLE001 - delivery failure degrades
+                metrics.inc("build_context_delivery_failed_total")
+                return False
+        if not bool(getattr(adapter, "verified_package_supported", False)):
+            return False
+        if len(artifact_digest or "") != 64:
+            return True
+        from cxx_analyzer import server as analyzer_server
+
+        with _VERIFIED_VIEW_HOLDERS_LOCK:
+            # 进程内刷新 + 持有权登记同一临界区（本地注册是纯字典
+            # 操作，锁内执行安全）：释放侧的末持有者判定不可能插进
+            # 这次交付与登记之间。
+            analyzer_server.register_verified_build_view(
+                build_result.snapshot_hash, view
+            )
+            analyzer_server.register_verified_build_view(
+                build_result.snapshot_hash, view,
+                artifact_digest=artifact_digest,
+            )
+            _VERIFIED_VIEW_HOLDERS.setdefault(
+                (build_result.snapshot_hash, artifact_digest), set()
+            ).add(holder_token)
+        return True
+
+    def _release_verified_context(
+        self, adapter: object, build_result: BuildAgentResult, holder_token: str
+    ) -> None:
+        """Release this execution's hold on one delivered view registration.
+
+        HTTP 部署：按本次执行 holder 释放——服务端计数，注册随最后
+        一个持有者离开。进程内声明部署：持有者计数与末持有者注销
+        在同一临界区完成。幂等；失败只计数不阻断——崩溃残留由
+        sidecar 的最老先回收兜底（#352）。
+        """
+
+        artifact_digest = build_result.artifact_digest or ""
+        if (
+            len(artifact_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in artifact_digest
+            )
+        ):
+            return
+        unregister = getattr(adapter, "unregister_verified_view", None)
+        if callable(unregister):
+            try:
+                unregister(
+                    build_result.snapshot_hash, artifact_digest,
+                    holder=holder_token,
+                )
+            except Exception:  # noqa: BLE001 - cleanup best-effort
+                metrics.inc("build_context_cleanup_failed_total")
+            return
+        from cxx_analyzer import server as analyzer_server
+
+        with _VERIFIED_VIEW_HOLDERS_LOCK:
+            holders = _VERIFIED_VIEW_HOLDERS.get(
+                (build_result.snapshot_hash, artifact_digest)
+            )
+            if not holders:
+                return
+            holders.discard(holder_token)
+            if holders:
+                # 其他任务仍在消费同一制品身份：保留注册。
+                return
+            del _VERIFIED_VIEW_HOLDERS[
+                (build_result.snapshot_hash, artifact_digest)
+            ]
+            # 末持有者注销也在同一临界区：判定与注销之间不可能被
+            # 新交付插队（新交付会先刷新注册并登记持有权）。
+            try:
+                analyzer_server.unregister_verified_build_view(
+                    build_result.snapshot_hash, artifact_digest
+                )
+            except Exception:  # noqa: BLE001 - cleanup best-effort
+                metrics.inc("build_context_cleanup_failed_total")
+
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
         repository_label: str, import_policy_extra: dict[str, Any],
@@ -1722,6 +1842,7 @@ class ReviewService:
         )
         build_gap: dict[str, Any] | None = None
         verified_view: object | None = None
+        delivered_registration: tuple[object, BuildAgentResult, str] | None = None
         if build_agent_mode != "off":
             try:
                 build_result = self._run_build_agent(
@@ -1754,18 +1875,28 @@ class ReviewService:
                 verified_view = self._consume_build_context(
                     task_id, workspace, build_result
                 )
-            # #350 第六轮 P1：消费能力在分析开始前统一判定。适配器未
-            # 声明与 sidecar 同进程的 verified package 支持时，本地
-            # 构造成功的视图对 facts、Specialist 契约与复现实验三方
-            # 都不可消费——不能把"视图构造成功"当作"部署可消费"。
+            # #351 B：消费能力 = 视图已交付给实际服务检测的分析器部署。
+            # HTTP 适配器把封存信封注册到 sidecar，ack 即跨进程能力证
+            # 据；其余适配器沿用 #350 第六轮的部署声明（进程内注册已
+            # 在 _consume_build_context 内完成）。交付失败时视图对
+            # facts、Specialist 契约与复现三方都不可消费。
             consumption_failure_code = None
             if verified_view is not None:
                 analyzer_adapter = getattr(
                     self.repository_scanner, "cxx_memory_adapter", None,
                 )
-                if not bool(getattr(
-                    analyzer_adapter, "verified_package_supported", False,
-                )):
+                # A Redis message can be reclaimed while its old handler
+                # still runs. Distinct executions of the same task must
+                # own distinct holds; POST retries within this delivery
+                # and its finally release reuse this one execution token.
+                holder_token = "scan-" + uuid.uuid4().hex
+                if self._deliver_verified_context(
+                    analyzer_adapter, build_result, verified_view, holder_token
+                ):
+                    delivered_registration = (
+                        analyzer_adapter, build_result, holder_token
+                    )
+                else:
                     verified_view = None
                     consumption_failure_code = (
                         "verified-context-not-consumable"
@@ -1798,63 +1929,85 @@ class ReviewService:
                 # 构建成功但消费失败（required）或构建失败（auto）都
                 # 拒绝进入依赖构建上下文的检测阶段。
                 cxx_agent_mode = "off"
-        self.store.transition(
-            task_id,
-            TraceEvent(
-                2, TaskState.EXECUTING,
-                "Running bounded AST and SAST repository analysis.", utc_now(),
-            ),
-        )
-        with self.observability.span(
-            "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
-            repository=repository_label,
-        ), metrics.timer("repository_scan_duration"):
-            result = self.repository_scanner.scan(
-                workspace,
-                repository_key=repository_label,
-                progress_callback=(
-                    progress.pipeline_event if progress is not None else None
+        try:
+            self.store.transition(
+                task_id,
+                TraceEvent(
+                    2, TaskState.EXECUTING,
+                    "Running bounded AST and SAST repository analysis.", utc_now(),
                 ),
-                task_id=task_id,
-                verified_view=verified_view,
-                # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
-                # 权威取消信号。
-                should_cancel=lambda: self.store.is_cancelled(task_id),
-                # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
-                # 并发任务各自隔离。
-                cxx_agent_mode=cxx_agent_mode,
-                investigate_paths=investigate_paths or (),
             )
-        if self.store.is_cancelled(task_id):
-            raise RepositoryScanCancelled()
-        result.report.repository = repository_label
-        result.report.collaboration["import_policy"] = {
-            "host_path_exposed": False,
-            "repository_code_executed": False,
-            "snapshot_sha256": result.inventory.fingerprint(),
-            "snapshot_files": len(result.inventory.files),
-            **import_policy_extra,
-        }
-        if build_gap is not None and verified_view is not None:
-            # consumed_by_analysis 最终以检测实际使用该上下文的肯定证据
-            # 为准（#350 第六轮 P1）：平台链完成（status=completed）且
-            # 摘要带回实际生效的 build_context=verified-package——三方
-            # 消费者（facts/Specialist/复现）与门控同源，缺一即未消费。
-            # analyzer-not-configured / llm-not-configured /
-            # no-cxx-sources / review-incomplete 等状态在此自然为 False。
-            platform_summary = (
-                (result.report.collaboration or {}).get("platform") or {}
-            )
-            platform_status = str(platform_summary.get("status", ""))
-            platform_context = str(platform_summary.get("build_context", ""))
-            build_gap["consumed_by_analysis"] = (
-                platform_status == "completed"
-                and platform_context == "verified-package"
-            )
-        if build_gap is not None:
-            # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
-            # 阻断依赖上下文阶段的判定，二者都不冒充成功。
-            result.report.collaboration["build_agent"] = build_gap
+            with self.observability.span(
+                "repository.scan", task_id, task_id=task_id, tenant_id=tenant_id,
+                repository=repository_label,
+            ), metrics.timer("repository_scan_duration"):
+                result = self.repository_scanner.scan(
+                    workspace,
+                    repository_key=repository_label,
+                    progress_callback=(
+                        progress.pipeline_event if progress is not None else None
+                    ),
+                    task_id=task_id,
+                    verified_view=verified_view,
+                    require_verified_context=build_agent_mode == "required",
+                    # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
+                    # 权威取消信号。
+                    should_cancel=lambda: self.store.is_cancelled(task_id),
+                    # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
+                    # 并发任务各自隔离。
+                    cxx_agent_mode=cxx_agent_mode,
+                    investigate_paths=investigate_paths or (),
+                )
+            if self.store.is_cancelled(task_id):
+                raise RepositoryScanCancelled()
+            result.report.repository = repository_label
+            result.report.collaboration["import_policy"] = {
+                "host_path_exposed": False,
+                "repository_code_executed": False,
+                "snapshot_sha256": result.inventory.fingerprint(),
+                "snapshot_files": len(result.inventory.files),
+                **import_policy_extra,
+            }
+            if build_gap is not None and verified_view is not None:
+                # consumed_by_analysis 最终以检测实际使用该上下文的肯定证据
+                # 为准（#350 第六轮 P1）：平台链完成（status=completed）且
+                # 摘要带回实际生效的 build_context=verified-package——三方
+                # 消费者（facts/Specialist/复现）与门控同源，缺一即未消费。
+                # analyzer-not-configured / llm-not-configured /
+                # no-cxx-sources / review-incomplete 等状态在此自然为 False。
+                platform_summary = (
+                    (result.report.collaboration or {}).get("platform") or {}
+                )
+                platform_status = str(platform_summary.get("status", ""))
+                platform_context = str(platform_summary.get("build_context", ""))
+                requested_units = set(platform_summary.get("translation_units") or ())
+                received_units = set(platform_summary.get("verified_context_units") or ())
+                build_gap["consumed_by_analysis"] = (
+                    platform_status == "completed"
+                    and platform_context == "verified-package"
+                    and bool(requested_units)
+                    and requested_units <= received_units
+                )
+                if requested_units - received_units:
+                    build_gap["failure_code"] = "verified-context-unavailable"
+                    build_gap["blocking"] = build_agent_mode == "required"
+                elif build_agent_mode == "required" and not build_gap["consumed_by_analysis"]:
+                    build_gap["failure_code"] = "verified-context-not-consumed"
+                    build_gap["blocking"] = True
+            if build_gap is not None:
+                # 构建缺口必须显式可见：auto 是可继续的降级证据，required 是
+                # 阻断依赖上下文阶段的判定，二者都不冒充成功。
+                result.report.collaboration["build_agent"] = build_gap
+        finally:
+            # #354 评审第一轮 P1：释放覆盖异常与取消路径——扫描中途
+            # 抛出（含 RepositoryScanCancelled）时同样只撤销本任务的
+            # 持有权，最后一个持有者结束时才真正注销共享注册。
+            if delivered_registration is not None:
+                self._release_verified_context(
+                    delivered_registration[0],
+                    delivered_registration[1],
+                    delivered_registration[2],
+                )
         if self.repository_semantic_triage is not None:
             if self.store.is_cancelled(task_id):
                 raise RepositoryScanCancelled()
@@ -1967,6 +2120,11 @@ class ReviewService:
             }
         # 冻结决策：任何 coverage-affecting skip ≥ 1 即 completed_with_warnings。
         warnings_by_reason = coverage_warning_counts(result.inventory)
+        if build_gap is not None:
+            if build_gap.get("blocking"):
+                warnings_by_reason["build-context-blocked"] = 1
+            elif build_gap.get("failure_code") or not build_gap.get("consumed_by_analysis"):
+                warnings_by_reason["build-context-not-consumed"] = 1
         cxx_status = str(
             (result.report.collaboration.get("cxx_memory") or {}).get("status", "")
         ).strip().lower()

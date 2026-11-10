@@ -55,7 +55,7 @@ import json
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Final
 
 from .agent_scale import ResultCache, map_bounded
@@ -975,6 +975,8 @@ class PlatformReviewOutcome:
     # 实际生效的构建上下文模式（门控切换/作废后的终值）：平台摘要
     # 以此为 consumed_by_analysis 的肯定证据（#350 第六轮 P1）。
     build_context_mode: str = "snapshot-compdb"
+    # Positive receipts from the facts consumer, never inferred from mode.
+    verified_context_units: tuple[str, ...] = ()
 
 
 def platform_rule_id(cwe: str) -> str:
@@ -2146,6 +2148,7 @@ def run_platform_review(
     timeout: int = 60,
     source_mode: str = MODE_REPOSITORY,
     verified_view: object | None = None,
+    require_verified_context: bool = False,
     should_cancel: Any = None,
     tool_analysis: Any = None,
     cache: ResultCache | None = None,
@@ -2300,6 +2303,18 @@ def run_platform_review(
         )
 
     diagnostics: list[str] = [*capability_notes]
+    verified_context_units: set[str] = set()
+    context_unreviewed: set[str] = set()
+
+    def _finish(outcome: PlatformReviewOutcome) -> PlatformReviewOutcome:
+        return replace(
+            outcome,
+            diagnostics=tuple(dict.fromkeys((*diagnostics, *outcome.diagnostics))),
+            unreviewed_units=tuple(sorted(
+                context_unreviewed | set(outcome.unreviewed_units)
+            )),
+            verified_context_units=tuple(sorted(verified_context_units)),
+        )
 
     def _fetch_bundle() -> UafFactBundle | None:
         if analyzer_client is None:
@@ -2310,20 +2325,58 @@ def run_platform_review(
             )
         if not units:
             return None
-        return instrument_facts(
+        result = instrument_facts(
             analyzer_client,
             repository_key=repository_key,
             snapshot_hash=snapshot_hash,
             translation_units=units,
             build_context_mode=build_context_mode,
+            # #354 评审第一轮 P1：verified-package 请求绑定本任务已
+            # 交付的制品摘要——同一快照被另一任务注册不同构建产物
+            # 时，默认槽会被覆盖，facts 必须取本任务的包。
+            artifact_digest=(
+                getattr(verified_view, "artifact_digest", None)
+                if build_context_mode == "verified-package"
+                else None
+            ),
         )
+        diagnostics.extend(f"coverage gap: {gap}" for gap in result.coverage_gaps)
+        if build_context_mode == "verified-package":
+            for unit in result.per_unit:
+                context = unit.build_context
+                if (
+                    context.source_kind == "verified-package"
+                    and context.status == "resolved"
+                    and context.context_hash
+                    and unit.coverage.ast_complete
+                ):
+                    verified_context_units.add(unit.translation_unit)
+                else:
+                    diagnostics.extend(
+                        f"coverage gap: {unit.translation_unit}: {note}"
+                        for note in context.diagnostics
+                    )
+            context_unreviewed.update(set(units) - verified_context_units)
+            if context_unreviewed:
+                diagnostics.append("coverage gap: verified-context-unavailable")
+        return result
 
     # Leads: caller-provided, else release events from the facts instrument,
     # else the Discovery agent reading the same audited units itself.
     bundle: UafFactBundle | None = None
     discovery_unreviewed: tuple[str, ...] = ()
-    if not given_leads:
+    if build_context_mode == "verified-package":
         bundle = _fetch_bundle()
+        if bundle is None:
+            context_unreviewed.update(units)
+        if context_unreviewed and (mode == MODE_REQUIRED or require_verified_context):
+            return _finish(_empty_outcome(
+                ("verified-context-unavailable",), units,
+                build_context_mode=build_context_mode,
+            ))
+    if not given_leads:
+        if bundle is None:
+            bundle = _fetch_bundle()
         given_leads = (
             _leads_from_candidates(generate_candidates(bundle))
             if bundle is not None
@@ -2338,11 +2391,11 @@ def run_platform_review(
             discovery_unreviewed = tuple(sorted(unreviewed))
             given_leads = discovered
         if not given_leads:
-            return _empty_outcome(
+            return _finish(_empty_outcome(
                 ("no-leads-available", *diagnostics), units,
                 unreviewed_units=discovery_unreviewed,
                 build_context_mode=build_context_mode,
-            )
+            ))
 
     scout_timeout = _bounded_step_timeout(timeout, deadline)
     if scout_timeout is None:
@@ -2350,14 +2403,14 @@ def run_platform_review(
         # every unit hosting a lead carries unreviewed evidence; a clean
         # pass reading here would launder an expired review into a
         # verified one (the pair validator reads unreviewed_units).
-        return _empty_outcome(
+        return _finish(_empty_outcome(
             ("deadline-exceeded before the scout review",), units,
             unreviewed_units=tuple(sorted(
                 set(discovery_unreviewed)
                 | {lead.path for lead in given_leads}
             )),
             build_context_mode=build_context_mode,
-        )
+        ))
     try:
         report: ScoutReport = review_leads(
             given_leads,
@@ -2375,14 +2428,14 @@ def run_platform_review(
                 "platform review required the Scout but the LLM provider is "
                 f"not usable: {exc}"
             ) from exc
-        return _empty_outcome(
+        return _finish(_empty_outcome(
             (f"scout-unavailable: {exc}",), units,
             unreviewed_units=tuple(sorted(
                 set(discovery_unreviewed)
                 | {lead.path for lead in given_leads}
             )),
             build_context_mode=build_context_mode,
-        )
+        ))
     if report.degradation:
         diagnostics.append(f"scout: {report.degradation}")
     # Review round 6 (P1): leads the Scout never resolved (mid-flight
@@ -2392,7 +2445,7 @@ def run_platform_review(
         lead.path for lead in report.unresolved_leads
     }
     if not report.targets:
-        return PlatformReviewOutcome(
+        return _finish(PlatformReviewOutcome(
             findings=(),
             targets=(),
             stats=PlatformReviewStats(
@@ -2405,7 +2458,7 @@ def run_platform_review(
                 set(discovery_unreviewed) | scout_unreviewed
             )),
             build_context_mode=build_context_mode,
-        )
+        ))
 
     if bundle is None and analyzer_client is not None:
         bundle = _fetch_bundle()
@@ -2625,7 +2678,7 @@ def run_platform_review(
         if item.state == "abstain"
         and item.rejected_reason in ("deadline-exceeded", "cancelled")
     }
-    return PlatformReviewOutcome(
+    return _finish(PlatformReviewOutcome(
         findings=findings,
         targets=tuple(targets_out),
         stats=PlatformReviewStats(
@@ -2644,4 +2697,4 @@ def run_platform_review(
             set(discovery_unreviewed) | stage_unreviewed | scout_unreviewed
         )),
         build_context_mode=build_context_mode,
-    )
+    ))

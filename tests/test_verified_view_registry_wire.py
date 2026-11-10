@@ -52,14 +52,17 @@ def make_settings() -> AnalyzerSettings:
     )
 
 
-def build_repository_and_view(root: Path, variant: int = 0):
+def build_repository_and_view(root: Path, variant: int = 0, macro: str = "1"):
     """One directory serving as snapshot, import-root repo and package source.
 
     Returns ``(repository, view, snapshot_hash, artifact_digest)``.  The
-    package binds ``src/a.cpp`` with ``-DVERIFIED=1`` plus one vendored
-    header member, mirroring the S4B fixtures.  ``variant`` varies the
-    source content so distinct calls yield DISTINCT snapshot
-    fingerprints (capacity tests register many snapshots).
+    package binds ``src/a.cpp`` with ``-DVERIFIED=<macro>`` plus one
+    vendored header member, mirroring the S4B fixtures.  ``variant``
+    varies the source content so distinct calls yield DISTINCT snapshot
+    fingerprints (capacity tests register many snapshots); ``macro``
+    varies only the compdb flag, so two calls with the same ``variant``
+    share ONE snapshot while producing two different sealed artifacts
+    (#354 review round 1, P1: sibling builds of the same snapshot).
     """
     repository = root / "team" / "project"
     (repository / "src").mkdir(parents=True, exist_ok=True)
@@ -69,7 +72,7 @@ def build_repository_and_view(root: Path, variant: int = 0):
     snapshot_hash = snapshot_fingerprint(repository)
     entry = {
         "directory": "src",
-        "arguments": ["/usr/bin/c++", "-DVERIFIED=1", "-c", "a.cpp"],
+        "arguments": ["/usr/bin/c++", f"-DVERIFIED={macro}", "-c", "a.cpp"],
         "file": "src/a.cpp",
     }
     manifest = build_manifest(
@@ -81,7 +84,7 @@ def build_repository_and_view(root: Path, variant: int = 0):
         rewrites={},
         created_by="registry-wire-test",
     )
-    package = root / "package"
+    package = root / f"package-{macro}"
     write_package(
         package,
         manifest,

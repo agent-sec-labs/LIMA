@@ -369,10 +369,22 @@ export interface RepairPreviewResult {
 }
 
 /** POST /v1/tasks/:id/fix（fixer.create_fix_commits 契约）。 */
+export type FixFailureCode =
+  | "repair-input-too-large"
+  | "repair-publication-store-unconfigured"
+  | "repair-publication-pending"
+  | "repair-publication-conflict"
+  | "repair-source-stale"
+  | "repair-manifest-missing"
+  | "repository-tests-not-configured"
+  | "repair-verification-failed";
+
 export interface FixResult {
   branch: string | null;
-  source_sha?: string;
+  source_sha: string | null;
   commits?: unknown[];
+  failure_code?: FixFailureCode;
+  publication_operation_id?: string;
   note?: string;
   [key: string]: unknown;
 }

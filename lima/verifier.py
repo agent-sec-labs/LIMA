@@ -1,8 +1,7 @@
 """Fail-closed compilation, security-oracle, rescan, and test gates for repairs."""
 import ast
 import os
-import shlex
-import subprocess
+import stat
 import tempfile
 import time
 import zipfile
@@ -12,6 +11,11 @@ from typing import Dict
 
 from .python_analyzer import PythonAstSecurityAnalyzer
 from .python_dataflow import PythonDataflowAnalyzer
+from .repair_sandbox import DockerRepairTestSandbox
+from .repair_bindings import (
+    PATH_HELPER_SOURCE, bindings, module_import_proven, trusted_root_proven,
+)
+from .repair_sql_bindings import sql_receiver_proven
 
 
 IGNORED_DIRECTORIES = {
@@ -41,15 +45,21 @@ def _call_name(node: ast.AST) -> str:
 
 
 class RepairVerifier:
-    def __init__(self, test_command: str = "", timeout_seconds: int = 120):
+    def __init__(self, test_command: str = "", timeout_seconds: int = 120,
+                 *, sandbox_image: str = "", sandbox_runner=None):
         self.test_command = test_command
         self.timeout_seconds = timeout_seconds
+        self.sandbox = DockerRepairTestSandbox(sandbox_image, runner=sandbox_runner)
 
     def verify_contents(self, files: Dict[str, str], repairs=None) -> dict:
         started = time.monotonic()
         checks = []
         trees = {}
         for path, content in files.items():
+            if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+                checks.append({"name": "compile:%s" % path, "passed": False,
+                               "detail": "repair-source-too-large"})
+                continue
             if path.endswith(".py"):
                 try:
                     trees[path] = ast.parse(content, filename=path)
@@ -95,7 +105,7 @@ class RepairVerifier:
             if len(expected_nodes) != 1 or not isinstance(expected_nodes[0], ast.Call):
                 errors.append("expected replacement call is not unique")
             else:
-                errors.extend(self._strategy_errors(expected_nodes[0], repair, identities))
+                errors.extend(self._strategy_errors(expected_nodes[0], repair, identities, tree))
             checks.append({
                 "name": name, "passed": not errors,
                 "detail": "; ".join(errors) if errors else str(
@@ -105,7 +115,7 @@ class RepairVerifier:
         return checks
 
     @staticmethod
-    def _strategy_errors(call, repair, identities):
+    def _strategy_errors(call, repair, identities, tree):
         strategy = str(repair.get("strategy", ""))
         oracle = repair.get("oracle") or {}
         errors = []
@@ -116,18 +126,50 @@ class RepairVerifier:
                   or not isinstance(call.args[0].elts[0], ast.Constant)
                   or not isinstance(call.args[0].elts[0].value, str)):
                 errors.append("executable is not a fixed string")
+            else:
+                argv = call.args[0].elts
+                executable = argv[0].value
+                # Independently recheck actual argv, never a manifest's claim.
+                if executable == "echo":
+                    safe_arguments = len(argv) >= 2
+                elif executable == "printf":
+                    safe_arguments = len(argv) >= 3 and isinstance(argv[1], ast.Constant) \
+                        and argv[1].value == "%s"
+                else:
+                    safe_arguments = False
+                if not safe_arguments:
+                    errors.append("command argument semantics are not proven")
+            if len(call.args) != 1 or any(
+                keyword.arg is None or keyword.arg in {"executable", "env", "cwd", "preexec_fn"}
+                for keyword in call.keywords
+            ):
+                errors.append("command execution override is not proven")
+            callee = _call_name(call.func)
+            module = "_lima_subprocess" if callee == "_lima_subprocess.run" else "subprocess"
+            if callee not in {
+                "subprocess.run", "subprocess.call", "subprocess.Popen",
+                "subprocess.check_call", "subprocess.check_output", "_lima_subprocess.run",
+            } or not module_import_proven(tree, module, "subprocess"):
+                errors.append("subprocess binding is not proven")
             shell = [item.value for item in call.keywords if item.arg == "shell"]
             if (len(shell) != 1 or not isinstance(shell[0], ast.Constant)
                     or shell[0].value is not False):
                 errors.append("shell=False is not explicit")
         elif strategy == "parameterized-sql":
+            if not sql_receiver_proven(tree, call):
+                errors.append("SQL driver binding is not proven")
+            if (oracle.get("driver_contract") != "sqlite3-standard-v1"
+                    or oracle.get("paramstyle") != "qmark"):
+                errors.append("SQL driver contract is not proven")
             if (len(call.args) != 2 or not isinstance(call.args[0], ast.Constant)
                     or not isinstance(call.args[0].value, str)
                     or not isinstance(call.args[1], ast.Tuple)):
                 errors.append("SQL is not a constant query plus tuple parameters")
             else:
                 count = int(oracle.get("parameter_count", -1))
-                placeholder = str(oracle.get("placeholder", ""))
+                placeholder = "?"
+                if oracle.get("placeholder") != placeholder:
+                    errors.append("SQL placeholder differs from proven driver")
                 if count < 1 or len(call.args[1].elts) != count:
                     errors.append("SQL parameter arity changed")
                 if not placeholder or call.args[0].value.count(placeholder) != count:
@@ -136,14 +178,33 @@ class RepairVerifier:
             if (not call.args or not isinstance(call.args[0], ast.Call)
                     or _call_name(call.args[0].func) != "_lima_resolve_under_base"):
                 errors.append("path sink does not use the confinement helper")
+            else:
+                resolver = call.args[0]
+                # Ignore only the fixed generated helper's local names while
+                # proving the repository expression's module binding.
+                root_tree = ast.Module(body=[item for item in tree.body if not (
+                    isinstance(item, ast.FunctionDef) and item.name == "_lima_resolve_under_base"
+                )], type_ignores=[])
+                if len(resolver.args) != 2 or resolver.keywords or not trusted_root_proven(
+                    resolver.args[0], root_tree,
+                ):
+                    errors.append("trusted path root binding is not proven")
             helper = str(repair.get("expected_helper_ast", ""))
-            if not helper or identities[helper] != 1:
+            canonical = _ast_identity(ast.parse(PATH_HELPER_SOURCE).body[0])
+            if helper != canonical or identities[canonical] != 1:
                 errors.append("audited confinement helper is missing or modified")
+            definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                           and node.name == "_lima_resolve_under_base"]
+            if len(definitions) != 1 or bindings(tree, "_lima_resolve_under_base") != definitions:
+                errors.append("confinement helper binding is not proven")
+            if not module_import_proven(tree, "_LIMAPath", "pathlib", "Path"):
+                errors.append("confinement Path binding is not proven")
         else:
             errors.append("unknown repair strategy")
         return errors
 
-    def verify_worktree(self, root: str, require_tests: bool = False) -> dict:
+    def verify_worktree(self, root: str, require_tests: bool = False,
+                        *, file_modes: dict[str, str] | None = None) -> dict:
         if not self.test_command:
             passed = not require_tests
             return {
@@ -154,48 +215,52 @@ class RepairVerifier:
                         "No test command configured; security repairs may not be published."
                         if require_tests else "No repository test command configured."
                     ),
-                }],
+                }], "sandbox": {"configured": bool(self.sandbox.image), "executed": False,
+                              "stop_confirmed": False, "passed": False,
+                              "reason": "repair-test-command-unconfigured", "image_id": None,
+                              "limits": {}},
             }
         root = os.path.abspath(root)
         if not os.path.isdir(root):
             raise ValueError("verification worktree does not exist")
-        command = shlex.split(self.test_command, posix=os.name != "nt")
         started = time.monotonic()
-        env = {
-            key: value for key, value in os.environ.items()
-            if key in {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "TMP", "TEMP"}
-        }
-        env.update({"HTTP_PROXY": "", "HTTPS_PROXY": "", "ALL_PROXY": "", "NO_PROXY": "*"})
-        with tempfile.TemporaryDirectory(prefix="lima-verify-") as temp:
-            env["TMPDIR"] = temp
-            try:
-                result = subprocess.run(
-                    command, cwd=root, env=env, text=True, capture_output=True,
-                    encoding="utf-8", errors="replace",
-                    timeout=self.timeout_seconds, check=False,
-                )
-                passed = result.returncode == 0
-                detail = (result.stdout + "\n" + result.stderr)[-8000:]
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                passed = False
-                detail = (
-                    "verification exceeded %d seconds" % self.timeout_seconds
-                    if isinstance(exc, subprocess.TimeoutExpired) else str(exc)
-                )
+        receipt = self.sandbox.run(
+            root, self.test_command, self.timeout_seconds, file_modes=file_modes,
+        )
+        passed = bool(receipt.get("passed"))
+        detail = (receipt.get("stdout", "") + "\n" + receipt.get("stderr", ""))[-8000:]
+        if not detail.strip():
+            detail = str(receipt.get("reason", "repair-sandbox-failed"))
         return {
             "passed": passed,
             "checks": [{"name": "repository-tests", "passed": passed, "detail": detail}],
             "duration_seconds": round(time.monotonic() - started, 4),
+            "sandbox": receipt,
         }
 
     def verify_archive(self, archive: bytes, files: Dict[str, str], repairs=None) -> dict:
         """Verify a patch in a bounded, isolated copy of the complete repository."""
         started = time.monotonic()
         repairs = repairs or []
+        test_result = None
         with tempfile.TemporaryDirectory(prefix="lima-repair-") as root:
-            self._safe_extract(archive, root)
+            try:
+                archive_modes = self._safe_extract(archive, root)
+            except (ValueError, zipfile.BadZipFile) as exc:
+                reason = str(exc) if str(exc) in {
+                    "repair-archive-link-unsupported", "repair-archive-type-unsupported",
+                    "repair-archive-path-conflict",
+                } else "repair-archive-invalid"
+                return {"passed": False, "checks": [{
+                    "name": "archive-input", "passed": False, "detail": reason,
+                }], "sandbox": None,
+                    "duration_seconds": round(time.monotonic() - started, 4)}
             entries = [item for item in os.scandir(root) if item.is_dir()]
             worktree = entries[0].path if len(entries) == 1 else root
+            file_modes = {
+                os.path.relpath(os.path.join(root, path), worktree).replace("\\", "/"): mode
+                for path, mode in archive_modes.items()
+            }
             before = self._snapshot_python(worktree)
             for path, content in files.items():
                 target = os.path.abspath(os.path.join(worktree, path))
@@ -210,12 +275,15 @@ class RepairVerifier:
             if content_result["passed"] and repairs:
                 checks.extend(self.verify_differential(before, after, repairs)["checks"])
             if all(item["passed"] for item in checks):
-                test_result = self.verify_worktree(worktree, require_tests=bool(repairs))
+                test_result = self.verify_worktree(
+                    worktree, require_tests=bool(repairs), file_modes=file_modes,
+                )
                 checks.extend(test_result["checks"])
             return {
                 "passed": bool(checks) and all(item["passed"] for item in checks),
                 "checks": checks,
                 "duration_seconds": round(time.monotonic() - started, 4),
+                "sandbox": test_result.get("sandbox") if test_result else None,
             }
 
     def verify_differential(self, before, after, repairs):
@@ -229,19 +297,39 @@ class RepairVerifier:
 
     @staticmethod
     def _safe_extract(archive, root):
-        with zipfile.ZipFile(BytesIO(archive)) as bundle:
+        source = BytesIO(archive) if isinstance(archive, (bytes, bytearray)) else archive
+        with zipfile.ZipFile(source) as bundle:
             members = bundle.infolist()
             if len(members) > MAX_ARCHIVE_MEMBERS:
                 raise ValueError("repository archive contains too many entries")
             if sum(item.file_size for item in members) > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
                 raise ValueError("repository archive exceeds extraction limit")
+            paths = set()
+            file_modes = {}
+            # Validate every header before creating even the first file.
             for member in members:
+                mode = member.external_attr >> 16
+                kind = stat.S_IFMT(mode)
+                if kind == stat.S_IFLNK:
+                    raise ValueError("repair-archive-link-unsupported")
+                expected_type = stat.S_IFDIR if member.is_dir() else stat.S_IFREG
+                if kind not in {0, expected_type} or mode & 0o7000:
+                    raise ValueError("repair-archive-type-unsupported")
                 normalized = os.path.normpath(member.filename).replace("\\", "/")
                 if normalized.startswith("../") or normalized.startswith("/"):
                     raise ValueError("repository archive contains an unsafe path")
                 target = os.path.abspath(os.path.join(root, normalized))
                 if not target.startswith(os.path.abspath(root) + os.sep):
                     raise ValueError("repository archive escapes the sandbox")
+                identity = os.path.normcase(target)
+                if identity in paths:
+                    raise ValueError("repair-archive-path-conflict")
+                paths.add(identity)
+                if not member.is_dir():
+                    file_modes[normalized] = "100755" if mode & 0o111 else "100644"
+            for member in members:
+                normalized = os.path.normpath(member.filename).replace("\\", "/")
+                target = os.path.abspath(os.path.join(root, normalized))
                 if member.is_dir():
                     continue
                 os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -251,6 +339,8 @@ class RepairVerifier:
                         if not chunk:
                             break
                         destination.write(chunk)
+                os.chmod(target, int(file_modes[normalized], 8) & 0o777)
+            return file_modes
 
     @staticmethod
     def _snapshot_python(root):

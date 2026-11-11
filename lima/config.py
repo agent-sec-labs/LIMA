@@ -156,6 +156,7 @@ class Settings:
     skill_container_image: str = ""
     repair_test_command: str = ""
     repair_verify_timeout_seconds: int = 120
+    repair_sandbox_image: str = ""
     otel_endpoint: str = ""
     otel_service_name: str = "lima"
     alert_failure_rate: float = 0.20
@@ -337,6 +338,8 @@ class Settings:
             raise ValueError("build_agent_mode must be off, auto or required")
         if self.build_concurrency < 1:
             raise ValueError("build_concurrency must be positive")
+        if self.repair_verify_timeout_seconds <= 0:
+            raise ValueError("LIMA_REPAIR_VERIFY_TIMEOUT_SECONDS must be positive")
         if self.build_artifacts_retention_days < 1:
             raise ValueError("build_artifacts_retention_days must be positive")
         if self.repository_scan_sast_mode not in {"auto", "off", "required"}:
@@ -484,6 +487,7 @@ class Settings:
             skill_container_image=os.getenv("LIMA_SKILL_CONTAINER_IMAGE", ""),
             repair_test_command=os.getenv("LIMA_REPAIR_TEST_COMMAND", ""),
             repair_verify_timeout_seconds=_int("LIMA_REPAIR_VERIFY_TIMEOUT_SECONDS", 120),
+            repair_sandbox_image=os.getenv("LIMA_REPAIR_SANDBOX_IMAGE", "").strip(),
             otel_endpoint=os.getenv("LIMA_OTEL_ENDPOINT", ""),
             otel_service_name=os.getenv("LIMA_OTEL_SERVICE_NAME", "lima"),
             alert_failure_rate=float(os.getenv("LIMA_ALERT_FAILURE_RATE", "0.20")),

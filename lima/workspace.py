@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Iterable, Iterator, Optional
@@ -44,6 +45,21 @@ LOW_PRIORITY_DIRECTORIES = frozenset(
     }
 )
 SOURCE_ROOT_DIRECTORIES = frozenset({"app", "lib", "package", "packages", "src"})
+
+
+def _is_link_or_reparse_point(path: Path) -> bool:
+    """Reject links on every platform, including Windows junctions."""
+
+    if path.is_symlink():
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None and isjunction(path):
+        return True
+    try:
+        attributes = path.lstat().st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 @dataclass(frozen=True)
@@ -119,7 +135,10 @@ class RepositoryWorkspace:
         extensions: Optional[Iterable[str]] = None,
         ignored_directories: Optional[Iterable[str]] = None,
     ) -> None:
-        candidate = Path(root).expanduser().resolve(strict=True)
+        supplied_root = Path(root).expanduser()
+        if _is_link_or_reparse_point(supplied_root):
+            raise ValueError("repository root must not be a link or reparse point")
+        candidate = supplied_root.resolve(strict=True)
         if not candidate.is_dir():
             raise ValueError("repository root must be a directory")
         if max_files < 1 or max_file_bytes < 1 or max_total_bytes < 1:
@@ -156,12 +175,21 @@ class RepositoryWorkspace:
         raw = Path(relative_path)
         if raw.is_absolute():
             raise ValueError("workspace paths must be relative")
-        resolved = (self.root / raw).resolve(strict=True)
+        candidate = self.root / raw
+        # Checking only ``candidate`` is insufficient on Windows: resolving
+        # ``junction/file.cpp`` erases the junction from the resulting path.
+        # Inspect every lexical component before resolving it.
+        component = self.root
+        for part in raw.parts:
+            component /= part
+            if _is_link_or_reparse_point(component):
+                raise ValueError("workspace path must reference a regular file")
+        resolved = candidate.resolve(strict=True)
         try:
             resolved.relative_to(self.root)
         except ValueError as exc:
             raise ValueError("workspace path escapes repository root") from exc
-        if resolved.is_symlink() or not resolved.is_file():
+        if _is_link_or_reparse_point(resolved) or not resolved.is_file():
             raise ValueError("workspace path must reference a regular file")
         return resolved
 
@@ -180,7 +208,6 @@ class RepositoryWorkspace:
             raise ValueError("workspace snapshot drift")
         return data
 
-
     def inventory(self) -> WorkspaceInventory:
         result = WorkspaceInventory(root=str(self.root))
         candidates: list[Path] = []
@@ -194,16 +221,16 @@ class RepositoryWorkspace:
                 child = current / name
                 if name in self.ignored_directories:
                     self._record_skip(result, "ignored-directory")
-                elif child.is_symlink():
-                    self._record_skip(result, "symlink")
+                elif _is_link_or_reparse_point(child):
+                    self._record_skip(result, "reparse-point")
                 else:
                     kept_directories.append(name)
             directory_names[:] = kept_directories
 
             for name in sorted(file_names):
                 path = current / name
-                if path.is_symlink():
-                    self._record_skip(result, "symlink")
+                if _is_link_or_reparse_point(path):
+                    self._record_skip(result, "reparse-point")
                 elif name in DEFAULT_IGNORED_FILES or name.startswith(".env."):
                     self._record_skip(result, "sensitive-config")
                 elif (

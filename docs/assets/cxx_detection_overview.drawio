@@ -1,0 +1,152 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron">
+  <diagram id="lima-cxx-overview" name="C++ 漏洞检测流程">
+    <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="1720" pageHeight="810" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="&lt;b&gt;LIMA · C++ 漏洞检测流程&lt;/b&gt;" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=27;fontColor=#263238;">
+          <mxGeometry as="geometry" x="380" y="15" width="960" height="45" />
+        </mxCell>
+        <mxCell id="subtitle" value="静态线索 → 智能体调查 → 假设与实验闭环 → 证据分级与报告" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=16;fontColor=#60717D;">
+          <mxGeometry as="geometry" x="300" y="65" width="1120" height="30" />
+        </mxCell>
+        <mxCell id="triage" value="" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#EEF6FC;container=1;pointerEvents=0;arcSize=12;">
+          <mxGeometry as="geometry" x="175" y="120" width="350" height="460" />
+        </mxCell>
+        <mxCell id="investigate" value="" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#F3EFF8;container=1;pointerEvents=0;arcSize=12;">
+          <mxGeometry as="geometry" x="545" y="120" width="685" height="460" />
+        </mxCell>
+        <mxCell id="final" value="" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#EEF7EE;container=1;pointerEvents=0;arcSize=12;">
+          <mxGeometry as="geometry" x="1250" y="120" width="285" height="460" />
+        </mxCell>
+        <mxCell id="h1" value="&lt;b&gt;线索发现与侦察&lt;/b&gt;" parent="triage" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=21;fontColor=#315A78;">
+          <mxGeometry as="geometry" x="10" y="12" width="330" height="34" />
+        </mxCell>
+        <mxCell id="h2" value="&lt;b&gt;深度分析与复现闭环&lt;/b&gt;" parent="investigate" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=21;fontColor=#5C4774;">
+          <mxGeometry as="geometry" x="10" y="12" width="665" height="34" />
+        </mxCell>
+        <mxCell id="h3" value="&lt;b&gt;证据裁决与报告&lt;/b&gt;" parent="final" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=21;fontColor=#486B47;">
+          <mxGeometry as="geometry" x="5" y="12" width="275" height="34" />
+        </mxCell>
+        <mxCell id="input" value="&lt;b&gt;C / C++ 源码&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#4F6472;&quot;&gt;仓库 / PR 快照&lt;br&gt;源码与构建上下文&lt;br&gt;绑定 snapshot_hash&lt;/font&gt;" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#FFFFFF;shape=document;boundedLbl=1;fontSize=18;">
+          <mxGeometry as="geometry" x="15" y="225" width="135" height="170" />
+        </mxCell>
+        <mxCell id="seed" value="&lt;b&gt;静态分诊&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#315A78;&quot;&gt;工具 / 事实候选&lt;br&gt;无候选时 Discovery&lt;br&gt;有界读码发现线索&lt;/font&gt;" parent="triage" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#D9ECF8;">
+          <mxGeometry as="geometry" x="20" y="110" width="140" height="170" />
+        </mxCell>
+        <mxCell id="scout" value="&lt;b&gt;Scout 智能体&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#315A78;&quot;&gt;搜索 · 读码 · 追踪&lt;br&gt;排除 / 升级线索&lt;br&gt;形成目标清单&lt;/font&gt;" parent="triage" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#CDEBF3;">
+          <mxGeometry as="geometry" x="190" y="110" width="140" height="170" />
+        </mxCell>
+        <mxCell id="leadnote" value="线索仅用于引导调查，不直接认定漏洞" parent="triage" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=14;fontColor=#315A78;">
+          <mxGeometry as="geometry" x="15" y="325" width="320" height="70" />
+        </mxCell>
+        <mxCell id="specialist" value="&lt;b&gt;Specialist&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#5C4774;&quot;&gt;分析生命周期 / 数据流&lt;br&gt;提出漏洞假设与 CWE&lt;br&gt;生成 PoC 驱动&lt;/font&gt;" parent="investigate" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#DDD4EA;">
+          <mxGeometry as="geometry" x="25" y="110" width="185" height="170" />
+        </mxCell>
+        <mxCell id="repro" value="&lt;b&gt;复现工作台&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#315A78;&quot;&gt;隔离沙箱编译与运行&lt;br&gt;ASan / UBSan 观察&lt;br&gt;绑定目标与漏洞类型&lt;/font&gt;" parent="investigate" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#D9ECF8;">
+          <mxGeometry as="geometry" x="260" y="110" width="210" height="170" />
+        </mxCell>
+        <mxCell id="critic" value="&lt;b&gt;Critic 智能体&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#8A4052;&quot;&gt;寻找反证与替代解释&lt;br&gt;修正假设 / PoC&lt;br&gt;拒绝或停止调查&lt;/font&gt;" parent="investigate" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#F7D7DF;">
+          <mxGeometry as="geometry" x="260" y="320" width="210" height="125" />
+        </mxCell>
+        <mxCell id="loopnote" value="有界迭代&lt;br&gt;轮次 / 预算 / 超时约束" parent="investigate" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=14;fontColor=#5C4774;">
+          <mxGeometry as="geometry" x="25" y="55" width="185" height="45" />
+        </mxCell>
+        <mxCell id="arbiter" value="&lt;b&gt;证据裁决&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#486B47;&quot;&gt;汇合假设、反证与工具证据&lt;br&gt;冻结状态机判定&lt;br&gt;冲突 → 人工复核&lt;/font&gt;" parent="final" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#CFE8CF;">
+          <mxGeometry as="geometry" x="25" y="110" width="235" height="130" />
+        </mxCell>
+        <mxCell id="grade" value="&lt;b&gt;发现分级&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#486B47;&quot;&gt;semantic-supported&lt;br&gt;fact-verified&lt;br&gt;runtime-confirmed&lt;br&gt;needs-human-review&lt;/font&gt;" parent="final" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#E3F1E3;">
+          <mxGeometry as="geometry" x="25" y="270" width="235" height="145" />
+        </mxCell>
+        <mxCell id="output" value="&lt;b&gt;检测报告&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#7B6122;&quot;&gt;位置 · CWE · 触发条件&lt;br&gt;证据与 PoC 执行记录&lt;br&gt;rejected / abstain 留审计&lt;br&gt;&lt;br&gt;检测结果不自动修复&lt;/font&gt;" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#FFFFFF;shape=document;boundedLbl=1;fontSize=18;">
+          <mxGeometry as="geometry" x="1560" y="225" width="145" height="220" />
+        </mxCell>
+        <mxCell id="support" value="" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=#FBE1C6;container=1;pointerEvents=0;arcSize=15;">
+          <mxGeometry as="geometry" x="175" y="645" width="1360" height="130" />
+        </mxCell>
+        <mxCell id="supporttitle" value="&lt;b&gt;工具与执行支撑&lt;/b&gt;" parent="support" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=20;fontColor=#A45E23;">
+          <mxGeometry as="geometry" x="400" y="8" width="560" height="30" />
+        </mxCell>
+        <mxCell id="facts" value="&lt;b&gt;静态与事实仪器&lt;/b&gt;&lt;br&gt;Semgrep · Clang · Build Context&lt;br&gt;UAF 事实 / P1–P7 证明（可选）" parent="support" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=14;fontColor=#755334;">
+          <mxGeometry as="geometry" x="15" y="46" width="440" height="72" />
+        </mxCell>
+        <mxCell id="sandbox" value="&lt;b&gt;复现沙箱&lt;/b&gt;&lt;br&gt;Docker · Landlock · seccomp&lt;br&gt;身份、资源预算与超时限制" parent="support" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=14;fontColor=#755334;">
+          <mxGeometry as="geometry" x="470" y="46" width="415" height="72" />
+        </mxCell>
+        <mxCell id="audit" value="&lt;b&gt;证据与审计&lt;/b&gt;&lt;br&gt;快照身份 · 实验台账 · 产物哈希&lt;br&gt;共享调用预算与降级记录" parent="support" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=14;fontColor=#755334;">
+          <mxGeometry as="geometry" x="920" y="46" width="425" height="72" />
+        </mxCell>
+        <mxCell id="e1" source="input" target="seed" parent="1" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#4F6472;strokeColor=#4F6472;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e2" source="seed" target="scout" parent="1" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#4F6472;strokeColor=#4F6472;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e3" source="scout" target="specialist" parent="1" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#4F6472;strokeColor=#4F6472;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e4" source="specialist" target="repro" parent="1" edge="1" value="假设 + PoC" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#5C4774;strokeColor=#5C4774;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e5" source="repro" target="arbiter" parent="1" edge="1" value="目标与漏洞类型匹配&lt;br&gt;运行命中" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#639763;strokeColor=#639763;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e6" source="repro" target="critic" parent="1" edge="1" value="未命中 / 实验失败" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#AE6176;strokeColor=#AE6176;exitX=0.5;exitY=1;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e7" source="critic" target="specialist" parent="1" edge="1" value="修正后再试" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#675181;strokeColor=#675181;exitX=0;exitY=0.5;entryX=0.5;entryY=1;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="665" y="502" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" source="critic" target="arbiter" parent="1" edge="1" value="收敛 / 拒绝 / 达到上限" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#AE6176;strokeColor=#AE6176;exitX=1;exitY=0.5;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1215" y="502" />
+              <mxPoint x="1215" y="180" />
+              <mxPoint x="1392" y="180" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" source="arbiter" target="grade" parent="1" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#486B47;strokeColor=#486B47;exitX=0.5;exitY=1;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e10" source="grade" target="output" parent="1" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#639763;strokeColor=#639763;exitX=1;exitY=0.5;entryX=0;entryY=0.75;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e11" source="facts" target="seed" parent="1" edge="1" value="候选线索" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#D78231;strokeColor=#D78231;exitX=0;exitY=0.5;entryX=0;entryY=0.8;dashed=1;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="165" y="727" />
+              <mxPoint x="165" y="488" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e12" source="sandbox" target="repro" parent="1" edge="1" value="受控实验" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#D78231;strokeColor=#D78231;exitX=1;exitY=0.5;entryX=1;entryY=0.8;dashed=1;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1165" y="727" />
+              <mxPoint x="1165" y="610" />
+              <mxPoint x="1040" y="610" />
+              <mxPoint x="1040" y="366" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e13" source="audit" target="arbiter" parent="1" edge="1" value="证据绑定" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.5;endArrow=classic;endFill=1;fontFamily=Microsoft YaHei;fontSize=13;labelBackgroundColor=#FFFFFF;fontColor=#D78231;strokeColor=#D78231;exitX=1;exitY=0.5;entryX=1;entryY=0.75;dashed=1;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1545" y="730" />
+              <mxPoint x="1545" y="328" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="boundary" value="整仓模式支持动态复现；diff-only 或复现不可用时降级汇报。工具证据用于裁决，不能替代智能体假设。" parent="1" vertex="1" style="whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#263238;rounded=1;arcSize=15;strokeColor=none;shadow=1;fillColor=none;shadow=0;fontSize=13;fontColor=#60717D;">
+          <mxGeometry as="geometry" x="200" y="785" width="1310" height="24" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

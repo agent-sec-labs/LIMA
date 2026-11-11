@@ -17,7 +17,7 @@ Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_B
 
 需要在 Docker 中完整构建 C/C++ 目标仓库时，请使用 [容器完整构建指南](docs/CONTAINER_BUILD_GUIDE.md)：统一入口为 `python -m lima.container_build`，具体仓库的配方由使用者在本机维护。
 
-希望在审计任务内**自动准备** C/C++ 编译上下文时，可启用 Build Agent（`LIMA_BUILD_AGENT_MODE=off/auto/required`）：它会在沙箱容器中自动规划、执行 CMake configure 并导出经校验的上下文包，无需手写配方。详见 [Build Agent 用户流程](docs/BUILD_AGENT_USER_FLOW.md)。
+希望在审计任务内**自动准备** C/C++ 编译上下文时，可启用 Build Agent（`LIMA_BUILD_AGENT_MODE=off/auto/required`）：它会在沙箱容器中自动执行受策略约束的 CMake configure，并导出经校验的上下文包。生产路径当前使用确定性的 CMake planner；详见 [Build Agent 用户流程](docs/BUILD_AGENT_USER_FLOW.md) 和[宿主部署指南](docs/BUILD_AGENT_HOST_DEPLOYMENT.md)。标准只读 Compose 不承载此 opt-in 功能。
 
 > 以证据审代码，以闭环修漏洞。Audit with evidence. Repair with confidence.
 
@@ -39,7 +39,7 @@ Logo 的设计语义、色彩与使用规范见 [品牌视觉规范](docs/LIMA_B
 - 覆盖任务、工具、反馈、记忆、观察与 Diff 的统一 Context Window 和逐轮压缩
 - Working/Episodic/Semantic 分层记忆、租户级检索、任务归档与过期清理
 - Redis Streams ACK、Worker 租约、指数退避重试和死信队列
-- Webhook delivery 幂等、重放时间窗与评论 upsert
+- Webhook delivery 幂等、持久 outbox 投递恢复、固定 base/head diff、重放时间窗与评论 upsert
 - 用户登录、RBAC、租户/仓库隔离和不可变管理审计
 - 动态 Skill manifest 校验、签名校验和隔离进程沙箱
 - 自动修复后的编译/测试门禁、灰度发布与影子流量
@@ -442,15 +442,20 @@ Invoke-RestMethod https://<公网域名>/health
 
 默认只在管理台保存结果。只有 `LIMA_AUTO_POST_REVIEW=true` 时才会向 PR 回写评论。
 
-自动修复只覆盖可以证明安全不变量的窄形态。CWE-78 仅处理固定可执行文件和独立动态参数，生成 argv 并显式设置 `shell=False`；CWE-89 仅处理能够确定 DB-API 参数风格、且动态内容只处于值位置的 `execute`；CWE-22 仅处理有模块级静态根目录或 `lima: trusted-path-root=<name>` 审计注解的路径拼接。动态命令、Shell 运算符、动态表/列名、未知数据库驱动、未证明可信的根目录会明确 abstain，不做猜测性修改。
+自动修复只覆盖可以证明安全不变量的窄形态。CWE-78 当前仅处理标准 `echo` 数据参数及固定 `%s` 格式的 `printf`，生成 argv 并显式设置 `shell=False`；解释器、未知程序、自定义可执行路径及 `executable`/`env`/`cwd` 等执行覆盖会拒修。该窄规则假定目标环境将这两个名称解析为可信的标准程序，仍须通过目标仓库的隔离测试。CWE-89 仅处理能够确定 DB-API 参数风格、且动态内容只处于值位置的 `execute`；CWE-22 要求根目录是静态路径表达式，或只有一次无条件模块赋值的静态路径，并核验 `Path` 导入和生成 helper 的绑定。参数遮蔽、重绑定、动态命名空间及仅有 `lima: trusted-path-root=<name>` 注释的根目录会拒修。无法证明时明确 abstain，不做猜测性修改。
 
 安全类修复必须配置目标仓库的回归测试命令，例如在 `.env` 中设置：
 
 ```dotenv
 LIMA_REPAIR_TEST_COMMAND=python -m unittest discover -s tests
+LIMA_REPAIR_SANDBOX_IMAGE=your-approved-repair-image@sha256:<digest>
 ```
 
-自动修复还会在服务端做显式授权检查：租户必须先由管理员通过 `POST /v1/repository-grants` 为目标仓库授予 `auto_fix=true`，否则 `POST /v1/tasks/{id}/fix` 会被拒绝。没有配置任何授权的租户不再默认放行自动修复；只读审查不受影响。未配置测试命令时，检测和补丁规划仍可工作，但 CWE-78/CWE-89/CWE-22 修复会在发布门禁处失败，不会创建 commit 或 PR。发布前依次执行编译、独立 AST 安全 Oracle、完整仓库差分复扫和原生测试；全部通过后才从固定的 PR commit SHA 创建单个原子提交与 Draft PR，仍需人工批准。CWE-22 模板会在解析符号链接后检查规范路径包含关系，但无法跨平台消除“检查后到打开前”文件系统并发变更的 TOCTOU 风险；高对抗文件系统场景还需要 OS 沙箱或 descriptor-relative open。
+自动修复还会在服务端做显式授权检查：租户必须先由管理员通过 `POST /v1/repository-grants` 为目标仓库授予 `auto_fix=true`，否则 `POST /v1/tasks/{id}/fix` 会被拒绝。发布必须绑定成功审计任务保存的完整 head SHA；PR 更新后需要重新审计。发布前执行编译、独立 AST 安全 Oracle、完整仓库差分复扫及隔离容器内的仓库测试，全部通过后才创建单个原子提交与 Draft PR，仍需人工批准。未配置测试命令或批准镜像、隔离执行失败、缺少 manifest 的规则均不能发布；不会退回宿主执行测试。部署和验证边界见[修复发布门禁](docs/REPAIR_PUBLICATION_GATES.md)。CWE-22 模板会在解析符号链接后检查规范路径包含关系，但无法跨平台消除“检查后到打开前”文件系统并发变更的 TOCTOU 风险；高对抗文件系统场景还需要 OS 沙箱或 descriptor-relative open。
+
+修复验证拒绝归档中的符号链接及特殊条目，防止验证副本与真实仓库文件类型不一致；修改文件发布时保留固定父提交中的 `100644`/`100755` 模式，避免清掉脚本执行位。类型或模式元数据无法确认时不创建提交。
+
+归档采用有 64 MiB 上限的流式临时文件下载，源码在规划前受 512 KiB 解码预算限制。发布意图及阶段结果保存在数据库；相同操作重试会先核对稳定分支和 PR，避免因响应丢失另建一套成果。管理台会区分已确认、待确认和冲突阻断，详见[下载预算与发布恢复](docs/REPAIR_PUBLICATION_GATES.md#下载预算与发布恢复)。
 
 ### 修复约束评测
 
@@ -461,7 +466,7 @@ powershell -ExecutionPolicy Bypass -File scripts/lima.ps1 repair-eval `
   -Format markdown -Output output\repair-evaluation.md
 ```
 
-v1 数据集包含 18 个 synthetic-controlled 用例：CWE-22、CWE-78、CWE-89 各 6 个，每类包含 3 个应修和 3 个应拒场景。当前 Windows 与无网络只读 Docker 结果一致：验证修复率 100%、正确拒修率 100%、Oracle 通过率 100%、不安全补丁逃逸率 0%。这些指标只评估“Finding 已经被数据流或人工确认后”的修复约束，不代表真实仓库检测召回率或通用漏洞修复率；真实样本扩展仍是下一阶段工作。
+当前 v3 数据集包含 26 个 synthetic-controlled 用例：7 个应修、19 个应拒。SQL 自动修复只接受能证明来自标准 `sqlite3.connect()` 的连接或默认游标；导入、变量名及参数风格注释均不能作为驱动证明。路径根目录必须具有静态绝对锚点，helper 在运行时再次检查当前平台的绝对路径语义。v3 将未证明的 psycopg 接收者改为拒修，补入相对根目录及 SQL 包装器反例，因此不能与 v2 直接比较指标。指标只评估已确认 Finding 的修复约束，不代表真实仓库检测召回率或通用修复率。详见[修复信任前提加固说明](docs/LIMA_REPAIR_TRUST_FIXES_2026-11-09.md)。
 
 ### 真实项目成对评测
 

@@ -1063,6 +1063,33 @@ class CxxMemoryAnalyzerClient:
             )
         return True
 
+    def renew_verified_view(
+        self, snapshot_sha256: str, artifact_digest: str, *, holder: str,
+    ) -> bool:
+        """Renew an existing execution lease; never re-create a lost view."""
+        body = json.dumps({
+            "snapshot_sha256": snapshot_sha256,
+            "artifact_digest": artifact_digest,
+            "holder": holder,
+        }, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf8")
+        status, payload = self._json_exchange(
+            "PATCH", self._REGISTER_VIEW_PATH, body,
+            timeout=min(5, self.timeout_seconds),
+        )
+        if status != 200:
+            return False
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"status", "schema_version", "snapshot_sha256", "artifact_digest"}
+            or payload.get("status") != "renewed"
+            or type(payload.get("schema_version")) is not int
+            or payload.get("schema_version") != 1
+            or payload.get("snapshot_sha256") != snapshot_sha256
+            or payload.get("artifact_digest") != artifact_digest
+        ):
+            raise CxxAnalyzerProtocolError("invalid C/C++ analyzer lease ack")
+        return True
+
     def confirmed_verified_view(
         self, snapshot_sha256: str, artifact_digest: str | None = None
     ) -> bool:
@@ -1106,7 +1133,8 @@ class CxxMemoryAnalyzerClient:
             separators=(",", ":"),
         ).encode("utf8")
         status, _payload = self._json_exchange(
-            "DELETE", self._REGISTER_VIEW_PATH, body
+            "DELETE", self._REGISTER_VIEW_PATH, body,
+            timeout=min(5, self.timeout_seconds),
         )
         return status == 200
 

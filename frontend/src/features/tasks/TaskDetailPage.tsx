@@ -1089,7 +1089,17 @@ function ReportCard({ task }: { task: TaskDetail }): React.JSX.Element | null {
         try {
           const data = await api.createFix(task.id);
           setOperation({ title: "修复分支结果", data });
-          void message.success(`修复分支已创建：${data.branch || "请在仓库中检查变更。"}`);
+          if (data.branch) {
+            void message.success(`修复发布已确认：${data.branch}`);
+          } else if (data.failure_code === "repair-publication-pending") {
+            void message.warning("发布结果待确认：可能已产生远端改动，请重试同一任务核对。");
+          } else if (data.failure_code === "repair-publication-conflict") {
+            void message.warning("修复发布被阻断：发布记录或远端结果不一致，请核对后处理。");
+          } else {
+            void message.warning(
+              `未创建修复分支：${data.note || "自动修复未通过发布门禁，请查看结果后处理。"}`,
+            );
+          }
         } catch (error) {
           void message.error(`创建修复分支失败：${(error as Error).message}`);
         } finally {

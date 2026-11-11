@@ -1,0 +1,44 @@
+[
+  {
+    "draft_id": "C01",
+    "number": 294,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/294",
+    "title": "[Evaluation][C01] 语义检测补充指标：冻结论据与统计接线（附 Codex 实施与人工验收清单）"
+  },
+  {
+    "draft_id": "C02",
+    "number": 295,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/295",
+    "title": "[Report][C02] 分支/版本影响矩阵：冻结论据与数据接线（附 Codex 实施与人工验收清单）"
+  },
+  {
+    "draft_id": "C03-criteria",
+    "number": 296,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/296",
+    "title": "[Evaluation][C03] 真实工作台评测入口：冻结论据（判据 Issue，实施见姊妹 Issue）"
+  },
+  {
+    "draft_id": "C03",
+    "number": 297,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/297",
+    "title": "[Evaluation][C03-impl] 真实工作台评测入口实现（判据见姊妹 Issue，附 Codex 实施与人工验收清单）"
+  },
+  {
+    "draft_id": "E08",
+    "number": 298,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/298",
+    "title": "[Competition][E08] 干净部署 smoke test：启动、健康检查与冻结门禁（附 Codex 实施与人工验收清单）"
+  },
+  {
+    "draft_id": "E10",
+    "number": 299,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/299",
+    "title": "[Competition][E10] 参赛提交包组装与缺件清单（附 Codex 实施与人工验收清单）"
+  },
+  {
+    "draft_id": "E11",
+    "number": 300,
+    "url": "https://github.com/agent-sec-labs/LIMA/issues/300",
+    "title": "[Competition][E11] DEMO 彩排与演示视频（附实施与人工验收清单）"
+  }
+]

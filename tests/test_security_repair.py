@@ -8,6 +8,8 @@ from lima.fixer import SafeFixer
 from lima.repair_preview import RepositoryRepairPreviewer
 from lima.verifier import RepairVerifier
 from lima.workspace import RepositoryWorkspace
+from tests.repair_sandbox_support import FIXTURE_IMAGE, run_trusted_fixture
+from lima.store import TaskStore
 
 
 def finding(path, line, rule_id, cwe):
@@ -31,7 +33,7 @@ def repository_archive(files):
 class SecurityRepairTemplateTests(unittest.TestCase):
     def test_explicitly_disabled_finding_cannot_create_repair_or_preview(self):
         source = (
-            "import sqlite3\n"
+            "import sqlite3; cursor = sqlite3.connect(':memory:').cursor()\n"
             "value = input()\n"
             "cursor.execute('SELECT * FROM users WHERE id = ' + value)\n"
         )
@@ -110,7 +112,7 @@ class SecurityRepairTemplateTests(unittest.TestCase):
 
     def test_cwe89_uses_driver_paramstyle_and_preserves_value_expression(self):
         sqlite_source = (
-            "import sqlite3\n"
+            "import sqlite3; cursor = sqlite3.connect(':memory:').cursor()\n"
             "user_id = input()\n"
             "cursor.execute('SELECT name FROM users WHERE id = ' + user_id)\n"
         )
@@ -128,12 +130,12 @@ class SecurityRepairTemplateTests(unittest.TestCase):
         )
 
         self.assertIn("cursor.execute('SELECT name FROM users WHERE id = ?', (user_id,))", sqlite_result["content"])
-        self.assertIn("cursor.execute('SELECT name FROM users WHERE id = %s', (user_id,))", postgres_result["content"])
+        self.assertEqual("sql-driver-binding-not-proven", postgres_result["blocked"][0]["reason"])
         self.assertEqual("parameterized-sql", sqlite_result["repairs"][0]["strategy"])
 
     def test_cwe89_rejects_dynamic_schema_and_unknown_driver(self):
         dynamic_table = (
-            "import sqlite3\n"
+            "import sqlite3; cursor = sqlite3.connect(':memory:').cursor()\n"
             "table = input()\n"
             "cursor.execute('SELECT * FROM ' + table + ' WHERE id = 1')\n"
         )
@@ -150,7 +152,7 @@ class SecurityRepairTemplateTests(unittest.TestCase):
         )
 
         self.assertEqual("dynamic-sql-structure", first["blocked"][0]["reason"])
-        self.assertEqual("unknown-sql-paramstyle", second["blocked"][0]["reason"])
+        self.assertEqual("sql-driver-binding-not-proven", second["blocked"][0]["reason"])
 
     def test_cwe22_adds_canonical_containment_helper_and_rejects_escape(self):
         with tempfile.TemporaryDirectory() as root:
@@ -194,7 +196,7 @@ class SecurityRepairTemplateTests(unittest.TestCase):
         self.assertIn("expected replacement call is not unique", verification["checks"][-1]["detail"])
 
     def test_archive_gate_requires_tests_for_security_repairs(self):
-        source = "import sqlite3\nvalue = input()\ncursor.execute('SELECT * FROM t WHERE id = ' + value)\n"
+        source = "import sqlite3; cursor = sqlite3.connect(':memory:').cursor()\nvalue = input()\ncursor.execute('SELECT * FROM t WHERE id = ' + value)\n"
         result = SafeFixer().apply(
             source, [finding("app.py", 3, "FLOW-SQL", "CWE-89")], "app.py"
         )
@@ -210,21 +212,23 @@ class VerifiedRepairLoopTests(unittest.TestCase):
     def test_atomic_commit_and_draft_pr_follow_all_verification_gates(self):
         source = (
             "import sqlite3\n"
-            "def lookup(cursor):\n"
+            "def lookup():\n"
+            "    cursor = sqlite3.connect(':memory:')\n"
+            "    cursor.execute('CREATE TABLE users(id INTEGER, name TEXT)')\n"
+            "    cursor.executemany('INSERT INTO users VALUES (?, ?)', [(1, 'first'), (2, 'second')])\n"
             "    value = input()\n"
-            "    return cursor.execute('SELECT name FROM users WHERE id = ' + value)\n"
+            "    return cursor.execute('SELECT name FROM users WHERE id = ' + value).fetchall()\n"
         )
         regression_test = (
             "import unittest\n"
-            "from unittest.mock import Mock, patch\n"
+            "from unittest.mock import patch\n"
             "from app import lookup\n"
             "class RepairTests(unittest.TestCase):\n"
             "    def test_query_value_is_bound(self):\n"
-            "        cursor = Mock()\n"
             "        with patch('builtins.input', return_value='1 OR 1=1'):\n"
-            "            lookup(cursor)\n"
-            "        cursor.execute.assert_called_once_with(\n"
-            "            'SELECT name FROM users WHERE id = ?', ('1 OR 1=1',))\n"
+            "            self.assertEqual([], lookup())\n"
+            "        with patch('builtins.input', return_value='1'):\n"
+            "            self.assertEqual([('first',)], lookup())\n"
         )
 
         class Client:
@@ -234,7 +238,7 @@ class VerifiedRepairLoopTests(unittest.TestCase):
 
             def get_pull_request(self, _repository, _pull_request):
                 return {
-                    "head": {"ref": "feature", "sha": "source-sha",
+                    "head": {"ref": "feature", "sha": "a" * 40,
                              "repo": {"full_name": "org/repo"}},
                     "base": {"ref": "main"},
                 }
@@ -254,12 +258,25 @@ class VerifiedRepairLoopTests(unittest.TestCase):
                 self.draft = (repository, title, branch, base, body)
                 return {"number": 9, "html_url": "https://example.test/pr/9"}
 
+            def ensure_repair_commit(self, repository, branch, sha, files, message, **kwargs):
+                return self.create_atomic_commit(repository, branch, sha, files, message)
+
+            def ensure_repair_pull(self, repository, title, branch, base, body, sha, operation_id, **kwargs):
+                return self.create_draft_pull_request(repository, title, branch, base, body)
+
         client = Client()
-        fixer = SafeFixer(RepairVerifier("python -m unittest discover -s .", 30))
-        result = fixer.create_fix_commits(
-            client, "org/repo", 7,
-            {"findings": [finding("app.py", 4, "FLOW-SQL", "CWE-89")]},
-        )
+        fixer = SafeFixer(RepairVerifier(
+            "python -m unittest discover -s .", 30,
+            sandbox_image=FIXTURE_IMAGE, sandbox_runner=run_trusted_fixture,
+        ))
+        with tempfile.TemporaryDirectory() as temporary:
+            result = fixer.create_fix_commits(
+                client, "org/repo", 7,
+                {"findings": [finding("app.py", 7, "FLOW-SQL", "CWE-89")]},
+                expected_source_sha="a" * 40,
+                publication_store=TaskStore(str(Path(temporary) / "publication.db")),
+                publication_scope="tenant/task",
+            )
 
         self.assertIsNotNone(client.commit)
         self.assertIsNotNone(client.draft)
@@ -267,7 +284,7 @@ class VerifiedRepairLoopTests(unittest.TestCase):
         self.assertEqual(9, result["draft_pull_request"]["number"])
         self.assertEqual("parameterized-sql", result["repair_manifest"][0]["strategy"])
         names = {item["name"] for item in result["verification"]["checks"]}
-        self.assertIn("security-oracle:CWE-89:app.py:4", names)
+        self.assertIn("security-oracle:CWE-89:app.py:7", names)
         self.assertIn("differential-rescan:CWE-89:app.py", names)
         self.assertIn("repository-tests", names)
 
@@ -281,13 +298,13 @@ class VerifiedRepairLoopTests(unittest.TestCase):
         class Client:
             def get_pull_request(self, _repository, _pull_request):
                 return {
-                    "head": {"ref": "feature", "sha": "source-sha",
+                    "head": {"ref": "feature", "sha": "a" * 40,
                              "repo": {"full_name": "org/repo"}},
                     "base": {"ref": "main"},
                 }
 
             def get_file(self, _repository, _path, ref):
-                if ref != "source-sha":
+                if ref != "a" * 40:
                     raise AssertionError("repair input must be pinned to the PR commit")
                 return {"decoded_content": source, "sha": "blob-sha"}
 
@@ -309,12 +326,16 @@ class VerifiedRepairLoopTests(unittest.TestCase):
                 raise AssertionError("a failed verification must not create a PR")
 
         result = SafeFixer(
-            RepairVerifier("python -m unittest discover -s .", 30)
+            RepairVerifier(
+                "python -m unittest discover -s .", 30,
+                sandbox_image=FIXTURE_IMAGE, sandbox_runner=run_trusted_fixture,
+            )
         ).create_fix_commits(
             Client(), "org/repo", 8,
             {"findings": [finding(
                 "app.py", 3, "SEC-SUBPROCESS-SHELL", "CWE-78"
             )]},
+            expected_source_sha="a" * 40,
         )
 
         self.assertIsNone(result["branch"])

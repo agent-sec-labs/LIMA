@@ -448,6 +448,47 @@ describe("task detail report surface", () => {
     expect(screen.getByText("lima/fix-7")).toBeVisible();
   });
 
+  it.each([
+    { code: "repair-source-stale", note: "审计后 PR 已更新，请重新审计后再试。",
+      expected: "未创建修复分支：审计后 PR 已更新，请重新审计后再试。" },
+    { code: "repair-publication-pending", note: "Publication outcome is pending.",
+      expected: "发布结果待确认：可能已产生远端改动，请重试同一任务核对。" },
+  ])("warns about publication state $code without claiming success", async ({ code, note, expected }) => {
+    stubFetch([
+      {
+        url: "/v1/tasks/task-fix-blocked",
+        body: successTask({
+          id: "task-fix-blocked",
+          pull_request: 7,
+          report: DERIVED_REPORT,
+        }),
+      },
+      { url: "/v1/tasks/task-fix-blocked/feedback", body: { cases: [] } },
+      {
+        url: "/v1/tasks/task-fix-blocked/fix",
+        method: "POST",
+        body: {
+          branch: null,
+          source_sha: null,
+          failure_code: code,
+          note,
+        },
+      },
+    ]);
+    renderAt("/tasks/task-fix-blocked");
+    fireEvent.click(await screen.findByRole("button", { name: "创建修复分支" }));
+    const modalOk = await waitFor(() => {
+      const buttons = screen.getAllByRole("button", { name: "创建修复分支" });
+      expect(buttons.length).toBeGreaterThanOrEqual(2);
+      return buttons[buttons.length - 1];
+    });
+    fireEvent.click(modalOk);
+    expect(
+      await screen.findByText(expected),
+    ).toBeVisible();
+    expect(screen.queryByText(/修复分支已创建/)).toBeNull();
+  });
+
   it("submits feedback and renders the recorded case history", async () => {
     const posts: unknown[] = [];
     // 反馈历史按调用序返回不同载荷：首次空，提交后含一条已记录案例。

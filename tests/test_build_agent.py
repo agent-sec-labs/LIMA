@@ -27,7 +27,8 @@ from lima.build_contracts import (
     BuildPolicy,
     BuildRequest,
 )
-from lima.build_executor import BuildExecutionResult
+from lima.build_executor import BuildExecutionResult, BuildExecutor
+from lima.build_inputs import BuildInputError
 from lima.build_tools import BUILD_TOOL_NAMES
 from lima.context_package import build_manifest, write_package
 
@@ -233,6 +234,26 @@ class BuildAgentTest(unittest.TestCase):
         self.assertTrue(planning.plan_digest)
         executing = next(u for u in progress_log if u.phase == "EXECUTING")
         self.assertEqual(executing.attempt, 1)
+
+    def test_real_input_rejection_survives_terminal_no_package_verdict(self) -> None:
+        """The agent must not replace a concrete boundary receipt with generic text."""
+
+        model = ScriptedModel(
+            [
+                plan_action(),
+                tool("prepare_dependencies", dependency_set_ref="clang16-cmake"),
+                tool("execute_configure"),
+                final(),
+            ]
+        )
+        with mock.patch(
+            "lima.build_executor.collect_build_inputs",
+            side_effect=BuildInputError("build-input-link"),
+        ):
+            result = self.run_agent(model, executor=BuildExecutor())
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(result.failure_code, "build-input-link")
+        self.assertFalse(result.repository_code_executed)
 
     def test_revision_after_failure_succeeds_on_second_attempt(self) -> None:
         model = ScriptedModel(

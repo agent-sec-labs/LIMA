@@ -146,6 +146,8 @@ _FAILED_PRESTART_PREFIXES: Final = (
 )
 _COVERAGE_GAP_PREFIX: Final = "coverage gap: "
 _COVERAGE_GAP_CODE: Final = "COVERAGE_GAP"
+_AEP_MAX_COVERAGE_GAPS: Final = 256
+_AEP_MAX_DIAGNOSTIC_GAPS: Final = 64
 _AEP_MAX_DETAIL_BYTES: Final = 4096
 _STAGE_ROLES: Final = ("scout", "specialist", "critic")
 
@@ -880,9 +882,10 @@ def platform_review_to_aep(
     carries no byte/line meters or upper bounds (facts, not quota
     decisions).  ``AuditOutcome.INCOMPLETE`` is used exactly when the
     outcome reports ``unreviewed_units`` (required scope unaudited,
-    review round 5 P1): the verdict then carries one
-    ``unreviewed-unit: <path>`` coverage gap per unit, satisfying the
-    outcome's documented precondition by construction.  The
+    review round 5 P1): the verdict then carries bounded
+    ``unreviewed-unit: <path>`` samples and, when necessary, a total-count
+    coverage gap, satisfying the outcome's documented precondition without
+    exceeding the contract array limit.  The
     repository-profile id is a deterministic stand-in (the platform has no
     profile artifact yet).  The package is validated by the real
     ``AuditEvidencePackage`` constructor; failures propagate (fail-closed).
@@ -933,7 +936,8 @@ def platform_review_to_aep(
 
     analyzed = {_normalized_path(target.path) for target in outcome.targets}
     in_scope = analyzed | {
-        _normalized_path(unit) for unit in outcome.translation_units
+        _normalized_path(unit)
+        for unit in (*outcome.translation_units, *unreviewed_units)
     }
     coverage = AuditCoverage(
         in_scope_file_count=len(in_scope),
@@ -952,6 +956,7 @@ def platform_review_to_aep(
 
     gaps: list[AuditCoverageGap] = []
     seen_details: set[str] = set()
+    diagnostic_details: list[str] = []
     for diagnostic in outcome.diagnostics:
         if not diagnostic.startswith(_COVERAGE_GAP_PREFIX):
             continue
@@ -961,8 +966,28 @@ def platform_review_to_aep(
         if not detail or detail in seen_details:
             continue
         seen_details.add(detail)
-        gaps.append(AuditCoverageGap(gap_code=_COVERAGE_GAP_CODE, detail=detail))
-    for unit in unreviewed_units:
+        diagnostic_details.append(detail)
+    diagnostic_sample = diagnostic_details[:_AEP_MAX_DIAGNOSTIC_GAPS]
+    gaps.extend(
+        AuditCoverageGap(gap_code=_COVERAGE_GAP_CODE, detail=detail)
+        for detail in diagnostic_sample
+    )
+    if len(diagnostic_details) > len(diagnostic_sample):
+        gaps.append(AuditCoverageGap(
+            gap_code=_COVERAGE_GAP_CODE,
+            detail=(
+                "coverage-gap-detail-count: "
+                f"{len(diagnostic_details)}; listed: {len(diagnostic_sample)}"
+            ),
+        ))
+    unit_gap_capacity = _AEP_MAX_COVERAGE_GAPS - len(gaps)
+    unit_sample_count = len(unreviewed_units)
+    if len(unreviewed_units) > unit_gap_capacity:
+        # Reserve one entry for the total.  The collaboration summary keeps
+        # every path; the sealed AEP is schema-bounded and must say that its
+        # list is a sample rather than silently truncating the request.
+        unit_sample_count = max(0, unit_gap_capacity - 1)
+    for unit in unreviewed_units[:unit_sample_count]:
         # The guaranteeable coverage gap behind an INCOMPLETE verdict.
         detail = _sanitize_text(
             f"unreviewed-unit: {unit}", cap=_AEP_MAX_DETAIL_BYTES,
@@ -971,6 +996,15 @@ def platform_review_to_aep(
             continue
         seen_details.add(detail)
         gaps.append(AuditCoverageGap(gap_code=_COVERAGE_GAP_CODE, detail=detail))
+    if unit_sample_count < len(unreviewed_units):
+        gaps.append(AuditCoverageGap(
+            gap_code=_COVERAGE_GAP_CODE,
+            detail=(
+                f"unreviewed-unit-count: {len(unreviewed_units)}; "
+                f"listed: {unit_sample_count}; "
+                f"omitted: {len(unreviewed_units) - unit_sample_count}"
+            ),
+        ))
     gaps.sort(key=lambda gap: (gap.gap_code, gap.detail.encode("utf-8")))
 
     profile_material = _canonical_json(

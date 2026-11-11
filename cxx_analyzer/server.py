@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import threading
+import time
 import unicodedata
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -101,6 +102,10 @@ _REGISTRY_SNAPSHOT_BYTES: dict[str, int] = {}
 # semantics; a holder-scoped release never deletes a registration it
 # does not own.
 _VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
+# A delivery hold is a lease, rather than a permanent pin.  The set above
+# remains the externally useful ownership index; this companion map records
+# its monotonic expiry without exposing wall-clock time across processes.
+_VIEW_HOLDER_LEASES: dict[tuple[str, str], dict[str, float]] = {}
 # Process-level capacity: a host that dies after POST (no DELETE) or an
 # endless stream of new snapshots must not grow the sidecar without
 # bound.  Oldest-registered snapshots are evicted first when a new
@@ -109,6 +114,10 @@ _VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
 # reference are unaffected (references, not the registry, own them).
 _MAX_REGISTRY_SNAPSHOTS: Final = 64
 _MAX_REGISTRY_TOTAL_MEMBER_BYTES: Final = 128 * 1024 * 1024
+_MAX_HOLDERS_PER_VIEW: Final = 128
+_MAX_HOLDERS_TOTAL: Final = 4096
+_MAX_HOLDER_TOTAL_BYTES: Final = 512 * 1024
+_VIEW_HOLDER_LEASE_SECONDS: Final = 300.0
 
 
 def _registry_total_bytes() -> int:
@@ -133,43 +142,101 @@ def _retained_member_bytes(views: dict[str, object]) -> int:
     )
 
 
-def _evict_until_capacity(exclude: str) -> None:
-    """Oldest-first snapshot eviction until the registry fits (locked)."""
+def _remove_identity_locked(snapshot_sha256: str, artifact_digest: str) -> None:
+    """Remove one artifact slot and its default alias (registry lock held)."""
 
-    while (
-        len(_VERIFIED_BUILD_VIEWS) > _MAX_REGISTRY_SNAPSHOTS
-        or _registry_total_bytes() > _MAX_REGISTRY_TOTAL_MEMBER_BYTES
+    identity = (snapshot_sha256, artifact_digest)
+    views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
+    _VIEW_HOLDERS.pop(identity, None)
+    _VIEW_HOLDER_LEASES.pop(identity, None)
+    if not views:
+        _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+        return
+    views.pop(artifact_digest, None)
+    default_view = views.get(_DEFAULT_VIEW_SLOT)
+    if (
+        default_view is not None
+        and getattr(default_view, "artifact_digest", None) == artifact_digest
     ):
-        oldest = next(
-            (
-                snapshot
-                for snapshot in _VERIFIED_BUILD_VIEWS
-                if snapshot != exclude
-            ),
-            None,
-        )
-        if oldest is None:
+        del views[_DEFAULT_VIEW_SLOT]
+    if not views:
+        del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
+        _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
+    else:
+        _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = _retained_member_bytes(views)
+
+
+def _prune_expired_holders_locked(now: float | None = None) -> None:
+    """Release expired delivery leases and the views pinned only by them."""
+
+    current = time.monotonic() if now is None else now
+    for identity, leases in list(_VIEW_HOLDER_LEASES.items()):
+        expired = [holder for holder, deadline in leases.items() if deadline <= current]
+        if not expired:
+            continue
+        holders = _VIEW_HOLDERS.get(identity)
+        for holder in expired:
+            leases.pop(holder, None)
+            if holders is not None:
+                holders.discard(holder)
+        if not leases:
+            _remove_identity_locked(*identity)
+
+
+def _snapshot_has_active_holders_locked(snapshot_sha256: str) -> bool:
+    return any(
+        identity[0] == snapshot_sha256 and holders
+        for identity, holders in _VIEW_HOLDERS.items()
+    )
+
+
+def _capacity_victims_locked(
+    snapshot_sha256: str, retained_bytes: int
+) -> list[str] | None:
+    """Choose inactive oldest snapshots to make a pending write fit.
+
+    The decision happens before publication.  Thus a rejected registration
+    cannot evict unrelated snapshots, and no task with a live holder can be
+    selected as a victim.
+    """
+
+    old_bytes = _REGISTRY_SNAPSHOT_BYTES.get(snapshot_sha256, 0)
+    snapshots = len(_VERIFIED_BUILD_VIEWS) + (
+        0 if snapshot_sha256 in _VERIFIED_BUILD_VIEWS else 1
+    )
+    total_bytes = _registry_total_bytes() - old_bytes + retained_bytes
+    victims: list[str] = []
+    for candidate in _VERIFIED_BUILD_VIEWS:
+        if (
+            snapshots <= _MAX_REGISTRY_SNAPSHOTS
+            and total_bytes <= _MAX_REGISTRY_TOTAL_MEMBER_BYTES
+        ):
             break
-        del _VERIFIED_BUILD_VIEWS[oldest]
-        _REGISTRY_SNAPSHOT_BYTES.pop(oldest, None)
-        for identity in [
-            identity
-            for identity in _VIEW_HOLDERS
-            if identity[0] == oldest
-        ]:
-            del _VIEW_HOLDERS[identity]
+        if candidate == snapshot_sha256 or _snapshot_has_active_holders_locked(candidate):
+            continue
+        victims.append(candidate)
+        snapshots -= 1
+        total_bytes -= _REGISTRY_SNAPSHOT_BYTES.get(candidate, 0)
+    if (
+        snapshots > _MAX_REGISTRY_SNAPSHOTS
+        or total_bytes > _MAX_REGISTRY_TOTAL_MEMBER_BYTES
+    ):
+        return None
+    return victims
 
 
 def register_verified_build_view(
     snapshot_sha256: str, view: object, artifact_digest: str | None = None,
-    *, set_default: bool = False,
+    *, set_default: bool = False, holder: str | None = None,
 ) -> None:
     """Register one sealed analysis view for a snapshot's uaf-facts run.
 
     Capacity is computed from the final retained references, before
     publication.  ``set_default`` publishes the digest and its default
     alias together, avoiding both torn reads and temporary double counts
-    when refreshing an existing artifact with a new wire object.
+    when refreshing an existing artifact with a new wire object.  A local
+    ``holder`` opts into the same bounded, expiring ownership contract as a
+    wire registration and therefore requires an explicit artifact digest.
     """
 
     if (
@@ -178,8 +245,20 @@ def register_verified_build_view(
         or any(character not in "0123456789abcdef" for character in snapshot_sha256)
     ):
         raise ValueError("invalid snapshot digest for verified view registration")
+    if holder is not None and (
+        artifact_digest is None
+        or not _hex64(artifact_digest)
+        or not _holder_token(holder)
+    ):
+        raise ValueError("invalid holder-backed verified view registration")
     slot = artifact_digest if artifact_digest is not None else _DEFAULT_VIEW_SLOT
     with _REGISTRY_LOCK:
+        _prune_expired_holders_locked()
+        identity = (snapshot_sha256, artifact_digest) if artifact_digest else None
+        if holder is not None:
+            assert identity is not None
+            if not _holder_budget_allows_locked(identity, holder):
+                raise RequestError("registry_holder_capacity_exhausted", status=503)
         views = dict(_VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {}))
         views[slot] = view
         if set_default:
@@ -189,9 +268,23 @@ def register_verified_build_view(
             # Other snapshots cannot free capacity occupied by this
             # snapshot alone.  Refuse without replacing its current view.
             raise RequestError("request_too_large", status=413)
+        victims = _capacity_victims_locked(snapshot_sha256, retained_bytes)
+        if victims is None:
+            raise RequestError("registry_capacity_exhausted", status=503)
+        for victim in victims:
+            for identity in [identity for identity in _VIEW_HOLDERS if identity[0] == victim]:
+                _VIEW_HOLDERS.pop(identity, None)
+                _VIEW_HOLDER_LEASES.pop(identity, None)
+            del _VERIFIED_BUILD_VIEWS[victim]
+            _REGISTRY_SNAPSHOT_BYTES.pop(victim, None)
         _VERIFIED_BUILD_VIEWS[snapshot_sha256] = views
         _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = retained_bytes
-        _evict_until_capacity(snapshot_sha256)
+        if holder is not None:
+            assert identity is not None
+            _VIEW_HOLDERS.setdefault(identity, set()).add(holder)
+            _VIEW_HOLDER_LEASES.setdefault(identity, {})[holder] = (
+                time.monotonic() + _VIEW_HOLDER_LEASE_SECONDS
+            )
 
 
 def lookup_verified_build_view(
@@ -200,6 +293,7 @@ def lookup_verified_build_view(
     """The registered view for one run identity, or ``None``."""
 
     with _REGISTRY_LOCK:
+        _prune_expired_holders_locked()
         views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256, {})
         if artifact_digest:
             return views.get(artifact_digest)
@@ -213,6 +307,7 @@ def clear_verified_build_views() -> None:
         _VERIFIED_BUILD_VIEWS.clear()
         _REGISTRY_SNAPSHOT_BYTES.clear()
         _VIEW_HOLDERS.clear()
+        _VIEW_HOLDER_LEASES.clear()
 
 
 def unregister_verified_build_view(
@@ -235,11 +330,13 @@ def unregister_verified_build_view(
     """
 
     with _REGISTRY_LOCK:
+        _prune_expired_holders_locked()
         identity = (snapshot_sha256, artifact_digest)
         views = _VERIFIED_BUILD_VIEWS.get(snapshot_sha256)
         if not views:
             _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
             _VIEW_HOLDERS.pop(identity, None)
+            _VIEW_HOLDER_LEASES.pop(identity, None)
             return
         if holder is not None:
             holders = _VIEW_HOLDERS.get(identity)
@@ -249,20 +346,9 @@ def unregister_verified_build_view(
                 return
             holders.discard(holder)
             if holders:
+                _VIEW_HOLDER_LEASES.get(identity, {}).pop(holder, None)
                 return
-            _VIEW_HOLDERS.pop(identity, None)
-        views.pop(artifact_digest, None)
-        default_view = views.get(_DEFAULT_VIEW_SLOT)
-        if (
-            default_view is not None
-            and getattr(default_view, "artifact_digest", None) == artifact_digest
-        ):
-            del views[_DEFAULT_VIEW_SLOT]
-        if not views:
-            del _VERIFIED_BUILD_VIEWS[snapshot_sha256]
-            _REGISTRY_SNAPSHOT_BYTES.pop(snapshot_sha256, None)
-        else:
-            _REGISTRY_SNAPSHOT_BYTES[snapshot_sha256] = _retained_member_bytes(views)
+        _remove_identity_locked(snapshot_sha256, artifact_digest)
 
 
 # ------------------------------------------------- verified-view wire (#351)
@@ -300,6 +386,9 @@ _MAX_HOLDER_BYTES: Final = 128
 _UNREGISTER_VIEW_FIELDS: Final = frozenset(
     {"snapshot_sha256", "artifact_digest"}
 )
+_RENEW_VIEW_FIELDS: Final = frozenset(
+    {"snapshot_sha256", "artifact_digest", "holder"}
+)
 # The envelope carries the whole sealed package (compdb, manifest,
 # vendored headers, generated files) base64-encoded; the budgets sit
 # above the package budgets the build stage already enforces.
@@ -334,6 +423,28 @@ def _holder_token(value: object) -> bool:
         and not any(
             unicodedata.category(character) == "Cc" for character in value
         )
+    )
+
+
+def _holder_budget_allows_locked(
+    identity: tuple[str, str], holder: str
+) -> bool:
+    """Whether a new holder can be admitted without unbounded metadata."""
+
+    existing = _VIEW_HOLDERS.get(identity, set())
+    if holder in existing:
+        return True
+    if len(existing) >= _MAX_HOLDERS_PER_VIEW:
+        return False
+    all_holders = [
+        token for tokens in _VIEW_HOLDERS.values() for token in tokens
+    ]
+    if len(all_holders) >= _MAX_HOLDERS_TOTAL:
+        return False
+    return (
+        sum(len(token.encode("utf-8")) for token in all_holders)
+        + len(holder.encode("utf-8"))
+        <= _MAX_HOLDER_TOTAL_BYTES
     )
 
 
@@ -483,6 +594,10 @@ def register_view_request(
         raise RequestError("invalid_request") from None
 
     with _REGISTRY_LOCK:
+        _prune_expired_holders_locked()
+        identity = (snapshot_sha256, artifact_digest)
+        if holder is not None and not _holder_budget_allows_locked(identity, holder):
+            raise RequestError("registry_holder_capacity_exhausted", status=503)
         # Slot bound: a new digest beyond the retry window is treated as
         # an upstream leak and refused (fail-closed) rather than
         # retained, atomically with the publication below.
@@ -500,9 +615,10 @@ def register_view_request(
             # The delivery hold lives with the registration it guards
             # (same lock, same lifecycle owner); retry re-POSTs are
             # idempotent set adds (#354 review round 2, P1).
-            _VIEW_HOLDERS.setdefault(
-                (snapshot_sha256, artifact_digest), set()
-            ).add(holder)
+            _VIEW_HOLDERS.setdefault(identity, set()).add(holder)
+            _VIEW_HOLDER_LEASES.setdefault(identity, {})[holder] = (
+                time.monotonic() + _VIEW_HOLDER_LEASE_SECONDS
+            )
     return {
         "status": "registered",
         "schema_version": SCHEMA_VERSION,
@@ -535,6 +651,35 @@ def unregister_view_request(payload: object) -> dict[str, object]:
     unregister_verified_build_view(snapshot_sha256, artifact_digest, holder)
     return {
         "status": "unregistered",
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_sha256": snapshot_sha256,
+        "artifact_digest": artifact_digest,
+    }
+
+
+def renew_view_request(payload: object) -> dict[str, object]:
+    """Extend one existing execution holder without re-uploading its package."""
+
+    if type(payload) is not dict or set(payload) != _RENEW_VIEW_FIELDS:
+        raise RequestError("invalid_request")
+    snapshot_sha256 = payload["snapshot_sha256"]
+    artifact_digest = payload["artifact_digest"]
+    holder = payload["holder"]
+    if (
+        not _hex64(snapshot_sha256)
+        or not _hex64(artifact_digest)
+        or not _holder_token(holder)
+    ):
+        raise RequestError("invalid_request")
+    identity = (snapshot_sha256, artifact_digest)
+    with _REGISTRY_LOCK:
+        _prune_expired_holders_locked()
+        leases = _VIEW_HOLDER_LEASES.get(identity)
+        if leases is None or holder not in leases:
+            raise RequestError("not_registered", status=404)
+        leases[holder] = time.monotonic() + _VIEW_HOLDER_LEASE_SECONDS
+    return {
+        "status": "renewed",
         "schema_version": SCHEMA_VERSION,
         "snapshot_sha256": snapshot_sha256,
         "artifact_digest": artifact_digest,
@@ -1448,7 +1593,7 @@ def _register_view_dispatch(
     body: bytes,
     settings: AnalyzerSettings,
 ) -> tuple[int, dict[str, object]]:
-    """Route the three verbs on ``/v1/verified-build-views``.
+    """Route the registration, renewal and cleanup verbs on the view endpoint.
 
     GET (with query) is the confirmation lookup the host service uses
     as its capability signal; POST registers one sealed view; DELETE
@@ -1469,7 +1614,7 @@ def _register_view_dispatch(
             return 400, _error_payload("invalid_request")
         artifact_digest = digest_values[0] if digest_values else None
         return _confirmed_view_response(snapshot_values[0], artifact_digest)
-    if method not in ("POST", "DELETE"):
+    if method not in ("POST", "PATCH", "DELETE"):
         return 405, _error_payload("method_not_allowed")
     if content_type.split(";", 1)[0].strip().lower() != "application/json":
         return 415, _error_payload("unsupported_media_type")
@@ -1489,6 +1634,8 @@ def _register_view_dispatch(
     try:
         if method == "POST":
             return 200, register_view_request(payload, settings)
+        if method == "PATCH":
+            return 200, renew_view_request(payload)
         return 200, unregister_view_request(payload)
     except RequestError as exc:
         return exc.status, _error_payload(exc.code, exc.request_id)
@@ -1641,6 +1788,12 @@ class AnalyzerRequestHandler(BaseHTTPRequestHandler):
         self._handle()
 
     def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+        route = getattr(self, "path", "").partition("?")[0]
+        if route == _REGISTER_VIEW_PATH:
+            body = self._read_json_body()
+            if body is not None:
+                self._handle(body)
+            return
         self._handle()
 
     def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.

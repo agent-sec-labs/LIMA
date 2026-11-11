@@ -657,14 +657,11 @@ class HolderLifecycleTests(unittest.TestCase):
             repository_scan_sast_mode="off", cxx_memory_mode="off",
         )
         from lima.build_agent import SUCCEEDED
-        from lima.service import (
-            _VERIFIED_VIEW_HOLDERS,
-            _VERIFIED_VIEW_HOLDERS_LOCK,
-        )
+        from cxx_analyzer.server import _REGISTRY_LOCK, _VIEW_HOLDERS
         from tests.test_build_consumption_wiring import make_build_result
 
-        self.holders = _VERIFIED_VIEW_HOLDERS
-        self.holders_lock = _VERIFIED_VIEW_HOLDERS_LOCK
+        self.holders = _VIEW_HOLDERS
+        self.holders_lock = _REGISTRY_LOCK
         self.build_result = make_build_result(SUCCEEDED, "run-1/pkg")
 
         class _RecordingAdapter:

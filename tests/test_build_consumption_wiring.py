@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from lima.build_agent import NEEDS_ATTENTION, SUCCEEDED, BuildResult
+from lima.build_inputs import compute_build_input_digest
 from lima.config import Settings
 from lima.service import ReviewService
 
@@ -252,6 +253,7 @@ class ConsumptionRealPathTests(unittest.TestCase):
             plan_digest="p" * 64, image_digest=None, dependency_digest=None,
             package_ref="run-1/package", artifact_digest=digest,
             attempts=1, coverage=None, failure_code=None, evidence_refs=(),
+            build_input_digest=compute_build_input_digest(repository),
         )
         view = service._consume_build_context("task-x", workspace, build_result)
         # The view is a real AnalysisContextView with the compdb's TU list.

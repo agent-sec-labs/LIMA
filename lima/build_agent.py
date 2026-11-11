@@ -122,6 +122,9 @@ class BuildResult:
     coverage: dict[str, Any] | None
     failure_code: str | None
     evidence_refs: tuple[str, ...]
+    # True only when the isolated session actually began a repository step.
+    repository_code_executed: bool = False
+    build_input_digest: str | None = None
 
 
 class _GuardedTools:
@@ -155,6 +158,8 @@ class _GuardedTools:
         self.cancelled: bool = False
         self.prepared_ref: str | None = None
         self.last_image_digest: str | None = None
+        self.last_build_input_digest: str | None = None
+        self.repository_code_executed: bool = False
         self.attempts: int = 0
         self.executed_once = False
         self.evidence: list[str] = []
@@ -259,6 +264,15 @@ class _GuardedTools:
             self.executed_once = True
             self.attempts = max(self.attempts, int(result.get("attempt") or 0))
             self.last_image_digest = result.get("image_digest")
+            self.last_build_input_digest = result.get("build_input_digest")
+            # A later pre-execution rejection cannot erase the receipt from
+            # an earlier attempt in the same agent run.
+            self.repository_code_executed = self.repository_code_executed or bool(
+                result.get("repository_code_executed", False)
+            )
+            input_ref = result.get("build_input_ref")
+            if input_ref and input_ref not in self.evidence:
+                self.evidence.append(input_ref)
             for step in result.get("steps") or []:
                 ref = step.get("stderr_ref")
                 if ref:
@@ -435,7 +449,21 @@ class BuildAgent:
                         status = SUCCEEDED
                     else:
                         status = FAILED
-                        failure_code = "no-validated-package"
+                        verdict_error = str(
+                            verdict.get("error") or "no-validated-package"
+                        )
+                        # The generic no-package verdict is expected after a
+                        # pre-execution input-boundary rejection.  Preserve
+                        # that concrete receipt, but never hide a real
+                        # package-validation error (for example a missing TU).
+                        failure_code = (
+                            guarded.last_failure_code
+                            if (
+                                verdict_error == "no-exported-package"
+                                and guarded.last_failure_code is not None
+                            )
+                            else verdict_error
+                        )
 
         # Publication gate: cancellation and the shared deadline override
         # every candidate terminal state, including a just-earned success.
@@ -478,4 +506,6 @@ class BuildAgent:
             coverage=None,
             failure_code=failure_code,
             evidence_refs=tuple(evidence),
+            repository_code_executed=guarded.repository_code_executed,
+            build_input_digest=guarded.last_build_input_digest,
         )

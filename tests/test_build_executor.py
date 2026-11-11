@@ -345,7 +345,10 @@ class BuildExecutorTest(unittest.TestCase):
             )
             self.assertFalse(cancelled.ok)
             self.assertEqual(cancelled.failure_code, "cancelled")
-            self.assertEqual(cancel_factory.sessions[0].step_timeouts, [])
+            # Snapshot copying observes cancellation before a container is
+            # opened, so no repository code may have run.
+            self.assertEqual(cancel_factory.sessions, [])
+            self.assertFalse(cancelled.repository_code_executed)
             self.assertFalse((cancel_attempt / "attempt.json").exists())
             self.assertTrue(
                 (cancel_attempt / "cancel-requested.json").exists()

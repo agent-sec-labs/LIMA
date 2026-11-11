@@ -1,0 +1,60 @@
+# [Competition][E03] 验证运行性能采集包装器（附 Codex 实施与人工验收清单）
+
+## 2026-10-17 并行开发边界（本节优先于下文宽泛范围）
+
+已核对：本任务已有开放 Draft PR #310（feat/competition-performance → main），当前进入原 PR 的评审/人工验收阶段；不要另分配一人重复实现，也不改变本 Issue 原冻结验收条款。
+
+- PR 当前拥有 scripts/measure_competition_run.py、lima/competition_performance.py、tests/test_competition_performance.py、requirements.txt 的 psutil 新增行，以及 docs/competition/性能数据.md 的采集方法小节。
+- 在 PR #310 完成前，其他并行任务不改上述文件；所需问题反馈到原 PR。#291 本轮只新增文档核对表，不再编辑性能数据.md。
+- 后续工具只可按已声明字段只读解析独立 performance.json；不要求本 PR 修改输出或为新任务预留接口。
+- 保留现有 assignee，是否合并由维护者按评审/人工验收决定，本次不关闭 Issue 或合并 PR。
+
+---
+
+## Problem to solve
+#273/#165需要真实耗时与内存数据。现有bundle有总耗时，但缺可复用的进程与Sidecar性能采集入口。本任务采集资源，不能判断漏洞或把采样值称作绝对峰值。
+
+## Proposed solution
+新增 scripts/measure_competition_run.py，包裹任意显式命令，写独立performance.json。默认无需Docker，以本机测试命令演示；容器采集显式传目标container，不自动启动、重建或清理服务。
+```powershell
+python scripts/measure_competition_run.py --output output/perf-demo.json --interval-seconds 0.2 -- python -c "import time; x=bytearray(10*1024*1024); time.sleep(2)"
+```
+
+### 给 Codex 的具体步骤
+1. 先核对requirements.txt中现有进程/系统采集依赖。优先复用；如需新增依赖，在PR说明理由、Windows/Linux支持与版本，不引入整个监控框架。
+2. 使用argv列表+shell=False启动'--'后的命令；用单调时钟计时。stdout/stderr继承当前终端，默认不保存命令参数、完整环境或子进程日志（其中可能有凭证）。
+3. 定期采集主进程与其可见子进程的RSS总和，记录 sampled_peak_rss_bytes、采样间隔、样本数和采集来源。某个子进程失联/权限不足时记录诊断和完整性标记，不静默当作0；RSS求和可能重复计共享内存，明确注明。
+4. 输出字段至少：schema_version、run_id、started_at_utc、wall_time_seconds、command_exit_code、sampling_interval_seconds、host.sampled_peak_rss_bytes、host.sample_count、host.measurement_source、host.complete、container或null、diagnostics。
+5. 可选 --container：仅只读采集指定容器内存/CPU统计，记录采样峰值、cpu_percent采样说明、容器ID/image/资源限额。Docker不存在/目标不可访问时字段null+原因，不令主命令变成“通过”或伪造0。
+6. 容器本次采样峰值与memory.peak生命周期数据如均可得分列；不重启/重建容器清零。第一版不要求阶段级计时、真实token成本、全机进程扫描或精确CPU峰值。
+7. 输出目录已存在的同名JSON拒绝覆盖；临时文件后原子发布。命令失败仍保存性能数据。测量器正常完成时返回被测命令退出码；测量配置/输出错误使用明确的独立错误结果并打印，保留命令退出码信息。Ctrl+C及时停止自己启动的命令树、保存partial记录，不重试命令或模型。
+8. tests/test_competition_performance.py 使用Mock/本地无网络测试命令：成功、失败、缺Docker、采集权限不足、子进程退出、输出已存在、中断清理和JSON字段。测试不要求某次峰值精确等于10MB。
+9. 在性能文档补字段解释和一次本地测试示例，明确该例只是采集器演示，不是OH实战性能。
+
+### 文件范围
+新增脚本、可选 lima/competition_performance.py、新测试、docs/competition/性能数据.md 中单独采集方法小节；必要最小依赖。不修改已有bundle、业务预算或运行时裁决。与E09文档任务协作，避免同时编辑同一段。
+
+## Evidence and evaluation
+- AC-01：本地测试命令不依赖模型/目标仓库，输出可复用JSON，单位和采样方法明确。
+- AC-02：没有Docker仍可测主命令，容器字段null；失败命令保留失败退出码与性能记录。
+- AC-03：不保存密钥/完整命令/环境，不修改容器；已有输出拒绝覆盖，Ctrl+C不留下本任务启动的命令。
+- AC-04：python -m unittest tests.test_competition_performance -v；附Windows实际demo结果与未验证平台说明。
+
+### wenxinliu52 人工验收
+- [ ] 运行上面的两秒演示命令，JSON有约两秒量级耗时和非空采样值，说明它是采样峰值。
+- [ ] 让Codex给一个退出码非0的无网络测试命令；JSON保留失败码，测量工具没有粉饰成成功。
+- [ ] 机器不装Docker也能运行基础演示；容器值显示未采集而非0。
+- [ ] 第二次写同名输出会拒绝覆盖；Ctrl+C后没有残留演示子进程。
+- [ ] performance.json没有密钥、环境变量或完整命令行。
+
+## Security and operational risks
+包装真实命令可能涉及费用/代码执行，因此本Issue验收只用本地演示；正式评测由维护者启动。采样器不增加权限，不改变沙箱，不自动重试。关联 #273/#165；来源文档/数据不得因此改成全仓验收通过。
+## 执行方式与职责
+- 负责人：wenxinliu52。代码主要由你的 Codex 完成，你负责按本 Issue 的人工验收清单检查结果；不要求你独立审查漏洞机理。
+- 将整个 Issue 发给 Codex，并要求先核对当前 main、已有实现和仓库协作说明；如已有实现，补缺口，不重复开发。
+- 一项任务一个分支/PR。只改本 Issue 列出的范围；确需改检测器、沙箱或冻结合同，先报告具体原因，不顺手扩大范围。
+- 本 Issue 的测试使用合成数据/Mock，不配置真实模型密钥、不执行目标仓库代码。真实漏洞结论由项目维护者审核。
+- PR 描述列出：实现了什么、测试命令和结果、演示命令、未验证事项。引用本 Issue；按仓库现有规则在合并后复验，不以 Codex 一句“完成”作为关闭依据。
+
+## 交付给 wenxinliu52 的检查材料
+Codex 必须提供可复制命令、实际输入/输出示例、测试原始结果和文件清单。你按人工清单操作后记录通过/不通过；遇到不一致，把原始输出交回 Codex 修复。涉及漏洞真假、CWE、修复有效性的结论交维护者判断。

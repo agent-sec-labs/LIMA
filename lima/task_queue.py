@@ -64,6 +64,7 @@ class TaskQueue:
         self._memory_dlq = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._maintenance_thread = None
         self.consumer = "%s-%s" % (socket.gethostname(), uuid.uuid4().hex[:8])
         if redis_url:
             try:
@@ -83,6 +84,29 @@ class TaskQueue:
     @property
     def backend(self) -> str:
         return "redis-streams" if self._redis else "memory-acked"
+
+    def set_maintenance(self, callback, interval: float = 2.0) -> None:
+        """Run durable admission recovery at startup and until this queue closes."""
+        if self._maintenance_thread is not None or self._stop.is_set():
+            raise RuntimeError("queue maintenance already configured or queue closed")
+
+        def recover():
+            try:
+                callback()
+            except Exception:
+                # Pending outbox rows survive a failed publication/ACK.
+                return
+
+        recover()
+
+        def maintain():
+            while not self._stop.wait(interval):
+                recover()
+
+        self._maintenance_thread = threading.Thread(
+            target=maintain, name="lima-webhook-outbox", daemon=True,
+        )
+        self._maintenance_thread.start()
 
     def submit(self, payload: Dict[str, Any], message_id: str = "") -> str:
         envelope = {
@@ -329,6 +353,8 @@ return 1
     def close(self) -> None:
         """Stop accepting work and wait for in-flight handlers to release resources."""
         self._stop.set()
+        if self._maintenance_thread is not None:
+            self._maintenance_thread.join()
         self._executor.shutdown(wait=True, cancel_futures=True)
         if self._redis:
             close = getattr(self._redis, "close", None)

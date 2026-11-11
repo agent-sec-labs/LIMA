@@ -1,0 +1,289 @@
+{
+  "repository": "agent-sec-labs/LIMA",
+  "date": "2026-10-20",
+  "local_head": "8c539211f1faa2981111bb0dea84b6dd0dab6b7d",
+  "main": "069f01feddde5536a38d972bf315ec3ae9fd5ac3",
+  "issues": [
+    {
+      "number": 327,
+      "title": "[赛后开发][B06] 自动构建到 PoC 的冷启动、多仓库与故障验收",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 所属总任务与前置\n\n关联总任务 #321。前置：#323、#322、#324、#325、#326。\n\n## 目标与样本\n\n验证浏览器提交到构建、上下文消费、PoC工作台及报告的真实闭环。至少包含ResInsight、opm-common，以及实施前冻结的一个未适配CMake项目；配置/关闭功能与外部数据集边界分别声明。\n\n## 验收矩阵\n\n- [ ] 在独立干净环境从前端提交已支持仓库，自动匹配配方、构建、测试、安装、导出并转分析。\n- [ ] 未适配CMake项目走真实规划智能体，无维护者逐步修配方；无法完成的样本保留失败，不改为成功。\n- [ ] 真实候选PoC在隔离容器中使用匹配依赖运行，保留编译命令、sanitizer归因和正负对照；普通崩溃不算漏洞确认。\n- [ ] 故障覆盖：依赖下载失败、模型故障、编译/链接/测试失败、磁盘满、超时、取消、进程重启、预算耗尽、缓存失配、产物篡改。\n- [ ] 输出源码/镜像/配方/模型身份、阶段耗时、资源峰值、费用、覆盖分母和未验证项；已有上游慢测试或UB单列，不通过删测过关。\n- [ ] 不靠维护者本机路径或手工环境才能成功；录像、命令和证据包可由另一人复验。\n- [ ] 清理仅本次manifest列出的资源，不全局prune或影响现有部署。\n\n## 发布与范围\n\nMock/单元/CI/真实模型/真实Docker分列；准备操作手册和适配能力矩阵。完整流程通过后再更新产品声明，不把部分项目成功泛化为任意C/C++仓库可构建。首版不以OpenHarmony原生全产品构建或任意漏洞均可复现为完成标准。",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:46Z"
+    },
+    {
+      "number": 326,
+      "title": "[赛后开发][B05] 构建任务产物自动交接到分析与 PoC 工作台",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 所属总任务与前置\n\n关联总任务 #321。前置：#323、#322。\n\n## 缺口与旧任务关系\n\n完整构建目前导出原始compdb和安装包，但前端分析与PoC不自动继承这些依赖。#181已跟踪上下文包/两层架构，#182跟踪compdb预算；本任务只补“BuildJob产物登记→既有上下文协议→分析/PoC消费”的产品接线，不另做平行上下文格式或重复实现它们。\n\n## 交付\n\n- 复用 `lima.context_package` 等现有reader/writer与compiler-argv校验；转换容器路径，收集真实需要的生成头、第三方头、宏、语言标准及必要的链接闭包。\n- 绑定仓库、commit、构建变体、架构、编译器/标准库、镜像和context_hash；严禁跨身份错误消费。\n- 分开记录头文件/编译上下文是否resolved、链接依赖是否可用、sanitizer是否实际启用。\n- 对GCC14/C++23构建结果与分析容器Clang14等不兼容情况输出明确诊断；不得直接把完整构建容器或无插桩二进制当作ASan验证环境。\n- 必要的sanitizer重编译在已有隔离规则下执行，原始源码保持只读；缺依赖/链接失败属于环境或未验证状态。\n\n## 验收\n\n- [ ] 一个需要生成头/外部依赖/跨文件链接的真实候选，能证明PoC确实消费匹配构建上下文并编译运行。\n- [ ] 篡改包、错commit/变体、越界路径、缺头、缺库、ABI不匹配等均拒绝或显式incomplete。\n- [ ] compdb不再被普通源码快照预算静默过滤，覆盖范围与失败原因可查（沿用#182验收）。\n- [ ] 完整项目构建成功、PoC运行成功、ASan命中、漏洞成立是不同状态，证据链保持分离。\n- [ ] 不在分析沙箱安装项目依赖或放宽Landlock/网络隔离；不改冻结合同而无迁移评审。\n\n## 实施前置\n\n重新审计#181/#182和相关PR实现；已有部分直接复用，缺口落到具体适配接口后再确定文件所有权。",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:44Z"
+    },
+    {
+      "number": 325,
+      "title": "[赛后开发][B04] CMake 构建规划智能体：生成配方与有限修正",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 所属总任务与前置\n\n关联总任务 #321。前置：#323、#322。\n\n## 目标\n\n没有适用配方时，LIMA读取仓库README、CMakeLists、依赖声明、子模块和官方CI，生成有来源依据的Dockerfile与full-build.json；通过确定性执行器验证，并按真实失败日志有限修正。\n\n## 交付\n\n- 构建规划角色复用现有模型接口、预算与任务编排；输出结构化规划、依赖依据、功能范围和候选配方。\n- 基于受控基础镜像和模板生成；仓库文本/日志仅作为数据，不得绕过约定执行权限。\n- 区分缺依赖、版本冲突、配置错误、源码编译错误、测试失败、网络/磁盘/平台问题，分别给出修正或需要协助结论。\n- 设置尝试次数、总时长、token/费用和日志量预算；取消及时生效。模型未配置时明确降级。\n- 保存每次配方diff、输入日志哈希、构建结果和原因；成功版本登记为带身份和范围的可复用配方。\n\n## 验收\n\n- [ ] 预先选定且未手工适配的CMake仓库，可从源码资料生成并通过真实构建；失败样本明确终止并留证。\n- [ ] 缺依赖、错误配置、unsupported、环境失败和预算耗尽均有测试。\n- [ ] 不通过静默关闭测试、核心功能、改目标源码或伪造报告来完成任务；必要功能范围变化须显式记录并按产品策略确认。\n- [ ] 模型仅提出候选，schema/执行器/测试/安装清单决定结果，不能自行宣布成功。\n- [ ] 自动测试采用fixture/Mock，不触发付费模型；真实模型验收单独配置和记录成本。\n\n## 边界\n\n首版仅CMake，不承诺GN/hb/Bazel/Meson任意项目自动适配，不修改分析沙箱隔离策略。完整自主适配验收不能用Codex手工修好后的配方冒充。",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:42Z"
+    },
+    {
+      "number": 324,
+      "title": "[赛后开发][B03] 前端构建并分析入口、实时阶段和失败诊断",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 所属总任务与前置\n\n关联总任务 #321。前置：#323、#322。\n\n## 用户操作\n\n用户只填写仓库、提交版本和范围，选择“仅扫描”或“构建后分析”。平台自动匹配已验证配方；未知项目显示待适配/规划状态，不要求普通用户编辑Dockerfile或执行命令。\n\n## 交付\n\n复用现有创建任务与详情页面，展示匹配配方及功能范围、构建阶段、日志、测试结果、失败原因、取消/重试和产物下载。区分构建完成与分析/PoC完成；页面刷新可恢复。\n\n## 验收\n\n- [ ] 已有配方从前端提交到真实构建完成，无维护者手工命令。\n- [ ] 未知/不兼容项目进入待适配而非静默退化成“构建成功”；显式仅扫描保持现有行为。\n- [ ] 编译失败、测试失败、模型未配置、预算耗尽、取消和重连均有对应界面。\n- [ ] 构建产物下载有认证；不将原始日志中的HTML/控制字符当界面指令。\n- [ ] 前端类型检查、组件测试和API合同测试通过；真实E2E证据与Mock结果分别记录。\n\n## 边界\n\nB05完成前不得把“构建完成”显示为“PoC验证成功”。用户不直接接触配方语法；管理员配方管理保持独立权限。",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:41Z"
+    },
+    {
+      "number": 323,
+      "title": "[赛后开发][B01] 持久化 Docker 构建任务 API 与独立构建 Worker",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 所属总任务与前置\n\n关联总任务 #321。前置：#322。\n\n## 目标与范围\n\n将现有 CLI 执行器接入持久化后台任务，浏览器关闭后构建继续；前端和模型服务不直接持有 Docker socket。\n\n- API 支持创建/查询构建任务、阶段日志、取消、基于新attempt的重试、产物下载；复用现有认证、租户、存储和队列。\n- 独立构建Worker调用现有执行器，记录源码提交、配方/执行器哈希、镜像ID、功能变体、容器/卷身份、预算与逐步退出码。\n- 明确 queued、运行阶段、completed、failed、cancelled、unsupported/needs-assistance 等状态及其向现有Task状态的映射，避免双重状态漂移。\n- 原始仓库只读；仅清理本任务登记的容器/卷/临时目录；新attempt不覆盖旧日志；支持Worker异常后的状态对账。\n\n## 验收\n\n- [ ] 通过API触发已有配方真实构建，服务重启/页面关闭不丢失状态。\n- [ ] 无权限/跨租户访问拒绝；日志下载受控，密钥不进入日志和模型上下文。\n- [ ] 超时、中断、磁盘满、镜像构建失败、容器异常、重试和重复消息不会永久running或重复执行。\n- [ ] completed只在测试、安装清单、产物哈希等现有门禁通过后产生。\n- [ ] Mock/CI无付费调用；真实验收使用唯一资源身份，不影响生产Compose和已有数据。\n\n## 边界\n\n复用CLI/现有build-result合同；不在API进程中直接执行用户shell，不开放web服务Docker socket，不以本任务替代配方生成或PoC接线。",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:39Z"
+    },
+    {
+      "number": 322,
+      "title": "[赛后开发][B02] 构建配方注册、版本匹配与适用范围管理",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 所属总任务与前置\n\n关联总任务 #321。前置：无硬性实施前置；与B01共同冻结配方/API合同。\n\n## 目标与范围\n\n复用 `--project` 目录和 `full-build.json`，建立可供后台和智能体读取的配方注册合同。普通用户无需上传配方。\n\n- 记录仓库规范身份、适用refs/提交约束、构建变体/架构、配方版本与哈希、镜像身份、依赖来源和启用/禁用功能。\n- 区分人工维护、智能体候选、已验证、不兼容、待适配；不能把任意同名目录匹配成受支持仓库。\n- 引入本地已有两项目配方；管理员注册/审核与普通用户选择分离。\n- 输出匹配依据和失配原因，供 B01/B03/B04 使用；不直接调用模型或构建目标。\n\n## 验收\n\n- [ ] 已知仓库及兼容配置命中；错误仓库、越界refs、错误架构/功能配置拒绝或待适配。\n- [ ] 配方/镜像/源码变化使对应缓存失效，不跨变体复用。\n- [ ] schema、环境变量、JUnit相对路径、命令argv和来源通过现有校验；外部仓库文本不能自动变成受信任配方。\n- [ ] 冻结注册/匹配API合同并提供无网络测试夹具；两项目匹配和不兼容案例可演示。\n\n## 实施边界\n\n不重复实现编译执行器，不重写旧 `recipe.yaml` 上下文协议。注册模块与API/schema文件所有权由主实施者先分配。",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:38Z"
+    },
+    {
+      "number": 321,
+      "title": "[赛后开发][Epic] 用户提交仓库到 Docker 构建、智能配方适配与 PoC 验证的自动闭环",
+      "body": "**排期：赛后开发。不纳入本届比赛提交、代码冻结或赛前演示的硬性门禁。**\n\n## 用户目标\n\n用户只提供仓库、版本和分析范围，无需准备配方、编译数据库或手动输入 Docker 命令。已有适用配方直接复用；未适配的 CMake 仓库由构建规划智能体提出配方并有限修正。平台持续展示构建/分析进度、失败原因和可下载证据。\n\n## 已有基础与实施前检查\n\n本地已有 `lima/container_build.py` 和 ResInsight/opm-common 的 `Dockerfile + full-build.json`，并留有真实构建证据；这不等于相关改动已经合入 GitHub main。开工先核对最新 main、未合并 PR 和现有实现，复用已有任务、认证、队列、日志、产物及 context-package 合同，不重建一套平行系统。\n\n## 当前缺口\n\n1. 前端任务创建尚未触发完整构建执行器。\n2. 配方目前由人/Codex编写，平台不会自动生成和修正。\n3. 完整构建环境中的头文件、宏、生成代码和链接依赖，尚未自动传递给分析与 PoC 工作台。\n\n## 目标流程\n\n仓库/提交 → 后台构建任务 → 匹配已有配方或生成候选 → 独立构建Worker → 配置/编译/测试/安装/验证 → 核验产物与上下文 → 分析/PoC编译运行 → 报告。\n\n构建规划智能体负责提出配方和修正，确定性执行器负责执行、核验和判定。完整构建成功不能替代 sanitizer 验证或漏洞成立判断。\n\n## 分阶段交付\n\n- 阶段一：已有配方的后台任务、配方注册与前端闭环（B01/B02/B03）。\n- 阶段二：CMake 配方自动生成与预算内修正（B04）。\n- 阶段三：构建上下文到分析/PoC 的接线与真实多仓库验收（B05/B06）。\n\n## 子任务\n\n子 Issue 发布后在此回填链接：B01 后台任务、B02 配方管理、B03 前端、B04 规划智能体、B05 上下文交接、B06 端到端验收。\n\n## 完成标准\n\n- [ ] 浏览器提交受支持仓库后，无需维护者命令即可完成构建和分析路径。\n- [ ] 已有配方按仓库身份、源码版本和功能配置匹配；无配方时可适配或明确进入 needs-assistance/unsupported。\n- [ ] 源码只读、工作副本独立，取消/失败/超时/磁盘不足/预算耗尽均有终态和证据。\n- [ ] 编译上下文与 repo/commit/配置/架构/编译器绑定，实际被 PoC 工作台消费。\n- [ ] 真实测试、disabled/skipped、失败及未覆盖范围分别统计；模型文本和普通崩溃不能当作漏洞确认。\n- [ ] 两个已适配项目及至少一个事先选定的未适配 CMake 仓库，有干净部署与端到端证据；Mock/CI和真实运行分开标记。\n\n## 关联与非目标\n\n关联 #181（两层构建依赖/上下文包）、#182（compdb预算）、#269（已完成的双版本checkout校验）。不因新 Epic 自动关闭、重排或改写这些旧任务。\n首版不承诺任意构建系统或 OpenHarmony GN/hb 原生产品构建自动适配；不把构建容器直接当作 PoC 沙箱；不静默关闭测试或核心功能来通过验收。\n\n## 协作与发布\n\n接口合同先冻结；前端、后台、智能体可在合同明确后并行，主实施者负责集成与独立验收。共享文件同一时刻只有一个所有者。无默认负责人、无赛前截止日期，赛后按首个闭环重新估时。计划文档：`docs/development/POST_COMPETITION_CONTAINER_BUILD_PLAN_2026-10-19.md`（当前本地稿，待后续PR提交）。\n\n## 已发布子任务\n\n- [ ] #322 — [赛后开发][B02] 构建配方注册、版本匹配与适用范围管理\n- [ ] #323 — [赛后开发][B01] 持久化 Docker 构建任务 API 与独立构建 Worker\n- [ ] #324 — [赛后开发][B03] 前端构建并分析入口、实时阶段和失败诊断\n- [ ] #325 — [赛后开发][B04] CMake 构建规划智能体：生成配方与有限修正\n- [ ] #326 — [赛后开发][B05] 构建任务产物自动交接到分析与 PoC 工作台\n- [ ] #327 — [赛后开发][B06] 自动构建到 PoC 的冷启动、多仓库与故障验收",
+      "labels": [
+        "phase:post-competition"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T15:14:50Z"
+    },
+    {
+      "number": 319,
+      "title": "评估 structured-v2 Specialist 提示词的误报风险",
+      "body": "## 背景\n\n当前 C/C++ Specialist 生产流程默认使用 legacy。structured-v2 加强了证据链、反证条件和结论分级，但现有对照尚不支持把它替换为默认提示词。\n\n## 已有对照\n\n- 上一轮 structured 对照：负例 Finding 为 legacy 3/15、structured 8/15；正例确认 14/15 对 15/15；同驱动判别双方 12/15。\n- 修正工作台快照路径后的 structured-v2 开发集复跑：有效配对 36 条（3 个案例、两版本、三次重复、两提示词；overflow-direct 整组剔除）。漏洞版运行确认 legacy 8/9、structured-v2 9/9；fixed 版语义支持 legacy 2/9、structured-v2 4/9；原始同驱动判别 8 次对 5 次。\n- 所有驱动人工有效性仍待复核，开发集结果不能视作独立验收。当前证据不支持切换默认。\n\n报告：`docs/competition/Specialist提示词拆分试点报告_2026-10-18.md`\n\n## 后续工作\n\n- 逐条复核 structured-v2 在 fixed 版上的语义支持，判断误报来自提示词证据链、Critic 裁决还是样本/API 契约。\n- 只针对已确认的问题提出最小改动，保持 legacy 作为对照和回退项。\n- 使用未参与调优的独立样本做配对评估，记录模型失败、实验失败、PoC 人工合法性和同驱动判别；不得把弃权或环境失败记作安全。\n- 只有在负例误报不增加、正例有效确认和人工核验后的同驱动判别不下降、回归通过后，才讨论将新提示词设为默认。\n\n## 验收\n\n1. 新旧提示词及模型/预算身份可复现，旧批次原始产物不被覆盖。\n2. 独立评估集上的负例误报满足原门槛，正例和版本判别不退化。\n3. 人工复核记录补齐，回归测试通过。\n4. 验收前，生产默认保持 legacy。",
+      "labels": [],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T09:06:21Z"
+    },
+    {
+      "number": 315,
+      "title": "[Competition][协作分工] 非漏洞专业队友任务认领与文件所有权（2026-10-17）",
+      "body": "## 目的与本次核对基线\n让不熟悉漏洞机理的队友承担可独立开发、可机械验收的工程任务。2026-10-17 已核对远端 main b69e5b9424445a6326115925ca39e838b8a0441d、全部 open Issue、最近 40 个 PR，以及相关关闭说明；不是仅按本机旧分支判断。\n\n“互不影响”按三个条件落实：文件不交叉、只读输入/独立输出、合并不改变现有扫描链。无法承诺任意提交绝对无回归，必须有独立测试、人工演示和维护者集成复核。不把“写完脚本”称为“真实漏洞验收通过”。\n\n## 认领方式\n- 现有 assignee 保留，本次不擅自换人；新任务暂不指派。队友评论“认领 #号 + 预计完成时间 + 基线 SHA”，维护者确认后更新 assignee，一项任务同一时间只有一位负责人。\n- 每人先完成一个小 Issue；一个 codex/ 分支和 PR，不从其他队友未合并分支堆叠起步。开工先核对 main/PR 是否已有实现。\n- Issue 正文就是范围与验收清单；只提交文件白名单。发现必须改共享文件时停在具体缺口，由维护者决定独立集成任务，不扩大自己的 PR。\n- 新工具只用标准库/现有依赖；不修改 requirements、__init__、CI、Compose、安全配置、writer 或 schema。测试夹具在自己的测试临时目录生成。\n\n## 可独立分配的任务\n\n| Issue | 适合技能/规模 | 独占文件和交付 | 前置与并行关系 |\n|---|---|---|---|\n| #293 E04 覆盖摘要 | Python/JSON，约1天 | scripts/summarize_competition_coverage.py；可选 lima/competition_coverage.py；tests/test_competition_coverage.py；tools/coverage.md | 只读现有 bundle；不依赖已关闭 #288；可与下列独立工具并行 |\n| #311 E01 运行前检查 | Python/Git/Mock，1–2天 | scripts/preflight_competition_run.py；lima/competition_preflight.py；tests/test_competition_preflight.py；tools/preflight.md | 复用既有校验器；默认离线，Sidecar health 显式启用；不运行模型/PoC |\n| #312 E06 历史结果汇总 | Python/CSV，1–2天 | scripts/aggregate_competition_runs.py；lima/competition_run_summary.py；tests/test_competition_run_summary.py；tools/run-summary.md | 消费已有原始结果；不依赖 E04/E07；性能 JSON 可选、缺失未知 |\n| #313 E07 环境清单 | Python/进程调用，1–2天 | scripts/export_competition_environment.py；lima/competition_environment.py；tests/test_competition_environment.py；tools/environment.md | 不依赖 #292/#298；不读 .env；Docker inspect 显式可选 |\n| #314 E14 报告缺件检查 | Python/文件校验，1–2天 | scripts/check_competition_report_materials.py；lima/competition_report_materials.py；tests/test_competition_report_materials.py；tools/report-materials.md 与独立 example JSON | 只查维护者手填索引/附件；不改 writer、不判漏洞、不依赖 #299 |\n| #291 E09 文档核对 | 文档/来源查证，约1天 | 仅新增 docs/competition/文档状态核对表.md | 可随时开展；共享正文不改，维护者最后统一应用建议 |\n| #289 E12 前端下载 | React/TS/Vitest，1–2天 | 原正文列出的 client.ts/测试、TaskDetailPage.tsx/测试、下载 helper | 建议与 #246 剩余 E2E 同一人串行；不碰后端/报告合同 |\n| #298 E08 干净部署冒烟 | Docker/跨平台脚本，1–2天+实际彩排 | scripts/smoke_clean_deploy.py；可选 lima/competition_deploy_smoke.py；tests/test_competition_deploy_smoke.py；tools/deploy-smoke.md | #290 已合并；不改 Compose/README；独立 project/端口/卷，与生产部署隔离 |\n\n表中 tools/*.md 均指 docs/competition/tools/，该目录不需要公共 index 或 __init__，每人仅新增自己的文件。建议优先分配 #293/#312/#313/#314；有前端经验分 #289，有 Docker 经验分 #298。#311 要求能理解校验器错误与 Git 状态，但不要求漏洞专业知识。\n\n## 需要等待材料或按现有 PR 推进\n\n| Issue | 当前状态及处理 |\n|---|---|\n| #292 E03 性能采集 | 已有 Draft PR #310，原作者继续修改/验收，其他人不要重复实现。该 PR 独占 performance 模块/脚本/测试、requirements 的 psutil 行和性能数据.md 采集小节 |\n| #299 E10 提交包 | 工具可用合成材料现在开发；最终组装等批准材料、交付形态、官方规则、#298/#300 产物。只写自己的打包文件，不要求任何新工具接入；已移除对关闭 #288 的硬依赖 |\n| #300 E11 DEMO/视频 | 可以先做分镜和彩排记录；最终录制等待固定版本、真实部署和已批准证据。独占 DEMO脚本.md 与 rehearsal/E11-rehearsal.md；#291 不改它，#299 只消费成品 |\n| #290 E13 环境示例 | PR #309 已合并、Issue completed；不要再实现。本机旧分支缺文件不代表 main 缺失 |\n\n#299 文件：scripts/build_submission_package.py、可选 lima/competition_submission.py、tests/test_competition_submission.py、submission-allowlist.example.json、submission-check-template.md、tools/submission-package.md（后三项在 docs/competition 下）。#300 视频在批准的交付目录，不进 Git。\n\n## 已裁剪任务不重复建单\n#288（独立 bundle 验包）、#294（scripted 统计增强）、#295（通用分支矩阵）、#297（独立真实工作台评测）是主动以 not_planned 关闭；#296 是判据已交付。保留其状态和判据，不因现在有队友就自动重开。本次新增任务分别服务运行前检查、数据汇总、环境记录和缺件检查，不实现这些已裁掉任务的主体。\n\n实际全仓分批调度、构建上下文/链接闭包、PoC 合法性、ASan/UBSan 归因、漏洞危害/严重度、版本受影响判定、CVE 归因和修复正确性仍由维护者负责设计与验收。队友可以提供原始字段，不代替专业结论。E05 批量真实执行器涉及预算/中断/重复费用，本轮不列为无前置的普通队友任务。\n\n## 集成与验收顺序\n1. 独立工具用自有合成输入+失败输入完成测试与人工演示，各自可直接合入/撤回；无需等待其他新工具。\n2. #292 沿 PR #310 评审；#298 真实干净部署另留 SHA/镜像与逐步日志，Mock 不能代替。\n3. 维护者最后统一采纳 #291 的文案、审核正式报告/风险/版本结论，进行真实运行并批准公开材料。\n4. #300 最终录制，#299 最终组装。原有冻结/组装排期未在本次擅自更改；资料不齐报缺件，不用模拟结果填补。\n\n## 本次已处理\n- [x] 新增 #311/#312/#313/#314：每项有明确文件、CLI 合同、正常/失败测试和非漏洞专业人工检查。\n- [x] 更新 #289/#291/#292/#293/#298/#299/#300：收紧文件边界，保留状态和 assignee，记录待合并与材料依赖。\n- [x] 对已关闭任务先读关闭理由，未重开或重复创建。\n- [ ] 队友认领后由维护者分配，每个 PR 根据白名单验收。\n",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-19T09:00:46Z"
+    },
+    {
+      "number": 314,
+      "title": "[Competition][E14][独立工具] 正式报告材料缺件检查，只查字段和附件不判断漏洞",
+      "body": "## 目标和适合的执行者\n正式报告经常缺源码片段、PoC、版本依据或修复说明。本工具在组装前列缺件清单；只检查维护者填写的交付索引和附件，不用 LLM 理解 Markdown，不决定漏洞是否成立。需要 JSON/文件校验能力，预计 1–2 天。\n\n## 文件所有权\n仅允许新增 scripts/check_competition_report_materials.py、lima/competition_report_materials.py、tests/test_competition_report_materials.py、docs/competition/tools/report-materials.md、docs/competition/tools/report-materials.example.json。\n只读参考赛题要求和当前 agent_report/openharmony_validation 输出；不改报告 writer、V4 schema、case 合同、已有 bundle 或打包 #299。\n\n## 输入输出合同\n入口：python scripts/check_competition_report_materials.py --index <materials.json> --root <approved-materials-root> --output <new-material-check.json>。\n新增索引独立 schema_version=1、scope=report-materials-check、findings 数组。每项有唯一 finding_id；field_refs 包含以下八项相对附件路径：source_excerpt、description_and_cwe、trigger_and_path、poc_source、reproduction_instructions、impact_modules_and_versions、remediation、maintainer_review。一个正文文件可承载多项，但工具只声称引用存在且非空，不声称段落内容正确。\n1. CVE 字段显式 cve_status=known|no-match-recorded|not-assessed；known 时要求符合格式的 cve_ids 和 evidence_ref；无对应记录保留状态，不自动标新漏洞。维护者复核项是显式附件/记录，只检查存在，不推断批准公开或签名真实性。\n2. 附件必须落在显式 root 内的规范相对普通文件；拒绝绝对/盘符/../反斜杠、symlink/junction/reparse point、重复 JSON key。缺失/空文件逐条报告，不打开执行、不联网、不修改附件；大文件大小检查有预算，不把整个源码/PoC打印到报告。\n3. 可选 severity 文本/执行记录引用由维护者提供；缺失标待补，不根据 evidence state/CWE/退出码计算严重度、稳定性或真实性。不能因附件名有 ASan 或 passed 而宣称漏洞通过。\n4. 输出 schema_version、scope、case_label、fields_complete、per_finding_missing、input_errors、diagnostics，始终含 semantic_verification=not-performed、disclosure_approval=not-checked。0=结构/引用字段齐备，2=缺件或无效索引，3=用法/输出错误。fields_complete=true 不能显示“漏洞成立/可以公开/可以提交比赛”。\n5. 这不是 #288 的完整性校验器，也不是 #299 的打包工具：不遍历所有包文件、不验 SHA 清单、不渲染 PDF、不执行敏感扫描、不生成 zip，不以此替代维护者终审。\n\n## 实施步骤及验收\n- [ ] 先写完整、逐项缺字段、CVE 三态、known 无证据、重复 finding_id/key、空附件、越界/链接、输出已存在测试。\n- [ ] 实现独立索引 schema 校验、文件引用检查、只包含相对定位的 JSON 诊断。\n- [ ] 在 doc/example 用纯合成内容；示例若未提供附件应如实报缺件。测试命令可临时生成“齐备”和“缺 PoC”两个案例。\n- [ ] 运行 python -m unittest tests.test_competition_report_materials -v；附两份 JSON 和退出码。\n\n## 队友人工检查\n- [ ] 删除合成 PoC 附件，看到该 finding 明确缺 poc_source。\n- [ ] 补齐文件后只显示“字段/附件齐备”，不显示“漏洞已通过”。\n- [ ] CVE 未评估仍明确 not-assessed，不编造编号。\n- [ ] 工具没有执行附件；PR 仅约定五个新文件。\n\n## 依赖及回退\n无前置，维护者以手填独立索引提供输入；不要求现有 writer、#299 或其他队友接入它。#299 可在未来选择调用，当前不增加其验收负担。\n\n## 协作边界与交付纪律\n- 一项 Issue 一位负责人，一个 codex/ 分支、一个 PR；开工先在本 Issue 认领并记录基线 SHA。当前远端 main 基线为 b69e5b9424445a6326115925ca39e838b8a0441d，实施时重新核对最新 main 及未合并 PR。\n- 仅新增本 Issue 白名单文件；不改既有源码、__init__.py、requirements.txt、pyproject.toml、CI、Compose、配置默认值、共享文档或其他任务夹具。不为复用几行代码新建跨任务公共层。\n- 只读既有接口；若接口不满足，先记录具体缺口交维护者，不能顺手改检测器、裁决、ASan 归因、沙箱、预算、报告 writer、V4 schema 或数据库。\n- 独立 CLI 是本任务完整交付；本轮不接服务/API/UI，不等待其他新任务，不要求别人消费本任务的新输出。移除新增文件即可撤回，对现有扫描行为无影响。\n- 开发/自动验收只用合成数据或 Mock；不配置模型密钥、不执行漏洞 PoC、不主动扫描真实仓库、不启动部署。真实漏洞真假、CWE/危害/修复/分支结论归维护者。\n- 输入只读；输出必须显式指定新目录/新文件，不写 sealed bundle 内部，不覆盖既有结果；新输出错误与输入错误可区分。不输出输入文件内容、凭证、完整环境或未处理异常原文。\n- 使用标准库和已存在依赖，不新增安装要求。正常与异常路径均需测试；PR 提供文件清单、可复制演示命令、实际输入输出、测试命令结果和未验证项。不以 Mock 结果声明真实 OH 能力。\n- 开始与结束各检查 git diff --name-only；碰到其他人的改动保留，不 revert；共享文件的必要集成另开维护者任务。\n",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:05Z"
+    },
+    {
+      "number": 313,
+      "title": "[Competition][E07][独立工具] 导出白名单环境清单，不读取凭证或完整环境",
+      "body": "## 目标和适合的执行者\n给实验和交付件附一份可复核的环境身份，减少本机环境无法还原的问题。需要 Python/子进程/JSON，预计 1–2 天；不涉及漏洞判断。\n\n## 文件所有权\n仅允许新增 scripts/export_competition_environment.py、lima/competition_environment.py、tests/test_competition_environment.py、docs/competition/tools/environment.md。\n只读参考 pyproject.toml、cxx_analyzer/Dockerfile、现有 Git/子进程调用风格；不修改依赖或导入设置初始化流程。\n\n## 输入输出合同\n入口：python scripts/export_competition_environment.py --repository <lima-checkout> --run-label <label> --output <new-environment.json> [--container <exact-id-or-name>] [--model-label <operator-label>]。\n1. 默认仅收集 schema_version=1、run_label、UTC 时间、OS 类型/版本、架构、逻辑 CPU 数、当前 Python 版本、源码 commit 和 dirty（含未跟踪文件）状态。内存总量无法仅靠现有依赖可靠获取则 null+reason，不为此安装库。git 返回异常要 unknown，不把不可读当 clean。\n2. 工具版本只用代码内固定工具名与固定 --version 参数白名单、argv+shell=False、有界超时和输出；不存在为 null+原因，不执行用户传来的“版本命令”。标明采自宿主；不能把宿主 clang 版本冒充 Sidecar clang。\n3. Docker inspect 仅显式 --container 后只读查询该容器，投影 image id、镜像引用和 CPU/memory/PID 限额；不保存全量 inspect（含 Env/Mounts），不 docker exec、不拉取/构建/重启、不探测其他容器。容器内部工具版本未采集就 unknown。\n4. model-label 为操作者提供的标签，标 operator-declared，不读取 key、不调用供应商、不声称后端版本已验证；如需额外预算值，仅接受文档列出的显式数值参数，不枚举环境变量。\n5. 不读 .env/config.toml/credential，不转储 os.environ、sys.path、完整命令行、用户名、机器名、绝对工作目录；异常输出只给类别，不回显原始 stderr。镜像引用/标签如含凭证、URL 参数或异常控制字符则拒绝，不收集任意输入原文。\n6. 输出新 JSON，0=清单已生成（每项可 unknown），2=必需的输入/仓库身份无法读取，3=参数/输出错误。可选 Docker 或工具不可用保留诊断不伪造值。明确这份环境清单不是锁定全部依赖、不是健康检查。\n\n## 实施步骤及测试\n- [ ] 先写缺 git、dirty/clean/未跟踪、工具超时、缺 Docker、权限不足、输出冲突、恶意标签/敏感异常的测试。\n- [ ] 实现白名单投影和固定命令，Mock 断言未选择 Docker 时零 Docker 调用、从未访问 Env/Mounts。\n- [ ] 合成版本和 inspect 数据中埋 secret，确认 JSON/stdout/stderr 不含它；测试宿主/容器身份分列。\n- [ ] 运行 python -m unittest tests.test_competition_environment -v；附一次本机无密钥/无 Docker 的演示（路径等隐私不发布）。\n\n## 队友人工检查\n- [ ] 不装 Docker/编译器仍得到 JSON，未知值有原因。\n- [ ] 在临时小 Git 仓新增未跟踪文件，dirty 为 true，删去后符合实际状态。\n- [ ] 清单没有 .env 内容、用户名、机器名、绝对目录和完整 inspect。\n- [ ] 模型标签写“操作者声明”，没有“已验证模型服务”。\n\n## 依赖及回退\n无 E01/#292/#298 前置；只输出新文件，不向其他任务添加必填字段。移除新文件不改变现有部署。\n\n## 协作边界与交付纪律\n- 一项 Issue 一位负责人，一个 codex/ 分支、一个 PR；开工先在本 Issue 认领并记录基线 SHA。当前远端 main 基线为 b69e5b9424445a6326115925ca39e838b8a0441d，实施时重新核对最新 main 及未合并 PR。\n- 仅新增本 Issue 白名单文件；不改既有源码、__init__.py、requirements.txt、pyproject.toml、CI、Compose、配置默认值、共享文档或其他任务夹具。不为复用几行代码新建跨任务公共层。\n- 只读既有接口；若接口不满足，先记录具体缺口交维护者，不能顺手改检测器、裁决、ASan 归因、沙箱、预算、报告 writer、V4 schema 或数据库。\n- 独立 CLI 是本任务完整交付；本轮不接服务/API/UI，不等待其他新任务，不要求别人消费本任务的新输出。移除新增文件即可撤回，对现有扫描行为无影响。\n- 开发/自动验收只用合成数据或 Mock；不配置模型密钥、不执行漏洞 PoC、不主动扫描真实仓库、不启动部署。真实漏洞真假、CWE/危害/修复/分支结论归维护者。\n- 输入只读；输出必须显式指定新目录/新文件，不写 sealed bundle 内部，不覆盖既有结果；新输出错误与输入错误可区分。不输出输入文件内容、凭证、完整环境或未处理异常原文。\n- 使用标准库和已存在依赖，不新增安装要求。正常与异常路径均需测试；PR 提供文件清单、可复制演示命令、实际输入输出、测试命令结果和未验证项。不以 Mock 结果声明真实 OH 能力。\n- 开始与结束各检查 git diff --name-only；碰到其他人的改动保留，不 revert；共享文件的必要集成另开维护者任务。\n",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:00Z"
+    },
+    {
+      "number": 312,
+      "title": "[Competition][E06][独立工具] 从已有证据包汇总多轮结果，保留失败和未知",
+      "body": "## 目标和适合的执行者\n把已有运行结果汇总成 CSV/Markdown，便于看清案例、版本、证据等级、失败原因和成本记录。只做数据搬运，不重跑、不重新判漏洞。需要 Python 文件处理/JSON/表格能力，预计 1–2 天。\n\n## 当前依据\n只读参考 lima/openharmony_validation.py 的 write_validation_bundle/_platform_document，以及 docs/COMPETITION_VALIDATION.md 对运行模式的区分。不要从本机 .zcode 或容器路径自动搜集数据。\n\n## 文件所有权\n仅允许新增 scripts/aggregate_competition_runs.py、lima/competition_run_summary.py、tests/test_competition_run_summary.py、docs/competition/tools/run-summary.md。测试自己生成小 JSON，不修改 writer 和共享夹具。\n\n## 输入输出合同\n入口：python scripts/aggregate_competition_runs.py --inputs <runs.json> --output-dir <new-directory>。\nruns.json v1 含 runs 数组，每项显式给 run_label、bundle_dir，可选 performance_file、execution_label；run_label 唯一。允许绝对输入目录（这是本地 CLI），输出行只记录标签与相对证据引用，不披露宿主路径。\n1. 只读输入 bundle 的 case.json/summary.json/两侧 platform.json；缺旧字段保留 null+原因，双侧不混用。坏包列 errors，不静默丢行。JSON 读取拒绝重复 key，关键字段冲突报错。\n2. 一轮一行，记录 run_label、case_id、两侧 commit、validation_status、两侧 findings 按原 state 的计数、原 reason_codes、total_elapsed_seconds、已声明的运行模式、采样性能可选值及来源。执行/模型身份没有原始记录就 unknown；不要从 finding 状态推断模型真实/模拟。\n3. CSV/Markdown 同源、排序稳定，不平均历史运行、不计算 precision/recall、不把多次 finding 相加称漏洞总数。同 case 不同 run 保留两行；输入路径重复/label 冲突具名拒绝，不能覆盖旧轮。\n4. performance_file 可按 #292/PR #310 已声明的 schema_version=1 只读提取 wall_time_seconds/host.sampled_peak_rss_bytes 等已知字段；未提供或不兼容时 null+原因，不要求先合并 PR #310、不导入其代码。自有 Mock 构造最小数据。旧 bundle 完全可用，不依赖 #288/#293 或 E07。\n5. 记录 summary 原始字节 SHA-256 用于定位这次读取的文件；必须注明未验完整 bundle，不使用 integrity_valid 字段，不重新实现已裁掉的 #288。\n6. 输出 summary.csv、summary.md、errors.json；0=全部指定输入可解析，2=部分/全部输入错误且保留诊断，3=用法/输出冲突。CSV 单元格对以 =、+、-、@ 或制表符起始的自由文本做表格公式转义并在文档说明；Markdown 转义换行和竖线。\n\n## 实施步骤与验收\n- [ ] 先写同案例两轮、failed/inconclusive、旧字段缺失、坏 JSON/重复 key、字段冲突、缺性能、模式未知的测试。\n- [ ] 实现只读加载、统一行投影、CSV/Markdown 与错误清单，不调用任何新工具。\n- [ ] 测试稳定排序、formula injection、输出拒绝覆盖、输入字节保持不变。\n- [ ] 运行 python -m unittest tests.test_competition_run_summary -v；附两份小型合成 bundle、输入清单及表格截图/原文（临时演示由测试命令生成）。\n\n## 队友人工检查\n- [ ] 同 case 的 passed/failed 两轮都保留，失败码没有被改成通过。\n- [ ] 删除一个性能文件，显示未知和原因，不显示 0 MB。\n- [ ] 模型来源未记录时仍 unknown，不因 runtime 字样显示“真实模型”。\n- [ ] 输入原包前后 SHA 不变；PR 仅四个新文件。\n\n## 依赖及回退\n无其他新工具依赖，独立合并/撤回；后续文档组装可选择引用表格但不是本 Issue 的验收条件。\n\n## 协作边界与交付纪律\n- 一项 Issue 一位负责人，一个 codex/ 分支、一个 PR；开工先在本 Issue 认领并记录基线 SHA。当前远端 main 基线为 b69e5b9424445a6326115925ca39e838b8a0441d，实施时重新核对最新 main 及未合并 PR。\n- 仅新增本 Issue 白名单文件；不改既有源码、__init__.py、requirements.txt、pyproject.toml、CI、Compose、配置默认值、共享文档或其他任务夹具。不为复用几行代码新建跨任务公共层。\n- 只读既有接口；若接口不满足，先记录具体缺口交维护者，不能顺手改检测器、裁决、ASan 归因、沙箱、预算、报告 writer、V4 schema 或数据库。\n- 独立 CLI 是本任务完整交付；本轮不接服务/API/UI，不等待其他新任务，不要求别人消费本任务的新输出。移除新增文件即可撤回，对现有扫描行为无影响。\n- 开发/自动验收只用合成数据或 Mock；不配置模型密钥、不执行漏洞 PoC、不主动扫描真实仓库、不启动部署。真实漏洞真假、CWE/危害/修复/分支结论归维护者。\n- 输入只读；输出必须显式指定新目录/新文件，不写 sealed bundle 内部，不覆盖既有结果；新输出错误与输入错误可区分。不输出输入文件内容、凭证、完整环境或未处理异常原文。\n- 使用标准库和已存在依赖，不新增安装要求。正常与异常路径均需测试；PR 提供文件清单、可复制演示命令、实际输入输出、测试命令结果和未验证项。不以 Mock 结果声明真实 OH 能力。\n- 开始与结束各检查 git diff --name-only；碰到其他人的改动保留，不 revert；共享文件的必要集成另开维护者任务。\n",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-17T14:48:56Z"
+    },
+    {
+      "number": 311,
+      "title": "[Competition][E01][独立工具] 运行前只读检查，不启动模型或目标代码",
+      "body": "## 目标和适合的执行者\n让操作者在昂贵验证前确认案例、checkout、compdb 与 Sidecar 前提是否齐备。需要 Python CLI/JSON/Mock 测试能力，不需要判断漏洞。预计 1–2 天；范围仅单案例 preflight，不增加批量运行器。\n\n## 当前可复用依据\n只读参考 lima/openharmony_validation.py 的 load_openharmony_case、validate_case_checkouts、WorkspaceLimits、CheckoutPreflightError；lima/repository_import.py 的 RepositoryImportPolicy；lima/cxx_memory.py 的 CxxMemoryAnalyzerClient.health；scripts/run_openharmony_validation.py 的参数。不得调用 run_openharmony_validation / run_platform_review。\n\n## 文件所有权\n仅允许新增：\n- scripts/preflight_competition_run.py（CLI）\n- lima/competition_preflight.py（检查与输出投影）\n- tests/test_competition_preflight.py\n- docs/competition/tools/preflight.md\n夹具全部在该测试临时目录中生成，不提交真实案例或修改共用 fixture。\n\n## 输入输出合同\n入口：python scripts/preflight_competition_run.py --case <case.json> --repository-import-root <root> --output <new-preflight.json> [--check-sidecar --analyzer-url <url>]。\n1. 默认离线，复用现有 case/checkout 校验，保留既有预算和错误类别。检测 manifest、两个 checkout 固定 SHA/dirty/compdb/overlay、文件预算，既有校验失败不能降格为警告。不得 fetch/checkout/reset/build 或写被测目录。\n2. Sidecar 健康探测是显式选项，只调用既有 health，使用有限超时且不重试。未选择时标 not-requested，不填 passed。URL 输入拒绝用户密码、query/fragment，输出不回显地址。\n3. 检查模型配置只能记录是否提供必要项，不能发送认证/模型请求、读 .env 文件或输出实际凭证；缺配置不得声称供应商不可用，存在配置不得声称认证有效。\n4. JSON v1：schema_version、checks[{name,status:pass|fail|not-requested,reason_code}]、prerequisites_passed、sidecar_requested、diagnostics。检查项失败后不伪造后续检查通过；结构/清单不可解析时记录错误并停止依赖检查。stdout 为简短同源摘要。\n5. 退出 0=所有本次请求的前提检查通过；2=前提不满足；3=用法/输出错误。所有文字说明“前提通过不代表漏洞成立，也不代表模型已认证”。\n\n## 实施步骤\n- [ ] 写合成案例/临时 checkout 或 Mock 校验器的测试，确认未实现前失败。\n- [ ] 复用校验器实现结果投影和 CLI，不复制其安全规则。\n- [ ] 补 Sidecar 可选探测与超时/不可用路径，确认默认不会调用网络或模型。\n- [ ] 运行 python -m unittest tests.test_competition_preflight -v，附一份通过和一份失败的合成演示输出。\n\n## 验收矩阵\n- AC1：正确案例前提通过；HEAD 漂移、dirty、缺 compdb、overlay 摘要错误、预算超限分别有稳定失败原因（可 Mock 已有校验器错误，接口复用有测试）。\n- AC2：Mock 断言未调用模型/编译/执行；默认未请求 health；显式 health 超时不能通过。\n- AC3：坏 manifest、输出已存在、缺输入、错误 URL、包含敏感文本的异常不会造成覆盖或泄漏。\n- AC4：输入目录前后文件内容一致；两种演示的 JSON 和退出码对应。\n\n## 队友人工检查\n- [ ] 复制合成演示命令，无 Docker/密钥也能验证离线模式。\n- [ ] 改坏一个模拟 HEAD，看到失败项目和原因；不出现“漏洞已验证”。\n- [ ] 不传 --check-sidecar 时不探测服务。\n- [ ] PR 只有四个新增文件，测试输出可复验。\n\n## 依赖及回退\n无新 Issue 前置；与 #292/#293/#289 可并行。只消费当前 main 已有校验器，不消费其他新工具。\n\n## 协作边界与交付纪律\n- 一项 Issue 一位负责人，一个 codex/ 分支、一个 PR；开工先在本 Issue 认领并记录基线 SHA。当前远端 main 基线为 b69e5b9424445a6326115925ca39e838b8a0441d，实施时重新核对最新 main 及未合并 PR。\n- 仅新增本 Issue 白名单文件；不改既有源码、__init__.py、requirements.txt、pyproject.toml、CI、Compose、配置默认值、共享文档或其他任务夹具。不为复用几行代码新建跨任务公共层。\n- 只读既有接口；若接口不满足，先记录具体缺口交维护者，不能顺手改检测器、裁决、ASan 归因、沙箱、预算、报告 writer、V4 schema 或数据库。\n- 独立 CLI 是本任务完整交付；本轮不接服务/API/UI，不等待其他新任务，不要求别人消费本任务的新输出。移除新增文件即可撤回，对现有扫描行为无影响。\n- 开发/自动验收只用合成数据或 Mock；不配置模型密钥、不执行漏洞 PoC、不主动扫描真实仓库、不启动部署。真实漏洞真假、CWE/危害/修复/分支结论归维护者。\n- 输入只读；输出必须显式指定新目录/新文件，不写 sealed bundle 内部，不覆盖既有结果；新输出错误与输入错误可区分。不输出输入文件内容、凭证、完整环境或未处理异常原文。\n- 使用标准库和已存在依赖，不新增安装要求。正常与异常路径均需测试；PR 提供文件清单、可复制演示命令、实际输入输出、测试命令结果和未验证项。不以 Mock 结果声明真实 OH 能力。\n- 开始与结束各检查 git diff --name-only；碰到其他人的改动保留，不 revert；共享文件的必要集成另开维护者任务。\n",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-10-20T03:05:40Z"
+    },
+    {
+      "number": 300,
+      "title": "[Competition][E11] DEMO 彩排与演示视频（附实施与人工验收清单）",
+      "body": "## 2026-10-17 并行开发边界（本节优先于下文宽泛范围）\n\n适合文档/录屏队友，不需要开发漏洞算法。保留原冻结后录制安排，不将其误列为现在可完成的最终验收。\n\n- 唯一源码文档所有权：docs/competition/DEMO脚本.md（仅经维护者批准的讲解/操作调整）、新 docs/competition/rehearsal/E11-rehearsal.md。视频在明确交付目录，不入 git；其他任务不修改此脚本。\n- #291 仅产文档核对表，不改 DEMO；#299 只消费批准的最终视频/脚本，不编辑它们。讲解漏洞机理、严重度和新发现主张由维护者提供并审核。\n- 现在可按已合并版本准备分镜/彩排表；最终录制等待固定 SHA、#298 的真实部署记录、维护者批准的漏洞证据和可用的演示功能。报告下载 #289 未合并时用已存在的导出方式或明确待完成，不能录制虚构按钮。\n- 不因演示失败修改后端/前端/配置/PoC。偏差写进 E11-rehearsal.md，交对应负责人。脚本更改记录前后对照；真实/历史回放/Fake 三类逐段标注。\n- 只提交批准的演示材料与验收记录，不在 Issue/PR/视频中曝光未批准漏洞或个人配置。工具不需要密钥。\n\n\n---\n\n## Problem to solve\n提交材料需要 DEMO 视频。已有 DEMO 脚本（`docs/competition/DEMO脚本.md`，#285 锚点）与彩排记录，缺面向参赛版本的可重复彩排和成品视频。本 Issue 先立任务书（10-15 前）；**录制在 10-20 代码冻结之后**按彩排脚本进行，使用与 release 一致的 SHA/环境。\n\n## Proposed solution（实施）\n1. 彩排：冻结 SHA 的检出 + E08 通过的部署环境上，按 DEMO 脚本完整走一遍；每步核对预期输出与实际输出，偏差记录并回报（不改脚本自欺）。脚本如需因 V02 战果/口径变化调整，先经维护者确认再改。\n2. 录制内容（按脚本章节）：环境检查、任务提交、进度观察、证据等级展示、真实 PoC 记录、修复对照、影响报告、导出操作。\n3. 真实性标注（硬性）：画面/字幕对**真实运行、历史记录回放、Fake 演示**三类分别标注；长耗时步骤用已封存真实记录讲解时必须注明\"历史回放\"；不得把 Fake 演示当真实性能或漏洞成果展示。\n4. 隐私与合规：画面无密钥、无维护者本机路径/个人信息、无未经批准的漏洞材料；正文与画面符合官方匿名要求（不出现学院、导师信息）。\n5. 讲解词中的漏洞定性与评分主张先送维护者审批（脚本级审核，一次审完整版），批准后录制；重录只改画面错误，不擅改主张。\n\n### 文件范围\n`docs/competition/DEMO脚本.md`（如需对齐实际功能的修订）、彩排记录、视频文件（不入 git，放交付目录，位置记录进 Issue）。不新增检测代码。\n\n## Evidence and evaluation\n- AC-01：彩排记录完整（每步预期 vs 实际），偏差有处置说明。\n- AC-02：视频三类标注齐全；抽查任一\"真实运行\"片段能对应到留存的运行记录。\n- AC-03：匿名与敏感信息检查通过（逐分钟回看或录制时双屏核对，方法记录）。\n\n### wenxinliu52 人工验收\n- [ ] 看完整视频一遍：无密钥/本机路径/学院导师信息；三类标注清楚。\n- [ ] 随机抽两个片段对照留存运行记录核对真实性标注。\n- [ ] 视频与冻结 release 的功能一致（演示的操作在当前版本真的存在）。\n\n## Security and operational risks\n未经披露审核的漏洞细节不得入镜（画面与讲解词都算）；讲解主张的审批在维护者。视频体积不进 PDF（E10 只收文档 PDF）。关联 #285（DEMO 锚点）、E08（部署环境）、E10（材料组装）。\n\n## 执行方式与职责\n- 负责人：wenxinliu52。录制工具自选；彩排与脚本偏差、讲解主张审批走维护者。\n- 本任务无代码 PR；交付为彩排记录 + 视频 + 本 Issue 的验收勾选，时间在 10-20 冻结后。",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [
+        "wenxinliu52"
+      ],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:35Z"
+    },
+    {
+      "number": 299,
+      "title": "[Competition][E10] 参赛提交包组装与缺件清单（附 Codex 实施与人工验收清单）",
+      "body": "## 2026-10-17 并行开发边界（本节优先于下文宽泛范围）\n\n适合文件处理/打包经验队友。拆开“可立即做的打包工具”和“依赖材料的最终组装”：工具用合成输入独立验收；正式材料到齐再组装，不让其他任务等待本 Issue 的新接口。\n\n- 唯一新增文件：scripts/build_submission_package.py、可选 lima/competition_submission.py、tests/test_competition_submission.py、docs/competition/submission-allowlist.example.json、docs/competition/submission-check-template.md、docs/competition/tools/submission-package.md。\n- #288 已以 not_planned 主动裁剪关闭，正文对其“复用”不再作为硬依赖；本任务自含提交包成员清单/SHA-256 检查，仅服务自己的显式 allowlist，不重启通用 bundle 验证器。拒绝目录通配/递归收集/链接逃逸，只允许明确相对普通文件。\n- 不修改报告、PoC、视频、示例配置或其他工具输出；不得默认消费 E01/E06/E07/E14 的新 schema。未来可手动把批准文件加入 allowlist，不要求其作者改接口。\n- 官方命名、大小、截止日期沿用原 Issue 的既有记录，本次未重新核实外部通知；工具把这些作为显式本地配置，不新增硬编码规则。模板/程序形式/批准材料未知时列缺件，不让队友自行决定。\n- 基础工具不引入 PDF/Office 新依赖；PDF 内容/匿名检查无法完成时标 manual-review-required，不能用只查文件名替代正文审查。正式成品仍须人工 PDF 可读性/匿名核查。\n- 不读 .env、不全仓打包、不执行包内程序、不上传。输出到全新目录；已有输出拒绝覆盖。测试覆盖 allowlist 外、越界/链接、缺件、超限、digest 不符和重复目标路径。脚本测试阶段不操作真实漏洞材料。\n- #298/#300 的结果和用户批准的官方规则是最终组装的前置，工具开发不是；保留原组装排期。\n\n---\n\n## Problem to solve\n作品提交（截止 2026-10-22）需要按官方要求组装材料：文档资料 PDF（≤10MB，含作品简介、设计方案、测试报告、其他文档、参赛作品声明）+ 可执行程序；命名规则\"队长姓名+作品名称+资料名称\"；正文不得体现学院、导师信息；模板见通知附件 2；须经培养单位资格审核后方可官网提交。目前没有可核对的提交清单与组装流程。本 Issue 先立任务书（10-15 前），执行窗口 **10-21**（组装+检查+模拟上传一轮完成）；**10-22 只处理提交系统问题，不再改材料**。\n\n## 输入与依赖\n- 材料内容定稿（作品简介、设计方案、测试报告、使用说明书/DEMO 脚本/正式漏洞报告）由维护者 10-20 后提供；本任务不写内容，只组装。\n- 参赛作品声明模板：**需用户从官方通知附件 2 下载提供**（未到位时列入缺件清单，不阻塞其他项）。\n- 可执行程序交付形态（源码包 / 镜像 / 两者）：**待用户 10-18 前拍板**。未定则停止最终组装并立即升级给用户处理，Codex 不得自行选择。\n- 依赖：#290（环境示例，进程序包）、E08（部署验证）、自含的提交包清单与摘要检查（#288 已裁剪，不作为前置）、E11 产物（视频，另列）。\n\n## Proposed solution（Codex 实施）\n1. 新增打包脚本（建议 `scripts/build_submission_package.py`）：从**显式 allowlist**（清单文件入库）打包源码、依赖/运行说明、维护者批准的正式漏洞报告、PoC/补丁/证据、文档 PDF、性能说明、声明、程序交付物；每项缺失输出缺件清单（哪项、谁负责、阻塞什么），不静默跳过。\n2. 检查与命名：\n   - 按\"队长姓名+作品名称+资料名称\"命名，报名字段（姓名/队名）走配置文件提供，不写死进仓库；\n   - 逐项检查：PDF ≤10MB；正文无学院/导师字样（对 PDF 文本做关键词扫描，结果记录）；无密钥、无 `.env`、无本地数据库/缓存、无未批准漏洞材料、无 `.git`、无维护者本机绝对路径；\n   - 输出全套 SHA-256 清单，用本任务自含的提交包成员清单与摘要检查验证，不依赖已关闭的 #288。\n3. 模拟上传演练：把成品复制到独立目录模拟上传，再\"下载\"（复制回来）后打开复核——PDF 可打开、程序包可解压/可按运行说明启动到健康检查、清单与实物一一对应。10-21 完成一轮；发现问题当日修复重跑。\n4. 不自动发布、不接触比赛平台；正式提交由用户执行。\n\n### 文件范围\n新增打包脚本、allowlist 清单模板、检查报告模板；不改业务代码。正式漏洞报告等敏感内容的\"允许进入打包\"清单由维护者逐项批准。\n\n## Evidence and evaluation\n- AC-01：allowlist 外任何文件不可进入包（越界即失败）；缺件清单准确（缺哪项、阻塞什么一目了然）。\n- AC-02：命名、≤10MB、敏感信息扫描、SHA-256 清单、离线校验全部有记录；扫描零命中也要记录扫描范围。\n- AC-03：模拟上传→下载→打开复核一轮完成并留档（10-21）。\n\n### wenxinliu52 人工验收\n- [ ] 拿到的包逐项对清单：文件齐、名字对、大小合规。\n- [ ] 随机抽两个 PDF 打开可读；程序包按运行说明能到健康检查（或如实记录哪步未验证）。\n- [ ] 用本任务提交包检查验件通过；SHA-256 清单与实物一致。\n- [ ] 敏感信息扫描报告无命中（或命中的都是已批准项）。\n\n## Security and operational risks\n未过披露审核的漏洞材料（PoC/利用细节）严禁进入提交包之外再漏进公开仓库——打包 allowlist 由维护者逐项批准。报名字段含个人信息，走本地配置不提交。关联 #288/#290、E08/E11、正式材料清单（冲刺计划 §4）。\n\n## 执行方式与职责\n- 负责人：wenxinliu52。Codex 实施组装与检查，你按清单验收；材料内容、漏洞报告版本、程序交付形态的批准权在维护者/用户。\n- 一项任务一个分支/PR；10-21 完成一轮演练留档。",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [
+        "wenxinliu52"
+      ],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:31Z"
+    },
+    {
+      "number": 298,
+      "title": "[Competition][E08] 干净部署 smoke test：启动、健康检查与冻结门禁（附 Codex 实施与人工验收清单）",
+      "body": "## 2026-10-17 并行开发边界（本节优先于下文宽泛范围）\n\n#290 已由 PR #309 合入 main，可直接使用它的示例，禁止重做环境模板。该任务需要熟悉 Docker 的队友；开发可使用 Mock，真实干净部署验收必须在隔离资源上留证据。\n\n- 唯一新增文件：scripts/smoke_clean_deploy.py、可选 lima/competition_deploy_smoke.py、tests/test_competition_deploy_smoke.py、docs/competition/tools/deploy-smoke.md。不修改 deploy/competition/README.md、docker-compose.yml、scripts/lima.ps1 或用户 .env。\n- 文档步骤不符时只记录在 deploy-smoke.md 问题表，交维护者后续整合，不顺手改生产默认值。无 .env/缺认证必需项时，允许按手册在本任务副本初始化，或给出明确配置错误；不能为了“不崩溃”绕过认证/启动校验。\n- 每次运行使用唯一 Compose project、独立端口、临时配置/卷及输出目录；不得 source 用户生产 .env。通过专用测试配置确保 LLM/Agent 远程调用关闭，不给网络权限打补丁。缺密钥是未启用远程模式，不是供应商健康证明。\n- 只清理 manifest 中本任务实际创建且带唯一 project 身份的资源；已有同名资源则启动前失败，禁止 down -v 他人的 project、全局 prune、删除现有库。Ctrl+C/失败保留记录，清理结果可见。\n- Mock 测试覆盖成功、启动失败、端口冲突、project 冲突、缺 Docker、超时、中断和仅清理自有资源；输出未知环境为未验证。真实运行须附固定 SHA/镜像/逐步结果；Mock 通过不能称干净部署通过。\n- 原排期不调整；#299/#300 的最终彩排消费通过记录，但脚本开发不等待它们。\n\n---\n\n## Problem to solve\n10-20 代码冻结的强制门禁是：参赛者能在干净环境按使用说明把系统跑起来。README 与现有测试不能代替这件事——需要一次真实执行的干净部署冒烟，形成操作记录和问题清单。本 Issue 先把任务书写清（10-15 前），执行窗口 **10-18~19**；依赖 #290（参赛环境示例，10-17 前合并）。\n\n## Proposed solution（Codex 实施）\n1. 新增 smoke-test 包装脚本 `scripts/smoke_clean_deploy.py`：在专用 Compose project + 独立测试数据目录中，按 `deploy/competition/README.md` 的步骤执行启动、服务健康检查、Sidecar 能力探测、退出清理，输出结构化记录（环境、逐条命令、日志、退出码、结论）。\n2. 检查项（逐项落记录）：\n   - 干净目录/干净机器按手册部署成功；\n   - **无密钥不误调用付费模型**：`.env` 缺失或凭证留空时，能力按文档声明显式禁用/提示，而不是崩溃或静默调用付费端点；\n   - 示例任务跑通且预期配置错误（缺必填项）有明确错误提示；\n   - 输出目录正确创建，无越权写入；\n   - 生成物与配置中**不存在维护者本机绝对路径**（对输出做路径扫描并记录结果）；\n   - 端口冲突、依赖缺失有可操作诊断。\n3. 失败处理：发现的问题按\"阻塞冻结 / 可推迟\"分两列记录，阻塞项各开一个小 Issue 修复后复跑（不重开大任务）；复跑结果追加记录，不覆盖。\n4. 不使用维护者现有数据库、卷或管理员账号；清理只针对本任务创建的资源；不调用真实模型。\n\n### 文件范围\n仅新增本节文件白名单内的 smoke 脚本、helper、测试与独立说明；README 偏差只记录，不修改共享文档。不改沙箱、不构建真实漏洞靶场、不改 Compose 安全权限。\n\n## Evidence and evaluation\n- AC-01：固定 commit（执行时按当时 main 或维护者指定 SHA，记录进输出）在干净测试环境按手册跑通；全部检查项有通过/失败结论与证据路径。\n- AC-02：无密钥场景验证过且记录；本机绝对路径扫描有结果（命中或零命中都要记录扫描范围）。\n- AC-03：本地通过 / CI 通过 / 未测试平台分别标记；操作记录可复现（逐条命令可复制）。\n\n### wenxinliu52 人工验收\n- [ ] 在你自己的机器（非维护者环境）按记录逐条复制命令跑一遍，结论一致。\n- [ ] 在独立测试副本验证缺 .env：按手册初始化或给出明确配置错误，不调用模型、不改认证默认值。\n- [ ] 检查输出目录扫描结果：无 D:\\ 或 /home/ 类维护者路径。\n- [ ] 清理后再跑一次能成功（幂等），残留资源列表为空。\n\n## Security and operational risks\n冒烟用独立 project/目录，不碰现有部署数据；不配置模型密钥。本任务是冻结门禁：10-19 未通过则冻结顺延或按维护者裁定处理，不得带病冻结。关联 #290（示例配置输入）、#273。\n\n## 执行方式与职责\n- 负责人：wenxinliu52。Codex 实施与首跑，你按清单在自己环境复跑；\"是否达到冻结门禁\"的最终裁定在维护者。\n- 一项任务一个分支/PR；PR 附首跑完整记录；执行窗口 10-18~19。",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [
+        "wenxinliu52"
+      ],
+      "state": "open",
+      "updated_at": "2026-10-20T11:39:39Z"
+    },
+    {
+      "number": 293,
+      "title": "[Competition][E04] 从证据包生成覆盖率与未审阅摘要（附 Codex 实施与人工验收清单）",
+      "body": "## 2026-10-17 并行开发边界（本节优先于下文宽泛范围）\n\n现有 assignee 为 w0r1i0g1ht，保留，不擅自分配给旧正文提到的其他人。适合 Python 数据处理队友，认领后单独分配。\n\n- 仅新增 scripts/summarize_competition_coverage.py、可选 lima/competition_coverage.py、tests/test_competition_coverage.py、docs/competition/tools/coverage.md；禁止修改任何既有文件或共享 fixture。\n- 本任务的说明只写 coverage.md；不得编辑使用说明书/性能数据/验证台账，文档统一整合归 #291 的维护者后续处理。\n- #288 已主动裁剪关闭，本任务不等待或重新实现其校验器。直接只读已批准输入，缺失/未知字段保持原正文合同。\n- 与 #292/E01/E06/E07/E14 无文件交集，无新功能前置，独立验收、合并或撤回。原有 10-19 时窗保留。\n\n---\n\n## Problem to solve\n现有summary有快照file_coverage/byte_coverage，新版platform有unreviewed_units，diagnostics有coverage gap，但缺统一展示。快照读全不能证明TU都审阅，也不能证明零漏报。\n\n## Proposed solution\n新增 scripts/summarize_competition_coverage.py，离线读取单个bundle，输出JSON或Markdown，不改包，不联网，不计算检测率。\n```powershell\npython scripts/summarize_competition_coverage.py --bundle <bundle目录> --format json\npython scripts/summarize_competition_coverage.py --bundle <bundle目录> --format markdown\n```\n\n### 给 Codex 的具体步骤\n1. 阅读 lima/openharmony_validation.py:_platform_document、write_validation_bundle，及对应bundle测试。分别读取summary中的vulnerable/fixed，不合并两侧分母。\n2. 冻结输出字段：schema_version、case_id、validation_status；每侧的snapshot_file_coverage、snapshot_byte_coverage、unreviewed_units、unreviewed_count、expected_tu_count、reviewed_tu_count、semantic_review_coverage、coverage_gaps、diagnostics、field_sources。\n3. file/byte比例从原字段直取，须有限数且0≤值≤1；缺失为null，不默认为0或1。百分比只在Markdown显示时换算，JSON保留比例。\n4. unreviewed_units缺失与空数组不同：旧包缺字段输出null+“未记录”；存在空数组输出[]和0，但不能据此宣称完整审阅。\n5. 当前包无法可靠给出总TU分母/已审阅TU数时，expected_tu_count、reviewed_tu_count、semantic_review_coverage都为null并说明原因。不要从case.translation_units或finding数量反推全部扫描范围；不新增total-known字段填上猜测值。\n6. coverage_gaps仅从现有diagnostics中精确提取'coverage gap: '前缀，保留原始code，按每侧code去重稳定排序；数量表示“记录的gap种类数”，不是受影响TU数。其他诊断单独保留，不用模型重新分类。\n7. summary与侧platform.json若都有同一字段：验证相同再使用，冲突失败并列出字段；不要静默覆盖。字段来源记录如summary.json#/vulnerable/file_coverage，方便核查。\n8. 输入损坏返回非0，列出错误文件与字段；正常输出仅说明覆盖记录，保持原validation_status。E02未实现时仍能独立做字段解析测试，不复制完整哈希校验器；E02完成后可在文档建议先验包。\n9. 新建tests/test_competition_coverage.py：完整字段、旧包缺字段、空列表、部分未审阅、比例越界/NaN、summary/platform冲突、同码去重和无finding。给出至少两份小型演示输入和输出。\n\n### 文件范围\n新增脚本、可选lima/competition_coverage.py、新测试、简短使用说明。禁止改writer、主检测器、gap taxonomy、裁决状态或历史bundle。\n\n## Evidence and evaluation\n- AC-01：JSON/Markdown同源，每个数值能追溯；双版本分开，比例/百分比转换正确。\n- AC-02：缺字段显示未知；空unreviewed不自动成为100%语义覆盖；零finding不写“全部代码安全”。\n- AC-03：gap种类计数不当作TU数量；冲突/坏数据非0退出，输入包不变。\n- AC-04：python -m unittest tests.test_competition_coverage -v；PR贴两份演示输出与字段解释。\n\n### wenxinliu52 人工验收\n- [ ] 在演示包设置file_coverage=0.5，Markdown显示快照文件50%，JSON仍为0.5。\n- [ ] 在旧包删除unreviewed_units，显示“未记录”，不能显示“0个未审阅”。\n- [ ] 保留unreviewed_units=[]但不给TU总数：语义覆盖仍显示不可计算。\n- [ ] 放两条相同gap，显示一个gap种类；两侧结果不混在一起。\n- [ ] 即使实验status=failed、快照比例=100%，摘要仍保留failed，不称检测成功。\n\n## Security and operational risks\n本任务只投影现有字段。任何新的覆盖率分母、漏洞真值或检测率定义都归维护者；不能由贡献者或模型自行解释。关联 #273/#165，工程输入可由合成fixture提供。\n## 执行方式与职责\n- 负责人：wenxinliu52。代码主要由你的 Codex 完成，你负责按本 Issue 的人工验收清单检查结果；不要求你独立审查漏洞机理。\n- 将整个 Issue 发给 Codex，并要求先核对当前 main、已有实现和仓库协作说明；如已有实现，补缺口，不重复开发。\n- 一项任务一个分支/PR。只改本 Issue 列出的范围；确需改检测器、沙箱或冻结合同，先报告具体原因，不顺手扩大范围。\n- 本 Issue 的测试使用合成数据/Mock，不配置真实模型密钥、不执行目标仓库代码。真实漏洞结论由项目维护者审核。\n- PR 描述列出：实现了什么、测试命令和结果、演示命令、未验证事项。引用本 Issue；按仓库现有规则在合并后复验，不以 Codex 一句“完成”作为关闭依据。\n\n## 交付给 wenxinliu52 的检查材料\nCodex 必须提供可复制命令、实际输入/输出示例、测试原始结果和文件清单。你按人工清单操作后记录通过/不通过；遇到不一致，把原始输出交回 Codex 修复。涉及漏洞真假、CWE、修复有效性的结论交维护者判断。",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [
+        "w0r1i0g1ht"
+      ],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:13Z"
+    },
+    {
+      "number": 291,
+      "title": "[Docs][E09] 参赛文档状态与证据核对表（共享正文留维护者统一整合）",
+      "body": "## 2026-10-17 范围收紧\n原任务方向正确，但一次编辑技术/使用/性能/验证/部署五份共享文档会与 #292、#298 和持续实战记录冲突。本轮改成独立核对表与修改建议交付；原需求快照已保存在本次任务记录，最终正文整合由维护者另行串行进行。保留现有负责人和原人工审核要求。\n\n## 可观察交付\n新增 docs/competition/文档状态核对表.md，逐条记录原文文件/小节、原陈述、证据 URL/commit/日期、当前状态、建议替换文本、未决问题和可公开性。队友只核对事实出处，不判漏洞真假；没有证据写待维护者确认。\n\n## 文件所有权\n唯一可提交文件：docs/competition/文档状态核对表.md。只读技术说明书.md、使用说明书.md、性能数据.md、docs/COMPETITION_VALIDATION.md、deploy/competition/README.md 和 DEMO脚本.md。禁止修改它们；不改源码/数据集/历史产物，不上传本地未批准漏洞材料。\n\n## 实施与验收\n- [ ] 开工核对最新 main 和 PR 状态：#285/#286/#287 已合并，#290 由 PR #309 合并；#292/PR #310 尚待评审，不能写成已合并。状态随执行时点重查。\n- [ ] 保留原边界：真实模型+scripted 工作台≠真实 ASan；expat 上游 DTD 路径≠OH 构建受影响；快照100%≠全语义审阅；失败不能改成成功。\n- [ ] 每项“已验证”列运行时间、代码基线、命令及可访问证据；本地记录如未批准公开只标待入正式交付，不能复制正文。\n- [ ] 建议替换文本单列，可由维护者直接应用；互相矛盾的历史记录标明先后和问题，不删除或选择有利数字。\n- [ ] 视频/PDF/正式报告等不存在则待制作；引用 #300 的产物，不替 #300 改 DEMO 脚本。\n- [ ] git diff --check；逐条人工打开链接和代码路径；不要求文字任务编写模拟实现的测试。\n\n## 非漏洞专业队友的验收\n- [ ] 任一已验证条目都能找到来源；无法判断的风险句子标待确认。\n- [ ] PR 只新增一个核对表，没有共享文档改动。\n- [ ] failed/inconclusive、Fake/真实、main/待合并分别表述。\n- [ ] 未执行付费评测、未上传未批准报告。\n\n## 独立性及后续\n无 #292 合并前置，可并行整理；PR #310 合并后只更新核对表中的事实。维护者最后按建议统一修改正文，属于后续整合，不作为本 Issue 关闭前置。回退仅移除本表，运行行为不变。\n",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [
+        "wenxinliu52"
+      ],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:24Z"
+    },
+    {
+      "number": 289,
+      "title": "[Frontend][E12] 任务详情下载 Markdown / JSON 报告（附 Codex 实施与人工验收清单）",
+      "body": "## 2026-10-17 并行开发边界（本节优先于下文宽泛范围）\n\n适合前端队友，保持现有 assignee；认领后由维护者分配，不自动换人。#246 已有组件与 API 实现（PR #261/#262 已合并），先核对它剩余的 E2E，不能重做已有卡片。\n\n- 只拥有原正文列出的 TaskDetailPage.tsx、client.ts 和各自测试及相邻小下载 helper；不改 frontend/e2e、后端、types 合同或其他页面。\n- #246 的剩余 E2E 与本任务建议由同一位前端负责人串行完成；若并行必须分别锁定上述文件和 frontend/e2e，不能各改一套 API helper。\n- 不把下载 JSON 称为完整原始证据包；不依赖 E01/E06/E07/E14。沿用已有 10-19 时窗，排期由维护者决定。\n\n---\n\n## Problem to solve\n#246 已有任务详情和平台结果展示，后端也有 GET /v1/tasks/{id}/report，但前端没有报告下载按钮。本任务补导出，不重做报告页面，不改漏洞判断。\n\n## Proposed solution\n在审计报告卡片增加“下载 Markdown”“下载 JSON”。Markdown 来自现有认证端点；JSON只导出已经加载的 task.report 对象，不导出完整task、token、input、设置或数据库内容。\n\n### 给 Codex 的具体步骤\n1. 阅读 frontend/src/features/tasks/TaskDetailPage.tsx 的 ReportCard、frontend/src/shared/api/client.ts、types.ts、client.test.ts 和 TaskDetail.report.test.tsx；核对后端report端点。\n2. 在集中式api对象增加 taskReportMarkdown(taskId,signal?)，复用 request<string> 和 encodeURIComponent(taskId)。当前 request 已按Content-Type解析文本/JSON，不另写一套fetch/认证流程。如main已有等价方法则复用。\n3. 按“report存在且是有效报告对象”显示按钮，不根据finding数量决定：零finding报告同样允许下载；没有report则隐藏。失败或取消任务如已有报告，也按已有访问权限允许导出。\n4. Markdown请求期间仅相应按钮loading；成功后保存文本。JSON导出 task.report 的UTF-8格式化JSON，不重新计算任何状态。\n5. 文件名固定 lima-task-<安全化taskId>-report.md / .json；taskId仅保留ASCII字母数字、连字符和下划线，其他字符替换成_并限制长度。API URL使用原始ID的URL编码，不能使用文件名安全化ID替代。\n6. MIME使用 text/markdown;charset=utf-8 与 application/json;charset=utf-8。用Blob/object URL下载，释放object URL，防止重复点击资源泄漏；封装小download helper可放相邻文件。\n7. 401沿用现有认证处理，403/404/网络异常有可见提示；不要把错误响应保存成报告。错误后按钮恢复可用，不向URL添加token。\n8. 前端测试覆盖：有报告、无报告、零finding、旧格式、Unicode文本、Markdown请求认证/URL编码、JSON只含report、下载错误/状态恢复及object URL释放。补一张演示截图或短GIF。\n\n### 文件范围\nfrontend/src/shared/api/client.ts、client.test.ts、frontend/src/features/tasks/TaskDetailPage.tsx、TaskDetail.report.test.tsx；必要小型下载helper及对应测试。后端和报告合同不变。\n\n## Evidence and evaluation\n- AC-01：下载Markdown与后端端点内容一致；JSON与当前task.report一致，包含证据等级但不包含task.input或token。\n- AC-02：无报告不显示，零finding报告仍可下载；中文正常显示。\n- AC-03：403/404/断网不生成错误文件，显示错误并恢复按钮；当前认证和URL编码保留。\n- AC-04：在 frontend 运行 npm run typecheck、npm run test -- src/shared/api/client.test.ts src/features/tasks/TaskDetail.report.test.tsx、npm run build；按main现有结构核对路径，记录真实结果。\n\n### wenxinliu52 人工验收\n- [ ] 让Codex准备本地测试页面或已有授权演示任务：点两个按钮，打开文件看中文是否正常。\n- [ ] JSON只包含报告，不包含登录token或提交任务的原始参数。\n- [ ] 无报告任务没有按钮；零finding任务有按钮。\n- [ ] 模拟接口失败时出现提示，页面仍可操作，不下载“错误页”。\n- [ ] 截图中的按钮和演示结果与PR描述一致。\n\n## Security and operational risks\nJSON是API已提供的脱敏、有界报告投影，不能命名为“完整原始证据包”；PoC只作为文本下载，不执行。无新增权限、模型调用或跨租户接口。关联 #246。\n## 执行方式与职责\n- 负责人：wenxinliu52。代码主要由你的 Codex 完成，你负责按本 Issue 的人工验收清单检查结果；不要求你独立审查漏洞机理。\n- 将整个 Issue 发给 Codex，并要求先核对当前 main、已有实现和仓库协作说明；如已有实现，补缺口，不重复开发。\n- 一项任务一个分支/PR。只改本 Issue 列出的范围；确需改检测器、沙箱或冻结合同，先报告具体原因，不顺手扩大范围。\n- 本 Issue 的测试使用合成数据/Mock，不配置真实模型密钥、不执行目标仓库代码。真实漏洞结论由项目维护者审核。\n- PR 描述列出：实现了什么、测试命令和结果、演示命令、未验证事项。引用本 Issue；按仓库现有规则在合并后复验，不以 Codex 一句“完成”作为关闭依据。\n\n## 交付给 wenxinliu52 的检查材料\nCodex 必须提供可复制命令、实际输入/输出示例、测试原始结果和文件清单。你按人工清单操作后记录通过/不通过；遇到不一致，把原始输出交回 Codex 修复。涉及漏洞真假、CWE、修复有效性的结论交维护者判断。",
+      "labels": [
+        "enhancement"
+      ],
+      "assignees": [
+        "w0r1i0g1ht"
+      ],
+      "state": "open",
+      "updated_at": "2026-10-17T14:49:08Z"
+    },
+    {
+      "number": 246,
+      "title": "[Feature]: 任务详情展示 C++ 智能体检测结果和阶段",
+      "body": "**Problem to solve**\n\n任务详情目前没有平台链审计卡片。平台链运行时进度会停留在上一个分析阶段；只有 C++ finding 的仓库报告也会显示\"生成修复预览\"，点击后只能得到无修复结果。\n\n**Proposed solution**\n\n在现有任务详情页沿用任务轮询和 `StageTimeline`，增加 `PLATFORM_ANALYSIS` 标签。新增 PlatformCard，展示平台状态、统计、前 32 个目标摘要和可选详情。无 `platform` 的旧报告及 disabled 状态不显示空卡片；不可用或失败状态显示原因。PoC 只作为文本展示。#70 的 V5 页面只默认读取摘要，PoC 和日志须按权限、按需获取，不直接复用此页的详情读取方式。修复预览按钮仅在本地报告存在 `.py` finding、CWE 为 22/78/89 且 `automatic_repair !== false` 时显示；混合报告仍可预览合格的 Python finding。不修改后端修复算法。\n\n**Evidence and evaluation**\n\n- 组件测试覆盖旧报告、disabled、no-cxx-sources、失败、详情被省略、长路径和混合 finding。\n- fake LLM 与 fake GitHub materializer 分别走通本地和 GitHub 提交：确认、202、平台进度、SUCCESS、`collaboration.platform` 与 finding 的 `verification_state`。关闭开关时没有模型调用。\n- 真实 Sidecar/模型可用时再做一次现场验证，记录运行状态及失败提示；fake 测试不代替健康性验证。\n\n**Security and operational risks**\n\n前端不执行 PoC，不把 PoC 或源码写入 localStorage、URL 或日志。页面不根据空统计推断仓库安全，也不把 `max_agent_calls` 显示为货币费用。\n\n**Primary scope**：Frontend and product experience\n\n**关系**：依赖 #243、#244、#245。与 #70 的 `TaskDetailPage.tsx` 和共享 API 类型重叠，实施前确认排期。",
+      "labels": [],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-09-30T06:35:26Z"
+    },
+    {
+      "number": 182,
+      "title": "[P1][bug] 快照总量预算过滤 compile_commands.json，大仓库构建上下文退化",
+      "body": "## 问题\n\n快照清单的总量预算（`LIMA_REPOSITORY_SCAN_MAX_TOTAL_BYTES` 默认 20MB）将大仓库根部的 compile_commands.json 过滤在清单之外，构建上下文退化为启发式，AST 提取质量下降。ResInsight 实测触发（2297 个文件超限）。\n\n## 影响与方案\n\n属产品边界缺陷而非配置问题。临时手段为调大预算（ResInsight 实测需约 2GB）；根治随两层构建依赖架构（#181）的上下文包落地——构建上下文不再依赖快照内 compdb。\n\n## 验收标准\n\n两层架构落地后，大仓库构建上下文不再受快照预算影响；本 issue 随 #181 验收关闭。",
+      "labels": [
+        "bug",
+        "area:backend",
+        "priority:medium",
+        "status:blocked"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-09-15T06:05:44Z"
+    },
+    {
+      "number": 181,
+      "title": "[P0][infra] 两层构建依赖架构：每仓库构建容器 + 统一分析沙箱",
+      "body": "## 背景\n\nFileInterface（ResInsight，115 个非测试 .cpp / 108 个解析器）在分析沙箱内 115/115 编译失败：完整构建需要 Qt 全框架、OPM、HDF5、Boost 与跨模块头文件；仓库级 compile_commands.json 又超出快照总量预算被清单过滤（见 #182）。手动指定 include 路径无法解决。\n\n## 架构共识\n\n构建与分析分离为两层：\n\n- **构建容器**（每仓库一个，`deploy/build-recipes/<repo>/`：Dockerfile + recipe.yaml）：装齐目标仓库依赖，仅执行 cmake configure（约 30s–2min），产出 compile_commands.json 与实际引用的第三方/生成头文件，打包为带 context_hash 的分析上下文包（约 10–50MB）\n- **分析沙箱**（现有五层沙箱 + clang-14）：展开上下文包执行 AST 提取与 PoC 验证，不安装项目依赖\n\n构建容器内不做分析：目标仓库的 CMakeLists 属不可信输入，且装依赖需要网络，与分析沙箱的安全不变量冲突。\n\n## 实施范围\n\n1. 定义上下文包格式（compdb + include 树 + 宏/语言标准 + context_hash）\n2. ResInsight 构建容器落地，验证 FileInterface 115 TU\n3. OpenHarmony 构建容器（GN/Ninja/hb，third_party 自带依赖）\n\n## 验收标准\n\nFileInterface 115 TU 全部取得有效编译上下文并进入检测管线；新仓库接入只需新增 build-recipe，不改检测代码。\n\n## 状态\n\n设计共识已确认（含所有者）；实施启动待批准。",
+      "labels": [
+        "infra",
+        "security",
+        "area:backend",
+        "priority:high",
+        "status:ready"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-09-15T06:05:46Z"
+    },
+    {
+      "number": 166,
+      "title": "[EPIC][CXX-Agent] C/C++ 智能体漏洞检测：现状归档与收尾计划",
+      "body": "## 背景\n\n`codex/cxx-llm-agent-detection` 承载 LIMA 的 C/C++ 漏洞智能体检测：多智能体管线结合静态分析（Semgrep / Clang Static Analyzer）与动态验证（AddressSanitizer），产出带证据链的漏洞结论。分支本地领先远端 68 个提交，已通过 `9114f46` 吸收 main 全部基础设施，**尚未合入 main**。\n\n近期战略调整（所有者拍板）：以通用的大规模构建依赖方案（两层容器架构）覆盖 OpenHarmony 赛题，OPM 仓库暂缓。\n\n## 设计不变量\n\n1. 模型输出不作为最终判定：结论须由工具证据（编译期分析、运行期崩溃）支撑\n2. 模型输出、用户代码、工具输出均按不可信输入校验，校验失败整包拒绝（fail-closed）\n3. C/C++ Finding 永不自动修复（`automatic_repair=False`）\n\n## 子项索引\n\n已建成（创建即归档，closed/completed）：\n\n| # | 子系统 |\n|---|---|\n| #158 | 检测器基座：五层沙箱 + 三层静态分析 |\n| #159 | UAF v2：Clang 事实 + P1–P7 证明的确定性路线（含跨函数释放的已知限制） |\n| #160 | 七角色多智能体检测管线 |\n| #161 | 平台化：五层漏斗、VulnPack、复现工作台 |\n\n待办：\n\n| # | 事项 | 前置 |\n|---|---|---|\n| #181 | [P0] 两层构建依赖架构（构建容器 + 分析沙箱） | 实施批准 |\n| #182 | [P1] 快照预算过滤 compile_commands.json | 随架构落地 |\n| #163 | [P1] 修复 compat golden 测试 | — |\n| #165 | [P0] 最终验收：FileInterface / OpenHarmony 全量评测 | 架构落地 |\n| #164 | [P0] 集成合并进 main（单一 PR + 评审材料包） | 架构落地 + #165 |\n\n已决：#162（目标决策 → FileInterface 主攻 + 通用构建依赖架构，OPM 暂缓）。\n\n## 当前进度\n\n约 2000 个测试（已知失败 2 个，见 #163，归 Task 10）；VizFwk 试点达标。收尾路径：两层架构实施 → FileInterface 验证 → #165 验收 → #164 合并。\n\n## 参考\n\n分支 `docs/superpowers/specs/`：`2026-09-02-cxx-llm-agent-detection-design.md`（管线）、`2026-09-10-cxx-uaf-v2-design.md`（UAF v2）、`2026-09-12-agent-vuln-platform-design.md`（平台）。",
+      "labels": [
+        "epic",
+        "security"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-09-15T06:05:55Z"
+    },
+    {
+      "number": 165,
+      "title": "[P0][acceptance] 最终验收：真实模型全量评测，0 漏报 0 误报",
+      "body": "## 验收标准\n\n沿用 VizFwk 已达标的口径：\n\n1. 真实 LLM 模型（非 mock）跑完整检测流程\n2. 目标仓库全量审阅（全部编译单元，不抽样）\n3. 0 漏报、0 误报\n\n## 目标对象\n\n- **FileInterface**（主攻，115 TU，依赖两层构建依赖架构，见相关 infra issue）\n- **OpenHarmony**（比赛目标，随构建容器接入）\n\n## 已达标基线\n\nVizFwk：349 TU → 99 进入模型审阅 → 0 漏报 0 误报。\n\n## 缺口\n\n真实模型在大仓库上的成本与稳定性未验证。",
+      "labels": [
+        "priority:high",
+        "status:blocked"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updated_at": "2026-09-15T06:05:54Z"
+    }
+  ]
+}

@@ -31,6 +31,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Protocol
 
+from lima.build_inputs import BuildInputError, collect_build_inputs, copy_build_inputs
 from lima.build_recipe import (
     LIST_GLOBS_SCRIPT,
     BuildRecipe,
@@ -106,6 +107,25 @@ class BuildLimits:
     memory: str = "10g"
     cpus: str = "6"
     pids_limit: int = 1024
+    # Snapshot-input bounds are enforced before an isolated session exists.
+    max_input_files: int = 50_000
+    max_input_file_bytes: int = 32 * 1024 * 1024
+    max_input_total_bytes: int = 512 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if self.total_seconds < 0 or self.step_seconds <= 0:
+            raise ValueError("build-limits-time-invalid")
+        if self.max_output_bytes <= 0:
+            raise ValueError("build-limits-output-invalid")
+        if (
+            type(self.max_input_files) is not int
+            or self.max_input_files < 1
+            or type(self.max_input_file_bytes) is not int
+            or self.max_input_file_bytes < 1
+            or type(self.max_input_total_bytes) is not int
+            or self.max_input_total_bytes < 1
+        ):
+            raise ValueError("build-limits-input-invalid")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -144,6 +164,10 @@ class BuildExecutionResult:
     package_path: str | None
     failure_code: str | None
     stop_unconfirmed: tuple[str, ...] = ()
+    # Receipt for reporting: input rejection is not repository-code execution.
+    repository_code_executed: bool = False
+    build_input_digest: str | None = None
+    build_input_ref: str | None = None
 
 
 class IsolatedStepOutcome:
@@ -516,15 +540,64 @@ class BuildExecutor:
         steps_dir.mkdir(parents=True, exist_ok=True)
         tmp_root = Path(tempfile.mkdtemp(prefix="lima-build-attempt-"))
         work_copy = tmp_root / "src"
-        shutil.copytree(snapshot, work_copy)
 
         steps: list[BuildStepResult] = []
         stop_unconfirmed: list[str] = []
         failure_code: str | None = None
         package_rel: str | None = None
+        input_digest: str | None = None
+        input_ref: str | None = None
+        repository_code_executed = False
         factory = self._session_factory or DockerIsolatedSessionFactory()
         session: IsolatedSession | None = None
         try:
+            try:
+                inputs = collect_build_inputs(
+                    snapshot, limits, deadline=deadline, cancel=cancel
+                )
+                copy_build_inputs(
+                    inputs, snapshot, work_copy, deadline=deadline, cancel=cancel
+                )
+            except BuildInputError as exc:
+                failure_code = exc.reason
+            else:
+                input_digest = inputs.digest
+                input_ref = "inputs.json"
+                save_record(attempt, inputs.as_record(), filename=input_ref)
+            if failure_code is not None:
+                # Do not create a container for rejected, cancelled or stale
+                # snapshot input.  This distinction is reported explicitly.
+                if failure_code == FAILURE_CANCELLED:
+                    (attempt / CANCEL_MARKER).write_text(
+                        '{"reason": "cancel-callback"}\n', encoding="utf8"
+                    )
+                else:
+                    save_record(
+                        attempt,
+                        {
+                            "ok": False,
+                            "failure_code": failure_code,
+                            "image": recipe.image,
+                            "package": None,
+                            "steps": [],
+                            "stop_unconfirmed": [],
+                            "build_input_digest": None,
+                            "build_input_ref": None,
+                            "repository_code_executed": False,
+                            "elapsed_seconds": time.monotonic()
+                            - (deadline - limits.total_seconds),
+                        },
+                        filename="attempt.json",
+                    )
+                return BuildExecutionResult(
+                    ok=False,
+                    steps=(),
+                    image=recipe.image,
+                    image_digest=None,
+                    package_path=None,
+                    failure_code=failure_code,
+                    repository_code_executed=False,
+                )
             session = factory.open(
                 image=recipe.image,
                 work_dir=work_copy,
@@ -544,6 +617,10 @@ class BuildExecutor:
                     break
                 step_timeout = min(limits.step_seconds, remaining)
                 step_id = f"step-{index:03d}"
+                # Receipt is deliberately set before the transport call:
+                # a timeout/transport exception may still have entered the
+                # container and started repository code.
+                repository_code_executed = True
                 outcome = session.run_step(
                     list(argv),
                     step_id=step_id,
@@ -675,6 +752,9 @@ class BuildExecutor:
                         for step in steps
                     ],
                     "stop_unconfirmed": stop_unconfirmed,
+                    "build_input_digest": input_digest,
+                    "build_input_ref": input_ref,
+                    "repository_code_executed": repository_code_executed,
                     "elapsed_seconds": time.monotonic()
                     - (deadline - limits.total_seconds),
                 },
@@ -688,4 +768,7 @@ class BuildExecutor:
             package_path=str(attempt / package_rel) if package_rel else None,
             failure_code=failure_code,
             stop_unconfirmed=tuple(stop_unconfirmed),
+            repository_code_executed=repository_code_executed,
+            build_input_digest=input_digest,
+            build_input_ref=input_ref,
         )

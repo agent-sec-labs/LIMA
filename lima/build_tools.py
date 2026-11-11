@@ -249,6 +249,13 @@ def _tool_execute_configure(context: _ToolContext) -> dict[str, Any]:
         "execution_digest": _execution_digest(validated),
         "plan_digest": plan_digest(validated.plan),
         "package_ref": f"{attempt_ref}/package" if result.ok else None,
+        "build_input_digest": result.build_input_digest,
+        "build_input_ref": (
+            f"{attempt_ref}/{result.build_input_ref}"
+            if result.build_input_ref
+            else None
+        ),
+        "repository_code_executed": result.repository_code_executed,
         "steps": [
             {
                 "step_id": step.step_id,
@@ -349,6 +356,15 @@ def _tool_validate_context(context: _ToolContext) -> dict[str, Any]:
         return {"ok": False, "error": "package-invalid"}
     if package.manifest.revision != context.request.snapshot_hash:
         return {"ok": False, "error": "snapshot-mismatch"}
+    missing_target_units = sorted(
+        set(context.request.target_units) - set(package.manifest.compdb.tu_list)
+    )
+    if missing_target_units:
+        return {
+            "ok": False,
+            "error": "target-units-missing",
+            "missing_target_units": missing_target_units,
+        }
     return {
         "ok": True,
         "snapshot_hash": context.request.snapshot_hash,

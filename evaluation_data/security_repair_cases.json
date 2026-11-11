@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "name": "lima-cwe-repair-constraints-v1",
+  "name": "lima-cwe-repair-constraints-v3",
+  "revision_note": "2026-11-09: require absolute roots and proven standard SQLite receivers; v2 metrics are not directly comparable.",
   "cases": [
     {
       "id": "cwe78-subprocess-concat",
@@ -14,7 +15,7 @@
       "cwe": "CWE-78",
       "source": "import subprocess\nname = input()\nsubprocess.check_output(f'getent hosts {name}', shell=True)\n",
       "finding": {"path": "dns.py", "line": 3, "rule_id": "FLOW-COMMAND"},
-      "expected": {"decision": "repair", "strategy": "argv-no-shell"}
+      "expected": {"decision": "abstain", "reason": "command-argument-semantics-not-proven"}
     },
     {
       "id": "cwe78-os-system-expression",
@@ -47,14 +48,14 @@
     {
       "id": "cwe89-sqlite-concat-value",
       "cwe": "CWE-89",
-      "source": "import sqlite3\nuser_id = input()\ncursor.execute('SELECT name FROM users WHERE id = ' + user_id)\n",
+      "source": "import sqlite3; cursor=sqlite3.connect(':memory:').cursor()\nuser_id = input()\ncursor.execute('SELECT name FROM users WHERE id = ' + user_id)\n",
       "finding": {"path": "db.py", "line": 3, "rule_id": "SEC-SQL-CONCAT"},
       "expected": {"decision": "repair", "strategy": "parameterized-sql"}
     },
     {
       "id": "cwe89-sqlite-fstring-value",
       "cwe": "CWE-89",
-      "source": "import sqlite3\nlimit = input()\ndb_cursor.execute(f'SELECT name FROM users LIMIT {limit}')\n",
+      "source": "import sqlite3; db_cursor=sqlite3.connect(':memory:').cursor()\nlimit = input()\ndb_cursor.execute(f'SELECT name FROM users LIMIT {limit}')\n",
       "finding": {"path": "db.py", "line": 3, "rule_id": "FLOW-SQL"},
       "expected": {"decision": "repair", "strategy": "parameterized-sql"}
     },
@@ -63,12 +64,12 @@
       "cwe": "CWE-89",
       "source": "import psycopg\nemail = input()\nconnection.execute('DELETE FROM users WHERE email = ' + email)\n",
       "finding": {"path": "db.py", "line": 3, "rule_id": "FLOW-SQL"},
-      "expected": {"decision": "repair", "strategy": "parameterized-sql"}
+      "expected": {"decision": "abstain", "reason": "sql-driver-binding-not-proven"}
     },
     {
       "id": "cwe89-dynamic-table",
       "cwe": "CWE-89",
-      "source": "import sqlite3\ntable = input()\ncursor.execute('SELECT * FROM ' + table + ' WHERE id = 1')\n",
+      "source": "import sqlite3; cursor=sqlite3.connect(':memory:').cursor()\ntable = input()\ncursor.execute('SELECT * FROM ' + table + ' WHERE id = 1')\n",
       "finding": {"path": "db.py", "line": 3, "rule_id": "SEC-SQL-CONCAT"},
       "expected": {"decision": "abstain", "reason": "dynamic-sql-structure"}
     },
@@ -77,12 +78,12 @@
       "cwe": "CWE-89",
       "source": "user_id = input()\ncursor.execute('SELECT * FROM users WHERE id = ' + user_id)\n",
       "finding": {"path": "db.py", "line": 2, "rule_id": "FLOW-SQL"},
-      "expected": {"decision": "abstain", "reason": "unknown-sql-paramstyle"}
+      "expected": {"decision": "abstain", "reason": "sql-driver-binding-not-proven"}
     },
     {
       "id": "cwe89-quoted-concatenation",
       "cwe": "CWE-89",
-      "source": "import sqlite3\nname = input()\ncursor.execute(\"SELECT * FROM users WHERE name = '\" + name + \"'\")\n",
+      "source": "import sqlite3; cursor=sqlite3.connect(':memory:').cursor()\nname = input()\ncursor.execute(\"SELECT * FROM users WHERE name = '\" + name + \"'\")\n",
       "finding": {"path": "db.py", "line": 3, "rule_id": "SEC-SQL-CONCAT"},
       "expected": {"decision": "abstain", "reason": "dynamic-sql-structure"}
     },
@@ -105,7 +106,7 @@
       "cwe": "CWE-22",
       "source": "# lima: trusted-path-root=config.UPLOAD_ROOT\nname = input()\nopen(config.UPLOAD_ROOT / name)\n",
       "finding": {"path": "files.py", "line": 3, "rule_id": "FLOW-PATH"},
-      "expected": {"decision": "repair", "strategy": "confined-path"}
+      "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
     },
     {
       "id": "cwe22-parameter-named-root",
@@ -127,6 +128,62 @@
       "source": "value = input()\nopen(value / 'file.txt')\n",
       "finding": {"path": "files.py", "line": 2, "rule_id": "FLOW-PATH"},
       "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
+    },
+    {
+      "id": "cwe78-interpreter-code-argument",
+      "cwe": "CWE-78",
+      "source": "import subprocess\nvalue=input()\nsubprocess.run('python -c ' + value, shell=True)\n",
+      "finding": {"path": "app.py", "line": 3, "rule_id": "FLOW-COMMAND"},
+      "expected": {"decision": "abstain", "reason": "command-argument-semantics-not-proven"}
+    },
+    {
+      "id": "cwe78-wrapper-code-argument",
+      "cwe": "CWE-78",
+      "source": "import subprocess\nvalue=input()\nsubprocess.run('env python -c ' + value, shell=True)\n",
+      "finding": {"path": "app.py", "line": 3, "rule_id": "FLOW-COMMAND"},
+      "expected": {"decision": "abstain", "reason": "command-argument-semantics-not-proven"}
+    },
+    {
+      "id": "cwe22-root-parameter-shadow",
+      "cwe": "CWE-22",
+      "source": "from pathlib import Path\nBASE_ROOT=Path('/safe')\ndef read(BASE_ROOT,name):\n return open(BASE_ROOT / name)\n",
+      "finding": {"path": "files.py", "line": 4, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
+    },
+    {
+      "id": "cwe22-root-reassignment",
+      "cwe": "CWE-22",
+      "source": "from pathlib import Path\nBASE_ROOT=Path('/safe')\nBASE_ROOT=Path(input())\nname=input()\nopen(BASE_ROOT / name)\n",
+      "finding": {"path": "files.py", "line": 5, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
+    },
+    {
+      "id": "cwe22-helper-parameter-shadow",
+      "cwe": "CWE-22",
+      "source": "from pathlib import Path\nBASE_ROOT=Path('/safe')\ndef read(name,_lima_resolve_under_base):\n return open(BASE_ROOT / name)\n",
+      "finding": {"path": "files.py", "line": 4, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "repair-helper-name-collision"}
+    },
+    {
+      "id": "cwe22-immutable-root-in-function",
+      "cwe": "CWE-22",
+      "source": "from pathlib import Path\nBASE_ROOT=Path('/safe')\ndef read(name):\n return open(BASE_ROOT / name)\n",
+      "finding": {"path": "files.py", "line": 4, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "repair", "strategy": "confined-path"}
+    },
+    {
+      "id": "cwe22-relative-root",
+      "cwe": "CWE-22",
+      "source": "from pathlib import Path\nBASE_ROOT=Path('approved')\nname=input()\nopen(BASE_ROOT / name)\n",
+      "finding": {"path": "app.py", "line": 4, "rule_id": "FLOW-PATH"},
+      "expected": {"decision": "abstain", "reason": "trusted-path-root-not-proven"}
+    },
+    {
+      "id": "cwe89-wrapper",
+      "cwe": "CWE-89",
+      "source": "import sqlite3\nclass LegacyCursor:\n def execute(self, sql, parameters=()):\n  return sql.replace('?', str(parameters))\ncursor=LegacyCursor()\nvalue=input()\ncursor.execute('SELECT * FROM t WHERE id = ' + value)\n",
+      "finding": {"path": "app.py", "line": 7, "rule_id": "FLOW-SQL"},
+      "expected": {"decision": "abstain", "reason": "sql-driver-binding-not-proven"}
     }
   ]
 }

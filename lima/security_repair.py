@@ -10,6 +10,14 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
+from .repair_bindings import (
+    PATH_HELPER_SOURCE,
+    bindings,
+    module_import_proven,
+    trusted_root_proven,
+)
+from .repair_sql_bindings import sql_receiver_proven
+
 
 RULE_CWE = {
     "FLOW-COMMAND": "CWE-78",
@@ -39,10 +47,6 @@ PATH_CALLS = {
 SHELL_META = re.compile(r"[;&|<>`$\n\r*?\[\]{}]")
 SQL_VALUE_CONTEXT = re.compile(
     r"(?:=|<>|!=|<=|>=|<|>|\bLIKE|\bLIMIT|\bOFFSET)\s*$",
-    re.IGNORECASE,
-)
-TRUSTED_ROOT_NAME = re.compile(
-    r"(?:^|_)(?:base|root|dir|directory|upload_root|download_root)$",
     re.IGNORECASE,
 )
 
@@ -222,6 +226,19 @@ class PythonSecurityRepairEngine:
         argv, reason = self._command_argv(call.args[0])
         if reason:
             return None, reason
+        # This bounded policy models data-only utilities, not arbitrary tools.
+        # Unknown programs, paths and command dispatchers require human repair.
+        executable = argv[0].value
+        if executable not in {"echo", "printf"} or (
+            executable == "printf" and (len(argv) < 3 or not isinstance(argv[1], ast.Constant)
+                                        or argv[1].value != "%s")
+        ):
+            return None, "command-argument-semantics-not-proven"
+        if len(call.args) != 1 or any(
+            keyword.arg is None or keyword.arg in {"executable", "env", "cwd", "preexec_fn"}
+            for keyword in call.keywords
+        ):
+            return None, "command-execution-override-not-proven"
         requirements: set[str] = set()
         replacement = ast.Call(
             func=copy.deepcopy(call.func),
@@ -265,7 +282,8 @@ class PythonSecurityRepairEngine:
         return self._planned(
             content, call, replacement, finding, path, strategy, requirements,
             root_cause="Untrusted data is interpreted by a command shell.",
-            invariant="The executable is static, untrusted values are separate argv entries, and shell parsing is disabled.",
+            invariant=("The command is an approved data-only utility, printf uses a fixed %s format, "
+                       "and shell parsing and execution overrides are disabled."),
             oracle={"fixed_executable": ast.literal_eval(argv[0]), "shell": False},
         ), ""
 
@@ -305,14 +323,11 @@ class PythonSecurityRepairEngine:
     ) -> tuple[PlannedRepair | None, str]:
         if not isinstance(call.func, ast.Attribute) or call.func.attr != "execute":
             return None, "unsupported-sql-api"
-        receiver = _call_name(call.func.value).split(".")[-1]
-        if not re.search(r"(?:cursor|cur|connection|conn|db)$", receiver, re.IGNORECASE):
+        if not sql_receiver_proven(tree, call):
             return None, "sql-driver-binding-not-proven"
         if len(call.args) != 1 or call.keywords:
             return None, "sql-call-already-has-parameters"
-        style, reason = self._sql_paramstyle(content, tree)
-        if reason:
-            return None, reason
+        style = "qmark"
         segments = self._segments(call.args[0])
         if segments is None:
             return None, "unsupported-sql-shape"
@@ -348,35 +363,12 @@ class PythonSecurityRepairEngine:
             root_cause="Untrusted values are concatenated into SQL syntax.",
             invariant="SQL structure is constant and every untrusted value is bound through the driver parameter API.",
             oracle={
+                "driver_contract": "sqlite3-standard-v1",
                 "paramstyle": style,
                 "placeholder": placeholder,
                 "parameter_count": len(parameters),
             },
         ), ""
-
-    @staticmethod
-    def _sql_paramstyle(content: str, tree: ast.Module) -> tuple[str, str]:
-        explicit = re.search(
-            r"lima:\s*sql-paramstyle\s*=\s*(qmark|format)",
-            "\n".join(content.splitlines()[:30]), re.IGNORECASE,
-        )
-        if explicit:
-            return explicit.group(1).lower(), ""
-        modules: set[str] = set()
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                modules.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                modules.add(node.module.split(".")[0])
-        qmark = "sqlite3" in modules
-        formatted = bool(modules & {"psycopg", "psycopg2", "mysql", "pymysql"})
-        if qmark and formatted:
-            return "", "ambiguous-sql-paramstyle"
-        if qmark:
-            return "qmark", ""
-        if formatted:
-            return "format", ""
-        return "", "unknown-sql-paramstyle"
 
     def _plan_path(
         self, content: str, tree: ast.Module, call: ast.Call,
@@ -429,47 +421,8 @@ class PythonSecurityRepairEngine:
 
     @classmethod
     def _trusted_root(cls, node: ast.AST, tree: ast.Module, content: str) -> bool:
-        if cls._static_path_expression(node):
-            return True
-        name = _call_name(node)
-        if not name or not TRUSTED_ROOT_NAME.search(name.split(".")[-1]):
-            return False
-        annotations = re.findall(
-            r"lima:\s*trusted-path-root\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)",
-            "\n".join(content.splitlines()[:30]), re.IGNORECASE,
-        )
-        if name.lower() in {item.lower() for item in annotations}:
-            return True
-        if not isinstance(node, ast.Name):
-            return False
-        for statement in tree.body:
-            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
-                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
-                value = statement.value
-                if value is not None and any(
-                    isinstance(target, ast.Name) and target.id == node.id for target in targets
-                ):
-                    return cls._static_path_expression(value)
-        return False
-
-    @classmethod
-    def _static_path_expression(cls, node: ast.AST) -> bool:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return bool(node.value)
-        if (
-            isinstance(node, ast.Call)
-            and _call_name(node.func) in {"Path", "pathlib.Path"}
-            and len(node.args) == 1
-            and not node.keywords
-        ):
-            return cls._static_path_expression(node.args[0])
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            return cls._static_path_expression(node.left) and (
-                isinstance(node.right, ast.Constant)
-                and isinstance(node.right.value, str)
-                and bool(node.right.value)
-            )
-        return False
+        # Source comments and a same-named global are not binding evidence.
+        return trusted_root_proven(node, tree)
 
     def _planned(
         self, content: str, original: ast.Call, replacement: ast.Call,
@@ -519,34 +472,11 @@ class PythonSecurityRepairEngine:
 
     @staticmethod
     def _imports_module(tree: ast.Module, module: str) -> bool:
-        imported = any(
-            isinstance(node, ast.Import)
-            and any(alias.name == module and alias.asname is None for alias in node.names)
-            for node in tree.body
-        )
-        if not imported:
-            return False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.arg) and node.arg == module:
-                return False
-            if isinstance(node, ast.Name) and node.id == module and isinstance(node.ctx, ast.Store):
-                return False
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
-                    and node.name == module:
-                return False
-        return True
+        return module_import_proven(tree, module, module)
 
     @staticmethod
     def _path_helper_ast() -> ast.FunctionDef:
-        helper_source = (
-            "def _lima_resolve_under_base(base, untrusted_path):\n"
-            "    root = _LIMAPath(base).resolve()\n"
-            "    candidate = (root / untrusted_path).resolve()\n"
-            "    if candidate != root and root not in candidate.parents:\n"
-            "        raise ValueError('path escapes allowed root')\n"
-            "    return candidate\n"
-        )
-        return ast.parse(helper_source).body[0]
+        return ast.parse(PATH_HELPER_SOURCE).body[0]
 
     def _preamble(
         self, tree: ast.Module, content: str, requirements: set[str]
@@ -560,11 +490,13 @@ class PythonSecurityRepairEngine:
         }
         pieces: list[str] = []
         if "subprocess-alias" in requirements:
-            if "_lima_subprocess" in identifiers:
+            if "_lima_subprocess" in identifiers or bindings(tree, "_lima_subprocess"):
                 return "", "repair-helper-name-collision"
             pieces.append("import subprocess as _lima_subprocess\n")
         if "confined-path" in requirements:
-            if {"_LIMAPath", "_lima_resolve_under_base"} & (identifiers | definitions):
+            if {"_LIMAPath", "_lima_resolve_under_base"} & (identifiers | definitions) or any(
+                bindings(tree, name) for name in ("_LIMAPath", "_lima_resolve_under_base")
+            ):
                 return "", "repair-helper-name-collision"
             pieces.append("from pathlib import Path as _LIMAPath\n")
             pieces.append("\n" + ast.unparse(self._path_helper_ast()) + "\n")

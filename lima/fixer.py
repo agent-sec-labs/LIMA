@@ -1,12 +1,11 @@
 import ast
 import re
-from datetime import datetime, timezone
 from typing import Dict, List
 
-from .github import GitHubClient
-from .security_repair import PythonSecurityRepairEngine, RULE_CWE
-from .verifier import RepairVerifier
-
+from .github import GitHubClient, ResponseTooLarge
+from .security_repair import RULE_CWE, PythonSecurityRepairEngine
+from .verifier import MAX_FILE_BYTES, RepairVerifier
+from .repair_publication import publish_repair
 
 SUPPORTED_AUTOFIX_RULES = {
     "REL-DEBUG-PRINT",
@@ -25,6 +24,7 @@ REPAIR_VERIFICATION_STATES = {
     "dataflow-verified",
     "confirmed",
 }
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class SafeFixer:
@@ -187,6 +187,112 @@ class SafeFixer:
         self.security_engine = PythonSecurityRepairEngine()
 
     @staticmethod
+    def _publication_blocked(
+        source_sha: str | None,
+        blocked_findings: list[dict],
+        *,
+        failure_code: str,
+        note: str,
+        verification: dict | None = None,
+        repair_manifest: list[dict] | None = None,
+    ) -> dict:
+        """Return a stable no-write publication result."""
+
+        result = {
+            "branch": None,
+            "source_sha": source_sha,
+            "commits": [],
+            "blocked_findings": blocked_findings,
+            "failure_code": failure_code,
+            "note": note,
+        }
+        if verification is not None:
+            result["verification"] = verification
+        if repair_manifest is not None:
+            result["repair_manifest"] = repair_manifest
+        return result
+
+    @staticmethod
+    def _publication_verification_passed(
+        verification: dict, repairs: list[dict], files: dict[str, str],
+    ) -> bool:
+        """Require all publication gates and a real sandbox execution receipt."""
+
+        if verification.get("passed") is not True:
+            return False
+        sandbox = verification.get("sandbox")
+        if not isinstance(sandbox, dict) or not all(
+            sandbox.get(field) is True
+            for field in ("configured", "executed", "stop_confirmed", "passed")
+        ):
+            return False
+        if not isinstance(sandbox.get("image_id"), str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", sandbox["image_id"]
+        ):
+            return False
+        checks = verification.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return False
+        if any(
+            not isinstance(check, dict) or check.get("passed") is not True
+            for check in checks
+        ):
+            return False
+        passed = {
+            str(check.get("name", ""))
+            for check in checks
+        }
+        if any(
+            f"compile:{path}" not in passed
+            for path in files
+        ):
+            return False
+        for repair in repairs:
+            path = str(repair.get("path", ""))
+            cwe = str(repair.get("cwe", "unknown"))
+            try:
+                line = int(repair.get("line", 0))
+            except (TypeError, ValueError):
+                return False
+            if f"security-oracle:{cwe}:{path}:{line}" not in passed:
+                return False
+            if f"differential-rescan:{cwe}:{path}" not in passed:
+                return False
+        return "repository-tests" in passed
+
+    @staticmethod
+    def _display_check_name(value: object) -> str:
+        """Escape controls so untrusted names cannot forge body rows."""
+
+        return "".join(
+            character if character.isprintable() else f"\\u{ord(character):04x}"
+            for character in str(value)
+        )
+
+    @staticmethod
+    def _verification_body(verification: dict) -> str:
+        """Describe only checks actually returned by the verifier."""
+
+        checks = verification.get("checks") or []
+        rendered = [
+            f"- {SafeFixer._display_check_name(item.get('name', 'unnamed'))}: "
+            f"{'passed' if item.get('passed') is True else 'failed'}"
+            for item in checks if isinstance(item, dict)
+        ]
+        sandbox = verification.get("sandbox") or {}
+        return (
+            f"Automated deterministic security repair for source commit "
+            f"{SafeFixer._display_check_name(verification.get('source_sha', 'unknown'))}.\n\n"
+            "Verified publication gates:\n"
+            + "\n".join(rendered)
+            + "\n\nSandbox receipt: "
+            f"executed={sandbox.get('executed') is True}; "
+            f"stop_confirmed={sandbox.get('stop_confirmed') is True}; "
+            f"passed={sandbox.get('passed') is True}.\n"
+            "Human approval is still required."
+        )
+
+    @staticmethod
     def repair_eligibility(finding: dict) -> Dict[str, object]:
         if finding.get("automatic_repair") is False:
             return {"eligible": False, "reason": "automatic-repair-disabled"}
@@ -210,12 +316,19 @@ class SafeFixer:
             ),
         }
 
-    def create_fix_commits(self, client: GitHubClient, repository: str, pull_request: int, report: dict) -> dict:
-        pull = client.get_pull_request(repository, pull_request)
-        source_sha = pull["head"]["sha"]
-        source_repository = pull["head"].get("repo", {}).get("full_name") or repository
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        branch = "lima/fix-pr-%d-%s" % (pull_request, stamp)
+    def create_fix_commits(
+        self,
+        client: GitHubClient,
+        repository: str,
+        pull_request: int,
+        report: dict,
+        *,
+        expected_source_sha: str | None = None,
+        publication_store=None,
+        publication_scope=None,
+    ) -> dict:
+        """Publish only repairs bound to the audited immutable PR head."""
+
         planned = []
         blocked_findings = []
         by_path = {}
@@ -230,8 +343,52 @@ class SafeFixer:
                 })
                 continue
             by_path.setdefault(finding["path"], []).append(finding)
+        # An all-blocked report is an informational response: do not fetch a
+        # PR or source files just to report eligibility.
+        if not by_path:
+            return {
+                "branch": None, "source_sha": expected_source_sha, "commits": [],
+                "blocked_findings": blocked_findings,
+                "note": "No verified finding was eligible for deterministic automatic repair.",
+            }
+        if len(by_path) >= 300:
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings, failure_code="repair-input-too-large",
+                note="A repair publication supports at most 299 modified files.",
+            )
+        if not isinstance(expected_source_sha, str) or not _COMMIT_SHA.fullmatch(
+            expected_source_sha
+        ):
+            return self._publication_blocked(
+                None, blocked_findings,
+                failure_code="repair-source-stale",
+                note="Repair publication requires the audited immutable source SHA.",
+            )
+
+        pull = client.get_pull_request(repository, pull_request)
+        live_source_sha = str((pull.get("head") or {}).get("sha") or "")
+        if live_source_sha != expected_source_sha:
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings,
+                failure_code="repair-source-stale",
+                note="Repair source changed after the audit; re-analysis is required.",
+            )
+        source_repository = (
+            (pull.get("head") or {}).get("repo", {}).get("full_name") or repository
+        )
+        source_total = 0
         for path, findings in by_path.items():
-            current = client.get_file(source_repository, path, source_sha)
+            try:
+                current = client.get_file(source_repository, path, expected_source_sha)
+                size = len(current["decoded_content"].encode("utf-8"))
+                source_total += size
+                if size > MAX_FILE_BYTES or source_total > 20 * 1024 * 1024:
+                    raise ResponseTooLarge("repair source exceeds the source byte budget")
+            except ResponseTooLarge:
+                return self._publication_blocked(
+                    expected_source_sha, blocked_findings, failure_code="repair-input-too-large",
+                    note="Repair source exceeded its bounded input budget.",
+                )
             result = self.apply(current["decoded_content"], findings, path)
             blocked_findings.extend([
                 {"path": path, **item} for item in result.get("blocked", [])
@@ -240,7 +397,7 @@ class SafeFixer:
                 continue
             planned.append((path, current, result))
         if not planned:
-            return {"branch": None, "source_sha": source_sha, "commits": [],
+            return {"branch": None, "source_sha": expected_source_sha, "commits": [],
                     "blocked_findings": blocked_findings,
                     "note": "No verified finding was eligible for deterministic automatic repair."}
         files = {path: result["content"] for path, _current, result in planned}
@@ -248,37 +405,76 @@ class SafeFixer:
             repair for _path, _current, result in planned
             for repair in result.get("repairs", [])
         ]
+        repaired_paths = {str(repair.get("path", "")) for repair in repairs}
+        unsupported_paths = sorted(set(files) - repaired_paths)
+        if unsupported_paths:
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings,
+                failure_code="repair-manifest-missing",
+                note="Repair publication requires an independent repair manifest for every file.",
+                repair_manifest=repairs,
+            )
+        if not self.verifier.test_command:
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings,
+                failure_code="repository-tests-not-configured",
+                note="Repair publication requires a configured sandbox repository test command.",
+                repair_manifest=repairs,
+            )
         verification = self.verifier.verify_contents(files, repairs)
-        if verification["passed"] and (repairs or self.verifier.test_command):
-            archive = client.download_archive(source_repository, source_sha)
-            verification = self.verifier.verify_archive(archive, files, repairs)
-        if not verification["passed"]:
-            return {
-                "branch": None, "source_sha": source_sha, "commits": [],
-                "verification": verification,
-                "blocked_findings": blocked_findings,
-                "note": "Repair was blocked because at least one verification gate failed.",
-            }
-        commit = client.create_atomic_commit(
-            repository, branch, source_sha, files,
-            "fix: apply verified LIMA repairs for PR #%d" % pull_request,
-        )
-        draft = client.create_draft_pull_request(
-            repository,
-            "fix: verified LIMA repairs for #%d" % pull_request,
-            branch, pull.get("base", {}).get("ref", "main"),
-            (
-                "Automated deterministic security repair. Compilation, independent security "
-                "oracles, full-repository differential rescan, and configured regression tests passed. "
-                "Human approval is still required."
-            ),
-        )
+        if verification["passed"]:
+            try:
+                if callable(getattr(client, "download_archive_file", None)):
+                    with client.download_archive_file(source_repository, expected_source_sha) as archive:
+                        verification = self.verifier.verify_archive(archive, files, repairs)
+                else:
+                    # Non-HTTP adapters must satisfy the same compressed budget.
+                    archive = client.download_archive(source_repository, expected_source_sha)
+                    if len(archive) > 64 * 1024 * 1024:
+                        raise ResponseTooLarge("repair archive exceeds the archive byte budget")
+                    verification = self.verifier.verify_archive(archive, files, repairs)
+            except ResponseTooLarge:
+                return self._publication_blocked(
+                    expected_source_sha, blocked_findings, failure_code="repair-input-too-large",
+                    note="Repair archive exceeded its bounded input budget.", repair_manifest=repairs,
+                )
+        verification["source_sha"] = expected_source_sha
+        if not self._publication_verification_passed(verification, repairs, files):
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings,
+                failure_code="repair-verification-failed",
+                note=(
+                    "Repair was blocked because publication verification was "
+                    "incomplete or failed."
+                ),
+                verification=verification,
+                repair_manifest=repairs,
+            )
+        # A PR may move while its complete archive is being verified.  This
+        # final read is deliberately immediately before the first write.
+        latest = client.get_pull_request(repository, pull_request)
+        latest_sha = str((latest.get("head") or {}).get("sha") or "")
+        if latest_sha != expected_source_sha:
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings,
+                failure_code="repair-source-stale",
+                note="Repair source changed during verification; re-analysis is required.",
+                verification=verification,
+                repair_manifest=repairs,
+            )
+        if publication_store is None or not publication_scope:
+            return self._publication_blocked(
+                expected_source_sha, blocked_findings,
+                failure_code="repair-publication-store-unconfigured",
+                note="Publication requires a durable operation store and a bounded file set.",
+                verification=verification, repair_manifest=repairs,
+            )
         commits = [{
             "paths": sorted(files),
             "rules": sorted({
                 rule for _path, _current, result in planned for rule in result["rules"]
             }),
-            "sha": commit.get("sha"),
+            "sha": None,
         }]
         patch_metrics = {
             "files_changed": len(files),
@@ -291,12 +487,23 @@ class SafeFixer:
                 for strategy in result.get("patch_metrics", {}).get("strategies", [])
             }),
         }
-        return {"branch": branch, "source_sha": source_sha, "commits": commits,
-                "draft_pull_request": {
-                    "number": draft.get("number"), "url": draft.get("html_url")
-                },
-                "verification": verification,
-                "repair_manifest": repairs,
-                "patch_metrics": patch_metrics,
-                "blocked_findings": blocked_findings,
-                "note": "Verified repairs were published as one atomic commit in a draft pull request."}
+        response = {
+            "branch": None,
+            "source_sha": expected_source_sha,
+            "commits": commits,
+            "verification": verification,
+            "repair_manifest": repairs,
+            "patch_metrics": patch_metrics,
+            "blocked_findings": blocked_findings,
+            "note": (
+                "Verified repairs were published as one atomic commit in a "
+                "draft pull request."
+            ),
+        }
+        response["_base"] = pull.get("base", {}).get("ref", "main")
+        return publish_repair(
+            client, publication_store, publication_scope,
+            repository=repository, pull_request=pull_request, source_sha=expected_source_sha,
+            files=files, verification=verification, repairs=repairs, response=response,
+            test_command=self.verifier.test_command, body=self._verification_body(verification),
+        )

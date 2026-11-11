@@ -9,11 +9,15 @@ import json
 from typing import Any, Dict, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
+from .repair_publication_store import REPAIR_PUBLICATION_SCHEMA, RepairPublicationStore
 from .store import utc_now
 from .task_progress import progress_summary
+from .webhook_outbox import OUTBOX_SCHEMA
 
 
-class PostgresTaskStore:
+class PostgresTaskStore(RepairPublicationStore):
+    _outbox_postgres = True
+
     def __init__(self, url: str):
         try:
             import psycopg
@@ -30,6 +34,8 @@ class PostgresTaskStore:
 
     def _init(self) -> None:
         statements = [
+            OUTBOX_SCHEMA,
+            REPAIR_PUBLICATION_SCHEMA,
             """CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, state TEXT NOT NULL, repository TEXT NOT NULL,
                 pull_request INTEGER, input_json JSONB NOT NULL, report_json JSONB,

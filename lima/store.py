@@ -7,14 +7,16 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
+from .repair_publication_store import REPAIR_PUBLICATION_SCHEMA, RepairPublicationStore
 from .task_progress import progress_summary
+from .webhook_outbox import OUTBOX_SCHEMA
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class TaskStore:
+class TaskStore(RepairPublicationStore):
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
@@ -44,6 +46,8 @@ class TaskStore:
 
     def _init(self) -> None:
         with self._connect() as conn:
+            conn.execute(OUTBOX_SCHEMA)
+            conn.execute(REPAIR_PUBLICATION_SCHEMA)
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,

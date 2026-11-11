@@ -634,7 +634,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 self.service.store.audit(
                     principal.tenant_id, principal.username, "repair.create",
-                    match.group(1), {"branch": result.get("branch")},
+                    match.group(1), {"branch": result.get("branch"),
+                                     "publication_operation_id": result.get("publication_operation_id"),
+                                     "failure_code": result.get("failure_code")},
                 )
                 self._send_json(201, result)
                 return

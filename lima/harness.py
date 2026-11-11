@@ -87,10 +87,12 @@ class ReviewHarness:
             )
             report = self._report_from_dict(result["report"])
             self._ctx.step += 1
-            self.store.succeed(
+            published = self.store.succeed_unless_cancelled(
                 task_id, report,
                 TraceEvent(self._ctx.step, TaskState.SUCCESS, "Review completed", utc_now()),
             )
+            if not published:
+                raise RuntimeCancelled("Task was cancelled")
             return report
         except TaskCancelled as exc:
             self._ctx.step += 1

@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from lima.build_agent import NEEDS_ATTENTION, SUCCEEDED, BuildResult
+from lima.build_inputs import compute_build_input_digest
 from lima.config import Settings
 from lima.service import ReviewService
 from lima.workspace import RepositoryWorkspace
@@ -314,6 +315,7 @@ class Round1ReviewTests(unittest.TestCase):
                 repository_import_root=temporary.name,
                 repository_scan_sast_mode="off", cxx_memory_mode="off",
                 build_agent_mode="auto", build_agent_image="lima-builder:test",
+                build_artifacts_root=str(Path(temporary.name) / "artifacts"),
                 build_concurrency=1,
             )
         )
@@ -395,16 +397,19 @@ class Round1ReviewTests(unittest.TestCase):
                         "attempts": 1,
                         "failure_code": None,
                         "evidence_refs": ["run-1/attempt-1/package"],
+                        "build_input_digest": compute_build_input_digest(workspace_root),
                     },
                 })
-                reused = service._persisted_build_result(task_root.name, fingerprint)
+                reused = service._persisted_build_result(
+                    task_root.name, fingerprint, workspace_root,
+                )
                 self.assertIsNotNone(reused)
                 self.assertEqual(reused.status, "SUCCEEDED")
                 self.assertEqual(reused.package_ref, "run-1/attempt-1/package")
 
                 # A different snapshot must not reuse.
                 self.assertIsNone(
-                    service._persisted_build_result(task_root.name, "b" * 64)
+                    service._persisted_build_result(task_root.name, "b" * 64, workspace_root)
                 )
 
                 # Removing the package must not reuse either.
@@ -412,7 +417,7 @@ class Round1ReviewTests(unittest.TestCase):
 
                 _shutil.rmtree(package_dir)
                 self.assertIsNone(
-                    service._persisted_build_result(task_root.name, fingerprint)
+                    service._persisted_build_result(task_root.name, fingerprint, workspace_root)
                 )
 
     def test_run_directories_are_run_scoped(self):
@@ -509,6 +514,9 @@ class Round2ReviewTests(unittest.TestCase):
             ),
             **overrides,
         )
+        settings = replace(settings, build_artifacts_root=overrides.get(
+            "build_artifacts_root", str(Path(temporary.name) / "artifacts"),
+        ))
         service = ReviewService(settings)
         self.addCleanup(service.queue.close)
         return service, Path(temporary.name) / "team" / "project"
@@ -732,7 +740,7 @@ class Round3ReviewTests(unittest.TestCase):
         def fake_agent_run(request, *, cancel, progress):
             executor_calls.append(1)
             package_dir = (
-                Path(artifacts.name) / "digest-task" / "run-1"
+                Path(artifacts.name) / "digest-task" / f"run-{len(executor_calls)}"
                 / "attempt-1" / "package"
             )
             write_package_fixture(
@@ -759,6 +767,7 @@ class Round3ReviewTests(unittest.TestCase):
                 coverage=None,
                 failure_code=None,
                 evidence_refs=("attempt-1/package",),
+                build_input_digest=compute_build_input_digest(repository),
             )
 
         task_id = "digest-task"
@@ -792,6 +801,7 @@ class Round3ReviewTests(unittest.TestCase):
                     "attempts": first.attempts,
                     "failure_code": first.failure_code,
                     "evidence_refs": list(first.evidence_refs),
+                    "build_input_digest": first.build_input_digest,
                 },
             })
             before = len(executor_calls)

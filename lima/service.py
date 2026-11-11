@@ -3,6 +3,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -20,7 +21,9 @@ from .build_contracts import (
 from .build_contracts import (
     BuildRequest as BuildAgentRequestBody,
 )
+from .build_deployment import build_environment_failure
 from .build_executor import BuildExecutor
+from .build_inputs import compute_build_input_digest
 from .config import Settings
 from .context_manager import ContextManager
 from .cxx_agent_tools import CxxAgentBudget
@@ -37,8 +40,7 @@ from .evolution import EvolutionEngine
 from .experiments import LLM_MODES, ExperimentRunner
 from .fixer import SafeFixer
 from .github import GitHubAppAuthenticator, GitHubClient, pull_request_commit_shas
-from .github_identity import installation_bindings
-from .github_identity import installation_id as validate_installation_id
+from .github_identity import installation_bindings, installation_id as validate_installation_id
 from .harness import ReviewHarness
 from .memory import MemoryManager
 from .metrics import metrics
@@ -102,6 +104,7 @@ from .task_progress import (
 )
 from .task_queue import DeferredTaskError, PermanentTaskError, TaskQueue
 from .uaf_orchestrator import UAF_FINDING_STATES
+from .verified_context_lease import VerifiedContextLease
 from .verifier import RepairVerifier
 from .workspace import (
     CXX_BUILD_EXTENSIONS,
@@ -283,24 +286,12 @@ def _deterministic_build_model(state: dict) -> dict:
     return {"action": "final", "output": {"status": "done"}}
 
 
-# #354 评审第二轮 P1：交付持有权的权威归属。
-# HTTP 部署：持有权是 sidecar 端的 token（注册带 holder、按 holder 释放），
-# 注册、计数与注销在同一服务端生命周期锁下——本进程的释放不可能删掉
-# 任何进程刚交付的注册，请求顺序无关。多实例/Redis 多消费者共享同一
-# sidecar 时同样正确。
-# 进程内声明部署（无 HTTP 通道）：本地按持有者计数，且注册刷新、计数
-# 增减与末持有者注销在同一把锁内串行完成（本地注销是纯字典操作，锁内
-# 执行安全），杜绝"本地判定末持有者后、实际注销前被新交付插队"的撕
-# 裂。崩溃残留由 sidecar 的最老先回收兜底（#352）。
-_VERIFIED_VIEW_HOLDERS: dict[tuple[str, str], set[str]] = {}
-_VERIFIED_VIEW_HOLDERS_LOCK = threading.Lock()
-
-
 class ReviewService:
     def __init__(self, settings: Settings):
         self.settings = settings
         settings.validate_evolution()
         installation_bindings(settings.github_installation_tenants)
+        self._build_slots = threading.BoundedSemaphore(max(1, settings.build_concurrency))
         self.llm_config = settings.resolved_llm()
         if settings.repository_scan_llm_mode == "required" and not self.llm_config:
             raise ValueError(
@@ -344,7 +335,8 @@ class ReviewService:
         )
         self.github = GitHubClient(settings.github_token)
         self.fixer = SafeFixer(RepairVerifier(
-            settings.repair_test_command, settings.repair_verify_timeout_seconds
+            settings.repair_test_command, settings.repair_verify_timeout_seconds,
+            sandbox_image=settings.repair_sandbox_image,
         ))
         self.repair_previewer = RepositoryRepairPreviewer(self.fixer)
         self.auth = AuthManager(
@@ -481,6 +473,8 @@ class ReviewService:
             group="lima-experiment-workers",
             thread_prefix="lima-experiment-worker",
         )
+        self._webhook_dispatch_lock = threading.Lock()
+        self.queue.set_maintenance(self._dispatch_webhook_outbox)
 
     def _build_llm_reviewer(self, prompt: str = "") -> OpenAICompatibleReviewer:
         if not self.llm_config:
@@ -1418,21 +1412,32 @@ class ReviewService:
             )
 
     def _build_admission_slot(self):
-        """The process-wide build admission slot (capacity: build_concurrency).
+        """This service instance's eagerly initialized build admission slot.
 
-        队列裁定（#348 评审 F3）：构建容器执行的并发额度由全局信号量执
-        行——同一服务进程内同时进入容器构建的任务数不会超过部署上限。
-        额度耗尽时构建在此等待（周期性响应取消），而不是静默超额。
+        Admission is nonblocking: a busy worker requeues the task. Artifact
+        namespaces are reserved on disk independently across instances.
         """
 
-        slots = getattr(self, "_build_slots", None)
-        if slots is None:
-            import threading
+        return self._build_slots
 
-            limit = max(1, int(getattr(self.settings, "build_concurrency", 1)))
-            slots = threading.BoundedSemaphore(limit)
-            self._build_slots = slots
-        return slots
+    def _reserve_build_run(self, task_id: str) -> tuple[int, Path]:
+        """Atomically reserve a namespace across overlapping worker executions."""
+        task_root = Path(self.settings.build_artifacts_root) / task_id
+        task_root.mkdir(parents=True, exist_ok=True)
+        if task_root.resolve().parent != Path(self.settings.build_artifacts_root).resolve():
+            raise ValueError("build-artifacts-task-outside-root")
+        existing = [
+            int(entry.name[4:]) for entry in task_root.glob("run-*")
+            if entry.name[4:].isascii() and entry.name[4:].isdigit()
+        ]
+        index = max(existing, default=0) + 1
+        while True:
+            candidate = task_root / f"run-{index}"
+            try:
+                candidate.mkdir()
+                return index, candidate
+            except FileExistsError:
+                index += 1
 
     def _make_build_agent_components(self):
         """(model, executor, policy) for the build agent, or None.
@@ -1456,7 +1461,29 @@ class ReviewService:
         )
         return _deterministic_build_model, BuildExecutor(), policy
 
-    def _persisted_build_result(self, task_id: str, snapshot_hash: str):
+    def _build_target_units(self, task_id: str, inventory) -> tuple[str, ...]:
+        task = self.store.get(task_id) or {}
+        task_input = task.get("input") or {}
+        units = RepositoryScanner._platform_translation_units(
+            inventory, task_input.get("investigate_paths") or (),
+        )
+        if task:
+            self.store.update_task_input(task_id, {
+                "build_target_units": list(units),
+                "build_scope_snapshot": inventory.fingerprint(),
+            })
+        return units
+
+    def _current_build_input_digest(self, task_id: str, snapshot_dir: Path) -> str:
+        return compute_build_input_digest(
+            snapshot_dir,
+            deadline=time.monotonic() + min(30, self.settings.timeout_seconds),
+            cancel=lambda: self.store.is_cancelled(task_id),
+        )
+
+    def _persisted_build_result(
+        self, task_id: str, snapshot_hash: str, snapshot_dir: Path | None = None,
+    ):
         """A reusable earlier success for this exact snapshot, if any.
 
         队列重领/任务恢复会重放整个 handler；已发布成功的构建结果不能
@@ -1471,6 +1498,11 @@ class ReviewService:
             return None
         if summary.get("snapshot_hash") != snapshot_hash:
             return None
+        expected_inputs = summary.get("build_input_digest")
+        if not expected_inputs or snapshot_dir is None:
+            # Old summaries did not prove the actual files given to CMake.
+            # They must be rebuilt, not silently promoted to trusted reuse.
+            return None
         package_ref = summary.get("package_ref")
         if not package_ref:
             return None
@@ -1479,6 +1511,8 @@ class ReviewService:
         if not package_dir.is_dir():
             return None
         try:
+            if self._current_build_input_digest(task_id, snapshot_dir) != expected_inputs:
+                return None
             from .build_context_view import verify_build_artifact
 
             verify_build_artifact(
@@ -1486,6 +1520,11 @@ class ReviewService:
                 snapshot_hash,
                 str(summary.get("artifact_digest") or ""),
             )
+            from .context_package import read_package
+
+            targets = (task.get("input") or {}).get("build_target_units") or ()
+            if set(targets) - set(read_package(package_dir).manifest.compdb.tu_list):
+                return None
         except Exception:  # noqa: BLE001 - any verification failure means retry
             return None
         return BuildAgentResult(
@@ -1501,6 +1540,8 @@ class ReviewService:
             coverage=None,
             failure_code=None,
             evidence_refs=tuple(summary.get("evidence_refs") or ()),
+            build_input_digest=expected_inputs,
+            repository_code_executed=bool(summary.get("repository_code_executed", False)),
         )
 
     def _run_build_agent(
@@ -1527,7 +1568,8 @@ class ReviewService:
             )
         model, executor, policy = components
         inventory = workspace.inventory()
-        reused = self._persisted_build_result(task_id, inventory.fingerprint())
+        units = self._build_target_units(task_id, inventory)
+        reused = self._persisted_build_result(task_id, inventory.fingerprint(), workspace.root)
         if reused is not None:
             if progress is not None:
                 progress.pipeline_event(
@@ -1537,16 +1579,11 @@ class ReviewService:
             return reused
         scope = sorted(
             {
-                item.path.split("/", 1)[0]
-                for item in inventory.files
-                if "/" in item.path
+                unit.split("/", 1)[0]
+                for unit in units
+                if "/" in unit
             }
-        )[:8] or ("src",)
-        units = [
-            item.path
-            for item in inventory.files
-            if item.path.endswith((".cpp", ".cc", ".cxx"))
-        ][:4]
+        ) or ("src",)
         if not units:
             return BuildAgentResult(
                 run_id="build-" + uuid.uuid4().hex[:16],
@@ -1562,23 +1599,21 @@ class ReviewService:
                 failure_code="build-no-cxx-units",
                 evidence_refs=(),
             )
-        # 每次运行独立子目录：重放绝不复用已占用的 attempt 目录
-        # （BuildExecutor 拒绝非空 attempt 目录），运行序号单调递增。
-        task_root = Path(self.settings.build_artifacts_root) / task_id
-        existing_runs = [
-            int(entry.name.split("-", 1)[-1])
-            for entry in task_root.glob("run-*")
-            if entry.name.split("-", 1)[-1].isdigit()
-        ]
-        run_index = max(existing_runs, default=0) + 1
-        run_root = task_root / f"run-{run_index}"
-        agent = BuildAgent(
-            model=model,
-            executor=executor,
-            policy=policy,
-            snapshot_dir=workspace.root,
-            artifacts_root=run_root,
+        # Custom execution adapters may use their own runtime. The shipped
+        # BuildExecutor requires a host Docker CLI/daemon and writable storage.
+        environment_failure = (
+            build_environment_failure(self.settings.build_artifacts_root)
+            if isinstance(executor, BuildExecutor) else None
         )
+        if environment_failure:
+            return BuildAgentResult(
+                run_id="build-" + uuid.uuid4().hex[:16], status=NEEDS_ATTENTION,
+                snapshot_hash=inventory.fingerprint(), plan_digest=None,
+                image_digest=None, dependency_digest=None, package_ref=None,
+                artifact_digest=None, attempts=0, coverage=None,
+                failure_code=environment_failure, evidence_refs=(),
+            )
+        task_root = Path(self.settings.build_artifacts_root) / task_id
         request = BuildAgentRequestBody(
             repository_ref=repository_label or "repository",
             snapshot_hash=inventory.fingerprint(),
@@ -1611,6 +1646,11 @@ class ReviewService:
                 )
             raise _BuildAdmissionRetry()
         try:
+            run_index, run_root = self._reserve_build_run(task_id)
+            agent = BuildAgent(
+                model=model, executor=executor, policy=policy,
+                snapshot_dir=workspace.root, artifacts_root=run_root,
+            )
             result = agent.run(
                 request,
                 cancel=lambda: self.store.is_cancelled(task_id),
@@ -1672,13 +1712,15 @@ class ReviewService:
         """Construct the verified AnalysisContextView from a build result.
 
         消费链接线：构建成功后从产物目录加载包、走 S4A 校验与视图构
-        造，把经验证的 TU 参数投影交给扫描阶段。TU 列表从包的 compdb
-        读取（而非 workspace inventory），确保与构建时的声明一致。
+        造，把经验证的 TU 参数投影交给扫描阶段。TU 列表来自任务范围，
+        包必须覆盖这些目标，不能以包内文件替换用户请求。
         包缺失或校验失败时返回 None（检测降级到旧路径，不阻断），
         consumed_by_analysis 保持 false。
         """
 
         if build_result.status != SUCCEEDED or not build_result.package_ref:
+            return None
+        if not build_result.build_input_digest:
             return None
         package_dir = (
             Path(self.settings.build_artifacts_root)
@@ -1688,47 +1730,28 @@ class ReviewService:
         if not package_dir.is_dir():
             return None
         try:
+            if (
+                self._current_build_input_digest(task_id, workspace.root)
+                != build_result.build_input_digest
+            ):
+                return None
             from .build_context_view import (
                 create_analysis_view,
                 verify_build_artifact,
             )
-            from .context_package import read_package
-
             artifact = verify_build_artifact(
                 package_dir,
                 build_result.snapshot_hash,
                 build_result.artifact_digest or "",
             )
-            package = read_package(package_dir)
-            target_units = tuple(package.manifest.compdb.tu_list)
+            target_units = self._build_target_units(task_id, workspace.inventory())
             if not target_units:
                 return None
             view = create_analysis_view(
                 workspace.root, artifact, target_units
             )
-            # 注册到 sidecar 的进程内视图注册表（内存队列/同进程模式
-            # 下 facts/repro 的 HTTP handler 可查到该视图）。
-            #
-            # 跨进程部署限制（#350 评审确认）：独立 sidecar 进程看不
-            # 到主进程的模块字典。生产部署需要 sidecar 增加受信包注
-            # 册的 HTTP 端点或共享存储协议，这是部署基础设施变更，
-            # 不在本 PR 代码层范围内。在此之前 Redis 队列 + 独立
-            # sidecar 的部署中 verified-package 模式会正确报告
-            # verified-view-not-registered（拒绝式降级，不冒充成功）。
-            try:
-                from cxx_analyzer import server as analyzer_server
-
-                analyzer_server.register_verified_build_view(
-                    build_result.snapshot_hash, view
-                )
-                if build_result.artifact_digest:
-                    analyzer_server.register_verified_build_view(
-                        build_result.snapshot_hash,
-                        view,
-                        artifact_digest=build_result.artifact_digest,
-                    )
-            except Exception:  # noqa: BLE001 - registration best-effort
-                pass
+            # Construction has no registry side effects. Delivery chooses
+            # the remote or explicit in-process registry and owns cleanup.
             return view
         except Exception:  # noqa: BLE001 - consumption failure degrades
             return None
@@ -1755,34 +1778,39 @@ class ReviewService:
         register = getattr(adapter, "register_verified_view", None)
         if callable(register):
             try:
-                return bool(
+                delivered = bool(
                     register(
                         build_result.snapshot_hash, view, holder=holder_token
                     )
                 )
             except Exception:  # noqa: BLE001 - delivery failure degrades
                 metrics.inc("build_context_delivery_failed_total")
-                return False
+                delivered = False
+            if (
+                not delivered
+                and getattr(view, "artifact_digest", None) == artifact_digest
+                and artifact_digest
+            ):
+                # The POST may have committed before its acknowledgement
+                # was lost. Release only this execution's token. Lease
+                # expiry remains the fallback for delayed/reordered POSTs.
+                self._release_verified_context(adapter, build_result, holder_token)
+            return delivered
         if not bool(getattr(adapter, "verified_package_supported", False)):
             return False
         if len(artifact_digest or "") != 64:
             return True
         from cxx_analyzer import server as analyzer_server
 
-        with _VERIFIED_VIEW_HOLDERS_LOCK:
-            # 进程内刷新 + 持有权登记同一临界区（本地注册是纯字典
-            # 操作，锁内执行安全）：释放侧的末持有者判定不可能插进
-            # 这次交付与登记之间。
-            analyzer_server.register_verified_build_view(
-                build_result.snapshot_hash, view
-            )
+        try:
             analyzer_server.register_verified_build_view(
                 build_result.snapshot_hash, view,
                 artifact_digest=artifact_digest,
+                set_default=True, holder=holder_token,
             )
-            _VERIFIED_VIEW_HOLDERS.setdefault(
-                (build_result.snapshot_hash, artifact_digest), set()
-            ).add(holder_token)
+        except Exception:  # noqa: BLE001 - admission refusal degrades delivery
+            metrics.inc("build_context_delivery_failed_total")
+            return False
         return True
 
     def _release_verified_context(
@@ -1792,8 +1820,8 @@ class ReviewService:
 
         HTTP 部署：按本次执行 holder 释放——服务端计数，注册随最后
         一个持有者离开。进程内声明部署：持有者计数与末持有者注销
-        在同一临界区完成。幂等；失败只计数不阻断——崩溃残留由
-        sidecar 的最老先回收兜底（#352）。
+        在同一临界区完成。幂等；远程释放有界重试，崩溃残留由
+        服务端租约到期回收。
         """
 
         artifact_digest = build_result.artifact_digest or ""
@@ -1807,37 +1835,46 @@ class ReviewService:
             return
         unregister = getattr(adapter, "unregister_verified_view", None)
         if callable(unregister):
-            try:
-                unregister(
-                    build_result.snapshot_hash, artifact_digest,
-                    holder=holder_token,
-                )
-            except Exception:  # noqa: BLE001 - cleanup best-effort
+            for _attempt in range(3):
+                try:
+                    if unregister(
+                        build_result.snapshot_hash, artifact_digest,
+                        holder=holder_token,
+                    ):
+                        return
+                except Exception:  # noqa: BLE001 - retry bounded cleanup
+                    metrics.inc("build_context_cleanup_failed_total")
+                    continue
                 metrics.inc("build_context_cleanup_failed_total")
             return
         from cxx_analyzer import server as analyzer_server
 
-        with _VERIFIED_VIEW_HOLDERS_LOCK:
-            holders = _VERIFIED_VIEW_HOLDERS.get(
-                (build_result.snapshot_hash, artifact_digest)
+        try:
+            analyzer_server.unregister_verified_build_view(
+                build_result.snapshot_hash, artifact_digest, holder=holder_token,
             )
-            if not holders:
-                return
-            holders.discard(holder_token)
-            if holders:
-                # 其他任务仍在消费同一制品身份：保留注册。
-                return
-            del _VERIFIED_VIEW_HOLDERS[
-                (build_result.snapshot_hash, artifact_digest)
-            ]
-            # 末持有者注销也在同一临界区：判定与注销之间不可能被
-            # 新交付插队（新交付会先刷新注册并登记持有权）。
-            try:
-                analyzer_server.unregister_verified_build_view(
-                    build_result.snapshot_hash, artifact_digest
-                )
-            except Exception:  # noqa: BLE001 - cleanup best-effort
-                metrics.inc("build_context_cleanup_failed_total")
+        except Exception:  # noqa: BLE001 - cleanup best-effort, lease expiry fallback
+            metrics.inc("build_context_cleanup_failed_total")
+
+    @staticmethod
+    def _context_lease(adapter, build_result, holder_token) -> VerifiedContextLease | None:
+        renew = getattr(adapter, "renew_verified_view", None)
+        if callable(renew):
+            return VerifiedContextLease(lambda: renew(
+                build_result.snapshot_hash, build_result.artifact_digest,
+                holder=holder_token,
+            ))
+        if not callable(getattr(adapter, "register_verified_view", None)) and bool(
+            getattr(adapter, "verified_package_supported", False)
+        ):
+            from cxx_analyzer import server as analyzer_server
+
+            return VerifiedContextLease(lambda: bool(analyzer_server.renew_view_request({
+                "snapshot_sha256": build_result.snapshot_hash,
+                "artifact_digest": build_result.artifact_digest,
+                "holder": holder_token,
+            })))
+        return None
 
     def _execute_repository_scan(
         self, task_id: str, root: Path, tenant_id: str,
@@ -1858,6 +1895,11 @@ class ReviewService:
         verified_view: object | None = None
         delivered_registration: tuple[object, BuildAgentResult, str] | None = None
         if build_agent_mode != "off":
+            self._build_target_units(task_id, workspace.inventory())
+            # Both selectors use the frozen original request. Retain that
+            # scope so the scanner can also report units beyond its budget.
+            task_input = (self.store.get(task_id) or {}).get("input") or {}
+            investigate_paths = task_input.get("investigate_paths", investigate_paths or [])
             try:
                 build_result = self._run_build_agent(
                     task_id, workspace, repository_label, progress
@@ -1882,6 +1924,8 @@ class ReviewService:
                     "attempts": build_result.attempts,
                     "failure_code": build_result.failure_code,
                     "evidence_refs": list(build_result.evidence_refs),
+                    "build_input_digest": build_result.build_input_digest,
+                    "repository_code_executed": build_result.repository_code_executed,
                 },
             })
             if build_result.status == SUCCEEDED:
@@ -1936,6 +1980,8 @@ class ReviewService:
                 # 才可能为 True，最终值在扫描后按平台摘要的肯定证据
                 # 重算（见下方 build_context 校验）。
                 "consumed_by_analysis": consumption_ok,
+                "build_input_digest": build_result.build_input_digest,
+                "repository_code_executed": build_result.repository_code_executed,
             }
             if not consumption_ok and str(
                 cxx_agent_mode or "off"
@@ -1943,7 +1989,19 @@ class ReviewService:
                 # 构建成功但消费失败（required）或构建失败（auto）都
                 # 拒绝进入依赖构建上下文的检测阶段。
                 cxx_agent_mode = "off"
+        lease = (
+            self._context_lease(*delivered_registration)
+            if delivered_registration is not None else None
+        )
+
+        def cancel_probe() -> bool:
+            if lease is not None and lease.lost.is_set():
+                raise CxxAnalyzerUnavailable("verified-context-lease-lost")
+            return self.store.is_cancelled(task_id)
+
         try:
+            if lease is not None:
+                lease.start()
             self.store.transition(
                 task_id,
                 TraceEvent(
@@ -1964,20 +2022,35 @@ class ReviewService:
                     task_id=task_id,
                     verified_view=verified_view,
                     require_verified_context=build_agent_mode == "required",
+                    # The legacy tool endpoint cannot bind an artifact
+                    # digest. Context-dependent work belongs to the verified
+                    # facts/repro platform; keep this endpoint source-only.
+                    cxx_allowed_layers=(
+                        ("source-only",) if build_agent_mode != "off" else None
+                    ),
                     # 任务取消时停止后续模型调用：store 的 cancel_requested 位是
                     # 权威取消信号。
-                    should_cancel=lambda: self.store.is_cancelled(task_id),
+                    should_cancel=cancel_probe,
                     # 任务级平台链模式快照（方案 §3.2）：不改共享 scanner 状态，
                     # 并发任务各自隔离。
                     cxx_agent_mode=cxx_agent_mode,
                     investigate_paths=investigate_paths or (),
                 )
-            if self.store.is_cancelled(task_id):
+            if cancel_probe():
                 raise RepositoryScanCancelled()
             result.report.repository = repository_label
             result.report.collaboration["import_policy"] = {
                 "host_path_exposed": False,
-                "repository_code_executed": False,
+                # Conservative execution receipt: a sandbox attempt may
+                # have run repository CMake code even if it later failed.
+                "repository_code_executed": bool(
+                    build_gap and build_gap.get("repository_code_executed")
+                ),
+                "host_repository_code_executed": False,
+                "repository_code_execution_environment": (
+                    "build-sandbox" if build_gap and build_gap.get("repository_code_executed")
+                    else "none"
+                ),
                 "snapshot_sha256": result.inventory.fingerprint(),
                 "snapshot_files": len(result.inventory.files),
                 **import_policy_extra,
@@ -2013,6 +2086,8 @@ class ReviewService:
                 # 阻断依赖上下文阶段的判定，二者都不冒充成功。
                 result.report.collaboration["build_agent"] = build_gap
         finally:
+            if lease is not None:
+                lease.close()
             # #354 评审第一轮 P1：释放覆盖异常与取消路径——扫描中途
             # 抛出（含 RepositoryScanCancelled）时同样只撤销本任务的
             # 持有权，最后一个持有者结束时才真正注销共享注册。
@@ -2146,7 +2221,7 @@ class ReviewService:
             warnings_by_reason["cxx-analysis-partial"] = (
                 warnings_by_reason.get("cxx-analysis-partial", 0) + 1
             )
-        elif cxx_status in {"failed", "unavailable", "invalid-response", "timedout"}:
+        elif cxx_status in {"failed", "unavailable", "invalid-response", "timedout", "blocked"}:
             warnings_by_reason["cxx-analysis-failed"] = (
                 warnings_by_reason.get("cxx-analysis-failed", 0) + 1
             )
@@ -2267,17 +2342,28 @@ class ReviewService:
                 )
             return
         diff = self.store.get_task_payload(task_id)
-        if diff is None and payload.get("diff_url"):
+        task_input = task.get("input") or {}
+        pinned_webhook = (
+            task_input.get("source") == "github-webhook" or bool(payload.get("diff_url"))
+        )
+        if pinned_webhook and (
+            diff is None or task_input.get("diff_source") != "pinned-compare-v1"
+        ):
+            # Old cached mutable-URL diffs/checkpoints cannot establish provenance.
+            if diff is not None or self.store.load_checkpoints(task_id):
+                raise PermanentTaskError("unpinned webhook diff; create a new audit task")
+            base_sha, head_sha = task_input.get("base_sha"), task_input.get("head_sha")
+            if any(not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None
+                   for sha in (base_sha, head_sha)):
+                raise PermanentTaskError("webhook audit requires immutable base/head SHAs")
             client = self._github_client_for_task(task, payload.get("installation_id"))
             client.ensure_repository_access(payload["repository"])
-            diff = client.fetch_diff(payload["diff_url"])
+            diff = client.fetch_diff_at_commits(
+                payload["repository"], base_sha, head_sha,
+                max_bytes=self.settings.max_diff_bytes,
+            )
             self._validate_review(payload["repository"], diff)
-            encoded = diff.encode("utf-8")
-            self.store.save_task_payload(task_id, diff)
-            self.store.update_task_input(task_id, {
-                "diff_pending": False, "diff_bytes": len(encoded),
-                "diff_sha256": hashlib.sha256(encoded).hexdigest(),
-            })
+            self.store.save_pinned_webhook_diff(task_id, diff, base_sha, head_sha)
         if diff is None:
             raise PermanentTaskError("task payload no longer exists")
         try:
@@ -2345,16 +2431,9 @@ class ReviewService:
         else:
             tenant_id = tenant_id or self.settings.default_tenant_id
         github_auth = self._github_auth_binding(tenant_id, installation_id)
-        if not self.store.claim_webhook(
-            delivery_id, tenant_id, "pull_request", payload_sha256
-        ):
-            existing = self.store.get_webhook(delivery_id) or {}
-            return {
-                "duplicate": True, "task_id": existing.get("task_id"),
-                "state": "PENDING" if existing.get("task_id") else "ACCEPTED",
-            }
         action = payload.get("action")
         if action not in {"opened", "reopened", "synchronize"}:
+            self.store.claim_webhook(delivery_id, tenant_id, "pull_request", payload_sha256)
             self.store.complete_webhook(delivery_id, None)
             return {"ignored": True, "reason": f"unsupported pull_request action: {action}"}
         pull = payload.get("pull_request") or {}
@@ -2368,22 +2447,43 @@ class ReviewService:
         # 都不能作为抓取依据；下游源码抓取只允许使用这里的 head SHA。
         head_sha, base_sha = pull_request_commit_shas(payload)
         self._authorize_repository(tenant_id, repository)
-        task_id = self._create_deferred_task(
-            repository, number, "github-webhook", tenant_id,
-            {"diff_url": diff_url, "head_sha": head_sha, "base_sha": base_sha,
-             "github_auth": github_auth},
-        )
-        self.queue.submit({
+        task_id = str(uuid.uuid4())
+        assignment = self.releases.assignment(tenant_id, "llm-review", task_id)
+        task_input = {
+            "source": "github-webhook", "diff_pending": True,
+            "github_auth": github_auth,
+            "release_lane": assignment["lane"], "shadow": assignment["shadow"],
+            "diff_url": diff_url, "head_sha": head_sha, "base_sha": base_sha,
+        }
+        queue_payload = {
             "task_id": task_id, "repository": repository, "pull_request": number,
             "github_issue_url": pull.get("issue_url", ""),
             "installation_id": installation_id, "tenant_id": tenant_id,
             "diff_url": diff_url,
-        }, message_id=task_id)
+        }
+        task_id, created = self.store.prepare_webhook_review(
+            delivery_id, tenant_id, payload_sha256, task_id,
+            repository, number, task_input, queue_payload,
+        )
+        self._dispatch_webhook_outbox(delivery_id)
         metrics.inc("reviews_enqueued_total")
         result = {"task_id": task_id, "state": "PENDING", "queue": self.queue.backend}
-        self.store.complete_webhook(delivery_id, result["task_id"])
+        result["duplicate"] = not created
         result["will_post_to_github"] = self.settings.auto_post_review
         return result
+
+    def _dispatch_webhook_outbox(self, delivery_id=None) -> None:
+        """Publish durable pending admissions, retaining ambiguous failures.
+
+        A request waits for the local dispatcher lock so its own failure can be
+        reported; periodic maintenance retries even without webhook redelivery.
+        Multiple service processes may deliver the same task, as with Redis ACK
+        loss. No new logical task is created by such redelivery.
+        """
+        with self._webhook_dispatch_lock:
+            for item in self.store.pending_webhook_outbox(delivery_id):
+                self.queue.submit(item["payload"], message_id=item["task_id"])
+                self.store.mark_webhook_dispatched(item["delivery_id"])
 
     def _github_app_mode(self) -> bool:
         return bool(self.settings.github_app_id or self.settings.github_private_key_path)
@@ -2445,16 +2545,24 @@ class ReviewService:
         tenant_id: str | None = None,
     ) -> dict:
         task = self.store.get(task_id, tenant_id)
-        if not task or not task.get("report"):
+        if not task or task.get("state") != TaskState.SUCCESS.value or not task.get("report"):
             raise ValueError("completed task not found")
         if task.get("pull_request") is None:
             raise ValueError("fix commits require a GitHub pull request task")
         actual_tenant = task.get("tenant_id") or tenant_id or "default"
         if not self.store.repository_allowed(actual_tenant, task["repository"], True):
             raise PermissionError("automatic repair is not enabled for this repository")
+        audited_head = (task.get("input") or {}).get("head_sha")
+        if not isinstance(audited_head, str) or re.fullmatch(r"[0-9a-f]{40}", audited_head) is None:
+            raise ValueError("repair-source-missing: a complete audited commit SHA is required")
+        if (task.get("input") or {}).get("diff_source") != "pinned-compare-v1":
+            raise ValueError("repair-source-unverified: run a new SHA-pinned audit before publication")
         result = self.fixer.create_fix_commits(
             self._github_client_for_task(task, installation_id),
             task["repository"], task["pull_request"], task["report"],
+            expected_source_sha=audited_head,
+            publication_store=self.store,
+            publication_scope={"tenant_id": actual_tenant, "task_id": task_id},
         )
         metrics.inc("fix_runs_total")
         return result

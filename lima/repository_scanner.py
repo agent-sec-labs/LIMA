@@ -5,12 +5,12 @@ from __future__ import annotations
 import difflib
 import json
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Final
+from typing import Final, Iterator
 
 from .adjudication import adjudicate_findings
 from .agent_orchestrator import (
@@ -77,6 +77,7 @@ VERIFICATION_RANK = {
 # unsupported-extension 属于既定扫描范围（node_modules、图片等），不算覆盖损失。
 COVERAGE_AFFECTING_SKIPS = frozenset({
     "symlink",
+    "reparse-point",
     "unreadable",
     "file-size-limit",
     "file-limit",
@@ -727,9 +728,13 @@ class RepositoryScanner:
                     "sidecar adapter is constructed"
                 )
             return {"mode": mode, "status": "analyzer-not-configured"}
-        translation_units = self._platform_translation_units(
+        requested_translation_units = self._platform_requested_translation_units(
             inventory, investigate_paths
         )
+        translation_units = requested_translation_units[:MAX_UAF_TRANSLATION_UNITS]
+        budget_omitted_units = requested_translation_units[
+            MAX_UAF_TRANSLATION_UNITS:
+        ]
         if not translation_units:
             return {"mode": mode, "status": "no-cxx-sources"}
         budget = (
@@ -807,6 +812,22 @@ class RepositoryScanner:
                 "status": "review-failed",
                 "diagnostics": [privacy_text(str(exc))[:500]],
             }
+        if budget_omitted_units:
+            # The platform intentionally reviews a bounded batch.  Keep the
+            # entire requested scope visible as unreviewed instead of
+            # silently redefining the request to its first batch.
+            outcome = replace(
+                outcome,
+                diagnostics=(
+                    *outcome.diagnostics,
+                    "coverage gap: translation-unit-budget: reviewed "
+                    f"{len(translation_units)} of {len(requested_translation_units)}; "
+                    f"{len(budget_omitted_units)} not reviewed",
+                ),
+                unreviewed_units=tuple(sorted(
+                    set(outcome.unreviewed_units) | set(budget_omitted_units)
+                )),
+            )
         # rejected/abstain 保留在 outcome 审计记录里，不投影为 Finding；
         # 正向状态按冻结状态机输出。合并键是不可变 finding 身份
         # (cwe, path, symbol, line)。
@@ -832,11 +853,11 @@ class RepositoryScanner:
         )
 
     @staticmethod
-    def _platform_translation_units(
+    def _platform_requested_translation_units(
         inventory: WorkspaceInventory,
         investigate_paths: Sequence[str] = (),
     ) -> tuple[str, ...]:
-        """Select the bounded C/C++ review scope, honoring explicit paths."""
+        """Select the full C/C++ request scope before the batch budget."""
         available = tuple(sorted({
             PurePosixPath(item.path).as_posix()
             for item in inventory.files
@@ -850,12 +871,22 @@ class RepositoryScanner:
             if str(item).strip().strip("/\\")
         )
         if not scopes:
-            return available[:MAX_UAF_TRANSLATION_UNITS]
-        requested = tuple(
+            return available
+        return tuple(
             unit for unit in available
             if any(unit == scope or unit.startswith(scope + "/") for scope in scopes)
         )
-        return requested[:MAX_UAF_TRANSLATION_UNITS]
+
+    @staticmethod
+    def _platform_translation_units(
+        inventory: WorkspaceInventory,
+        investigate_paths: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        """Select the bounded C/C++ review batch, honoring explicit paths."""
+
+        return RepositoryScanner._platform_requested_translation_units(
+            inventory, investigate_paths,
+        )[:MAX_UAF_TRANSLATION_UNITS]
 
     @contextmanager
     def _materialized_snapshot(
@@ -892,6 +923,7 @@ class RepositoryScanner:
         investigate_paths: Sequence[str] = (),
         verified_view: object | None = None,
         require_verified_context: bool = False,
+        cxx_allowed_layers: tuple[str, ...] | None = None,
     ) -> RepositoryScanResult:
         """Scan a materialized workspace.
 
@@ -906,6 +938,10 @@ class RepositoryScanner:
             raise ValueError(
                 "cxx_agent_mode must be auto, off or required"
             )
+        if cxx_allowed_layers is not None and any(
+            not isinstance(layer, str) for layer in cxx_allowed_layers
+        ):
+            raise ValueError("cxx_allowed_layers must contain strings")
         cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
 
         def check_cancelled() -> None:
@@ -932,6 +968,7 @@ class RepositoryScanner:
                 investigate_paths=investigate_paths,
                 verified_view=verified_view,
                 require_verified_context=require_verified_context,
+                cxx_allowed_layers=cxx_allowed_layers,
             )
         result.report.repository = str(workspace.root)
         return result
@@ -949,8 +986,9 @@ class RepositoryScanner:
         investigate_paths: Sequence[str] = (),
         verified_view: object | None = None,
         require_verified_context: bool = False,
+        cxx_allowed_layers: tuple[str, ...] | None = None,
     ) -> RepositoryScanResult:
-        """Analyze the captured workspace using its original inventory."""
+        """Run local analyzers against a previously materialized workspace snapshot."""
 
         cancel_probe = should_cancel if should_cancel is not None else self.should_cancel
 
@@ -958,7 +996,6 @@ class RepositoryScanner:
             if cancel_probe is not None and cancel_probe():
                 raise RepositoryScanCancelled()
 
-        check_cancelled()
         findings: list[Finding] = []
         finding_index: dict[tuple[str, int, str], Finding] = {}
         cxx_finding_index: dict[tuple[str, str, str, int], Finding] = {}
@@ -1065,10 +1102,24 @@ class RepositoryScanner:
                     engine=result.engine,
                 )
 
+        effective_cxx_layers = (
+            tuple(
+                layer for layer in self.cxx_requested_layers
+                if layer in cxx_allowed_layers
+            )
+            if cxx_allowed_layers is not None
+            else self.cxx_requested_layers
+        )
+        blocked_cxx_layers = tuple(
+            layer for layer in self.cxx_requested_layers
+            if layer not in effective_cxx_layers
+        )
         cxx_summary = {
             "status": "disabled" if self.cxx_memory_mode == "off" else "not-applicable",
             "mode": self.cxx_memory_mode,
             "requested_layers": list(self.cxx_requested_layers),
+            "effective_layers": list(effective_cxx_layers),
+            "blocked_layers": list(blocked_cxx_layers),
             "tool_runs": [],
             "coverage": {},
             "diagnostics": [],
@@ -1079,48 +1130,71 @@ class RepositoryScanner:
             for item in inventory.files
         )
         if self.cxx_memory_mode != "off" and has_cxx_source:
-            try:
-                check_cancelled()
-                if self.cxx_memory_adapter is None:
-                    raise CxxAnalyzerUnavailable("C/C++ analyzer is not configured")
-                cxx_result = self.cxx_memory_adapter.analyze(
-                    repository_key,
-                    inventory.fingerprint(),
-                    self.cxx_requested_layers,
-                    inventory=inventory,
-                )
-                check_cancelled()
-            except CxxAnalyzerUnavailable as exc:
-                if self.cxx_memory_mode == "required":
-                    raise RuntimeError(
-                        "required C/C++ memory analyzer is unavailable"
-                    ) from exc
+            if blocked_cxx_layers and not effective_cxx_layers:
                 cxx_summary.update({
-                    "status": "unavailable",
-                    "diagnostics": ["C/C++ memory analyzer is unavailable"],
-                })
-            except CxxAnalyzerProtocolError as exc:
-                if self.cxx_memory_mode == "required":
-                    raise RuntimeError(
-                        "required C/C++ memory analyzer returned an invalid response"
-                    ) from exc
-                cxx_summary.update({
-                    "status": "invalid-response",
-                    "diagnostics": ["C/C++ memory analyzer response was rejected"],
+                    "status": "blocked",
+                    "diagnostics": [
+                        "C/C++ analyzer layers blocked by task context: "
+                        + ", ".join(blocked_cxx_layers)
+                    ],
                 })
             else:
-                evidence_status = analysis_evidence_status(cxx_result)
-                if evidence_status == "failed" and self.cxx_memory_mode == "required":
-                    raise RuntimeError("required C/C++ memory analysis failed to produce accepted evidence")
-                cxx_summary.update({
-                    "status": evidence_status,
-                    "tool_runs": cxx_result.tool_runs,
-                    "coverage": cxx_result.coverage,
-                    # Review round 6: sidecar diagnostics are free text too.
-                    "diagnostics": [privacy_text(item) for item in cxx_result.diagnostics],
-                })
-                for finding in cxx_result.findings:
-                    self._merge_cxx_finding(findings, cxx_finding_index, finding)
+                try:
+                    check_cancelled()
+                    if self.cxx_memory_adapter is None:
+                        raise CxxAnalyzerUnavailable(
+                            "C/C++ analyzer is not configured"
+                        )
+                    cxx_result = self.cxx_memory_adapter.analyze(
+                        repository_key,
+                        inventory.fingerprint(),
+                        effective_cxx_layers,
+                        inventory=inventory,
+                    )
+                    check_cancelled()
+                except CxxAnalyzerUnavailable as exc:
+                    if self.cxx_memory_mode == "required":
+                        raise RuntimeError(
+                            "required C/C++ memory analyzer is unavailable"
+                        ) from exc
+                    cxx_summary.update({
+                        "status": "unavailable",
+                        "diagnostics": ["C/C++ memory analyzer is unavailable"],
+                    })
+                except CxxAnalyzerProtocolError as exc:
+                    if self.cxx_memory_mode == "required":
+                        raise RuntimeError(
+                            "required C/C++ memory analyzer returned an invalid response"
+                        ) from exc
+                    cxx_summary.update({
+                        "status": "invalid-response",
+                        "diagnostics": ["C/C++ memory analyzer response was rejected"],
+                    })
+                else:
+                    evidence_status = analysis_evidence_status(cxx_result)
+                    if evidence_status == "failed" and self.cxx_memory_mode == "required":
+                        raise RuntimeError(
+                            "required C/C++ memory analysis failed to produce accepted evidence"
+                        )
+                    cxx_summary.update({
+                        "status": evidence_status,
+                        "tool_runs": cxx_result.tool_runs,
+                        "coverage": cxx_result.coverage,
+                        # Review round 6: sidecar diagnostics are free text too.
+                        "diagnostics": [
+                            privacy_text(item) for item in cxx_result.diagnostics
+                        ],
+                    })
+                    for finding in cxx_result.findings:
+                        self._merge_cxx_finding(
+                            findings, cxx_finding_index, finding
+                        )
+                    if blocked_cxx_layers:
+                        cxx_summary["status"] = "partial"
+                        cxx_summary["diagnostics"].append(
+                            "C/C++ analyzer layers blocked by task context: "
+                            + ", ".join(blocked_cxx_layers)
+                        )
 
         # 平台分支是唯一的智能体检测链（设计 §10 单链；retirement Task 1
         # 移除了 legacy 七角色分支）：Scout→假设→实验→修正循环，按

@@ -86,8 +86,14 @@ class BuildInputBoundaryTest(unittest.TestCase):
             target.write_bytes(b"x" * 1000)
             limits = Limits()
             limits.max_input_file_bytes = 1000
+            # collect_build_inputs resolves the snapshot root before opening
+            # files, and Windows runners may spell TEMP with an 8.3 alias
+            # (RUNNER~1); resolve the injection target the same way so the
+            # path comparison below can match.
+            target = target.resolve(strict=True)
             # The file grows after stat but before its second stream chunk.
             original_open = Path.open
+            injected = []
 
             class Growing:
                 def __init__(self, handle): self.handle, self.calls = handle, 0
@@ -97,6 +103,7 @@ class BuildInputBoundaryTest(unittest.TestCase):
                     self.calls += 1
                     data = self.handle.read(size)
                     if self.calls == 1:
+                        injected.append(target)
                         with original_open(target, "wb") as writer:
                             writer.write(b"x" * 2000)
                     return data
@@ -109,6 +116,7 @@ class BuildInputBoundaryTest(unittest.TestCase):
             with mock.patch.object(Path, "open", opened):
                 with self.assertRaisesRegex(BuildInputError, "build-input-file-too-large"):
                     collect_build_inputs(root, limits)
+            self.assertEqual([target], injected)
 
     def test_cancelled_input_never_opens_session_and_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

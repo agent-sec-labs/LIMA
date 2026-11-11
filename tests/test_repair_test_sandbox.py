@@ -151,10 +151,17 @@ class RepairTestSandboxTest(unittest.TestCase):
                 (root / "linked").symlink_to(original)
             except OSError:
                 self.skipTest("symlink creation unavailable")
+            # Windows maps chmod to a coarse read/write mask (0o666 after
+            # chmod 0o700), so the invariant under test is "staging leaves
+            # the mode untouched"; the literal owner-only mode stays a
+            # POSIX-only assertion.
+            mode_before = original.stat().st_mode & 0o777
+            if os.name == "posix":
+                self.assertEqual(mode_before, 0o700)
             result = RepairVerifier(
                 "python3 run.py", sandbox_image="sha256:" + "a" * 64,
                 sandbox_runner=lambda *_args, **_kwargs: None,
             ).verify_worktree(str(root), True)
             self.assertFalse(result["passed"])
             self.assertEqual(result["sandbox"]["reason"], "repair-sandbox-input-link")
-            self.assertEqual(original.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(original.stat().st_mode & 0o777, mode_before)

@@ -858,6 +858,10 @@ class Round4ReviewTests(unittest.TestCase):
                 repository_scan_sast_mode="off", cxx_memory_mode="off",
                 build_agent_mode="auto", build_agent_image="lima-builder:test",
                 build_concurrency=1, queue_max_attempts=2,
+                # Round-4 uses the real _run_build_agent admission path, so
+                # artifact namespaces must stay inside the temporary root
+                # (read-only containers have no writable output/).
+                build_artifacts_root=str(Path(temporary.name) / "artifacts"),
             )
         )
         self.addCleanup(service.queue.close)

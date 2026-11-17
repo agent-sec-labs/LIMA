@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { CxxMemoryCard } from "./CxxMemoryCard";
+import { CxxInvestigationTimeline } from "./CxxInvestigationTimeline";
 import { TaskActions } from "./TaskActions";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -752,6 +753,9 @@ function platformOmissionLabel(code: string): string {
 function PlatformTargetDetails({ target }: { target: PlatformTarget }): React.JSX.Element {
   return (
     <Space direction="vertical" size={4} style={{ width: "100%" }}>
+      {target.investigation !== undefined ? (
+        <CxxInvestigationTimeline investigation={target.investigation} />
+      ) : null}
       {target.hypothesis_reason !== undefined ? (
         <span>
           <strong>假设描述：</strong>

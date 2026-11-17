@@ -13,7 +13,8 @@ from lima.agent_orchestrator import run_platform_review
 from lima.agent_repro_tools import ExperimentObservation
 from lima.agent_scout import ScoutLead, ScoutReport, ScoutTarget
 from lima.config import Settings
-from lima.cxx_agent_tools import CxxAgentBudget
+from lima.cxx_agent_tools import AgentBudgetExceeded, CxxAgentBudget
+from lima.runtime import AgentLoopProtocolError
 from lima.repository_scanner import RepositoryScanner
 from lima.workspace import RepositoryWorkspace
 
@@ -47,6 +48,169 @@ def completed_engine(result):
 
 
 class InvestigationIntegrationTests(unittest.TestCase):
+    def test_auto_partial_investigation_requires_review_for_each_failure_status(self):
+        observation = ExperimentObservation(
+            False, "run", 1, "heap-use-after-free", 2, 1, 1, (), "ASan hit",
+            faulting_file="src/a.cpp",
+        )
+        for stop in ("protocol-error", "error", "budget-exhausted", "incomplete"):
+            with self.subTest(stop=stop):
+                result = SimpleNamespace(
+                    hypothesis=HYPOTHESIS,
+                    experiments=[{
+                        "driver_code": HYPOTHESIS["driver_code"],
+                        "source_files": ("src/a.cpp",), "observation": observation,
+                        "hypothesis": HYPOTHESIS,
+                    }],
+                    critic=None,
+                    trace={"stop_reason": stop},
+                )
+                with patch("lima.cxx_scout_exploration.explore_leads", return_value=(
+                    (), {"stop_reason": "final", "actions": []},
+                )), patch("lima.cxx_investigator.run_investigation", return_value=result):
+                    outcome = review(
+                        self.workspace, mode="auto", investigation_strategy="investigator",
+                    )
+                finding = outcome.targets[0]
+                self.assertEqual("needs-human-review", finding.state)
+                self.assertEqual(stop, finding.investigation["stop_reason"])
+                self.assertEqual(1, len(finding.experiment_log))
+                self.assertTrue(finding.evidence_records)
+
+    def test_forged_specialist_final_after_runtime_hit_respects_agent_mode(self):
+        class Workbench:
+            def run_experiment(self, *args, **kwargs):
+                return ExperimentObservation(
+                    False, "run", 1, "heap-use-after-free", 2, 1, 1, (), "ASan hit",
+                    faulting_file="src/a.cpp",
+                )
+
+        for mode in ("auto", "required"):
+            with self.subTest(mode=mode):
+                actions = iter([
+                    {"action": "tool", "tool": "record_hypothesis", "purpose": "propose",
+                     "arguments": {"hypothesis": HYPOTHESIS, "trigger_path": "src/a.cpp",
+                                   "cwe": "CWE-416", "driver_code": HYPOTHESIS["driver_code"],
+                                   "experiment_design": "call", "unresolved_assumptions": []}},
+                    {"action": "tool", "tool": "run_reproduction", "purpose": "test",
+                     "arguments": {"source_files": ["src/a.cpp"],
+                                   "driver_code": HYPOTHESIS["driver_code"]}},
+                    {"action": "final", "hypothesis_id": "h1", "evidence_ids": ["forged"],
+                     "unresolved_questions": []},
+                ])
+                with patch("lima.cxx_scout_exploration.explore_leads", return_value=(
+                    (), {"stop_reason": "final", "actions": []},
+                )), patch("lima.agent_orchestrator.send_semantic_request",
+                          side_effect=lambda *args: json.dumps(next(actions))):
+                    if mode == "required":
+                        with self.assertRaisesRegex(RuntimeError, "protocol-error"):
+                            review(self.workspace, mode=mode, investigation_strategy="investigator",
+                                   repro_workbench=Workbench())
+                    else:
+                        outcome = review(
+                            self.workspace, mode=mode, investigation_strategy="investigator",
+                            repro_workbench=Workbench(),
+                        )
+                        finding = outcome.targets[0]
+                        self.assertEqual("needs-human-review", finding.state)
+                        self.assertEqual("protocol-error", finding.investigation["stop_reason"])
+                        self.assertIsNone(finding.investigation["critic"])
+                        self.assertEqual(1, len(finding.experiment_log))
+                        self.assertTrue(finding.evidence_records)
+
+    def test_required_mode_rejects_failed_critic_after_runtime_hit(self):
+        class Workbench:
+            def run_experiment(self, *args, **kwargs):
+                return ExperimentObservation(
+                    False, "run", 1, "heap-use-after-free", 2, 1, 1, (), "ASan hit",
+                    faulting_file="src/a.cpp",
+                )
+
+        for error in (AgentBudgetExceeded("critic exhausted"),
+                      AgentLoopProtocolError("invalid critic"),
+                      ValueError("provider unavailable")):
+            with self.subTest(error=type(error).__name__):
+                actions = iter([
+                    {"action": "tool", "tool": "record_hypothesis", "purpose": "propose",
+                     "arguments": {"hypothesis": HYPOTHESIS, "trigger_path": "src/a.cpp",
+                                   "cwe": "CWE-416", "driver_code": HYPOTHESIS["driver_code"],
+                                   "experiment_design": "call", "unresolved_assumptions": []}},
+                    {"action": "tool", "tool": "run_reproduction", "purpose": "test",
+                     "arguments": {"source_files": ["src/a.cpp"],
+                                   "driver_code": HYPOTHESIS["driver_code"]}},
+                    {"action": "final", "hypothesis_id": "h1", "evidence_ids": ["e2"],
+                     "unresolved_questions": []},
+                ])
+
+                def send(config, system, user, timeout, budget):
+                    if "You are the critic." in system:
+                        raise error
+                    context = json.loads(user)["target"]
+                    self.assertEqual(TARGET.path, context["path"])
+                    self.assertEqual(TARGET.line, context["line"])
+                    self.assertEqual(TARGET.reason, context["reason"])
+                    return json.dumps(next(actions))
+
+                with patch("lima.cxx_scout_exploration.explore_leads", return_value=(
+                    (), {"stop_reason": "final", "actions": []},
+                )), patch("lima.agent_orchestrator.send_semantic_request", side_effect=send):
+                    with self.assertRaisesRegex(RuntimeError, "required investigation failed"):
+                        review(self.workspace, mode="required", investigation_strategy="investigator",
+                               repro_workbench=Workbench())
+
+    def test_cancelled_critic_preserves_trace_and_abstains(self):
+        result = SimpleNamespace(
+            hypothesis=HYPOTHESIS, experiments=[], critic=None,
+            trace={"stop_reason": "cancelled", "critic_error": "critic cancelled"},
+        )
+        with patch("lima.cxx_scout_exploration.explore_leads", return_value=(
+            (), {"stop_reason": "final", "actions": []},
+        )), patch("lima.cxx_investigator.run_investigation", return_value=result), patch(
+            "lima.agent_orchestrator._adjudicate_target",
+            side_effect=AssertionError("cancelled investigation reached adjudication"),
+        ):
+            outcome = review(self.workspace, mode="required", investigation_strategy="investigator")
+        self.assertEqual("abstain", outcome.targets[0].state)
+        self.assertEqual("cancelled", outcome.targets[0].rejected_reason)
+        self.assertEqual("critic cancelled", outcome.targets[0].investigation["critic_error"])
+
+    def test_auto_critic_failure_keeps_runtime_evidence_for_review(self):
+        observation = ExperimentObservation(
+            False, "run", 1, "heap-use-after-free", 2, 1, 1, (), "ASan hit",
+            faulting_file="src/a.cpp",
+        )
+        result = SimpleNamespace(
+            hypothesis=HYPOTHESIS,
+            experiments=[{
+                "driver_code": HYPOTHESIS["driver_code"], "source_files": ("src/a.cpp",),
+                "observation": observation, "hypothesis": HYPOTHESIS,
+            }],
+            critic=None,
+            trace={"stop_reason": "error", "critic_error": "provider unavailable"},
+        )
+        with patch("lima.cxx_scout_exploration.explore_leads", return_value=(
+            (), {"stop_reason": "final", "actions": []},
+        )), patch("lima.cxx_investigator.run_investigation", return_value=result):
+            outcome = review(self.workspace, mode="auto", investigation_strategy="investigator")
+        finding = outcome.targets[0]
+        self.assertEqual("needs-human-review", finding.state)
+        self.assertEqual(1, len(finding.experiment_log))
+        self.assertTrue(finding.evidence_records)
+        self.assertEqual("provider unavailable", finding.investigation["critic_error"])
+
+    def test_cancelled_exploration_does_not_start_fallback_discovery(self):
+        checks = iter((False, True))
+        with patch("lima.agent_orchestrator.send_semantic_request") as send:
+            outcome = run_platform_review(
+                None, self.workspace, repository_key="team/repo", snapshot_hash="a" * 64,
+                translation_units=("src/a.cpp",), llm_config={"provider": "local"},
+                investigation_strategy="investigator", should_cancel=lambda: next(checks, True),
+            )
+        self.assertEqual("cancelled", outcome.scout_exploration["stop_reason"])
+        self.assertEqual(("src/a.cpp",), outcome.unreviewed_units)
+        self.assertEqual((), outcome.targets)
+        send.assert_not_called()
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

@@ -8,6 +8,7 @@ already sandboxed reproduction workbench.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import inspect
 import json
 import math
@@ -126,6 +127,16 @@ def _safe_for_model(value: Any) -> Any:
 
 def _render(value: Any) -> str:
     return json.dumps(_safe_for_model(value), ensure_ascii=True, default=str)
+
+
+def _failure_reason(exc: Exception) -> str:
+    if isinstance(exc, RuntimeCancelled):
+        return "cancelled"
+    if isinstance(exc, (RuntimeBudgetExceeded, AgentBudgetExceeded)):
+        return "budget-exhausted"
+    if isinstance(exc, AgentLoopProtocolError):
+        return "protocol-error"
+    return "error"
 
 
 class _Runtime:
@@ -342,7 +353,14 @@ class _Runtime:
             "hypothesis": dict(self.hypotheses[-1]["hypothesis"]),
         }
         self.experiments.append(experiment)
-        return self._record("reproduction", _observation_dict(observation))
+        return self._record("reproduction", {
+            **_observation_dict(observation),
+            "driver_code": experiment["driver_code"],
+            "driver_sha256": hashlib.sha256(driver_code.encode("utf-8")).hexdigest(),
+            "source_files": experiment["source_files"],
+            "hypothesis_id": self.hypotheses[-1]["hypothesis_id"],
+            "hypothesis": experiment["hypothesis"],
+        })
 
     def _remaining_timeout(self) -> int:
         if self.deadline is None:
@@ -379,15 +397,17 @@ class _Runtime:
         ):
             raise ValueError("invalid child search request")
         hits = []
+        truncated = False
         for path in sorted(paths):
             for number, line in enumerate(self.texts[path].splitlines(), 1):
                 if query in line:
                     hits.append({"path": path, "line": number, "text": line[:500]})
                     if len(hits) >= min(limit, 100):
-                        value = {"query": query, "hits": hits, "truncated": True}
-                        self._charge(lines=len(hits), value=value)
-                        return self._record("child_search_code", value)
-        value = {"query": query, "hits": hits, "truncated": False}
+                        truncated = True
+                        break
+            if truncated:
+                break
+        value = {"query": query, "hits": hits, "truncated": truncated}
         self._charge(lines=len(hits), value=value)
         if hasattr(self.budget, "consume"):
             for path in {hit["path"] for hit in hits}:
@@ -411,70 +431,82 @@ class _Runtime:
         child_actions: list[dict] = []
         summary: dict | None = None
         start_evidence = set(self.evidence)
-        for _step in range(4):
-            if self.deadline is not None and time.monotonic() >= self.deadline:
-                raise RuntimeBudgetExceeded("child deadline exceeded")
-            raw = self.send(
-                self.prompt(role=f"child {role}", child=True)
-                + (
-                    ' Child final: {"action":"final","summary":"...",'
-                    '"evidence_ids":["e1"],"unresolved_questions":[]}.'
-                ),
-                _render(
-                    {
-                        "question": question,
-                        "paths": sorted(scoped_paths),
-                        "parent_evidence": {eid: self.evidence[eid] for eid in evidence_ids},
-                        "observations": {
-                            eid: self.evidence[eid]
-                            for eid in self.evidence
-                            if eid not in start_evidence
-                        },
-                    }
-                ),
-                role,
-            )
-            parsed = _json_value(raw)
-            if parsed.get("action") == "final":
-                summary = _child_final(raw)
-                if any(eid not in self.evidence for eid in summary["evidence_ids"]):
-                    raise AgentLoopProtocolError("invalid child evidence reference")
-                break
-            action = _action(raw)
-            if action["tool"] == "read_source":
-                requested = action["arguments"].get("path")
-                if requested not in scoped_paths:
-                    raise AgentLoopProtocolError("child path escapes delegated scope")
-                self._read_source(**action["arguments"])
-            elif action["tool"] == "search_code":
-                self._search_scoped(
-                    action["arguments"].get("query"), action["arguments"].get("limit"), scoped_paths
-                )
-            elif action["tool"] == "query_facts":
-                if action["arguments"]:
-                    raise AgentLoopProtocolError("query_facts takes no arguments")
-                self._query_facts()
-            elif action["tool"] == "inspect_build_context":
-                requested = action["arguments"].get("path")
-                if requested not in scoped_paths:
-                    raise AgentLoopProtocolError("child path escapes delegated scope")
-                self._inspect_build_context(requested)
-            else:
-                raise AgentLoopProtocolError("child tool is not permitted")
-            child_actions.append({"tool": action["tool"], "purpose": action["purpose"]})
-        if summary is None:
-            raise RuntimeBudgetExceeded("child steps exhausted")
         child = {
             "role": role,
             "question": question,
             "paths": list(paths),
             "parent_evidence_ids": list(evidence_ids),
-            "summary": summary["summary"],
-            "evidence_ids": summary["evidence_ids"],
-            "unresolved_questions": summary["unresolved_questions"],
+            "summary": "",
+            "evidence_ids": [],
+            "unresolved_questions": [],
             "actions": child_actions,
+            "stop_reason": "incomplete",
         }
         self.children.append(child)
+        try:
+            for _step in range(4):
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    raise RuntimeBudgetExceeded("child deadline exceeded")
+                raw = self.send(
+                    self.prompt(role=f"child {role}", child=True)
+                    + (
+                        ' Child final: {"action":"final","summary":"...",'
+                        '"evidence_ids":["e1"],"unresolved_questions":[]}.'
+                    ),
+                    _render(
+                        {
+                            "question": question,
+                            "paths": sorted(scoped_paths),
+                            "parent_evidence": {eid: self.evidence[eid] for eid in evidence_ids},
+                            "observations": {
+                                eid: self.evidence[eid]
+                                for eid in self.evidence
+                                if eid not in start_evidence
+                            },
+                        }
+                    ),
+                    role,
+                )
+                parsed = _json_value(raw)
+                if parsed.get("action") == "final":
+                    summary = _child_final(raw)
+                    if any(eid not in self.evidence for eid in summary["evidence_ids"]):
+                        raise AgentLoopProtocolError("invalid child evidence reference")
+                    break
+                action = _action(raw)
+                if action["tool"] == "read_source":
+                    requested = action["arguments"].get("path")
+                    if requested not in scoped_paths:
+                        raise AgentLoopProtocolError("child path escapes delegated scope")
+                    self._read_source(**action["arguments"])
+                elif action["tool"] == "search_code":
+                    self._search_scoped(
+                        action["arguments"].get("query"), action["arguments"].get("limit"), scoped_paths
+                    )
+                elif action["tool"] == "query_facts":
+                    if action["arguments"]:
+                        raise AgentLoopProtocolError("query_facts takes no arguments")
+                    self._query_facts()
+                elif action["tool"] == "inspect_build_context":
+                    requested = action["arguments"].get("path")
+                    if requested not in scoped_paths:
+                        raise AgentLoopProtocolError("child path escapes delegated scope")
+                    self._inspect_build_context(requested)
+                else:
+                    raise AgentLoopProtocolError("child tool is not permitted")
+                child_actions.append({"tool": action["tool"], "purpose": action["purpose"]})
+            if summary is None:
+                raise RuntimeBudgetExceeded("child steps exhausted")
+        except Exception as exc:
+            child["stop_reason"] = _failure_reason(exc)
+            child["error_kind"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
+            raise
+        child.update(
+            summary=summary["summary"],
+            evidence_ids=summary["evidence_ids"],
+            unresolved_questions=summary["unresolved_questions"],
+            stop_reason="final",
+        )
         return self._record("child", child)
 
     def _tools(self) -> list[AgentTool]:
@@ -567,6 +599,14 @@ def run_investigation(
         send=send,
         deadline=deadline,
     )
+    target_fields = target if isinstance(target, dict) else {
+        key: getattr(target, key, None) for key in ("line", "reason", "confidence")
+    }
+    target_context = {
+        "target_id": runtime.target_id,
+        "path": runtime.target_path,
+        **{key: target_fields.get(key) for key in ("line", "reason", "confidence")},
+    }
     trace = {
         "actions": runtime.actions,
         "evidence": runtime.evidence,
@@ -591,9 +631,11 @@ def run_investigation(
                 _render(
                     {
                         "target_id": runtime.target_id,
+                        "target": target_context,
                         "paths": sorted(runtime.paths)[:500],
                         "evidence": runtime.evidence,
                         "hypotheses": runtime.hypotheses,
+                        "observations": state.get("observations", []),
                         "driver_contract": driver_contract,
                         "source_mode": source_mode,
                     }
@@ -620,7 +662,7 @@ def run_investigation(
                 json.dumps(runtime.hypotheses, sort_keys=True),
                 # Repeating an identical tool action cannot become progress
                 # merely because it creates another evidence number.
-                tuple(
+                frozenset(
                     (record["kind"], _render(record["value"]))
                     for record in runtime.evidence.values()
                 ),
@@ -660,6 +702,13 @@ def run_investigation(
     except Exception as exc:  # preserve evidence but never disguise engine faults as proof
         trace["stop_reason"] = "error"
         trace["error_kind"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
+    hypothesis = runtime.hypotheses[-1]["hypothesis"] if runtime.hypotheses else None
+    if final is not None:
+        hypothesis = next(
+            (entry["hypothesis"] for entry in runtime.hypotheses
+             if entry["hypothesis_id"] == final["hypothesis_id"]),
+            None,
+        )
     critic = None
     if final is not None:
         try:
@@ -684,9 +733,8 @@ def run_investigation(
                     "Supports/refutes must cite at least one observed evidence ID.",
                     _render(
                         {
-                            "hypothesis": runtime.hypotheses[-1]["hypothesis"]
-                            if runtime.hypotheses
-                            else None,
+                            "target": target_context,
+                            "hypothesis": hypothesis,
                             "evidence": runtime.evidence,
                             "final": final,
                         }
@@ -738,11 +786,13 @@ def run_investigation(
                 trace["critic"] = _safe_for_model(critic)
                 break
             if critic is None:
-                trace["critic_error"] = "critic-steps-exhausted"
+                raise RuntimeBudgetExceeded("critic-steps-exhausted")
         except Exception as exc:
             trace["critic_error"] = str(exc)[:300]
+            trace["stop_reason"] = _failure_reason(exc)
+            trace["error_kind"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
     return InvestigationResult(
-        runtime.hypotheses[-1]["hypothesis"] if runtime.hypotheses else None,
+        hypothesis,
         runtime.experiments,
         critic,
         _safe_for_model(trace),

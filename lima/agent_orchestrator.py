@@ -1923,6 +1923,9 @@ def _investigate_target(
         max_children=max_children, should_cancel=should_cancel, deadline=deadline,
     )
     stop = result.trace.get("stop_reason", "inconclusive")
+    if stop == "cancelled":
+        diagnostics.append(f"investigation {target.lead_id}: {stop}")
+        return replace(_abstain_finding(target, stop), investigation=result.trace)
     if mode == MODE_REQUIRED and stop in {
         "budget-exhausted", "protocol-error", "model-error", "error",
     }:
@@ -1971,6 +1974,8 @@ def _investigate_target(
         tool_analysis=tool_analysis, diagnostics=diagnostics, source_mode=source_mode,
         calls=specialist_calls[0] + critic_calls[0], investigation=result.trace,
     )
+    if stop != "final" or result.trace.get("critic_error"):
+        finding = replace(finding, state="needs-human-review")
     if stop != "final":
         diagnostics.append(f"investigation {target.lead_id}: {stop}")
         if finding.state == "abstain":
@@ -2544,6 +2549,12 @@ def run_platform_review(
             should_cancel=should_cancel, deadline=deadline,
         )
         given_leads = (*given_leads, *additional)
+        if exploration_trace["stop_reason"] == "cancelled":
+            return _finish(_empty_outcome(
+                ("scout exploration: cancelled",), units,
+                unreviewed_units=units,
+                build_context_mode=build_context_mode,
+            ))
         if exploration_trace["stop_reason"] != "final":
             diagnostics.append("scout exploration: " + exploration_trace["stop_reason"])
             discovery_unreviewed = units

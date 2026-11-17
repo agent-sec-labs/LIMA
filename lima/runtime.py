@@ -229,6 +229,9 @@ class AgentLoopResult:
     steps: int
     observations: List[Dict[str, Any]]
     stop_reason: str
+    # Raw values stay available to the application even when the model-facing
+    # observation is projected or truncated.
+    tool_results: List[Any] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -250,22 +253,46 @@ class AgentLoop:
         self, stepper: Callable[[Dict[str, Any]], Dict[str, Any]],
         tools: Any, initial_state: Dict[str, Any],
         event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        fatal_exceptions: Tuple[type, ...] = (),
+        result_projector: Optional[Callable[[Any], Any]] = None,
     ) -> AgentLoopResult:
+        if not isinstance(fatal_exceptions, tuple) or any(
+            not isinstance(exc_type, type) or not issubclass(exc_type, BaseException)
+            for exc_type in fatal_exceptions
+        ):
+            raise ValueError("fatal_exceptions must be a tuple of exception types")
         state = dict(initial_state)
         observations = list(state.get("observations") or [])
+        tool_results: List[Any] = []
         started = time.monotonic()
 
         def emit(kind: str, **detail) -> None:
             if event_sink:
                 event_sink(kind, detail)
 
-        for step in range(1, self.max_steps + 1):
+        def guard(step: int, phase: str) -> None:
+            if cancel_check and cancel_check():
+                emit("agent_loop_cancelled", step=step, phase=phase)
+                raise RuntimeCancelled("agent loop was cancelled")
             if time.monotonic() - started > self.timeout_seconds:
                 emit("agent_loop_budget_exhausted", step=step, budget="time")
                 raise RuntimeBudgetExceeded("agent loop time budget exceeded")
+
+        # Cancellation is opt-in to preserve the historic treatment of tool
+        # exceptions.  Once enabled, RuntimeCancelled is never converted into
+        # an ordinary tool observation.
+        fatal_types = fatal_exceptions + ((RuntimeCancelled,) if cancel_check else ())
+
+        for step in range(1, self.max_steps + 1):
+            guard(step, "before_stepper")
             state["loop_step"] = step
             state["observations"] = list(observations)
             action = stepper(state)
+            # A slow model response cannot authorize a subsequent tool side
+            # effect after the loop deadline has elapsed.
+            guard(step, "after_stepper")
             if not isinstance(action, dict):
                 raise AgentLoopProtocolError("agent loop action must be an object")
             kind = str(action.get("action", "")).strip().lower()
@@ -273,7 +300,7 @@ class AgentLoop:
             if kind == "final":
                 return AgentLoopResult(
                     action.get("findings", action.get("output")), step,
-                    observations, "final",
+                    observations, "final", tool_results,
                 )
             if kind != "tool":
                 raise AgentLoopProtocolError("unsupported agent loop action: %s" % kind)
@@ -282,6 +309,7 @@ class AgentLoop:
             if not isinstance(arguments, dict):
                 raise AgentLoopProtocolError("tool arguments must be an object")
             try:
+                guard(step, "before_tool")
                 if isinstance(tools, ToolRegistry):
                     value = tools.invoke(tool_name, arguments)
                 else:
@@ -289,18 +317,26 @@ class AgentLoop:
                     if tool is None:
                         raise AgentLoopProtocolError("unknown agent tool: %s" % tool_name)
                     value = tool(**arguments)
+                tool_results.append(value)
+                guard(step, "after_tool")
+                projected = result_projector(value) if result_projector else value
                 rendered = (
-                    json.dumps(value, ensure_ascii=False, sort_keys=True)
-                    if isinstance(value, (dict, list, tuple)) else str(value)
+                    json.dumps(projected, ensure_ascii=False, sort_keys=True)
+                    if isinstance(projected, (dict, list, tuple)) else str(projected)
                 )
                 observation = {
                     "step": step, "tool": tool_name, "ok": True,
                     "result": rendered[:self.max_observation_chars],
+                    "truncated": len(rendered) > self.max_observation_chars,
                 }
+            except fatal_types:
+                raise
             except Exception as exc:
+                error = str(exc)
                 observation = {
                     "step": step, "tool": tool_name, "ok": False,
-                    "error": str(exc)[:1000],
+                    "error": error[:1000],
+                    "truncated": len(error) > 1000,
                 }
             observations.append(observation)
             emit("agent_loop_observation", **observation)

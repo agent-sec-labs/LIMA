@@ -207,6 +207,9 @@ class Settings:
     cxx_agent_timeout_seconds: int = 600
     cxx_agent_parallelism: int = 3
     cxx_agent_dialogue_rounds: int = 2
+    cxx_investigation_strategy: str = "pipeline"
+    cxx_investigation_max_steps: int = 24
+    cxx_investigation_max_children: int = 2
     # Hybrid reasoning models (deepseek-flash / deepseek-v4-pro) default to
     # thinking on with effort=high, and reasoning tokens share the
     # max_completion_tokens budget: a hard window thinks past the cap and the
@@ -382,6 +385,11 @@ class Settings:
             raise ValueError(
                 "LIMA_CXX_ANALYZER_URL must be an HTTP(S) URL without user info, query or fragment"
             )
+        if self.cxx_investigation_strategy not in {"pipeline", "investigator", "team"}:
+            raise ValueError("C/C++ investigation strategy must be pipeline, investigator or team")
+        for value in (self.cxx_investigation_max_steps, self.cxx_investigation_max_children):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("C/C++ investigation controls must be positive integers")
         if self.cxx_agent_mode not in {"off", "auto", "required"}:
             raise ValueError("LIMA_CXX_AGENT_MODE must be off, auto or required")
         if self.cxx_agent_mode == "required" and not self.effective_cxx_agent_model():
@@ -586,6 +594,11 @@ class Settings:
             cxx_agent_timeout_seconds=_int("LIMA_CXX_AGENT_TIMEOUT_SECONDS", 600),
             cxx_agent_parallelism=_int("LIMA_CXX_AGENT_PARALLELISM", 3),
             cxx_agent_dialogue_rounds=_int("LIMA_CXX_AGENT_DIALOGUE_ROUNDS", 2),
+            cxx_investigation_strategy=os.getenv(
+                "LIMA_CXX_INVESTIGATION_STRATEGY", "pipeline"
+            ).strip().lower(),
+            cxx_investigation_max_steps=_int("LIMA_CXX_INVESTIGATION_MAX_STEPS", 24),
+            cxx_investigation_max_children=_int("LIMA_CXX_INVESTIGATION_MAX_CHILDREN", 2),
             cxx_agent_disable_thinking=_bool("LIMA_CXX_AGENT_DISABLE_THINKING"),
             repository_scan_llm_mode=os.getenv(
                 "LIMA_REPOSITORY_SCAN_LLM_MODE", "off"

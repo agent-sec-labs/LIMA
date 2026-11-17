@@ -1030,11 +1030,9 @@ def _scripted_investigation_reply(
     revise-experiment cases get the critic's committed revised driver as
     a second reproduction before the final.
 
-    Evidence IDs are the deterministic counter of the committed flow:
-    e1 records the hypothesis, e2 the first reproduction and e3 the
-    critic's revised reproduction.  A committed case whose flow ever
-    records an extra evidence step shifts those IDs and this script must
-    follow it.
+    Final and critic replies cite the highest-numbered evidence ID the
+    prompt actually carries, so a failed reproduction degrades to an
+    abstention instead of a fabricated reference.
     """
 
     user = ""
@@ -1060,8 +1058,10 @@ def _scripted_investigation_reply(
         for item in observations
     )
     revised_driver = str(critic.get("revised_driver_code") or "")
-    step = state["investigator_step"]
-    state["investigator_step"] += 1
+    # One step counter per target: a second lead in the same run must not
+    # resume the first target's conversation mid-flow.
+    step = state.setdefault(target_id, 0)
+    state[target_id] = step + 1
     if step == 0:
         hypothesis = {
             "target_id": target_id,
@@ -1127,15 +1127,36 @@ def _scripted_investigation_reply(
                 },
             }
         )
-    final_evidence = "e3" if revised_driver else "e2"
+    observed = [
+        str(key) for key in (context.get("evidence") or {})
+        if isinstance(context.get("evidence"), dict)
+    ]
+    if not observed:
+        # No evidence survived (e.g. the reproduction tool failed): an
+        # abstention is honest, a fabricated reference is not.
+        return json.dumps(
+            {
+                "action": "final",
+                "hypothesis_id": "",
+                "evidence_ids": [],
+                "unresolved_questions": ["no observed evidence"],
+            }
+        )
     return json.dumps(
         {
             "action": "final",
             "hypothesis_id": "h1",
-            "evidence_ids": [final_evidence],
+            "evidence_ids": [max(observed, key=_evidence_ordinal)],
             "unresolved_questions": [],
         }
     )
+
+
+def _evidence_ordinal(evidence_id: str) -> tuple[int, str]:
+    """Order evidence IDs by their numeric suffix (e12 after e3)."""
+
+    suffix = evidence_id[1:] if evidence_id[:1] == "e" else ""
+    return (int(suffix) if suffix.isdigit() else -1, evidence_id)
 
 
 def _observed_evidence_ids(payload: dict[str, Any]) -> list[str]:
@@ -1173,7 +1194,7 @@ def scripted_platform_transport(
         raise ValueError(f"no scripted semantic transport for case {case_id!r}")
     specialist = _SPECIALIST_SCRIPTS[case_id]
     critic = _CRITIC_SCRIPTS.get(case_id, _DEFAULT_CRITIC)
-    investigation_state: dict[str, Any] = {"investigator_step": 0}
+    investigation_state: dict[str, Any] = {}  # per-target step counters
 
     def transport(
         provider, base_url, api_key, payload, timeout,
@@ -1211,7 +1232,7 @@ def scripted_platform_transport(
                         "assessment": _scripted_critic_assessment(critic),
                         "rationale": str(critic.get("rationale") or ""),
                         "evidence_ids": [
-                            "e3" if revised_driver else "e2"
+                            max(observed, key=_evidence_ordinal)
                         ],
                         "unresolved_questions": [],
                     }

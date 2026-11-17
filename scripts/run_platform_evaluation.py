@@ -1029,6 +1029,12 @@ def _scripted_investigation_reply(
     explicit abstention (not a fabricated evidence reference), and the
     revise-experiment cases get the critic's committed revised driver as
     a second reproduction before the final.
+
+    Evidence IDs are the deterministic counter of the committed flow:
+    e1 records the hypothesis, e2 the first reproduction and e3 the
+    critic's revised reproduction.  A committed case whose flow ever
+    records an extra evidence step shifts those IDs and this script must
+    follow it.
     """
 
     user = ""
@@ -2138,8 +2144,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-key", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument(
-        "--strategy", choices=STRATEGIES, default="pipeline",
-        help="investigation strategy for a single-strategy run",
+        "--strategy", choices=STRATEGIES, default=None,
+        help="investigation strategy for a single-strategy run "
+        "(default pipeline)",
     )
     parser.add_argument(
         "--compare-strategies", action="store_true",
@@ -2152,7 +2159,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.timeout < 1:
         raise SystemExit("--timeout must be a positive integer of seconds")
-    if args.compare_strategies and args.strategy != "pipeline":
+    if args.compare_strategies and args.strategy is not None:
         raise SystemExit(
             "--compare-strategies runs every strategy; do not also pass --strategy"
         )
@@ -2162,7 +2169,7 @@ def main(argv: list[str] | None = None) -> int:
     # configuration can never degrade into a silent empty report.
     llm_config, provider, model = build_llm_config(args)
     raw_case_data = args.cases.read_bytes()
-    strategies = STRATEGIES if args.compare_strategies else (args.strategy,)
+    strategies = STRATEGIES if args.compare_strategies else (args.strategy or "pipeline",)
     # Preregistered interleave: for each case and revision the strategies
     # run back to back, so time-dependent provider behaviour cannot map to
     # one strategy.
@@ -2225,12 +2232,13 @@ def main(argv: list[str] | None = None) -> int:
             "strategies": strategy_reports,
         }
     else:
+        single = args.strategy or "pipeline"
         subset = {
-            (case["id"], revision): records[(args.strategy, case["id"], revision)]
+            (case["id"], revision): records[(single, case["id"], revision)]
             for case in cases
             for revision in REVISIONS
         }
-        report = run_evaluation(cases, subset, strategy=args.strategy)
+        report = run_evaluation(cases, subset, strategy=single)
         report = add_report_metadata(
             report,
             raw_case_data,
@@ -2238,7 +2246,7 @@ def main(argv: list[str] | None = None) -> int:
             fake_llm=bool(args.fake_llm),
             provider=provider,
             model=model,
-            strategy=args.strategy,
+            strategy=single,
             timeout=args.timeout,
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)

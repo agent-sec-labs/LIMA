@@ -158,6 +158,9 @@ class RepositoryScanner:
         cxx_agent_timeout_seconds: int = 60,
         cxx_agent_parallelism: int = 1,
         cxx_agent_dialogue_rounds: int = 1,
+        cxx_investigation_strategy: str = "pipeline",
+        cxx_investigation_max_steps: int = 24,
+        cxx_investigation_max_children: int = 2,
     ) -> None:
         self.reviewers = list(
             reviewers or [SecurityRuleReviewer()]
@@ -191,6 +194,14 @@ class RepositoryScanner:
         self.cxx_agent_timeout_seconds = cxx_agent_timeout_seconds
         self.cxx_agent_parallelism = cxx_agent_parallelism
         self.cxx_agent_dialogue_rounds = cxx_agent_dialogue_rounds
+        if cxx_investigation_strategy not in {"pipeline", "investigator", "team"}:
+            raise ValueError("unknown C/C++ investigation strategy")
+        for value in (cxx_investigation_max_steps, cxx_investigation_max_children):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("C/C++ investigation controls must be positive integers")
+        self.cxx_investigation_strategy = cxx_investigation_strategy
+        self.cxx_investigation_max_steps = cxx_investigation_max_steps
+        self.cxx_investigation_max_children = cxx_investigation_max_children
 
     @staticmethod
     def _semantic_key(finding: Finding) -> tuple[str, int, str]:
@@ -400,6 +411,17 @@ class RepositoryScanner:
         )
         for summary, detail in zip(audit, details, strict=True):
             summary.update(detail)
+        from .cxx_investigation_reporting import investigation_summary
+
+        trace_budget = 128 * 1024
+        for index, (summary, item) in enumerate(zip(audit, outcome.targets[:32], strict=True)):
+            if item.investigation is not None:
+                projected = investigation_summary(
+                    item.investigation,
+                    byte_limit=max(0, trace_budget - 512 * (len(audit) - index - 1)),
+                )
+                summary["investigation"] = projected
+                trace_budget -= len(json.dumps(projected, ensure_ascii=True).encode("utf-8"))
         payload = {
             "mode": mode,
             "status": status,
@@ -434,6 +456,8 @@ class RepositoryScanner:
         }
         if v4 is not None:
             payload["v4"] = v4
+        if getattr(outcome, "scout_exploration", None) is not None:
+            payload["scout_exploration"] = investigation_summary(outcome.scout_exploration)
         return payload
 
     _V4_PAYLOAD_BUDGET_BYTES: Final = 512 * 1024
@@ -788,6 +812,9 @@ class RepositoryScanner:
                 timeout=self.cxx_agent_timeout_seconds,
                 parallelism=self.cxx_agent_parallelism,
                 dialogue_rounds=self.cxx_agent_dialogue_rounds,
+                investigation_strategy=self.cxx_investigation_strategy,
+                investigation_max_steps=self.cxx_investigation_max_steps,
+                investigation_max_children=self.cxx_investigation_max_children,
             )
         except (CxxAnalyzerUnavailable, CxxAnalyzerProtocolError) as exc:
             if mode == "required":

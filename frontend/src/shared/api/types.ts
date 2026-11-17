@@ -195,6 +195,17 @@ export interface PlatformExperimentLogEntry {
   [key: string]: unknown;
 }
 
+export interface CxxInvestigationSummary {
+  strategy?: string;
+  stop_reason?: string;
+  action_count?: number;
+  child_count?: number;
+  hypothesis_count?: number;
+  actions?: { tool?: string; purpose?: string; ok?: boolean }[];
+  children?: { role?: string; stop_reason?: string; question?: string }[];
+  detail_omissions?: string[];
+}
+
 export interface PlatformTarget {
   target_id?: string;
   path?: string;
@@ -211,6 +222,7 @@ export interface PlatformTarget {
   experiment_log?: PlatformExperimentLogEntry[];
   /** 省略原因代码（如 "poc_driver_code:too-large"）。 */
   detail_omissions?: string[];
+  investigation?: CxxInvestigationSummary;
   [key: string]: unknown;
 }
 

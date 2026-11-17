@@ -935,6 +935,7 @@ class PlatformFinding:
     broker_verdicts: tuple[Any, ...] = ()
     proof_verdict: str = ""
     rejected_reason: str = ""
+    investigation: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -977,6 +978,7 @@ class PlatformReviewOutcome:
     build_context_mode: str = "snapshot-compdb"
     # Positive receipts from the facts consumer, never inferred from mode.
     verified_context_units: tuple[str, ...] = ()
+    scout_exploration: dict | None = None
 
 
 def platform_rule_id(cwe: str) -> str:
@@ -1089,6 +1091,7 @@ def _finding_from_payload(data: Mapping[str, Any]) -> PlatformFinding:
         ),
         proof_verdict=data["proof_verdict"],
         rejected_reason=data["rejected_reason"],
+        investigation=data.get("investigation"),
     )
 
 
@@ -1885,6 +1888,101 @@ def _abstain_finding(target: ScoutTarget, reason: str) -> PlatformFinding:
     )
 
 
+def _investigate_target(
+    target: ScoutTarget, *, workspace: RepositoryWorkspace, repository_key: str,
+    snapshot_hash: str, bundle: UafFactBundle | None, candidate: UafCandidate | None,
+    resolved_llm: dict, budget: CxxAgentBudget, mode: str, timeout: int,
+    deadline: float | None, source_mode: str, repro_workbench: Any,
+    tool_analysis: Any, verified_view: object | None, diagnostics: list[str],
+    specialist_calls: list[int], critic_calls: list[int], strategy: str,
+    max_steps: int, max_children: int, should_cancel: Any,
+) -> PlatformFinding:
+    """Adapt autonomous investigation to the existing evidence adjudicator."""
+    from .cxx_investigator import run_investigation
+    from .runtime import RuntimeBudgetExceeded, RuntimeCancelled
+
+    def send(system: str, user: str, role: str) -> str:
+        if should_cancel is not None and should_cancel():
+            raise RuntimeCancelled("C/C++ investigation cancelled")
+        bound = _bounded_step_timeout(timeout, deadline)
+        if bound is None:
+            raise RuntimeBudgetExceeded("investigation deadline exceeded")
+        budget.consume(bytes=len(user.encode("utf-8")))
+        counter = critic_calls if role == "critic" else specialist_calls
+        counter[0] += 1
+        return send_semantic_request(resolved_llm, system, user, bound, budget)
+
+    result = run_investigation(
+        target=target, workspace=workspace, repository_key=repository_key,
+        snapshot_hash=snapshot_hash, budget=budget, send=send,
+        workbench=repro_workbench, verified_view=verified_view,
+        fact_lines=_candidate_fact_lines(bundle, candidate)
+        if bundle is not None and candidate is not None else (),
+        driver_contract=_driver_contract(workspace, target.path, verified_view),
+        source_mode=source_mode, strategy=strategy, max_steps=max_steps,
+        max_children=max_children, should_cancel=should_cancel, deadline=deadline,
+    )
+    stop = result.trace.get("stop_reason", "inconclusive")
+    if stop == "cancelled":
+        diagnostics.append(f"investigation {target.lead_id}: {stop}")
+        return replace(_abstain_finding(target, stop), investigation=result.trace)
+    if mode == MODE_REQUIRED and stop in {
+        "budget-exhausted", "protocol-error", "model-error", "error",
+    }:
+        raise RuntimeError(f"required investigation failed: {stop}")
+    if result.hypothesis is None:
+        diagnostics.append(f"investigation {target.lead_id}: {stop}")
+        return replace(_abstain_finding(target, stop), investigation=result.trace)
+    hypothesis = parse_hypothesis_reply(
+        json.dumps(result.hypothesis), frozenset({target.lead_id}),
+    )
+    driver = hypothesis.driver_code
+    experiment_log = []
+    hit_observation = None
+    for index, experiment in enumerate(result.experiments):
+        observed_hypothesis = experiment["hypothesis"]
+        same_claim = all(
+            observed_hypothesis.get(field) == result.hypothesis.get(field)
+            for field in ("target_id", "hypothesis", "cwe", "trigger_path")
+        )
+        observation = experiment["observation"]
+        observed_driver = experiment["driver_code"]
+        hit = source_mode != "diff-only" and same_claim and experiment_matches_target(
+            observation, hypothesis.cwe, target_path=target.path,
+            driver_paths=(repro_driver_relative_path(observed_driver),),
+        )
+        entry = _experiment_entry(index, observed_driver, observation, hit)
+        entry["source_files"] = list(experiment["source_files"])
+        experiment_log.append(entry)
+        if hit:
+            hit_observation = observation
+            driver = observed_driver
+    critic = None
+    if result.critic is not None:
+        assessment = result.critic.get("assessment")
+        if assessment in {"supports", "refutes"}:
+            critic = CriticAssessment(
+                target.lead_id,
+                "supports-hypothesis" if assessment == "supports" else "hypothesis-wrong",
+                result.critic.get("rationale", ""), "",
+            )
+    symbol = candidate.function_usr.rsplit("::", 1)[-1].rstrip("#") if candidate else ""
+    finding = _adjudicate_target(
+        target, hypothesis=hypothesis, driver=driver, symbol=symbol,
+        experiment_log=experiment_log, hit_observation=hit_observation, critic=critic,
+        snapshot_hash=snapshot_hash, candidate=candidate, bundle=bundle,
+        tool_analysis=tool_analysis, diagnostics=diagnostics, source_mode=source_mode,
+        calls=specialist_calls[0] + critic_calls[0], investigation=result.trace,
+    )
+    if stop != "final" or result.trace.get("critic_error"):
+        finding = replace(finding, state="needs-human-review")
+    if stop != "final":
+        diagnostics.append(f"investigation {target.lead_id}: {stop}")
+        if finding.state == "abstain":
+            finding = replace(finding, rejected_reason=stop)
+    return finding
+
+
 def _process_target(
     target: ScoutTarget,
     *,
@@ -1906,8 +2004,25 @@ def _process_target(
     diagnostics: list[str],
     specialist_calls: list[int],
     critic_calls: list[int],
+    investigation_strategy: str = "pipeline",
+    investigation_max_steps: int = 24,
+    investigation_max_children: int = 2,
+    should_cancel: Any = None,
 ) -> PlatformFinding:
     """Hypothesis -> experiment -> revision loop for one Scout target."""
+
+    if investigation_strategy != "pipeline":
+        return _investigate_target(
+            target, workspace=workspace, repository_key=repository_key,
+            snapshot_hash=snapshot_hash, bundle=bundle, candidate=candidate,
+            resolved_llm=resolved_llm, budget=budget, mode=mode, timeout=timeout,
+            deadline=deadline, source_mode=source_mode, repro_workbench=repro_workbench,
+            tool_analysis=tool_analysis, verified_view=verified_view,
+            diagnostics=diagnostics, specialist_calls=specialist_calls,
+            critic_calls=critic_calls, strategy=investigation_strategy,
+            max_steps=investigation_max_steps, max_children=investigation_max_children,
+            should_cancel=should_cancel,
+        )
 
     target_ids = frozenset({target.lead_id})
     symbol = ""
@@ -2036,6 +2151,23 @@ def _process_target(
             deadline,
         )
 
+    return _adjudicate_target(
+        target, hypothesis=hypothesis, driver=driver, symbol=symbol,
+        experiment_log=experiment_log, hit_observation=hit_observation,
+        critic=critic, snapshot_hash=snapshot_hash, candidate=candidate,
+        bundle=bundle, tool_analysis=tool_analysis, diagnostics=diagnostics,
+        source_mode=source_mode, calls=specialist_calls[0] + critic_calls[0],
+    )
+
+
+def _adjudicate_target(
+    target: ScoutTarget, *, hypothesis: Hypothesis, driver: str, symbol: str,
+    experiment_log: list[dict], hit_observation: Any, critic: CriticAssessment | None,
+    snapshot_hash: str, candidate: UafCandidate | None, bundle: UafFactBundle | None,
+    tool_analysis: Any, diagnostics: list[str], source_mode: str, calls: int,
+    investigation: dict | None = None,
+) -> PlatformFinding:
+    """Grade observed evidence through the same arbiter for both workflows."""
     # Instrument consultation (never a gate): the proof engine and the
     # broker grade the pursued target when certified facts exist.
     identity: CandidateIdentity | None = None
@@ -2087,13 +2219,17 @@ def _process_target(
         evidence = evidence + (record,)
 
     semantic = _semantic_outcome(
-        critic, specialist_calls[0] + critic_calls[0],
+        critic, calls,
     )
     state = _capped_platform(
         arbiter_state(proof if proof is not None else _unknown_proof(),
                       verdicts, semantic),
         source_mode,
     )
+    if investigation is not None and hit_observation is not None and (
+        critic is not None and critic.assessment == "hypothesis-wrong"
+    ):
+        state = "needs-human-review"
     reason = ""
     if state == "rejected":
         refuted = proof is not None and next(
@@ -2126,6 +2262,7 @@ def _process_target(
         broker_verdicts=verdicts,
         proof_verdict=proof.verdict if proof is not None else "",
         rejected_reason=reason,
+        investigation=investigation,
     )
 
 
@@ -2152,6 +2289,9 @@ def run_platform_review(
     should_cancel: Any = None,
     tool_analysis: Any = None,
     cache: ResultCache | None = None,
+    investigation_strategy: str = "pipeline",
+    investigation_max_steps: int = 24,
+    investigation_max_children: int = 2,
 ) -> PlatformReviewOutcome:
     """Run one agent-first review over the leads (or facts-derived leads).
 
@@ -2176,6 +2316,11 @@ def run_platform_review(
     ``deadline-exceeded`` instead of sending anything further.
     """
 
+    if investigation_strategy not in {"pipeline", "investigator", "team"}:
+        raise ValueError("investigation strategy must be pipeline, investigator or team")
+    for name, value in (("steps", investigation_max_steps), ("children", investigation_max_children)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"investigation {name} must be a positive integer")
     if not isinstance(workspace, RepositoryWorkspace):
         raise ValueError("workspace must be a RepositoryWorkspace")
     if mode not in AGENT_MODES:
@@ -2303,6 +2448,8 @@ def run_platform_review(
         )
 
     diagnostics: list[str] = [*capability_notes]
+    exploration_trace = None
+    exploration_calls = [0]
     verified_context_units: set[str] = set()
     context_unreviewed: set[str] = set()
 
@@ -2314,6 +2461,7 @@ def run_platform_review(
                 context_unreviewed | set(outcome.unreviewed_units)
             )),
             verified_context_units=tuple(sorted(verified_context_units)),
+            scout_exploration=exploration_trace,
         )
 
     def _fetch_bundle() -> UafFactBundle | None:
@@ -2379,23 +2527,55 @@ def run_platform_review(
             bundle = _fetch_bundle()
         given_leads = (
             _leads_from_candidates(generate_candidates(bundle))
-            if bundle is not None
-            else ()
+            if bundle is not None else ()
         )
-        if not given_leads:
-            discovered, notes, unreviewed = _discover_leads(
-                resolved_llm, workspace, units, timeout, deadline,
-                run_budget, mode,
-            )
-            diagnostics.extend(notes)
-            discovery_unreviewed = tuple(sorted(unreviewed))
-            given_leads = discovered
-        if not given_leads:
+    if investigation_strategy != "pipeline":
+        from .cxx_scout_exploration import explore_leads
+        from .runtime import RuntimeBudgetExceeded, RuntimeCancelled
+
+        def scout_send(system: str, user: str, role: str) -> str:
+            if _cancelled():
+                raise RuntimeCancelled("scout cancelled")
+            bound = _bounded_step_timeout(timeout, deadline)
+            if bound is None:
+                raise RuntimeBudgetExceeded("scout deadline exceeded")
+            run_budget.consume(bytes=len(user.encode("utf-8")))
+            exploration_calls[0] += 1
+            return send_semantic_request(resolved_llm, system, user, bound, run_budget)
+
+        additional, exploration_trace = explore_leads(
+            workspace=workspace, units=units, initial_leads=given_leads,
+            budget=run_budget, send=scout_send, max_steps=min(6, investigation_max_steps),
+            should_cancel=should_cancel, deadline=deadline,
+        )
+        given_leads = (*given_leads, *additional)
+        if exploration_trace["stop_reason"] == "cancelled":
             return _finish(_empty_outcome(
-                ("no-leads-available", *diagnostics), units,
-                unreviewed_units=discovery_unreviewed,
+                ("scout exploration: cancelled",), units,
+                unreviewed_units=units,
                 build_context_mode=build_context_mode,
             ))
+        if exploration_trace["stop_reason"] != "final":
+            diagnostics.append("scout exploration: " + exploration_trace["stop_reason"])
+            discovery_unreviewed = units
+            if mode == MODE_REQUIRED and exploration_trace["stop_reason"] in {
+                "error", "budget-exhausted",
+            }:
+                raise RuntimeError("required scout exploration failed: "
+                                   + exploration_trace["stop_reason"])
+    if not given_leads:
+        discovered, notes, unreviewed = _discover_leads(
+            resolved_llm, workspace, units, timeout, deadline, run_budget, mode,
+        )
+        diagnostics.extend(notes)
+        discovery_unreviewed = tuple(sorted(set(discovery_unreviewed) | set(unreviewed)))
+        given_leads = discovered
+    if not given_leads:
+        return _finish(_empty_outcome(
+            ("no-leads-available", *diagnostics), units,
+            unreviewed_units=discovery_unreviewed,
+            build_context_mode=build_context_mode,
+        ))
 
     scout_timeout = _bounded_step_timeout(timeout, deadline)
     if scout_timeout is None:
@@ -2449,7 +2629,7 @@ def run_platform_review(
             findings=(),
             targets=(),
             stats=PlatformReviewStats(
-                len(given_leads), 0, 0, 0, 0, 0, report.calls_used,
+                len(given_leads), 0, 0, 0, 0, 0, report.calls_used + exploration_calls[0],
             ),
             diagnostics=tuple(diagnostics),
             leads_considered=len(given_leads),
@@ -2511,7 +2691,7 @@ def run_platform_review(
                 f"cancelled before target {target.lead_id}",
                 False, 0, 0, [],
             )
-        if cache is not None:
+        if cache is not None and investigation_strategy == "pipeline":
             cached = cache.get(_cache_key(target))
             if cached is not None:
                 return (_finding_from_payload(cached), "", False, 0, 0, [])
@@ -2544,6 +2724,10 @@ def run_platform_review(
                 diagnostics=worker_diagnostics,
                 specialist_calls=specialist_calls,
                 critic_calls=critic_calls,
+                investigation_strategy=investigation_strategy,
+                investigation_max_steps=investigation_max_steps,
+                investigation_max_children=investigation_max_children,
+                should_cancel=should_cancel,
             )
         except AgentBudgetExceeded as exc:
             if mode == MODE_REQUIRED:
@@ -2599,7 +2783,7 @@ def run_platform_review(
                 f"llm-unavailable at target {target.lead_id}: {exc}",
                 False, specialist_calls[0], critic_calls[0], worker_diagnostics,
             )
-        if cache is not None:
+        if cache is not None and investigation_strategy == "pipeline":
             cache.put(_cache_key(target), _finding_payload(finding))
         return (
             finding,
@@ -2688,7 +2872,7 @@ def run_platform_review(
             experiment_count=experiment_count,
             specialist_calls=specialist_total[0],
             critic_calls=critic_total[0],
-            scout_calls=report.calls_used,
+            scout_calls=report.calls_used + exploration_calls[0],
         ),
         diagnostics=tuple(diagnostics),
         leads_considered=len(given_leads),

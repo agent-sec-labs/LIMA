@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import Any
 
 
 class AgentBudgetExceeded(RuntimeError):
@@ -63,6 +64,8 @@ class CxxAgentBudget:
     max_context_files: int = 12
     max_context_lines: int = 1200
     max_output_bytes: int = 1_048_576
+
+    _USAGE_VERSION = 1
 
     def __post_init__(self) -> None:
         for name in (
@@ -148,6 +151,71 @@ class CxxAgentBudget:
                 lines=self.max_context_lines - usage.used_lines,
                 bytes_remaining=self.max_output_bytes - usage.used_bytes,
             )
+
+    def usage_snapshot(self) -> dict[str, Any]:
+        """Return a versioned, JSON-ready snapshot of mutable consumption.
+
+        The path list is retained because it is part of the file-charge
+        deduplication state, not merely diagnostic metadata.
+        """
+        with self._lock:
+            usage = self._usage
+            return {
+                "version": self._USAGE_VERSION,
+                "used_calls": usage.used_calls,
+                "used_files": usage.used_files,
+                "used_lines": usage.used_lines,
+                "used_bytes": usage.used_bytes,
+                "files_read": sorted(usage.files_read),
+            }
+
+    @classmethod
+    def from_usage(cls, caps: dict[str, Any], usage: dict[str, Any]) -> "CxxAgentBudget":
+        """Restore a budget only when its complete usage fits its caps."""
+        if not isinstance(caps, dict) or set(caps) != {
+            "max_calls", "max_context_files", "max_context_lines", "max_output_bytes",
+        }:
+            raise ValueError("caps must contain exactly the four budget limits")
+        try:
+            budget = cls(**caps)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid budget caps") from exc
+        if not isinstance(usage, dict) or set(usage) != {
+            "version", "used_calls", "used_files", "used_lines", "used_bytes", "files_read",
+        }:
+            raise ValueError("invalid budget usage snapshot")
+        if usage["version"] != cls._USAGE_VERSION:
+            raise ValueError("unsupported budget usage snapshot version")
+        values = {
+            key: usage[key]
+            for key in ("used_calls", "used_files", "used_lines", "used_bytes")
+        }
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+               for value in values.values()):
+            raise ValueError("budget usage values must be non-negative integers")
+        files_read = usage["files_read"]
+        if (not isinstance(files_read, list) or
+                any(not isinstance(path, str) for path in files_read) or
+                len(files_read) != len(set(files_read))):
+            raise ValueError("budget usage files_read must be a deduplicated string list")
+        limits = {
+            "used_calls": budget.max_calls,
+            "used_files": budget.max_context_files,
+            "used_lines": budget.max_context_lines,
+            "used_bytes": budget.max_output_bytes,
+        }
+        if any(values[key] > limit for key, limit in limits.items()):
+            raise ValueError("budget usage cannot exceed its caps")
+        if len(files_read) > values["used_files"]:
+            raise ValueError("files_read cannot exceed used_files")
+        with budget._lock:
+            restored = budget._usage
+            restored.used_calls = values["used_calls"]
+            restored.used_files = values["used_files"]
+            restored.used_lines = values["used_lines"]
+            restored.used_bytes = values["used_bytes"]
+            restored.files_read = set(files_read)
+        return budget
 
 
 __all__ = [

@@ -439,6 +439,9 @@ class ReviewService:
             cxx_agent_timeout_seconds=settings.cxx_agent_timeout_seconds,
             cxx_agent_parallelism=settings.cxx_agent_parallelism,
             cxx_agent_dialogue_rounds=settings.cxx_agent_dialogue_rounds,
+            cxx_investigation_strategy=settings.cxx_investigation_strategy,
+            cxx_investigation_max_steps=settings.cxx_investigation_max_steps,
+            cxx_investigation_max_children=settings.cxx_investigation_max_children,
         )
         self.repository_semantic_triage = self._build_repository_semantic_triage()
         self.repository_investigation = self._build_repository_investigation()

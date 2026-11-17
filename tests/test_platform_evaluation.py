@@ -992,6 +992,8 @@ class ProviderAndCliTests(unittest.TestCase):
                 "provider_url",
                 "provider_key",
                 "model",
+                "strategy",
+                "compare_strategies",
             },
             {action.dest for action in parser._actions if action.dest != "help"},
         )

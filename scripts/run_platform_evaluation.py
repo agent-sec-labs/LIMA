@@ -132,6 +132,13 @@ PLATFORM_PIPELINE_COMPONENTS = (
     "agent_orchestrator.py",
     "agent_repro_tools.py",
     "agent_scale.py",
+    "cxx_investigator.py",
+    "cxx_scout_exploration.py",
+    "cxx_agent_models.py",
+    "cxx_agent_tools.py",
+    "cxx_llm.py",
+    "runtime.py",
+    "workspace.py",
     "uaf_llm_branch.py",
     "uaf_models.py",
     "uaf_facts.py",
@@ -195,8 +202,9 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def load_case_document(path: Path) -> dict[str, Any]:
-    raw = Path(path).read_bytes()
+def load_case_document(path: Path, *, raw: bytes | None = None) -> dict[str, Any]:
+    if raw is None:
+        raw = Path(path).read_bytes()
     try:
         document = json.loads(
             raw.decode("utf-8"),
@@ -1310,7 +1318,7 @@ def _investigation_projection(item: Any) -> dict[str, Any] | None:
         "stop_reason": str(trace.get("stop_reason", "incomplete")),
         "action_count": len(trace.get("actions", [])),
         "child_count": len(trace.get("children", [])),
-        "hypothesis_count": len(trace.get("hypotheses", [])),
+        "hypothesis_count": len(trace.get("hypothesis_history", [])),
     }
 
 
@@ -1444,12 +1452,24 @@ def _record_from_outcome(
                 "investigation": _investigation_projection(item),
             }
         )
+    exploration = getattr(outcome, "scout_exploration", None) or {}
+    budget_exhausted = (
+        exploration.get("stop_reason") == "budget-exhausted"
+        or "scout: budget-exhausted" in outcome.diagnostics
+        or any(
+            item.rejected_reason == "budget-exhausted"
+            or (getattr(item, "investigation", None) or {}).get("stop_reason")
+            == "budget-exhausted"
+            for item in outcome.targets
+        )
+    )
     return {
         "case_id": case_id,
         "revision": revision,
         "counted": True,
         "strategy": strategy,
         "llm_transport": llm_transport,
+        "budget_exhausted": budget_exhausted,
         "build_context_source": str(
             served_units[0]["build_context"]["source_kind"]
         ) if served_units else "",
@@ -1548,7 +1568,7 @@ _TARGET_KEYS = frozenset(
 # defaults below are the honest reading of history (every legacy scripted
 # or provider record was a pipeline run; the transport marker is
 # "unmarked" rather than a fabricated "fake").
-_RECORD_OPTIONAL_KEYS = frozenset({"strategy", "llm_transport"})
+_RECORD_OPTIONAL_KEYS = frozenset({"strategy", "llm_transport", "budget_exhausted"})
 _TARGET_OPTIONAL_KEYS = frozenset({"investigation"})
 _INVESTIGATION_KEYS = frozenset(
     {
@@ -1578,10 +1598,12 @@ def validate_record(raw: object) -> dict[str, Any]:
 
     if (
         type(raw) is not dict
-        or not set(raw) <= (_RECORD_KEYS | _RECORD_OPTIONAL_KEYS)
+        or not _RECORD_KEYS <= set(raw) <= (_RECORD_KEYS | _RECORD_OPTIONAL_KEYS)
     ):
         raise ValueError("pipeline record fields do not match the schema")
     record = raw
+    if "budget_exhausted" in record and type(record["budget_exhausted"]) is not bool:
+        raise ValueError("record budget_exhausted must be a boolean")
     # Legacy records predate the strategy fields; absent means a pipeline
     # run with no transport marker, and the record passes through
     # unchanged so validation stays an identity for well-formed input.
@@ -1609,7 +1631,7 @@ def validate_record(raw: object) -> dict[str, Any]:
     for target in targets:
         if (
             type(target) is not dict
-            or not set(target) <= (_TARGET_KEYS | _TARGET_OPTIONAL_KEYS)
+            or not _TARGET_KEYS <= set(target) <= (_TARGET_KEYS | _TARGET_OPTIONAL_KEYS)
         ):
             raise ValueError("target record fields do not match the schema")
         fields = dict(target)
@@ -1737,7 +1759,10 @@ def _investigation_metrics(
     for case in cases:
         for revision in REVISIONS:
             record = records[(case["id"], revision)]
-            run_exhausted = False
+            run_exhausted = (
+                record.get("budget_exhausted", False)
+                or "scout: budget-exhausted" in record["diagnostics"]
+            )
             for target in record.get("targets", []):
                 investigation = target.get("investigation")
                 if investigation is None:
@@ -1774,6 +1799,8 @@ def run_evaluation(
     plus a diagnostic instead of a fabricated zero.
     """
 
+    if strategy is not None and strategy not in STRATEGIES:
+        raise ValueError("evaluation strategy is outside the closed domain")
     diagnostics: list[str] = []
     case_results: list[dict[str, Any]] = []
     revision_count = counted_revisions = 0
@@ -1792,6 +1819,11 @@ def run_evaluation(
         correct_pair = True
         for revision in REVISIONS:
             record = validate_record(records[(case["id"], revision)])
+            record_strategy = record.get("strategy", "pipeline")
+            if strategy is None:
+                strategy = record_strategy
+            elif record_strategy != strategy:
+                raise ValueError("record strategy does not match evaluation strategy")
             revision_count += 1
             expected = case["expected"][revision]
             observed = _observed_state(record)
@@ -1884,7 +1916,7 @@ def run_evaluation(
 
     return {
         "schema_version": 1,
-        "strategy": strategy,
+        "strategy": strategy or "pipeline",
         "investigation_metrics": _investigation_metrics(cases, records),
         "case_count": len(cases),
         "revision_count": revision_count,
@@ -2045,14 +2077,18 @@ def add_report_metadata(
     model: str,
     strategy: str = "pipeline",
     timeout: int = 300,
+    frozen_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = dict(report)
     result["mode"] = mode
     result["llm_transport"] = "fake" if fake_llm else "provider"
-    result["identity"] = build_identity_manifest(
-        mode=mode, fake_llm=fake_llm, provider=provider, model=model,
-        raw_case_data=raw_case_data, strategy=strategy, timeout=timeout,
-    )
+    if frozen_identity is None:
+        result["identity"] = build_identity_manifest(
+            mode=mode, fake_llm=fake_llm, provider=provider, model=model,
+            raw_case_data=raw_case_data, strategy=strategy, timeout=timeout,
+        )
+    else:
+        result["identity"] = {**frozen_identity, "strategy": strategy}
     result["validity_boundaries"] = [
         VALIDITY_BOUNDARY,
         "The pipeline input is the fixture workspace plus the served fact "
@@ -2184,13 +2220,30 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--compare-strategies runs every strategy; do not also pass --strategy"
         )
-    document = load_case_document(args.cases)
+    raw_case_data = args.cases.read_bytes()
+    document = load_case_document(args.cases, raw=raw_case_data)
     cases = select_cases(document, args.case_id)
     # Provider resolution happens before any pipeline work so a missing
     # configuration can never degrade into a silent empty report.
     llm_config, provider, model = build_llm_config(args)
-    raw_case_data = args.cases.read_bytes()
     strategies = STRATEGIES if args.compare_strategies else (args.strategy or "pipeline",)
+    identity_options = {
+        "mode": args.mode,
+        "fake_llm": bool(args.fake_llm),
+        "provider": provider,
+        "model": model,
+        "strategy": strategies[0],
+        "timeout": args.timeout,
+    }
+    frozen_identity = build_identity_manifest(raw_case_data=raw_case_data, **identity_options)
+
+    def check_identity() -> None:
+        current = build_identity_manifest(
+            raw_case_data=args.cases.read_bytes(), **identity_options,
+        )
+        if current != frozen_identity:
+            raise SystemExit("evaluation identity changed during execution")
+
     # Preregistered interleave: for each case and revision the strategies
     # run back to back, so time-dependent provider behaviour cannot map to
     # one strategy.
@@ -2198,6 +2251,7 @@ def main(argv: list[str] | None = None) -> int:
     for case in cases:
         for revision in REVISIONS:
             for strategy in strategies:
+                check_identity()
                 records[(strategy, case["id"], revision)] = run_revision(
                     case,
                     revision,
@@ -2207,6 +2261,7 @@ def main(argv: list[str] | None = None) -> int:
                     llm_config=llm_config,
                     timeout=args.timeout,
                 )
+                check_identity()
     if args.compare_strategies:
         strategy_reports: dict[str, Any] = {}
         for strategy in strategies:
@@ -2225,6 +2280,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=model,
                 strategy=strategy,
                 timeout=args.timeout,
+                frozen_identity=frozen_identity,
             )
             strategy_reports[strategy] = strategy_report
         first = strategy_reports[STRATEGIES[0]]["identity"]
@@ -2269,7 +2325,9 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             strategy=single,
             timeout=args.timeout,
+            frozen_identity=frozen_identity,
         )
+    check_identity()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf8"

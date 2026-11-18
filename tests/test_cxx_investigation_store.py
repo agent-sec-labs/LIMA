@@ -154,6 +154,48 @@ class InvestigationJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown investigation action"):
             self.store.mark_dispatched(identity(), "a99")
 
+    def test_identity_mismatch_cannot_overwrite_the_head(self):
+        self._save_initial()
+        same_keys_other_snapshot = state(
+            version=2,
+            ident=InvestigationIdentity(
+                tenant_id="tenant-a", task_id="task-1", investigation_id="inv-1",
+                snapshot_hash="e" * 64, context_digest=DIGEST_B, config_digest=DIGEST_C,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            self.store.save_investigation(
+                same_keys_other_snapshot, expected_version=1
+            )
+        self.assertEqual(1, self.store.load_investigation(identity()).version)
+
+    def test_identity_mismatch_cannot_load_or_prepare(self):
+        self._save_initial()
+        other_snapshot = InvestigationIdentity(
+            tenant_id="tenant-a", task_id="task-1", investigation_id="inv-1",
+            snapshot_hash="e" * 64, context_digest=DIGEST_B, config_digest=DIGEST_C,
+        )
+        self.assertIsNone(self.store.load_investigation(other_snapshot))
+        with self.assertRaisesRegex(ValueError, "unknown investigation"):
+            self.store.prepare_action(
+                other_snapshot, "a1", DIGEST_B, {"calls": 1, "bytes": 1}
+            )
+        self.assertEqual(0, len(self.store.investigation_actions(identity())))
+
+    def test_version_must_advance_by_exactly_one(self):
+        self._save_initial()
+        with self.assertRaisesRegex(ValueError, "advance expected_version by one"):
+            self.store.save_investigation(state(version=3), expected_version=1)
+
+    def test_conflicting_receipt_on_completed_action_is_rejected(self):
+        self._save_initial()
+        self.store.prepare_action(identity(), "a1", DIGEST_B, {"calls": 1, "bytes": 100})
+        self.store.complete_action(identity(), "a1", {"calls": 1, "bytes": 90})
+        with self.assertRaisesRegex(ValueError, "receipt conflict"):
+            self.store.complete_action(identity(), "a1", {"calls": 1, "bytes": 80})
+        budget = self.store.investigation_budget(identity())
+        self.assertEqual(90, budget["settled_bytes"])
+
 
 class JournalContractTests(unittest.TestCase):
     def test_postgres_store_exposes_the_same_journal(self):

@@ -173,16 +173,22 @@ class CxxInvestigationStore:
                         "UPDATE cxx_investigations SET version = ?, status = ?,"
                         " state_json = ? WHERE tenant_id = ? AND task_id = ?"
                         " AND investigation_id = ? AND version = ?"
+                        " AND snapshot_hash = ? AND context_digest = ?"
+                        " AND config_digest = ?"
                     ),
                     (
                         state.version, state.status,
                         json.dumps(state.to_json(), ensure_ascii=True, sort_keys=True),
                         tenant, task, investigation, expected_version,
+                        state.identity.snapshot_hash,
+                        state.identity.context_digest,
+                        state.identity.config_digest,
                     ),
                 )
                 if cur.rowcount == 0:
                     raise ValueError(
-                        "investigation version conflict or unknown investigation"
+                        "investigation version conflict, identity mismatch"
+                        " or unknown investigation"
                     )
             conn.commit()
 
@@ -196,8 +202,14 @@ class CxxInvestigationStore:
                 self._investigation_sql(
                     "SELECT state_json FROM cxx_investigations"
                     " WHERE tenant_id = ? AND task_id = ? AND investigation_id = ?"
+                    " AND snapshot_hash = ? AND context_digest = ?"
+                    " AND config_digest = ?"
                 ),
-                (tenant, task, investigation),
+                (
+                    tenant, task, investigation,
+                    identity.snapshot_hash, identity.context_digest,
+                    identity.config_digest,
+                ),
             )
             row = cur.fetchone()
         if row is None:
@@ -209,9 +221,15 @@ class CxxInvestigationStore:
         cur.execute(
             self._investigation_sql(
                 "SELECT 1 FROM cxx_investigations"
-                " WHERE tenant_id = ? AND task_id = ? AND investigation_id = ?{lock}"
+                " WHERE tenant_id = ? AND task_id = ? AND investigation_id = ?"
+                " AND snapshot_hash = ? AND context_digest = ?"
+                " AND config_digest = ?{lock}"
             ),
-            (tenant, task, investigation),
+            (
+                tenant, task, investigation,
+                identity.snapshot_hash, identity.context_digest,
+                identity.config_digest,
+            ),
         )
         if cur.fetchone() is None:
             raise ValueError("unknown investigation")
@@ -270,7 +288,7 @@ class CxxInvestigationStore:
             conn.commit()
 
     def _require_action(
-        self, cur, identity: InvestigationIdentity, action_id: str, *, lock: bool = True
+        self, cur, identity: InvestigationIdentity, action_id: str
     ):
         tenant, task, investigation = _identity_values(identity)
         cur.execute(

@@ -132,6 +132,13 @@ PLATFORM_PIPELINE_COMPONENTS = (
     "agent_orchestrator.py",
     "agent_repro_tools.py",
     "agent_scale.py",
+    "cxx_investigator.py",
+    "cxx_scout_exploration.py",
+    "cxx_agent_models.py",
+    "cxx_agent_tools.py",
+    "cxx_llm.py",
+    "runtime.py",
+    "workspace.py",
     "uaf_llm_branch.py",
     "uaf_models.py",
     "uaf_facts.py",
@@ -149,8 +156,38 @@ FAKE_LLM_CONFIG = {
     "model": "fake-platform-model",
     "headers": {},
 }
-_REVIEW_BUDGET = CxxAgentBudget(max_calls=64, max_output_bytes=1_048_576)
+_REVIEW_BUDGET_CAPS = dict(
+    max_calls=64, max_context_files=12, max_context_lines=1200,
+    max_output_bytes=1_048_576,
+)
+
+
+def _fresh_review_budget() -> CxxAgentBudget:
+    """Per-run budget with the frozen caps.
+
+    ``run_revision`` must not share one mutable budget across runs:
+    a comparison pass would exhaust the shared call pool and the
+    later strategies would degrade for accounting reasons, not for
+    investigation reasons.
+    """
+
+    return CxxAgentBudget(**_REVIEW_BUDGET_CAPS)
 FAKE_CONTEXT_HASH = "e" * 64
+
+STRATEGIES = ("pipeline", "investigator", "team")
+# stop_reason vocabulary produced by the investigation loop / scout
+# exploration traces; an unknown value is preserved as "error" instead of
+# being silently dropped from the comparison.
+_INVESTIGATION_STOP_REASONS = (
+    "final",
+    "incomplete",
+    "budget-exhausted",
+    "steps-exhausted",
+    "protocol-error",
+    "cancelled",
+    "error",
+)
+_LLM_TRANSPORTS = frozenset({"fake", "provider", "unmarked"})
 
 
 # --------------------------------------------------------------------- schema
@@ -165,8 +202,9 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def load_case_document(path: Path) -> dict[str, Any]:
-    raw = Path(path).read_bytes()
+def load_case_document(path: Path, *, raw: bytes | None = None) -> dict[str, Any]:
+    if raw is None:
+        raw = Path(path).read_bytes()
     try:
         document = json.loads(
             raw.decode("utf-8"),
@@ -778,8 +816,19 @@ class FakePlatformWorkbench:
         self._hitting = _HITTING_OBSERVATIONS.get((case_id, revision), {})
 
     def run_experiment(
-        self, repository_key: str, snapshot_hash: str, source_files, driver_code: str,
+        self,
+        repository_key: str,
+        snapshot_hash: str,
+        source_files,
+        driver_code: str,
+        *,
+        timeout: int | None = None,
+        verified_artifact_digest: str | None = None,
     ) -> ExperimentObservation:
+        # Mirror the real ReproWorkbench signature: the investigator binds
+        # it with inspect.signature before every verified invocation, and
+        # the scripted observation itself stays keyed by driver hash only.
+        del timeout, verified_artifact_digest
         self.calls.append(
             (repository_key, snapshot_hash, tuple(source_files), driver_code)
         )
@@ -972,6 +1021,178 @@ def _target_id_from(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _scripted_investigation_reply(
+    state: dict[str, Any],
+    specialist: dict[str, Any],
+    critic: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    """The honest scripted investigator: hypothesis, reproduction, final.
+
+    The reproduction uses the same committed driver as the pipeline
+    specialist script, so the hash-keyed scripted workbench serves the
+    identical canned observation and the strategy comparison stays fair.
+    Two mirrors of the pipeline's canned behaviour keep the strategies
+    comparable: a hypothesis the closed vocabulary rejects leads to an
+    explicit abstention (not a fabricated evidence reference), and the
+    revise-experiment cases get the critic's committed revised driver as
+    a second reproduction before the final.
+
+    Final and critic replies cite the highest-numbered evidence ID the
+    prompt actually carries, so a failed reproduction degrades to an
+    abstention instead of a fabricated reference.
+    """
+
+    user = ""
+    messages = payload.get("messages") or []
+    if len(messages) > 1:
+        user = str(messages[1]["content"])
+    try:
+        context = json.loads(user)
+    except ValueError:
+        context = {}
+    context = context if isinstance(context, dict) else {}
+    target = context.get("target")
+    target = target if isinstance(target, dict) else {}
+    path = str(target.get("path") or "src/a.cpp")
+    target_id = str(
+        context.get("target_id") or target.get("target_id") or "lead-001"
+    )
+    observations = context.get("observations") or []
+    rejected = any(
+        isinstance(item, dict)
+        and item.get("tool") == "record_hypothesis"
+        and item.get("ok") is False
+        for item in observations
+    )
+    revised_driver = str(critic.get("revised_driver_code") or "")
+    # One step counter per target: a second lead in the same run must not
+    # resume the first target's conversation mid-flow.
+    step = state.setdefault(target_id, 0)
+    state[target_id] = step + 1
+    if step == 0:
+        hypothesis = {
+            "target_id": target_id,
+            "hypothesis": specialist["hypothesis"],
+            "trigger_path": [path],
+            "cwe": specialist["cwe"],
+            "driver_code": specialist["driver_code"],
+            "experiment_design": specialist["experiment_design"],
+            "unresolved_assumptions": list(specialist["unresolved_assumptions"]),
+        }
+        return json.dumps(
+            {
+                "action": "tool",
+                "tool": "record_hypothesis",
+                "purpose": "commit the canned hypothesis for reproduction",
+                "arguments": {
+                    "hypothesis": hypothesis,
+                    "trigger_path": path,
+                    "cwe": specialist["cwe"],
+                    "driver_code": specialist["driver_code"],
+                    "experiment_design": specialist["experiment_design"],
+                    "unresolved_assumptions": list(
+                        specialist["unresolved_assumptions"]
+                    ),
+                },
+            }
+        )
+    if rejected:
+        # The closed hypothesis vocabulary rejected the commit: mirror the
+        # pipeline's audited abstention instead of citing evidence that
+        # does not exist.
+        return json.dumps(
+            {
+                "action": "final",
+                "hypothesis_id": "",
+                "evidence_ids": [],
+                "unresolved_questions": [
+                    "hypothesis rejected by the closed vocabulary",
+                ],
+            }
+        )
+    if step == 1:
+        return json.dumps(
+            {
+                "action": "tool",
+                "tool": "run_reproduction",
+                "purpose": "execute the committed driver against the target",
+                "arguments": {
+                    "source_files": [path],
+                    "driver_code": specialist["driver_code"],
+                },
+            }
+        )
+    if step == 2 and revised_driver:
+        return json.dumps(
+            {
+                "action": "tool",
+                "tool": "run_reproduction",
+                "purpose": "exercise the alternate path the critic proposed",
+                "arguments": {
+                    "source_files": [path],
+                    "driver_code": revised_driver,
+                },
+            }
+        )
+    observed = [
+        str(key) for key in (context.get("evidence") or {})
+        if isinstance(context.get("evidence"), dict)
+    ]
+    if not observed:
+        # No evidence survived (e.g. the reproduction tool failed): an
+        # abstention is honest, a fabricated reference is not.
+        return json.dumps(
+            {
+                "action": "final",
+                "hypothesis_id": "",
+                "evidence_ids": [],
+                "unresolved_questions": ["no observed evidence"],
+            }
+        )
+    return json.dumps(
+        {
+            "action": "final",
+            "hypothesis_id": "h1",
+            "evidence_ids": [max(observed, key=_evidence_ordinal)],
+            "unresolved_questions": [],
+        }
+    )
+
+
+def _evidence_ordinal(evidence_id: str) -> tuple[int, str]:
+    """Order evidence IDs by their numeric suffix (e12 after e3)."""
+
+    suffix = evidence_id[1:] if evidence_id[:1] == "e" else ""
+    return (int(suffix) if suffix.isdigit() else -1, evidence_id)
+
+
+def _observed_evidence_ids(payload: dict[str, Any]) -> list[str]:
+    """Read the evidence IDs the critic prompt actually carries."""
+
+    messages = payload.get("messages") or []
+    if len(messages) < 2:
+        return []
+    try:
+        context = json.loads(messages[1]["content"])
+    except (ValueError, TypeError):
+        return []
+    evidence = context.get("evidence") if isinstance(context, dict) else None
+    if not isinstance(evidence, dict):
+        return []
+    return [str(key) for key in evidence]
+
+
+def _scripted_critic_assessment(critic: dict[str, Any]) -> str:
+    """Map the canned dialogue verdict onto the critic's closed vocabulary."""
+    assessment = str(critic.get("assessment") or "supports-hypothesis")
+    if assessment.startswith("hypothesis-wrong"):
+        return "refutes"
+    if assessment.startswith("revise-experiment"):
+        return "supports"
+    return "supports"
+
+
 def scripted_platform_transport(
     case_id: str, counter: dict[str, int]
 ) -> Callable[..., str]:
@@ -981,6 +1202,7 @@ def scripted_platform_transport(
         raise ValueError(f"no scripted semantic transport for case {case_id!r}")
     specialist = _SPECIALIST_SCRIPTS[case_id]
     critic = _CRITIC_SCRIPTS.get(case_id, _DEFAULT_CRITIC)
+    investigation_state: dict[str, Any] = {}  # per-target step counters
 
     def transport(
         provider, base_url, api_key, payload, timeout,
@@ -989,7 +1211,45 @@ def scripted_platform_transport(
         del provider, base_url, api_key, timeout, extra_headers, max_bytes
         system = payload["messages"][0]["content"]
         counter["llm_calls"] += 1
-        if "Discovery agent" in system:
+        if system.startswith("Explore the requested"):
+            # The honest scripted scout exploration adds no lead: the
+            # committed cases already hand the pipeline canned leads, so
+            # the strategy delta must come from investigation, not from
+            # different discovery inputs.
+            reply = json.dumps({"action": "final"})
+        elif "Tool action:" in system and "You are the critic" in system:
+            revised_driver = str(critic.get("revised_driver_code") or "")
+            observed = _observed_evidence_ids(payload)
+            if not observed:
+                # An abstained investigation has no citable evidence:
+                # only "insufficient" is honest there, and the critic
+                # contract forbids supports/refutes without evidence.
+                reply = json.dumps(
+                    {
+                        "action": "final",
+                        "assessment": "insufficient",
+                        "rationale": "no observed evidence to review",
+                        "evidence_ids": [],
+                        "unresolved_questions": [],
+                    }
+                )
+            else:
+                reply = json.dumps(
+                    {
+                        "action": "final",
+                        "assessment": _scripted_critic_assessment(critic),
+                        "rationale": str(critic.get("rationale") or ""),
+                        "evidence_ids": [
+                            max(observed, key=_evidence_ordinal)
+                        ],
+                        "unresolved_questions": [],
+                    }
+                )
+        elif "Tool action:" in system:
+            reply = _scripted_investigation_reply(
+                investigation_state, specialist, critic, payload
+            )
+        elif "Discovery agent" in system:
             # The honest scripted model finds nothing on its own: the
             # committed cases hand the vulnerable side canned triage leads
             # (or deterministic candidates), and the clean side must stay
@@ -1048,11 +1308,26 @@ def _driver_digest(driver_code: str) -> str:
     return hashlib.sha256(driver_code.encode("utf-8")).hexdigest()
 
 
+def _investigation_projection(item: Any) -> dict[str, Any] | None:
+    """Project one target's investigation trace into the record schema."""
+    trace = getattr(item, "investigation", None)
+    if not isinstance(trace, dict):
+        return None
+    return {
+        "strategy": str(trace.get("strategy", "pipeline")),
+        "stop_reason": str(trace.get("stop_reason", "incomplete")),
+        "action_count": len(trace.get("actions", [])),
+        "child_count": len(trace.get("children", [])),
+        "hypothesis_count": len(trace.get("hypothesis_history", [])),
+    }
+
+
 def run_revision(
     case: dict[str, Any],
     revision: str,
     *,
     mode: str = "auto",
+    strategy: str = "pipeline",
     fake_llm: bool = True,
     llm_config: dict[str, Any] | None = None,
     timeout: int = 60,
@@ -1071,6 +1346,8 @@ def run_revision(
 
     if revision not in REVISIONS:
         raise ValueError(f"unknown revision {revision!r}")
+    if strategy not in STRATEGIES:
+        raise ValueError(f"unknown investigation strategy {strategy!r}")
     case_id = case["id"]
     if case_id not in _WIRE_BUILDERS:
         raise ValueError(f"no canned sidecar wire is committed for case {case_id!r}")
@@ -1100,7 +1377,7 @@ def run_revision(
                     snapshot_hash=snapshot,
                     translation_units=units,
                     mode=mode,
-                    budget=_REVIEW_BUDGET,
+                    budget=_fresh_review_budget(),
                     llm_config=dict(
                         llm_config if llm_config is not None else FAKE_LLM_CONFIG
                     ),
@@ -1108,6 +1385,7 @@ def run_revision(
                     leads=leads,
                     dialogue_rounds=dialogue_rounds,
                     timeout=timeout,
+                    investigation_strategy=strategy,
                 )
         else:
             outcome = run_platform_review(
@@ -1117,16 +1395,19 @@ def run_revision(
                 snapshot_hash=snapshot,
                 translation_units=units,
                 mode=mode,
-                budget=_REVIEW_BUDGET,
+                budget=_fresh_review_budget(),
                 llm_config=dict(llm_config or {}),
                 repro_workbench=workbench,
                 leads=leads,
                 dialogue_rounds=dialogue_rounds,
                 timeout=timeout,
+                investigation_strategy=strategy,
             )
         elapsed = time.monotonic() - started
         record = _record_from_outcome(
-            case_id, revision, len(leads), served_units, outcome, counter, elapsed
+            case_id, revision, len(leads), served_units, outcome, counter,
+            elapsed, strategy=strategy,
+            llm_transport="fake" if fake_llm else "provider",
         )
         record["poc_stability"] = _poc_stability_probe(
             case_id, revision, outcome, workbench_class=FakePlatformWorkbench
@@ -1142,6 +1423,9 @@ def _record_from_outcome(
     outcome: Any,
     counter: dict[str, int],
     elapsed: float,
+    *,
+    strategy: str = "pipeline",
+    llm_transport: str = "unmarked",
 ) -> dict[str, Any]:
     targets = []
     for item in outcome.targets:
@@ -1165,12 +1449,27 @@ def _record_from_outcome(
                     for entry in item.experiment_log
                 ],
                 "driver_sha256": _driver_digest(item.poc_driver_code),
+                "investigation": _investigation_projection(item),
             }
         )
+    exploration = getattr(outcome, "scout_exploration", None) or {}
+    budget_exhausted = (
+        exploration.get("stop_reason") == "budget-exhausted"
+        or "scout: budget-exhausted" in outcome.diagnostics
+        or any(
+            item.rejected_reason == "budget-exhausted"
+            or (getattr(item, "investigation", None) or {}).get("stop_reason")
+            == "budget-exhausted"
+            for item in outcome.targets
+        )
+    )
     return {
         "case_id": case_id,
         "revision": revision,
         "counted": True,
+        "strategy": strategy,
+        "llm_transport": llm_transport,
+        "budget_exhausted": budget_exhausted,
         "build_context_source": str(
             served_units[0]["build_context"]["source_kind"]
         ) if served_units else "",
@@ -1265,6 +1564,21 @@ _TARGET_KEYS = frozenset(
         "driver_sha256",
     }
 )
+# Optional record/target extensions.  Legacy records predate them; the
+# defaults below are the honest reading of history (every legacy scripted
+# or provider record was a pipeline run; the transport marker is
+# "unmarked" rather than a fabricated "fake").
+_RECORD_OPTIONAL_KEYS = frozenset({"strategy", "llm_transport", "budget_exhausted"})
+_TARGET_OPTIONAL_KEYS = frozenset({"investigation"})
+_INVESTIGATION_KEYS = frozenset(
+    {
+        "strategy",
+        "stop_reason",
+        "action_count",
+        "child_count",
+        "hypothesis_count",
+    }
+)
 _LOG_KEYS = frozenset({"round", "stage", "hit", "error_type"})
 _LLM_KEYS = frozenset(
     {"scout_calls", "specialist_calls", "critic_calls", "reply_bytes"}
@@ -1282,7 +1596,24 @@ def _bounded_int(value: Any, label: str, low: int, high: int) -> int:
 def validate_record(raw: object) -> dict[str, Any]:
     """Validate one pipeline record; the shape is part of the contract."""
 
-    record = _exact_fields(raw, _RECORD_KEYS, "pipeline record")
+    if (
+        type(raw) is not dict
+        or not _RECORD_KEYS <= set(raw) <= (_RECORD_KEYS | _RECORD_OPTIONAL_KEYS)
+    ):
+        raise ValueError("pipeline record fields do not match the schema")
+    record = raw
+    if "budget_exhausted" in record and type(record["budget_exhausted"]) is not bool:
+        raise ValueError("record budget_exhausted must be a boolean")
+    # Legacy records predate the strategy fields; absent means a pipeline
+    # run with no transport marker, and the record passes through
+    # unchanged so validation stays an identity for well-formed input.
+    if "strategy" in record and record["strategy"] not in STRATEGIES:
+        raise ValueError("record strategy is outside the closed domain")
+    if (
+        "llm_transport" in record
+        and record["llm_transport"] not in _LLM_TRANSPORTS
+    ):
+        raise ValueError("record llm_transport is outside the closed domain")
     if type(record["counted"]) is not bool:
         raise ValueError("record counted must be a boolean")
     _bounded_text(record["case_id"], "record case_id", 128)
@@ -1298,7 +1629,28 @@ def validate_record(raw: object) -> dict[str, Any]:
         raise ValueError("record targets must be a bounded array")
     executed_hit = False
     for target in targets:
-        fields = _exact_fields(target, _TARGET_KEYS, "target record")
+        if (
+            type(target) is not dict
+            or not _TARGET_KEYS <= set(target) <= (_TARGET_KEYS | _TARGET_OPTIONAL_KEYS)
+        ):
+            raise ValueError("target record fields do not match the schema")
+        fields = dict(target)
+        fields.setdefault("investigation", None)
+        investigation = fields["investigation"]
+        if investigation is not None:
+            item = _exact_fields(
+                investigation, _INVESTIGATION_KEYS, "target investigation"
+            )
+            if item["strategy"] not in STRATEGIES:
+                raise ValueError(
+                    "target investigation strategy is outside the closed domain"
+                )
+            if item["stop_reason"] not in _INVESTIGATION_STOP_REASONS:
+                raise ValueError(
+                    "target investigation stop_reason is outside the closed domain"
+                )
+            for name in ("action_count", "child_count", "hypothesis_count"):
+                _bounded_int(item[name], f"investigation {name}", 0, 10_000)
         _bounded_text(fields["target_id"], "target_id", 300)
         _bounded_text(fields["path"], "target path", 4_096)
         _bounded_int(fields["line"], "target line", 1, _MAX_LINE)
@@ -1383,9 +1735,62 @@ def _safe_ratio(
     return numerator / denominator
 
 
+def _investigation_metrics(
+    cases: list[dict[str, Any]],
+    records: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Derive the trace metrics purely from the validated records.
+
+    No live outcome object participates: recomputing over the same
+    records always yields the same numbers, and a budget-exhausted or
+    otherwise degraded run keeps its case in every denominator.
+    """
+
+    metrics: dict[str, Any] = {
+        "targets_with_investigation": 0,
+        "stop_reasons": {name: 0 for name in _INVESTIGATION_STOP_REASONS},
+        "runtime_confirmed_targets": 0,
+        "needs_review_targets": 0,
+        "action_total": 0,
+        "child_total": 0,
+        "hypothesis_total": 0,
+        "budget_exhausted_runs": 0,
+    }
+    for case in cases:
+        for revision in REVISIONS:
+            record = records[(case["id"], revision)]
+            run_exhausted = (
+                record.get("budget_exhausted", False)
+                or "scout: budget-exhausted" in record["diagnostics"]
+            )
+            for target in record.get("targets", []):
+                investigation = target.get("investigation")
+                if investigation is None:
+                    continue
+                metrics["targets_with_investigation"] += 1
+                stop_reason = investigation["stop_reason"]
+                if stop_reason not in metrics["stop_reasons"]:
+                    stop_reason = "error"
+                metrics["stop_reasons"][stop_reason] += 1
+                metrics["action_total"] += investigation["action_count"]
+                metrics["child_total"] += investigation["child_count"]
+                metrics["hypothesis_total"] += investigation["hypothesis_count"]
+                if target["state"] == "runtime-confirmed":
+                    metrics["runtime_confirmed_targets"] += 1
+                if target["state"] == "needs-human-review":
+                    metrics["needs_review_targets"] += 1
+                if stop_reason == "budget-exhausted":
+                    run_exhausted = True
+            if run_exhausted:
+                metrics["budget_exhausted_runs"] += 1
+    return metrics
+
+
 def run_evaluation(
     cases: list[dict[str, Any]],
     records: dict[tuple[str, str], dict[str, Any]],
+    *,
+    strategy: str | None = None,
 ) -> dict[str, Any]:
     """Score the fixed pairs; labels never enter the records themselves.
 
@@ -1394,6 +1799,8 @@ def run_evaluation(
     plus a diagnostic instead of a fabricated zero.
     """
 
+    if strategy is not None and strategy not in STRATEGIES:
+        raise ValueError("evaluation strategy is outside the closed domain")
     diagnostics: list[str] = []
     case_results: list[dict[str, Any]] = []
     revision_count = counted_revisions = 0
@@ -1412,6 +1819,11 @@ def run_evaluation(
         correct_pair = True
         for revision in REVISIONS:
             record = validate_record(records[(case["id"], revision)])
+            record_strategy = record.get("strategy", "pipeline")
+            if strategy is None:
+                strategy = record_strategy
+            elif record_strategy != strategy:
+                raise ValueError("record strategy does not match evaluation strategy")
             revision_count += 1
             expected = case["expected"][revision]
             observed = _observed_state(record)
@@ -1504,6 +1916,8 @@ def run_evaluation(
 
     return {
         "schema_version": 1,
+        "strategy": strategy or "pipeline",
+        "investigation_metrics": _investigation_metrics(cases, records),
         "case_count": len(cases),
         "revision_count": revision_count,
         "counted_revision_count": counted_revisions,
@@ -1637,12 +2051,17 @@ def build_identity_manifest(
     provider: str,
     model: str,
     raw_case_data: bytes,
+    strategy: str = "pipeline",
+    timeout: int = 300,
 ) -> dict[str, Any]:
     return {
         "mode": mode,
         "llm_transport": "fake" if fake_llm else "provider",
         "provider": provider,
         "model": model,
+        "strategy": strategy,
+        "timeout_seconds": timeout,
+        "review_budget": dict(_REVIEW_BUDGET_CAPS),
         "platform_pipeline_sha256": platform_pipeline_fingerprint(),
         "case_data_sha256": hashlib.sha256(raw_case_data).hexdigest(),
     }
@@ -1656,14 +2075,20 @@ def add_report_metadata(
     fake_llm: bool,
     provider: str,
     model: str,
+    strategy: str = "pipeline",
+    timeout: int = 300,
+    frozen_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = dict(report)
     result["mode"] = mode
     result["llm_transport"] = "fake" if fake_llm else "provider"
-    result["identity"] = build_identity_manifest(
-        mode=mode, fake_llm=fake_llm, provider=provider, model=model,
-        raw_case_data=raw_case_data,
-    )
+    if frozen_identity is None:
+        result["identity"] = build_identity_manifest(
+            mode=mode, fake_llm=fake_llm, provider=provider, model=model,
+            raw_case_data=raw_case_data, strategy=strategy, timeout=timeout,
+        )
+    else:
+        result["identity"] = {**frozen_identity, "strategy": strategy}
     result["validity_boundaries"] = [
         VALIDITY_BOUNDARY,
         "The pipeline input is the fixture workspace plus the served fact "
@@ -1775,6 +2200,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-url", default=None)
     parser.add_argument("--provider-key", default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--strategy", choices=STRATEGIES, default=None,
+        help="investigation strategy for a single-strategy run "
+        "(default pipeline)",
+    )
+    parser.add_argument(
+        "--compare-strategies", action="store_true",
+        help="run every strategy over the same cases with one shared identity",
+    )
     return parser
 
 
@@ -1782,35 +2216,121 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.timeout < 1:
         raise SystemExit("--timeout must be a positive integer of seconds")
-    document = load_case_document(args.cases)
+    if args.compare_strategies and args.strategy is not None:
+        raise SystemExit(
+            "--compare-strategies runs every strategy; do not also pass --strategy"
+        )
+    raw_case_data = args.cases.read_bytes()
+    document = load_case_document(args.cases, raw=raw_case_data)
     cases = select_cases(document, args.case_id)
     # Provider resolution happens before any pipeline work so a missing
     # configuration can never degrade into a silent empty report.
     llm_config, provider, model = build_llm_config(args)
-    raw_case_data = args.cases.read_bytes()
-    records: dict[tuple[str, str], dict[str, Any]] = {}
+    strategies = STRATEGIES if args.compare_strategies else (args.strategy or "pipeline",)
+    identity_options = {
+        "mode": args.mode,
+        "fake_llm": bool(args.fake_llm),
+        "provider": provider,
+        "model": model,
+        "strategy": strategies[0],
+        "timeout": args.timeout,
+    }
+    frozen_identity = build_identity_manifest(raw_case_data=raw_case_data, **identity_options)
+
+    def check_identity() -> None:
+        current = build_identity_manifest(
+            raw_case_data=args.cases.read_bytes(), **identity_options,
+        )
+        if current != frozen_identity:
+            raise SystemExit("evaluation identity changed during execution")
+
+    # Preregistered interleave: for each case and revision the strategies
+    # run back to back, so time-dependent provider behaviour cannot map to
+    # one strategy.
+    records: dict[tuple[str, str, str], dict[str, Any]] = {}
     for case in cases:
         for revision in REVISIONS:
-            records[(case["id"], revision)] = run_revision(
-                case,
-                revision,
+            for strategy in strategies:
+                check_identity()
+                records[(strategy, case["id"], revision)] = run_revision(
+                    case,
+                    revision,
+                    mode=args.mode,
+                    strategy=strategy,
+                    fake_llm=bool(args.fake_llm),
+                    llm_config=llm_config,
+                    timeout=args.timeout,
+                )
+                check_identity()
+    if args.compare_strategies:
+        strategy_reports: dict[str, Any] = {}
+        for strategy in strategies:
+            subset = {
+                (case["id"], revision): records[(strategy, case["id"], revision)]
+                for case in cases
+                for revision in REVISIONS
+            }
+            strategy_report = run_evaluation(cases, subset, strategy=strategy)
+            strategy_report = add_report_metadata(
+                strategy_report,
+                raw_case_data,
                 mode=args.mode,
                 fake_llm=bool(args.fake_llm),
-                llm_config=llm_config,
+                provider=provider,
+                model=model,
+                strategy=strategy,
                 timeout=args.timeout,
+                frozen_identity=frozen_identity,
             )
-    report = run_evaluation(cases, records)
-    report = add_report_metadata(
-        report,
-        raw_case_data,
-        mode=args.mode,
-        fake_llm=bool(args.fake_llm),
-        provider=provider,
-        model=model,
-    )
+            strategy_reports[strategy] = strategy_report
+        first = strategy_reports[STRATEGIES[0]]["identity"]
+        shared_identity = {
+            key: value for key, value in first.items() if key != "strategy"
+        }
+        for strategy in strategies[1:]:
+            other = {
+                key: value
+                for key, value in strategy_reports[strategy]["identity"].items()
+                if key != "strategy"
+            }
+            if other != shared_identity:
+                raise SystemExit(
+                    "strategy runs must share one identity manifest; "
+                    f"differs at {strategy}"
+                )
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "comparison": True,
+            "execution_order": (
+                "preregistered: for each case and revision the strategies "
+                "run in order " + ", ".join(STRATEGIES)
+            ),
+            "shared_identity": shared_identity,
+            "strategies": strategy_reports,
+        }
+    else:
+        single = args.strategy or "pipeline"
+        subset = {
+            (case["id"], revision): records[(single, case["id"], revision)]
+            for case in cases
+            for revision in REVISIONS
+        }
+        report = run_evaluation(cases, subset, strategy=single)
+        report = add_report_metadata(
+            report,
+            raw_case_data,
+            mode=args.mode,
+            fake_llm=bool(args.fake_llm),
+            provider=provider,
+            model=model,
+            strategy=single,
+            timeout=args.timeout,
+            frozen_identity=frozen_identity,
+        )
+    check_identity()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf8"
     )
     print(VALIDITY_BOUNDARY)
     return 0

@@ -434,12 +434,21 @@ class CxxInvestigationStore:
             cur = conn.cursor()
             cur.execute(
                 self._investigation_sql(
-                    "SELECT action_id, payload_digest, status, reservation_json,"
-                    " receipt_json, fencing_token FROM cxx_investigation_actions"
-                    " WHERE tenant_id = ? AND task_id = ? AND investigation_id = ?"
-                    " ORDER BY action_id"
+                    "SELECT a.action_id, a.payload_digest, a.status,"
+                    " a.reservation_json, a.receipt_json, a.fencing_token"
+                    " FROM cxx_investigation_actions a JOIN cxx_investigations i"
+                    " ON a.tenant_id = i.tenant_id AND a.task_id = i.task_id"
+                    " AND a.investigation_id = i.investigation_id"
+                    " WHERE a.tenant_id = ? AND a.task_id = ?"
+                    " AND a.investigation_id = ? AND i.snapshot_hash = ?"
+                    " AND i.context_digest = ? AND i.config_digest = ?"
+                    " ORDER BY a.action_id"
                 ),
-                (tenant, task, investigation),
+                (
+                    tenant, task, investigation,
+                    identity.snapshot_hash, identity.context_digest,
+                    identity.config_digest,
+                ),
             )
             rows = cur.fetchall()
         return [
@@ -467,8 +476,14 @@ class CxxInvestigationStore:
                     "SELECT reserved_calls, settled_calls, reserved_bytes,"
                     " settled_bytes FROM cxx_investigations"
                     " WHERE tenant_id = ? AND task_id = ? AND investigation_id = ?"
+                    " AND snapshot_hash = ? AND context_digest = ?"
+                    " AND config_digest = ?"
                 ),
-                (tenant, task, investigation),
+                (
+                    tenant, task, investigation,
+                    identity.snapshot_hash, identity.context_digest,
+                    identity.config_digest,
+                ),
             )
             row = cur.fetchone()
         if row is None:

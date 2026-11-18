@@ -191,6 +191,12 @@ class StateRoundTripTests(unittest.TestCase):
                 config_digest="c" * 64,
             )
 
+    def test_hypothesis_cannot_cite_unobserved_evidence(self):
+        state = _state()
+        state.hypotheses[0].evidence_ids.append("e99")
+        with self.assertRaisesRegex(ValueError, "unobserved evidence"):
+            state_from_json(state_to_json(state))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -242,6 +242,17 @@ class InvestigationState:
             _bounded_text(key, "evidence key", 64)
             if not isinstance(item, InvestigationEvidence):
                 raise ValueError("state evidence entries must be InvestigationEvidence")
+        for hypothesis in self.hypotheses:
+            dangling = [
+                evidence_id
+                for evidence_id in hypothesis.evidence_ids
+                if evidence_id not in self.evidence
+            ]
+            if dangling:
+                raise ValueError(
+                    "hypothesis cites unobserved evidence: "
+                    f"{dangling[0]} ({hypothesis.hypothesis_id})"
+                )
         self.open_questions = _string_list(self.open_questions, "state open_questions", 512)
         self.action_ids = _string_list(self.action_ids, "state action_ids", 10_000)
         self.child_ids = _string_list(self.child_ids, "state child_ids", 64)

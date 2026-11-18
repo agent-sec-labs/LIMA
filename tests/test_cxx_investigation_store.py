@@ -132,6 +132,21 @@ class InvestigationJournalTests(unittest.TestCase):
         self.assertEqual("prepared", actions["a2"])
         # The recovery mark itself is versioned and persisted.
         self.assertEqual("needs_attention", self.store.load_investigation(identity()).status)
+        # A second restore finds nothing dispatched and must not bump again.
+        again = self.store.restore_investigation(identity())
+        self.assertEqual("needs_attention", again.status)
+        self.assertEqual(restored.version, again.version)
+
+    def test_reads_require_the_full_identity_too(self):
+        self._save_initial()
+        self.store.prepare_action(identity(), "a1", DIGEST_B, {"calls": 1, "bytes": 5})
+        other_snapshot = InvestigationIdentity(
+            tenant_id="tenant-a", task_id="task-1", investigation_id="inv-1",
+            snapshot_hash="e" * 64, context_digest=DIGEST_B, config_digest=DIGEST_C,
+        )
+        self.assertEqual([], self.store.investigation_actions(other_snapshot))
+        with self.assertRaisesRegex(ValueError, "unknown investigation"):
+            self.store.investigation_budget(other_snapshot)
 
     def test_foreign_tenant_cannot_load_state(self):
         self._save_initial()
